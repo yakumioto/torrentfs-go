@@ -21,6 +21,10 @@ func validMetadataName(name string) bool {
 		filepath.Base(name) == name && strings.HasSuffix(name, ".torrent")
 }
 
+func metadataRoot(dataDir string) string {
+	return filepath.Clean(dataDir) + ".metadata"
+}
+
 func (s *Session) metadataPath(name string) string {
 	return filepath.Join(s.metadataDir, name)
 }

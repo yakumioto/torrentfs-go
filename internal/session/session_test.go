@@ -16,6 +16,31 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
+type cancelAfterFirstCheckContext struct {
+	errChecks int
+	done      chan struct{}
+}
+
+func newCancelAfterFirstCheckContext() *cancelAfterFirstCheckContext {
+	return &cancelAfterFirstCheckContext{done: make(chan struct{})}
+}
+
+func (c *cancelAfterFirstCheckContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterFirstCheckContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelAfterFirstCheckContext) Err() error {
+	c.errChecks++
+	if c.errChecks > 1 {
+		select {
+		case <-c.done:
+		default:
+			close(c.done)
+		}
+		return context.Canceled
+	}
+	return nil
+}
+func (c *cancelAfterFirstCheckContext) Value(any) any { return nil }
+
 func waitComplete(t *testing.T, ctx context.Context, st *session.Torrent) {
 	t.Helper()
 	select {
@@ -138,6 +163,69 @@ func TestSessionDuplicateAddIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := []byte("duplicate cancellation")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+
+	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	source := session.Source{MetainfoPath: torrentPath}
+	if err := sess.AddTorrent(ctx, source); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent missing after initial add")
+	}
+	waitComplete(t, ctx, st)
+	if !st.Seeding() {
+		t.Fatal("initial torrent is not seeding")
+	}
+
+	if err := sess.AddTorrent(newCancelAfterFirstCheckContext(), source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled duplicate AddTorrent = %v, want context.Canceled", err)
+	}
+	current, ok := sess.Torrent(hash)
+	if !ok || current != st {
+		t.Fatalf("torrent after cancelled duplicate = (%p, %v), want original (%p, true)", current, ok, st)
+	}
+	if !current.Seeding() {
+		t.Fatal("cancelled duplicate stopped the existing torrent")
+	}
+
+	ra, err := sess.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile after cancelled duplicate: %v", err)
+	}
+	got := make([]byte, len(content))
+	if _, err := io.ReadFull(io.NewSectionReader(ra, 0, int64(len(content))), got); err != nil {
+		t.Fatalf("read after cancelled duplicate: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("read after cancelled duplicate = %q, want %q", got, content)
+	}
+
+	if err := sess.AddTorrent(context.Background(), source); err != nil {
+		t.Fatalf("subsequent duplicate AddTorrent: %v", err)
+	}
+	if current, ok := sess.Torrent(hash); !ok || current != st || !current.Seeding() {
+		t.Fatalf("torrent after subsequent duplicate = (%p, %v), want original seeding torrent", current, ok)
+	}
+}
+
 func commitMetadata(t *testing.T, sess *session.Session, name string, data []byte) {
 	t.Helper()
 	w, err := sess.BeginMetadata(context.Background(), name, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL)
@@ -149,6 +237,69 @@ func commitMetadata(t *testing.T, sess *session.Session, name string, data []byt
 	}
 	if err := w.Commit(); err != nil {
 		t.Fatalf("Commit(%q): %v", name, err)
+	}
+}
+
+func TestSessionMetadataRootDoesNotConflictWithTorrentNamedMetadata(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := []byte("torrent named metadata")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "metadata", content)
+	torrentBytes, err := os.ReadFile(torrentPath)
+	if err != nil {
+		t.Fatalf("read torrent: %v", err)
+	}
+
+	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	dataPath := filepath.Join(dataDir, "metadata")
+	if info, err := os.Stat(dataPath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("torrent data path = (%v, %v), want regular file", info, err)
+	}
+	metadataDir := filepath.Clean(dataDir) + ".metadata"
+	if info, err := os.Stat(metadataDir); err != nil || !info.IsDir() {
+		t.Fatalf("metadata root = (%v, %v), want directory", info, err)
+	}
+
+	source := session.Source{MetainfoPath: torrentPath}
+	if err := sess.AddTorrent(ctx, source); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent named metadata was not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	ra, err := sess.OpenFile(hash, "metadata")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	got := make([]byte, len(content))
+	if _, err := io.ReadFull(io.NewSectionReader(ra, 0, int64(len(content))), got); err != nil {
+		t.Fatalf("read torrent data: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("torrent data = %q, want %q", got, content)
+	}
+
+	commitMetadata(t, sess, "control.torrent", torrentBytes)
+	if files := sess.MetadataFiles(); len(files) != 1 || files[0].Name != "control.torrent" {
+		t.Fatalf("MetadataFiles = %+v, want control.torrent", files)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, "control.torrent")); err != nil {
+		t.Fatalf("sibling metadata file missing: %v", err)
 	}
 }
 
@@ -255,7 +406,7 @@ func TestSessionMetadataCommitFailureCleansTemporaryFile(t *testing.T) {
 	if got := sess.MetadataFiles(); len(got) != 0 {
 		t.Fatalf("MetadataFiles after failed commit = %+v", got)
 	}
-	entries, err := os.ReadDir(filepath.Join(dataDir, "metadata"))
+	entries, err := os.ReadDir(filepath.Clean(dataDir) + ".metadata")
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/anacrolix/torrent"
@@ -49,7 +48,7 @@ func New(cfg config.Config) (*Session, error) {
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create data dir: %w", err)
 	}
-	metadataDir := filepath.Join(cfg.Paths.DataDir, "metadata")
+	metadataDir := metadataRoot(cfg.Paths.DataDir)
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create metadata dir: %w", err)
 	}

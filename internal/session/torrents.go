@@ -57,29 +57,40 @@ func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torr
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 
-	var t *torrent.Torrent
+	var spec *torrent.TorrentSpec
 	var err error
 	switch {
 	case src.MagnetURI != "" && src.MetainfoPath != "":
 		return nil, false, errors.New("session: Source sets both MetainfoPath and MagnetURI")
 	case src.MagnetURI != "":
-		t, err = s.cl.AddMagnet(src.MagnetURI)
+		spec, err = torrent.TorrentSpecFromMagnetUri(src.MagnetURI)
 	case src.MetainfoPath != "":
-		t, err = s.cl.AddTorrentFromFile(src.MetainfoPath)
+		var mi *metainfo.MetaInfo
+		mi, err = metainfo.LoadFromFile(src.MetainfoPath)
+		if err == nil {
+			spec, err = torrent.TorrentSpecFromMetaInfoErr(mi)
+		}
 	default:
 		return nil, false, errors.New("session: Source needs MetainfoPath or MagnetURI")
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
+
+	t, clientNew, err := s.cl.AddTorrentSpec(spec)
+	if err != nil {
+		return nil, false, fmt.Errorf("session: add torrent: %w", err)
+	}
 	if err := ctx.Err(); err != nil {
-		t.Drop()
+		if clientNew {
+			t.Drop()
+		}
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 
 	hash := t.InfoHash()
 	if existing, ok := s.torrents[hash]; ok {
-		if existing.tor != t {
+		if existing.tor != t && clientNew {
 			t.Drop()
 		}
 		return existing, false, nil

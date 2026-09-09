@@ -160,9 +160,15 @@ func TestFuseMetadataLifecycle(t *testing.T) {
 	}
 	content := []byte("metadata lifecycle data")
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	otherContent := []byte("different metadata lifecycle data")
+	otherTorrentPath, otherHash := buildSingleFileTorrent(t, dataDir, work, "other.bin", otherContent)
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
+	}
+	otherTorrentBytes, err := os.ReadFile(otherTorrentPath)
+	if err != nil {
+		t.Fatalf("read other torrent: %v", err)
 	}
 
 	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
@@ -207,15 +213,41 @@ func TestFuseMetadataLifecycle(t *testing.T) {
 	if err := os.Rename(second, first); !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("rename over existing metadata = %v, want EEXIST", err)
 	}
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatalf("stat original metadata: %v", err)
+	}
 	if err := os.Rename(first, renamed); err != nil {
 		t.Fatalf("rename metadata: %v", err)
 	}
-	if _, err := os.Stat(renamed); err != nil {
+	renamedInfo, err := os.Stat(renamed)
+	if err != nil {
 		t.Fatalf("stat renamed FUSE path: %v", err)
+	}
+	if !os.SameFile(firstInfo, renamedInfo) {
+		t.Fatal("rename changed the metadata inode")
 	}
 	if got, err := os.ReadFile(renamed); err != nil || string(got) != string(torrentBytes) {
 		t.Fatalf("read renamed metadata: bytes=%d err=%v", len(got), err)
 	}
+
+	if err := os.WriteFile(first, otherTorrentBytes, 0o644); err != nil {
+		t.Fatalf("recreate original metadata name: %v", err)
+	}
+	if err := waitFor(ctx, func() bool { return len(sess.MetadataFiles()) == 3 }); err != nil {
+		t.Fatalf("wait for recreated metadata: %v", err)
+	}
+	newFirstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatalf("stat recreated metadata: %v", err)
+	}
+	if os.SameFile(firstInfo, newFirstInfo) || os.SameFile(renamedInfo, newFirstInfo) {
+		t.Fatal("recreated metadata reused the renamed inode")
+	}
+	if got, err := os.ReadFile(first); err != nil || string(got) != string(otherTorrentBytes) {
+		t.Fatalf("read recreated metadata: bytes=%d err=%v", len(got), err)
+	}
+
 	if err := os.Rename(second, renamed); !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("rename over renamed metadata = %v, want EEXIST", err)
 	}
@@ -228,8 +260,14 @@ func TestFuseMetadataLifecycle(t *testing.T) {
 	if err := os.Remove(second); err != nil {
 		t.Fatalf("unlink second metadata: %v", err)
 	}
+	if err := os.Remove(first); err != nil {
+		t.Fatalf("unlink recreated metadata: %v", err)
+	}
 	if err := waitFor(ctx, func() bool {
-		_, ok := sess.Torrent(hash)
+		if _, ok := sess.Torrent(hash); ok {
+			return false
+		}
+		_, ok := sess.Torrent(otherHash)
 		return !ok
 	}); err != nil {
 		t.Fatalf("wait for metadata removal: %v", err)

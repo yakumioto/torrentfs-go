@@ -351,6 +351,45 @@ func TestHasMountOption(t *testing.T) {
 	}
 }
 
+func TestMetadataRenameDropsOldInodeKey(t *testing.T) {
+	state := &fsState{
+		nextIno:       1,
+		inoByKey:      make(map[string]uint64),
+		metadataNodes: make(map[string]*metadataFileNode),
+	}
+	node := &metadataFileNode{name: "a.torrent"}
+	state.rememberMetadataNode("a.torrent", node)
+	oldIno := state.inoFor(metadataFileKey("a.torrent"))
+
+	state.renameMetadataNode("a.torrent", "b.torrent")
+
+	if got := state.inoFor(metadataFileKey("b.torrent")); got != oldIno {
+		t.Fatalf("renamed inode = %d, want %d", got, oldIno)
+	}
+	newIno := state.inoFor(metadataFileKey("a.torrent"))
+	if newIno == oldIno {
+		t.Fatalf("recreated old name reused inode %d", newIno)
+	}
+	if newIno <= oldIno {
+		t.Fatalf("recreated old name inode = %d, want monotonic value after %d", newIno, oldIno)
+	}
+
+	state.mu.Lock()
+	if _, ok := state.metadataNodes["a.torrent"]; ok {
+		t.Fatal("old metadata node name was retained after rename")
+	}
+	if got := state.metadataNodes["b.torrent"]; got != node {
+		t.Fatalf("renamed metadata node = %p, want %p", got, node)
+	}
+	state.mu.Unlock()
+	node.mu.Lock()
+	name := node.name
+	node.mu.Unlock()
+	if name != "b.torrent" {
+		t.Fatalf("renamed node name = %q, want b.torrent", name)
+	}
+}
+
 // Interface assertions: the node types expose what go-fuse expects.
 var (
 	_ fs.NodeGetattrer = (*rootNode)(nil)

@@ -146,22 +146,28 @@ func (s *fsState) rememberMetadataNode(name string, node *metadataFileNode) {
 func (s *fsState) forgetMetadataNode(name string) {
 	s.mu.Lock()
 	delete(s.metadataNodes, name)
+	delete(s.inoByKey, metadataFileKey(name))
 	s.mu.Unlock()
 }
 
 func (s *fsState) renameMetadataNode(oldName, newName string) {
 	s.mu.Lock()
-	if node := s.metadataNodes[oldName]; node != nil {
-		delete(s.metadataNodes, oldName)
+	defer s.mu.Unlock()
+
+	node := s.metadataNodes[oldName]
+	delete(s.metadataNodes, oldName)
+	if node != nil {
 		s.metadataNodes[newName] = node
 		node.mu.Lock()
 		node.name = newName
 		node.mu.Unlock()
 	}
-	if ino := s.inoByKey[metadataFileKey(oldName)]; ino != 0 {
-		s.inoByKey[metadataFileKey(newName)] = ino
+
+	oldKey, newKey := metadataFileKey(oldName), metadataFileKey(newName)
+	if ino, ok := s.inoByKey[oldKey]; ok {
+		delete(s.inoByKey, oldKey)
+		s.inoByKey[newKey] = ino
 	}
-	s.mu.Unlock()
 }
 
 // Mount mounts backend on mnt and returns the running server. Dynamic
