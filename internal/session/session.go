@@ -27,8 +27,6 @@ const (
 	stateClosed
 )
 
-const defaultPieceCacheCapacity int64 = 64 << 20
-
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
 	cl  *torrent.Client
@@ -47,8 +45,12 @@ type Session struct {
 }
 
 // New creates a session and its anacrolix client. The data and metadata
-// directories are created if missing. The client is configured to seed.
+// directories are created if missing. The client is configured to seed and
+// existing metadata is restored before the session is returned.
 func New(cfg config.Config) (*Session, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("session: validate config: %w", err)
+	}
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create data dir: %w", err)
 	}
@@ -62,21 +64,35 @@ func New(cfg config.Config) (*Session, error) {
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort
 	configureSeeding(cc)
+	peerDialer, err := configureProxy(cc, cfg.Proxy.Socks5URL)
+	if err != nil {
+		return nil, err
+	}
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
 		return nil, fmt.Errorf("session: new client: %w", err)
 	}
-	return &Session{
+	if peerDialer != nil {
+		cl.AddDialer(peerDialer)
+	}
+	s := &Session{
 		cl:             cl,
 		cfg:            cfg,
-		pieceCache:     cache.New(defaultPieceCacheCapacity),
+		pieceCache:     cache.New(cfg.Cache.CapacityBytes),
 		closeDone:      make(chan struct{}),
 		torrents:       make(map[metainfo.Hash]*Torrent),
 		metadata:       make(map[string]metainfo.Hash),
 		metadataRefs:   make(map[metainfo.Hash]int),
 		pendingWriters: make(map[string]*metadataWriter),
 		metadataDir:    metadataDir,
-	}, nil
+	}
+	if err := s.rescanMetadata(); err != nil {
+		if closeErr := errors.Join(cl.Close()...); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("session: close client after metadata restore: %w", closeErr))
+		}
+		return nil, err
+	}
+	return s, nil
 }
 
 // Close releases every open file handle, drops every torrent, and shuts the

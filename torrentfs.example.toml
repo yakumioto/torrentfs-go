@@ -1,20 +1,23 @@
-# torrentfs.example.toml — example configuration for torrentfs.
+# torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
-# This file is a placeholder: torrentfs does not read a TOML configuration
-# yet. The paths/connections sections below are defined in the in-code config
-# model (M1), and loading a file like this one lands in M4.
-#
-# The commented sections below sketch the intended shape for upcoming
-# milestones. Keys may change — treat them as a record of direction, not a
-# contract.
+# mountpoint remains a required command-line flag. Configuration is loaded on
+# every startup; an explicit -data-dir flag overrides paths.data_dir.
 
-# [paths]
-#   # Filesystem paths torrentfs manages at runtime
-#   # (session data, cache, mountpoint helpers, ...).
-#   data_dir = "<user cache dir>/torrentfs"
+[paths]
+# Writable directory for downloaded data and the metadata sidecar.
+# Omitting this key uses <user cache dir>/torrentfs.
+data_dir = "./torrentfs-data"
 
-# [connections]
-#   # Settings for the torrent session and FUSE mount
-#   # (listen ports, cache limits, mount options, ...).
-#   listen_host = ""
-#   listen_port = 0
+[connections]
+# Empty listens on all suitable local interfaces.
+listen_host = ""
+# 0 selects an available port.
+listen_port = 0
+
+[proxy]
+# Empty disables SOCKS5. Use socks5:// or socks5h://, optionally with auth.
+socks5_url = ""
+
+[cache]
+# Maximum in-memory piece cache size, in bytes (64 MiB by default).
+capacity_bytes = 67108864

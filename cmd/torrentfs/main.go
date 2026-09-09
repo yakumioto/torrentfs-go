@@ -1,8 +1,4 @@
 // Command torrentfs mounts BitTorrent downloads as a FUSE filesystem.
-//
-// M2 exposes the mounted torrent tree and a writable metadata/ control
-// directory. Configuration loading from a TOML file lands in M4; for now paths
-// are passed on the command line.
 package main
 
 import (
@@ -23,17 +19,18 @@ import (
 const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem.
 
 Usage:
-  torrentfs -mountpoint <dir> [flags] <torrent-file>...
+  torrentfs -mountpoint <dir> [flags] [torrent-file]...
 
 Flags:
   -mountpoint <dir>  directory to mount on (required)
-  -data-dir <dir>    torrent session data directory
-                     (default: <user cache dir>/torrentfs)
+  -config <file>     TOML configuration file
+  -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
 
-Each <torrent-file> is a .torrent file to expose under the mount point as a
-directory. Complete .torrent files may also be written to metadata/ while
-mounted. Send SIGINT or SIGTERM to unmount and exit.
+Each [torrent-file] is a .torrent file to expose under the mount point as a
+directory. Existing metadata files are restored at startup, and complete
+.torrent files may also be written to metadata/ while mounted. Send SIGINT or
+SIGTERM to unmount and exit.
 `
 
 func main() {
@@ -41,16 +38,16 @@ func main() {
 }
 
 // run executes the CLI and returns the process exit code: 0 on success, 1 on
-// runtime errors, 2 on usage errors.
+// runtime errors, 2 on usage or configuration errors.
 func run(args []string, stderr io.Writer) int {
 	flags := flag.NewFlagSet("torrentfs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { _, _ = io.WriteString(stderr, usageText) }
 
-	defaultDataDir := config.Default().Paths.DataDir
 	var (
 		mountpoint = flags.String("mountpoint", "", "directory to mount on")
-		dataDir    = flags.String("data-dir", defaultDataDir, "torrent session data directory")
+		configPath = flags.String("config", "", "TOML configuration file")
+		dataDir    = flags.String("data-dir", "", "override the configured data directory")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -58,13 +55,22 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 2
 	}
-	if *mountpoint == "" || flags.NArg() == 0 {
+	if *mountpoint == "" {
 		flags.Usage()
 		return 2
 	}
 
-	cfg := config.Default()
-	cfg.Paths.DataDir = *dataDir
+	dataDirSet := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "data-dir" {
+			dataDirSet = true
+		}
+	})
+	cfg, err := loadConfig(*configPath, *dataDir, dataDirSet)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -75,6 +81,9 @@ func run(args []string, stderr io.Writer) int {
 	sess, err := session.New(cfg)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		if errors.Is(err, config.ErrInvalid) {
+			return 2
+		}
 		return 1
 	}
 	for _, p := range flags.Args() {
@@ -106,4 +115,22 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {
+	cfg := config.Default()
+	if path != "" {
+		var err error
+		cfg, err = config.Load(path)
+		if err != nil {
+			return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
+		}
+	}
+	if dataDirSet {
+		cfg.Paths.DataDir = dataDir
+	}
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, fmt.Errorf("validate config: %w", err)
+	}
+	return cfg, nil
 }

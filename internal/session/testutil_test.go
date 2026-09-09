@@ -10,9 +10,17 @@ import (
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 const testPieceLength = 256 << 10
+
+func testConfig(dataDir string) config.Config {
+	cfg := config.Default()
+	cfg.Paths.DataDir = dataDir
+	return cfg
+}
 
 // buildSingleFileTorrent writes data into the session data directory (using
 // anacrolix's default file storage layout: DataDir/<info name>) and produces

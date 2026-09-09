@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -70,7 +69,7 @@ func TestSessionReadsExistingData(t *testing.T) {
 	content := []byte(strings.Repeat("hello torrentfs\n", 200)) // ~3.4 KiB
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
-	cfg := config.Config{Paths: config.Paths{DataDir: dataDir}}
+	cfg := testConfig(dataDir)
 	sess, err := session.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -139,7 +138,7 @@ func TestSessionDuplicateAddIsIdempotent(t *testing.T) {
 	dataDir := work + "/data"
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("dup me"))
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -172,7 +171,7 @@ func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
 	content := []byte("duplicate cancellation")
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -253,7 +252,7 @@ func TestSessionMetadataRootDoesNotConflictWithTorrentNamedMetadata(t *testing.T
 		t.Fatalf("read torrent: %v", err)
 	}
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -312,7 +311,7 @@ func TestSessionMetadataLifecycle(t *testing.T) {
 		t.Fatalf("read torrent: %v", err)
 	}
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -351,6 +350,182 @@ func TestSessionMetadataLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := []byte(strings.Repeat("restored metadata\n", 200))
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentBytes, err := os.ReadFile(torrentPath)
+	if err != nil {
+		t.Fatalf("read torrent: %v", err)
+	}
+
+	first, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	commitMetadata(t, first, "restored.torrent", torrentBytes)
+	st, ok := first.Torrent(hash)
+	if !ok {
+		t.Fatal("first session did not register metadata torrent")
+	}
+	waitComplete(t, ctx, st)
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	second, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	defer func() {
+		if err := second.Close(context.Background()); err != nil {
+			t.Errorf("second Close: %v", err)
+		}
+	}()
+
+	files := second.MetadataFiles()
+	if len(files) != 1 || files[0].Name != "restored.torrent" || files[0].Size != int64(len(torrentBytes)) {
+		t.Fatalf("MetadataFiles after restart = %+v", files)
+	}
+	st, ok = second.Torrent(hash)
+	if !ok {
+		t.Fatal("restored torrent missing from session")
+	}
+	waitComplete(t, ctx, st)
+	views := second.Torrents()
+	if len(views) != 1 || views[0].Hash != hash || views[0].Name != "payload.bin" {
+		t.Fatalf("Torrents after restart = %+v", views)
+	}
+
+	ra, err := second.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile after restart: %v", err)
+	}
+	got := make([]byte, len(content))
+	if _, err := io.ReadFull(io.NewSectionReader(ra, 0, int64(len(content))), got); err != nil {
+		t.Fatalf("read after restart: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("restored content = %q, want %q", got, content)
+	}
+}
+
+func TestSessionRestoresDuplicateMetadataReferences(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentPath, _ := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("duplicate restart"))
+	torrentBytes, err := os.ReadFile(torrentPath)
+	if err != nil {
+		t.Fatalf("read torrent: %v", err)
+	}
+
+	first, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	commitMetadata(t, first, "one.torrent", torrentBytes)
+	commitMetadata(t, first, "two.torrent", torrentBytes)
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	second, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	defer func() {
+		if err := second.Close(context.Background()); err != nil {
+			t.Errorf("second Close: %v", err)
+		}
+	}()
+	if len(second.List()) != 1 {
+		t.Fatalf("List after restart = %d, want 1", len(second.List()))
+	}
+	if err := second.RemoveMetadata(context.Background(), "one.torrent"); err != nil {
+		t.Fatalf("remove first restored metadata: %v", err)
+	}
+	if len(second.List()) != 1 {
+		t.Fatalf("List after first restored remove = %d, want 1", len(second.List()))
+	}
+	if err := second.RemoveMetadata(context.Background(), "two.torrent"); err != nil {
+		t.Fatalf("remove second restored metadata: %v", err)
+	}
+	if len(second.List()) != 0 {
+		t.Fatalf("List after second restored remove = %d, want 0", len(second.List()))
+	}
+}
+
+func TestSessionMetadataRescanIgnoresSymlinksAndTemporaryEntries(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("rescan entries"))
+	torrentBytes, err := os.ReadFile(torrentPath)
+	if err != nil {
+		t.Fatalf("read torrent: %v", err)
+	}
+	metadataDir := filepath.Clean(dataDir) + ".metadata"
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "valid.torrent"), torrentBytes, 0o644); err != nil {
+		t.Fatalf("write valid metadata: %v", err)
+	}
+	if err := os.Symlink(torrentPath, filepath.Join(metadataDir, "link.torrent")); err != nil {
+		t.Fatalf("write metadata symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, ".torrentfs-write.tmp"), torrentBytes, 0o644); err != nil {
+		t.Fatalf("write metadata temporary: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(metadataDir, "directory.torrent"), 0o755); err != nil {
+		t.Fatalf("write metadata directory: %v", err)
+	}
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	files := sess.MetadataFiles()
+	if len(files) != 1 || files[0].Name != "valid.torrent" {
+		t.Fatalf("MetadataFiles = %+v, want only valid.torrent", files)
+	}
+	if len(sess.List()) != 1 {
+		t.Fatalf("List = %d, want 1", len(sess.List()))
+	}
+	if _, ok := sess.Torrent(hash); !ok {
+		t.Fatal("valid metadata torrent missing")
+	}
+}
+
+func TestSessionMetadataRescanRejectsCorruptTorrent(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	metadataDir := filepath.Clean(dataDir) + ".metadata"
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
+	}
+	name := "broken.torrent"
+	if err := os.WriteFile(filepath.Join(metadataDir, name), []byte("not a torrent"), 0o644); err != nil {
+		t.Fatalf("write corrupt metadata: %v", err)
+	}
+
+	_, err := session.New(testConfig(dataDir))
+	if err == nil {
+		t.Fatal("New corrupt metadata succeeded")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("New corrupt metadata error = %q, want filename", err)
+	}
+}
+
 func TestSessionMetadataDuplicateReferences(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
@@ -359,11 +534,15 @@ func TestSessionMetadataDuplicateReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
 	}
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer sess.Close(context.Background())
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 
 	commitMetadata(t, sess, "one.torrent", torrentBytes)
 	commitMetadata(t, sess, "two.torrent", torrentBytes)
@@ -387,11 +566,15 @@ func TestSessionMetadataDuplicateReferences(t *testing.T) {
 func TestSessionMetadataCommitFailureCleansTemporaryFile(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer sess.Close(context.Background())
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 
 	w, err := sess.BeginMetadata(context.Background(), "invalid.torrent", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL)
 	if err != nil {
@@ -417,7 +600,7 @@ func TestSessionMetadataCommitFailureCleansTemporaryFile(t *testing.T) {
 
 func TestSessionCloseIsIdempotentAndRejectsNewOperations(t *testing.T) {
 	work := t.TempDir()
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: filepath.Join(work, "data")}})
+	sess, err := session.New(testConfig(filepath.Join(work, "data")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

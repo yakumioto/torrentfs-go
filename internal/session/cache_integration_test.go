@@ -11,14 +11,13 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
-	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
 func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Hash) *session.Session {
 	t.Helper()
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -136,11 +135,15 @@ func TestSessionPieceStatesCompleteTorrent(t *testing.T) {
 func TestSessionPieceStatesUnknownTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer sess.Close(context.Background())
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if _, err := sess.PieceStates(metainfo.Hash{}); !errors.Is(err, filesystem.ErrNotFound) {
 		t.Fatalf("PieceStates error = %v, want ErrNotFound", err)
 	}

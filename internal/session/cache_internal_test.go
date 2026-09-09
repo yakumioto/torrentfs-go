@@ -24,13 +24,19 @@ import (
 
 const internalTestPieceLength = 256 << 10
 
+func internalTestConfig(dataDir string) config.Config {
+	cfg := config.Default()
+	cfg.Paths.DataDir = dataDir
+	return cfg
+}
+
 func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := bytes.Repeat([]byte("cache"), internalTestPieceLength/5+1)
 	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
 
-	sess, err := New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := New(internalTestConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -82,6 +88,25 @@ func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 	readers.Wait()
 	if got := sess.pieceCache.Len(); got != 0 {
 		t.Fatalf("cache Len after concurrent close = %d, want 0", got)
+	}
+}
+
+func TestSessionUsesConfiguredPieceCacheCapacity(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	cfg := internalTestConfig(dataDir)
+	cfg.Cache.CapacityBytes = 1234
+
+	sess, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if got := sess.pieceCache.Capacity(); got != 1234 {
+		t.Fatalf("piece cache capacity = %d, want 1234", got)
 	}
 }
 
@@ -182,9 +207,9 @@ func TestSessionLargePieceReadBypassesCache(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte("small request from a large piece")
-	torrentPath, hash := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, defaultPieceCacheCapacity+1)
+	torrentPath, hash := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, config.Default().Cache.CapacityBytes+1)
 
-	sess, err := New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := New(internalTestConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

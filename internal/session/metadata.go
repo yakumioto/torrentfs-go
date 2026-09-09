@@ -29,6 +29,40 @@ func (s *Session) metadataPath(name string) string {
 	return filepath.Join(s.metadataDir, name)
 }
 
+func (s *Session) rescanMetadata() error {
+	entries, err := os.ReadDir(s.metadataDir)
+	if err != nil {
+		return fmt.Errorf("session: scan metadata dir: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !validMetadataName(name) {
+			continue
+		}
+		path := s.metadataPath(name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("session: inspect metadata %q: %w", name, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+
+		s.mu.Lock()
+		st, _, err := s.addTorrentLockedResult(context.Background(), Source{MetainfoPath: path})
+		if err == nil {
+			hash := st.InfoHash()
+			s.metadata[name] = hash
+			s.metadataRefs[hash]++
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("session: restore metadata %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // MetadataDirExists reports whether the control directory is present.
 func (s *Session) MetadataDirExists() bool {
 	info, err := os.Lstat(s.metadataDir)

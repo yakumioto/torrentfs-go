@@ -79,6 +79,9 @@ func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torr
 	if err != nil {
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
+	if s.cfg.Proxy.Socks5URL != "" {
+		spec.Trackers = filterProxyTrackers(spec.Trackers)
+	}
 
 	t, clientNew, err := s.cl.AddTorrentSpec(spec)
 	if err != nil {

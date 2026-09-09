@@ -14,7 +14,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -74,7 +73,7 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	}
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -186,7 +185,7 @@ func TestFuseMetadataLifecycle(t *testing.T) {
 		t.Fatalf("read other torrent: %v", err)
 	}
 
-	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
