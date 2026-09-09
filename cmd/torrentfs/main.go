@@ -1,10 +1,8 @@
-// Command torrentfs mounts BitTorrent downloads as a read-only FUSE
-// filesystem.
+// Command torrentfs mounts BitTorrent downloads as a FUSE filesystem.
 //
-// M1 read-only MVP: torrentfs loads the given .torrent files, mounts a tree
-// with one directory per torrent, and serves each file's contents on demand
-// from the torrent session. Configuration loading from a TOML file lands in
-// M4; for now paths are passed on the command line.
+// M2 exposes the mounted torrent tree and a writable metadata/ control
+// directory. Configuration loading from a TOML file lands in M4; for now paths
+// are passed on the command line.
 package main
 
 import (
@@ -22,7 +20,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-const usageText = `torrentfs mounts BitTorrent downloads as a read-only FUSE filesystem.
+const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem.
 
 Usage:
   torrentfs -mountpoint <dir> [flags] <torrent-file>...
@@ -34,7 +32,8 @@ Flags:
   -h, --help         show this help and exit
 
 Each <torrent-file> is a .torrent file to expose under the mount point as a
-read-only directory. Send SIGINT or SIGTERM to unmount and exit.
+directory. Complete .torrent files may also be written to metadata/ while
+mounted. Send SIGINT or SIGTERM to unmount and exit.
 `
 
 func main() {
@@ -67,8 +66,11 @@ func run(args []string, stderr io.Writer) int {
 	cfg := config.Default()
 	cfg.Paths.DataDir = *dataDir
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
 
 	sess, err := session.New(cfg)
 	if err != nil {
@@ -76,7 +78,7 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	for _, p := range flags.Args() {
-		if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: p}); err != nil {
+		if err := sess.AddTorrent(rootCtx, session.Source{MetainfoPath: p}); err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: add torrent %s: %v\n", p, err)
 			_ = sess.Close(context.Background())
 			return 1
@@ -90,10 +92,17 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	<-ctx.Done()
-	_ = server.Unmount()
-	if err := sess.Close(context.Background()); err != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", err)
+	<-signals
+	unmountErr := server.Unmount()
+	closeErr := sess.Close(rootCtx)
+	cancel()
+	if unmountErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: unmount %s: %v\n", *mountpoint, unmountErr)
+	}
+	if closeErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", closeErr)
+	}
+	if unmountErr != nil || closeErr != nil {
 		return 1
 	}
 	return 0

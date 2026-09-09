@@ -75,8 +75,9 @@ func lookupChild(files []FileView, relPrefix, name string) (fsEntry, bool) {
 // rootEntry is one immediate child of the mount root: a top directory for a
 // single torrent.
 type rootEntry struct {
-	Name string
-	View TorrentView
+	Name     string
+	View     TorrentView
+	Metadata bool
 }
 
 // rootEntries returns the sorted top-level directories, one per torrent.
@@ -88,7 +89,7 @@ func rootEntries(views []TorrentView) []rootEntry {
 	slices.SortFunc(ordered, func(a, b TorrentView) int {
 		return strings.Compare(a.Hash.HexString(), b.Hash.HexString())
 	})
-	used := make(map[string]bool, len(ordered))
+	used := map[string]bool{metadataName: true}
 	entries := make([]rootEntry, 0, len(ordered))
 	for _, v := range ordered {
 		name := uniqueTorrentName(v, used)
@@ -122,6 +123,9 @@ func uniqueTorrentName(v TorrentView, used map[string]bool) string {
 		}
 	}
 }
+
+// metadataKey is the inode identity of the control directory.
+func metadataKey() string { return "metadata" }
 
 // torrentKey is the inode identity of a torrent's top directory.
 func torrentKey(hash metainfo.Hash) string { return "t/" + hash.HexString() }

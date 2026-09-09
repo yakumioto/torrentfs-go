@@ -8,6 +8,8 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
 // Source identifies where the metainfo of a torrent to add comes from.
@@ -25,6 +27,7 @@ type Torrent struct {
 	tor *torrent.Torrent
 
 	mu      sync.Mutex
+	closed  bool
 	readers map[string]*raFile // open reader handles by display path
 }
 
@@ -32,42 +35,72 @@ type Torrent struct {
 // returns once the torrent is registered with the client; for magnet sources
 // the metainfo (and thus Info, Name and Files) may still be pending.
 func (s *Session) AddTorrent(ctx context.Context, src Source) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _, err := s.addTorrentLockedResult(ctx, src)
+	return err
+}
+
+func (s *Session) addTorrentLocked(ctx context.Context, src Source) error {
+	_, _, err := s.addTorrentLockedResult(ctx, src)
+	return err
+}
+
+func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torrent, bool, error) {
+	if err := s.ensureActiveLocked(); err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, fmt.Errorf("session: add torrent: %w", err)
+	}
+
 	var t *torrent.Torrent
 	var err error
 	switch {
 	case src.MagnetURI != "" && src.MetainfoPath != "":
-		return errors.New("session: Source sets both MetainfoPath and MagnetURI")
+		return nil, false, errors.New("session: Source sets both MetainfoPath and MagnetURI")
 	case src.MagnetURI != "":
 		t, err = s.cl.AddMagnet(src.MagnetURI)
 	case src.MetainfoPath != "":
 		t, err = s.cl.AddTorrentFromFile(src.MetainfoPath)
 	default:
-		return errors.New("session: Source needs MetainfoPath or MagnetURI")
+		return nil, false, errors.New("session: Source needs MetainfoPath or MagnetURI")
 	}
 	if err != nil {
-		return fmt.Errorf("session: add torrent: %w", err)
+		return nil, false, fmt.Errorf("session: add torrent: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Drop()
+		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.torrents[t.InfoHash()]; !ok {
-		s.torrents[t.InfoHash()] = &Torrent{tor: t, readers: make(map[string]*raFile)}
+	hash := t.InfoHash()
+	if existing, ok := s.torrents[hash]; ok {
+		if existing.tor != t {
+			t.Drop()
+		}
+		return existing, false, nil
 	}
-	return nil
+	st := &Torrent{tor: t, readers: make(map[string]*raFile)}
+	s.torrents[hash] = st
+	return st, true, nil
 }
 
 // Torrent returns the registered torrent with the given info hash.
 func (s *Session) Torrent(hash metainfo.Hash) (*Torrent, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st, ok := s.torrents[hash]
 	return st, ok
 }
 
 // List returns every registered torrent, in no particular order.
 func (s *Session) List() []*Torrent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]*Torrent, 0, len(s.torrents))
 	for _, st := range s.torrents {
 		out = append(out, st)
@@ -107,12 +140,21 @@ func (t *Torrent) BytesCompleted() int64 {
 	return t.tor.BytesCompleted()
 }
 
+// Seeding reports whether the client is willing to upload this complete
+// torrent without requiring anything in return.
+func (t *Torrent) Seeding() bool {
+	return t.tor.Seeding()
+}
+
 // readerFor returns the shared reader handle for the file with the given
 // display path, opening it on first use. Handles are owned by the session:
 // they are closed by Close, never by the filesystem's release path.
 func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed {
+		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+	}
 	if r, ok := t.readers[displayPath]; ok {
 		return r, nil
 	}
@@ -124,9 +166,11 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 		}
 	}
 	if f == nil {
-		return nil, fmt.Errorf("session: no file %q in torrent %s", displayPath, t.InfoHash())
+		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), filesystem.ErrNotFound)
 	}
-	r := &raFile{r: f.NewReader()}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &raFile{r: f.NewReader(), cancel: cancel}
+	r.r.SetContext(ctx)
 	t.readers[displayPath] = r
 	return r, nil
 }
@@ -134,13 +178,26 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 // close releases every open reader handle for this torrent.
 func (t *Torrent) close() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	var errs []error
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.closed = true
+	readers := make(map[string]*raFile, len(t.readers))
 	for path, r := range t.readers {
+		readers[path] = r
+	}
+	t.readers = make(map[string]*raFile)
+	t.mu.Unlock()
+
+	for _, r := range readers {
+		r.cancelRead()
+	}
+	var errs []error
+	for path, r := range readers {
 		if err := r.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %q: %w", path, err))
 		}
-		delete(t.readers, path)
 	}
 	return errors.Join(errs...)
 }

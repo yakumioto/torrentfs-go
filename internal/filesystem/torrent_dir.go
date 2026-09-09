@@ -29,7 +29,7 @@ func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse
 func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	e, ok := lookupChild(n.files, n.prefix, name)
 	if !ok {
-		return nil, syscall.ENOENT
+		return nil, errnoFor(ErrNotFound)
 	}
 	if e.IsDir {
 		out.Mode = 0o555
@@ -61,3 +61,31 @@ func (n *torrentDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Err
 	}
 	return fs.NewListDirStream(entries), 0
 }
+
+func (n *torrentDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	return nil, errnoFor(ErrReadOnly)
+}
+
+func (n *torrentDirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	return nil, nil, 0, errnoFor(ErrReadOnly)
+}
+
+func (n *torrentDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	return errnoFor(ErrReadOnly)
+}
+
+func (n *torrentDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	return errnoFor(ErrReadOnly)
+}
+
+func (n *torrentDirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	return errnoFor(ErrReadOnly)
+}
+
+var (
+	_ fs.NodeMkdirer  = (*torrentDirNode)(nil)
+	_ fs.NodeCreater  = (*torrentDirNode)(nil)
+	_ fs.NodeUnlinker = (*torrentDirNode)(nil)
+	_ fs.NodeRmdirer  = (*torrentDirNode)(nil)
+	_ fs.NodeRenamer  = (*torrentDirNode)(nil)
+)

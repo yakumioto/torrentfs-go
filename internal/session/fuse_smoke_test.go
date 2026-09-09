@@ -2,9 +2,11 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -139,5 +141,130 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	// Nothing holds the mount open now; unmount must succeed.
 	if err := server.Unmount(); err != nil {
 		t.Fatalf("Unmount: %v", err)
+	}
+}
+
+func TestFuseMetadataLifecycle(t *testing.T) {
+	if !fuseUsable(t) {
+		t.Skipf("FUSE not usable in this environment (/dev/fuse or mount permission missing); metadata integration test skipped")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	content := []byte("metadata lifecycle data")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentBytes, err := os.ReadFile(torrentPath)
+	if err != nil {
+		t.Fatalf("read torrent: %v", err)
+	}
+
+	sess, err := session.New(config.Config{Paths: config.Paths{DataDir: dataDir}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		_ = sess.Close(context.Background())
+		t.Fatalf("Mount: %v", err)
+	}
+	unmounted, closed := false, false
+	defer func() {
+		if !unmounted {
+			_ = server.Unmount()
+		}
+		if !closed {
+			_ = sess.Close(context.Background())
+		}
+	}()
+
+	metadataDir := filepath.Join(mnt, "metadata")
+	first := filepath.Join(metadataDir, "first.torrent")
+	second := filepath.Join(metadataDir, "second.torrent")
+	renamed := filepath.Join(metadataDir, "renamed.torrent")
+	if err := os.WriteFile(first, torrentBytes, 0o644); err != nil {
+		t.Fatalf("write first metadata: %v", err)
+	}
+	if err := waitFor(ctx, func() bool {
+		_, ok := sess.Torrent(hash)
+		return ok
+	}); err != nil {
+		t.Fatalf("wait for first metadata add: %v", err)
+	}
+	if err := os.WriteFile(second, torrentBytes, 0o644); err != nil {
+		t.Fatalf("write second metadata: %v", err)
+	}
+	if err := waitFor(ctx, func() bool { return len(sess.MetadataFiles()) == 2 }); err != nil {
+		t.Fatalf("wait for metadata files: %v", err)
+	}
+
+	if err := os.Rename(second, first); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("rename over existing metadata = %v, want EEXIST", err)
+	}
+	if err := os.Rename(first, renamed); err != nil {
+		t.Fatalf("rename metadata: %v", err)
+	}
+	if _, err := os.Stat(renamed); err != nil {
+		t.Fatalf("stat renamed FUSE path: %v", err)
+	}
+	if got, err := os.ReadFile(renamed); err != nil || string(got) != string(torrentBytes) {
+		t.Fatalf("read renamed metadata: bytes=%d err=%v", len(got), err)
+	}
+	if err := os.Rename(second, renamed); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("rename over renamed metadata = %v, want EEXIST", err)
+	}
+	if err := os.Remove(metadataDir); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("rmdir non-empty metadata = %v, want ENOTEMPTY", err)
+	}
+	if err := os.Remove(renamed); err != nil {
+		t.Fatalf("unlink renamed metadata: %v", err)
+	}
+	if err := os.Remove(second); err != nil {
+		t.Fatalf("unlink second metadata: %v", err)
+	}
+	if err := waitFor(ctx, func() bool {
+		_, ok := sess.Torrent(hash)
+		return !ok
+	}); err != nil {
+		t.Fatalf("wait for metadata removal: %v", err)
+	}
+	if err := os.Remove(metadataDir); err != nil {
+		t.Fatalf("rmdir empty metadata: %v", err)
+	}
+	if err := os.Mkdir(metadataDir, 0o755); err != nil {
+		t.Fatalf("mkdir metadata after rmdir: %v", err)
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+	unmounted = true
+	if err := sess.Close(ctx); err != nil {
+		t.Fatalf("Close after unmount: %v", err)
+	}
+	closed = true
+}
+
+func waitFor(ctx context.Context, condition func() bool) error {
+	if condition() {
+		return nil
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if condition() {
+				return nil
+			}
+		}
 	}
 }

@@ -1,12 +1,14 @@
-// Package filesystem adapts torrent session data to a read-only FUSE
-// filesystem. It contains no network or download logic of its own: every
-// piece of torrent data it serves comes through the Backend interface it
-// declares, which the session implements and main injects.
+// Package filesystem adapts torrent session data to a FUSE filesystem. It
+// contains no network or download logic of its own: every piece of torrent
+// data it serves comes through the Backend interface it declares, which the
+// session implements and main injects.
 package filesystem
 
 import (
+	"context"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -39,22 +41,71 @@ type Backend interface {
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 }
 
-// fsState carries the pieces shared by every node in a mount: the Backend
-// and the stable inode allocator. Inode numbers are assigned once per child
-// identity and reused on every later lookup, so go-fuse can recognise the
-// same object across calls and keep its identity stable.
+// MetadataView describes one metadata file in the control directory.
+type MetadataView struct {
+	Name string
+	Size int64
+}
+
+// MetadataReader is a per-open metadata file handle.
+type MetadataReader interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// MetadataWriter receives an atomically committed metadata file.
+type MetadataWriter interface {
+	io.WriterAt
+	Commit() error
+	Abort() error
+}
+
+// MetadataBackend supplies the optional metadata control directory. It is
+// deliberately narrower than the session implementation so read-only fakes
+// only need to implement Backend.
+type MetadataBackend interface {
+	Backend
+	MetadataFiles() []MetadataView
+	OpenMetadata(name string) (MetadataReader, error)
+	BeginMetadata(ctx context.Context, name string, flags uint32) (MetadataWriter, error)
+	RemoveMetadata(ctx context.Context, name string) error
+	RenameMetadata(ctx context.Context, oldName, newName string) error
+	EnsureMetadataDir() error
+	RemoveMetadataDir() error
+}
+
+// metadataDirState is an optional extension used to distinguish an empty
+// metadata directory from one removed through the filesystem.
+type metadataDirState interface {
+	MetadataDirExists() bool
+}
+
+// fsState carries the pieces shared by every node in a mount: the Backend,
+// optional metadata support, and the stable inode allocator.
 type fsState struct {
 	backend  Backend
-	mu       sync.Mutex
-	nextIno  uint64
-	inoByKey map[string]uint64
+	metadata MetadataBackend
+
+	mu              sync.Mutex
+	nextIno         uint64
+	inoByKey        map[string]uint64
+	metadataNodes   map[string]*metadataFileNode
+	metadataPresent bool
 }
 
 func newFSState(backend Backend) *fsState {
+	metadata, _ := backend.(MetadataBackend)
+	metadataPresent := metadata != nil
+	if checker, ok := backend.(metadataDirState); ok {
+		metadataPresent = checker.MetadataDirExists()
+	}
 	return &fsState{
-		backend:  backend,
-		nextIno:  1, // root takes inode 1; children start at 2
-		inoByKey: make(map[string]uint64),
+		backend:         backend,
+		metadata:        metadata,
+		nextIno:         1, // root takes inode 1; children start at 2
+		inoByKey:        make(map[string]uint64),
+		metadataNodes:   make(map[string]*metadataFileNode),
+		metadataPresent: metadataPresent,
 	}
 }
 
@@ -71,16 +122,58 @@ func (s *fsState) inoFor(key string) uint64 {
 	return s.nextIno
 }
 
-// Mount mounts backend on mnt as a read-only FUSE filesystem and returns the
-// running server. opts is used as-is except that a missing "ro" option is
-// appended, and a missing RootStableAttr is set to inode 1.
+func (s *fsState) metadataExists() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.metadataPresent
+}
+
+func (s *fsState) setMetadataExists(present bool) {
+	s.mu.Lock()
+	s.metadataPresent = present
+	s.mu.Unlock()
+}
+
+func (s *fsState) rememberMetadataNode(name string, node *metadataFileNode) {
+	s.mu.Lock()
+	if s.metadataNodes == nil {
+		s.metadataNodes = make(map[string]*metadataFileNode)
+	}
+	s.metadataNodes[name] = node
+	s.mu.Unlock()
+}
+
+func (s *fsState) forgetMetadataNode(name string) {
+	s.mu.Lock()
+	delete(s.metadataNodes, name)
+	s.mu.Unlock()
+}
+
+func (s *fsState) renameMetadataNode(oldName, newName string) {
+	s.mu.Lock()
+	if node := s.metadataNodes[oldName]; node != nil {
+		delete(s.metadataNodes, oldName)
+		s.metadataNodes[newName] = node
+		node.mu.Lock()
+		node.name = newName
+		node.mu.Unlock()
+	}
+	if ino := s.inoByKey[metadataFileKey(oldName)]; ino != 0 {
+		s.inoByKey[metadataFileKey(newName)] = ino
+	}
+	s.mu.Unlock()
+}
+
+// Mount mounts backend on mnt and returns the running server. Dynamic
+// metadata and torrent views use zero kernel cache timeouts so namespace
+// changes become visible without explicit invalidation calls.
 func Mount(mnt string, backend Backend, opts *fs.Options) (*fuse.Server, error) {
 	if opts == nil {
 		opts = &fs.Options{}
 	}
-	if !hasMountOption(opts, "ro") {
-		opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
-	}
+	zero := time.Duration(0)
+	opts.EntryTimeout = &zero
+	opts.AttrTimeout = &zero
 	if opts.RootStableAttr == nil {
 		opts.RootStableAttr = &fs.StableAttr{Ino: 1, Mode: fuse.S_IFDIR}
 	}

@@ -9,16 +9,24 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
-var _ filesystem.Backend = (*Session)(nil)
+var (
+	_ filesystem.Backend         = (*Session)(nil)
+	_ filesystem.MetadataBackend = (*Session)(nil)
+)
 
 // Torrents implements filesystem.Backend. Torrents whose metainfo is not yet
 // available (magnet sources still resolving) are excluded: without info there
 // is nothing to show or read.
 func (s *Session) Torrents() []filesystem.TorrentView {
-	st := s.List()
-	views := make([]filesystem.TorrentView, 0, len(st))
-	for _, t := range st {
-		if t.Info() == nil {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state != stateActive {
+		return nil
+	}
+	views := make([]filesystem.TorrentView, 0, len(s.torrents))
+	for _, t := range s.torrents {
+		info := t.Info()
+		if info == nil {
 			continue
 		}
 		view := filesystem.TorrentView{Name: t.Name(), Hash: t.InfoHash()}
@@ -36,11 +44,14 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 // OpenFile implements filesystem.Backend: it returns a reader handle for the
 // file at the given display path inside the torrent identified by hash.
 func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error) {
-	s.mu.Lock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.ensureActiveLocked(); err != nil {
+		return nil, err
+	}
 	t, ok := s.torrents[hash]
-	s.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("session: unknown torrent %s", hash)
+		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
 	}
 	return t.readerFor(path)
 }
