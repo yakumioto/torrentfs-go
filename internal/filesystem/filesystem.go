@@ -13,6 +13,8 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/yakumioto/torrentfs-go/internal/status"
 )
 
 // FileView describes one file of a torrent, addressed by its path relative to
@@ -30,8 +32,11 @@ type TorrentView struct {
 	Files []FileView
 }
 
-// Backend supplies the filesystem layer with torrent snapshots and file
-// handles.
+// PieceState is the status value exposed by the filesystem backend.
+type PieceState = status.PieceState
+
+// Backend supplies the filesystem layer with torrent snapshots, piece states,
+// and file handles.
 type Backend interface {
 	// Torrents returns the torrents to expose. Only torrents whose metainfo
 	// is available are included.
@@ -39,6 +44,8 @@ type Backend interface {
 	// OpenFile returns a handle for reading the file at the given display
 	// path inside the torrent identified by hash.
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
+	// PieceStates returns a snapshot of all pieces in ascending piece order.
+	PieceStates(hash metainfo.Hash) ([]PieceState, error)
 }
 
 // MetadataView describes one metadata file in the control directory.

@@ -3,6 +3,7 @@ package filesystem
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -18,8 +19,10 @@ import (
 // fakeBackend is an in-memory Backend: no network, no anacrolix client, no
 // real mount. Data is stored per (hash, display path).
 type fakeBackend struct {
-	views []TorrentView
-	data  map[string][]byte
+	views     []TorrentView
+	data      map[string][]byte
+	states    map[string][]PieceState
+	statesErr error
 }
 
 func (b *fakeBackend) Torrents() []TorrentView { return b.views }
@@ -30,6 +33,13 @@ func (b *fakeBackend) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, er
 		return nil, fmt.Errorf("fake backend: no file %q", path)
 	}
 	return bytes.NewReader(data), nil
+}
+
+func (b *fakeBackend) PieceStates(hash metainfo.Hash) ([]PieceState, error) {
+	if b.statesErr != nil {
+		return nil, b.statesErr
+	}
+	return append([]PieceState(nil), b.states[hash.HexString()]...), nil
 }
 
 func hashN(n byte) metainfo.Hash {
@@ -318,7 +328,7 @@ func TestReaddirStream(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("Readdir errno = %v", errno)
 	}
-	want := []string{"a.txt", "b.txt", "sub"}
+	want := []string{".stats", "a.txt", "b.txt", "sub"}
 	var got []fuse.DirEntry
 	for stream.HasNext() {
 		e, errno := stream.Next()
@@ -335,8 +345,101 @@ func TestReaddirStream(t *testing.T) {
 			t.Fatalf("Readdir[%d] = %q, want %q", i, got[i].Name, name)
 		}
 	}
-	if got[0].Mode&syscall.S_IFMT != syscall.S_IFREG || got[2].Mode&syscall.S_IFMT != syscall.S_IFDIR {
+	if got[0].Mode&syscall.S_IFMT != syscall.S_IFREG || got[3].Mode&syscall.S_IFMT != syscall.S_IFDIR {
 		t.Fatalf("entry modes wrong: %v", got)
+	}
+}
+
+func TestStatsFileRendersSnapshotAndReservesName(t *testing.T) {
+	ctx := context.Background()
+	hash := hashN(0x09)
+	b := &fakeBackend{
+		views: []TorrentView{{
+			Name: "t",
+			Hash: hash,
+			Files: []FileView{
+				{Path: ".stats", Size: 99},
+				{Path: "sub/file", Size: 4},
+			},
+		}},
+		states: map[string][]PieceState{
+			hash.HexString(): {
+				{Known: true, Complete: true},
+				{Known: true, Partial: true, Bytes: 3},
+				{Known: true},
+				{Known: true, Wanted: true},
+			},
+		},
+	}
+	state := &fsState{backend: b, inoByKey: make(map[string]uint64), nextIno: 1}
+	dir := &torrentDirNode{state: state, hash: hash, files: b.views[0].Files}
+	entries := dir.entries()
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	if want := []string{".stats", "sub"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("top-level entries = %v, want %v", names, want)
+	}
+	if _, errno := (&torrentDirNode{state: state, hash: hash, files: b.views[0].Files, prefix: "sub"}).Lookup(ctx, ".stats", &fuse.EntryOut{}); errno != syscall.ENOENT {
+		t.Fatalf("nested .stats lookup errno = %v, want ENOENT", errno)
+	}
+
+	stats := &statsFileNode{state: state, hash: hash}
+	var attr fuse.AttrOut
+	if errno := stats.Getattr(ctx, nil, &attr); errno != 0 {
+		t.Fatalf("Getattr errno = %v", errno)
+	}
+	want := "[x] [X 3] [N] []\n"
+	if attr.Size != uint64(len(want)) {
+		t.Fatalf("attr size = %d, want %d", attr.Size, len(want))
+	}
+	fh, _, errno := stats.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("Open errno = %v", errno)
+	}
+	oldHandle := fh.(*readHandle)
+	b.states[hash.HexString()] = []PieceState{{Known: true, Complete: true}}
+	read := make([]byte, len(want))
+	result, errno := oldHandle.Read(ctx, read, 0)
+	if errno != 0 {
+		t.Fatalf("snapshot Read errno = %v", errno)
+	}
+	got, status := result.Bytes(nil)
+	if status != fuse.OK || string(got) != want {
+		t.Fatalf("snapshot = %q, status %v; want %q", got, status, want)
+	}
+
+	newHandle, _, errno := stats.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("second Open errno = %v", errno)
+	}
+	newResult, errno := newHandle.(*readHandle).Read(ctx, make([]byte, 32), 0)
+	if errno != 0 {
+		t.Fatalf("second Read errno = %v", errno)
+	}
+	newGot, status := newResult.Bytes(nil)
+	if status != fuse.OK || string(newGot) != "[x]\n" {
+		t.Fatalf("new snapshot = %q, status %v; want [x]", newGot, status)
+	}
+}
+
+func TestStatsFileRejectsWriteAndMapsBackendError(t *testing.T) {
+	ctx := context.Background()
+	hash := hashN(0x0a)
+	b := &fakeBackend{statesErr: errors.New("backend failed")}
+	stats := &statsFileNode{state: &fsState{backend: b}, hash: hash}
+	var attr fuse.AttrOut
+	if errno := stats.Getattr(ctx, nil, &attr); errno != syscall.EIO {
+		t.Fatalf("Getattr errno = %v, want EIO", errno)
+	}
+	if _, _, errno := stats.Open(ctx, syscall.O_RDONLY); errno != syscall.EIO {
+		t.Fatalf("Open backend error = %v, want EIO", errno)
+	}
+	for _, flags := range []uint32{syscall.O_WRONLY, syscall.O_RDWR, syscall.O_RDONLY | syscall.O_TRUNC, syscall.O_RDONLY | syscall.O_CREAT} {
+		if _, _, errno := stats.Open(ctx, flags); errno != syscall.EROFS {
+			t.Fatalf("Open(0x%x) = %v, want EROFS", flags, errno)
+		}
 	}
 }
 

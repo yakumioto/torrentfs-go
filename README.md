@@ -2,10 +2,17 @@
 
 Mount BitTorrent downloads as a FUSE filesystem.
 
-> **Status: M2 lifecycle and write semantics.** `torrentfs` loads one or more
+> **Status: M3 piece visibility and cache.** `torrentfs` loads one or more
 > `.torrent` files, mounts a torrent tree, serves file content on demand, and
 > exposes a writable `metadata/` control directory for adding and removing
-> torrents. Piece status, `.stats`, and caching land in later milestones.
+> torrents. Each torrent root exposes a read-only `.stats` file with one status
+> token per piece; repeated reads use an in-memory piece cache. `.stats` is a
+> reserved virtual name, so a top-level torrent file with that name is hidden.
+>
+> `.stats` lists pieces in index order, separated by single spaces and ending
+> with a newline: `[x]` is a verified complete piece, `[X n]` is a partial
+> piece with `n` available bytes, `[N]` is an incomplete piece that is not
+> wanted, and `[]` represents other incomplete states.
 
 ## Build
 

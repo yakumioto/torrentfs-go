@@ -135,6 +135,14 @@ func fileKey(hash metainfo.Hash, displayPath string) string {
 	return "f/" + hash.HexString() + "/" + displayPath
 }
 
+// statsName is the reserved virtual status file at a torrent root.
+const statsName = ".stats"
+
+// statsKey is the inode identity of a torrent's virtual status file.
+func statsKey(hash metainfo.Hash) string {
+	return "s/" + hash.HexString()
+}
+
 // dirKey is the inode identity of a (virtual) subdirectory inside a torrent.
 func dirKey(hash metainfo.Hash, relPrefix string) string {
 	return "d/" + hash.HexString() + "/" + relPrefix

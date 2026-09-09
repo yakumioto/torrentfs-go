@@ -2,6 +2,8 @@ package filesystem
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -21,12 +23,43 @@ type torrentDirNode struct {
 	prefix string     // torrent-relative prefix this directory represents
 }
 
+func (n *torrentDirNode) entries() []fsEntry {
+	entries := childrenOf(n.files, n.prefix)
+	if n.prefix != "" {
+		return entries
+	}
+	filtered := make([]fsEntry, 0, len(entries)+1)
+	for _, entry := range entries {
+		if entry.Name != statsName {
+			filtered = append(filtered, entry)
+		}
+	}
+	filtered = append(filtered, fsEntry{Name: statsName})
+	slices.SortFunc(filtered, func(a, b fsEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return filtered
+}
+
 func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o555
 	return 0
 }
 
 func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if n.prefix == "" && name == statsName {
+		out.Mode = 0o444
+		child := &statsFileNode{state: n.state, hash: n.hash}
+		content, err := child.snapshot()
+		if err != nil {
+			return nil, errnoFor(err)
+		}
+		out.Size = uint64(len(content))
+		return n.NewInode(ctx, child, fs.StableAttr{
+			Mode: syscall.S_IFREG,
+			Ino:  n.state.inoFor(statsKey(n.hash)),
+		}), 0
+	}
 	e, ok := lookupChild(n.files, n.prefix, name)
 	if !ok {
 		return nil, errnoFor(ErrNotFound)
@@ -50,7 +83,7 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 }
 
 func (n *torrentDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	cs := childrenOf(n.files, n.prefix)
+	cs := n.entries()
 	entries := make([]fuse.DirEntry, 0, len(cs))
 	for _, c := range cs {
 		mode := uint32(syscall.S_IFREG)

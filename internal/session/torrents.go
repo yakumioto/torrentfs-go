@@ -9,6 +9,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
@@ -29,6 +30,8 @@ type Torrent struct {
 	mu      sync.Mutex
 	closed  bool
 	readers map[string]*raFile // open reader handles by display path
+	cache   *cache.Cache
+	loader  pieceSource
 }
 
 // AddTorrent registers a torrent from a .torrent file or a magnet link. It
@@ -95,7 +98,7 @@ func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torr
 		}
 		return existing, false, nil
 	}
-	st := &Torrent{tor: t, readers: make(map[string]*raFile)}
+	st := &Torrent{tor: t, readers: make(map[string]*raFile), cache: s.pieceCache}
 	s.torrents[hash] = st
 	return st, true, nil
 }
@@ -179,9 +182,23 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 	if f == nil {
 		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), filesystem.ErrNotFound)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	r := &raFile{r: f.NewReader(), cancel: cancel}
-	r.r.SetContext(ctx)
+	info := t.tor.Info()
+	if info == nil {
+		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
+	}
+	if t.loader == nil {
+		t.loader = newPieceLoader(t.tor)
+	}
+	r := &raFile{
+		loader:      t.loader,
+		cache:       t.cache,
+		tor:         t.tor,
+		torrentKey:  t.InfoHash().HexString(),
+		fileOffset:  f.Offset(),
+		fileSize:    f.Length(),
+		pieceLength: info.PieceLength,
+		torrentSize: t.tor.Length(),
+	}
 	t.readers[displayPath] = r
 	return r, nil
 }
@@ -199,16 +216,22 @@ func (t *Torrent) close() error {
 		readers[path] = r
 	}
 	t.readers = make(map[string]*raFile)
+	loader := t.loader
 	t.mu.Unlock()
 
-	for _, r := range readers {
-		r.cancelRead()
-	}
 	var errs []error
 	for path, r := range readers {
 		if err := r.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %q: %w", path, err))
 		}
+	}
+	if loader != nil {
+		if err := loader.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close torrent reader: %w", err))
+		}
+	}
+	if t.cache != nil {
+		t.cache.InvalidateTorrent(t.InfoHash().HexString())
 	}
 	return errors.Join(errs...)
 }

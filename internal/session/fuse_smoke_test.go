@@ -116,6 +116,21 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 		}
 	}
 
+	stats, err := os.ReadFile(filepath.Join(mnt, "payload.bin", ".stats"))
+	if err != nil {
+		t.Fatalf("ReadFile(.stats): %v", err)
+	}
+	if string(stats) != "[x]\n" {
+		t.Fatalf(".stats = %q, want [x]", stats)
+	}
+	statsInfo, err := os.Stat(filepath.Join(mnt, "payload.bin", ".stats"))
+	if err != nil {
+		t.Fatalf("Stat(.stats): %v", err)
+	}
+	if got, want := statsInfo.Size(), int64(len(stats)); got != want {
+		t.Fatalf(".stats size = %d, want %d", got, want)
+	}
+
 	// Seeked read: read a window from the middle of the mounted file.
 	f, err := os.Open(path)
 	if err != nil {

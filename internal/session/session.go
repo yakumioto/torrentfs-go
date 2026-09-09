@@ -14,6 +14,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
@@ -26,11 +27,14 @@ const (
 	stateClosed
 )
 
+const defaultPieceCacheCapacity int64 = 64 << 20
+
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
 	cl  *torrent.Client
 	cfg config.Config
 
+	pieceCache     *cache.Cache
 	mu             sync.RWMutex
 	state          lifecycle
 	closeDone      chan struct{}
@@ -65,6 +69,7 @@ func New(cfg config.Config) (*Session, error) {
 	return &Session{
 		cl:             cl,
 		cfg:            cfg,
+		pieceCache:     cache.New(defaultPieceCacheCapacity),
 		closeDone:      make(chan struct{}),
 		torrents:       make(map[metainfo.Hash]*Torrent),
 		metadata:       make(map[string]metainfo.Hash),
