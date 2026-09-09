@@ -1,0 +1,14 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yakumioto/torrentfs-go

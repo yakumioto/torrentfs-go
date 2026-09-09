@@ -1,0 +1,17 @@
+# torrentfs.example.toml — example configuration for torrentfs.
+#
+# This file is a placeholder. torrentfs does not read any configuration yet
+# (M0 skeleton): copying it to torrentfs.toml only takes effect once config
+# loading lands (M4).
+#
+# The commented sections below sketch the intended shape for upcoming
+# milestones. Keys are deliberately NOT defined yet and may change — treat
+# them as a record of direction, not a contract.
+
+# [paths]
+#   # Filesystem paths torrentfs manages at runtime
+#   # (session data, cache, mountpoint helpers, ...). Defined in M1.
+
+# [connections]
+#   # Settings for the torrent session and FUSE mount
+#   # (listen ports, cache limits, mount options, ...). Defined in M1.
