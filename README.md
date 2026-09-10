@@ -33,7 +33,7 @@ go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] [tor
 ```
 
 `-mountpoint` is required. Without `-config`, defaults are used; a TOML file
-loads the four sections shown in `torrentfs.example.toml`, and an explicit
+loads the five sections shown in `torrentfs.example.toml`, and an explicit
 `-data-dir` overrides `[paths].data_dir`. Positional torrent files are optional:
 the session restores metadata first, then adds those files idempotently.
 Configuration is read at every startup; changing the file takes effect after a
@@ -71,6 +71,11 @@ socks5_url = ""
 
 [cache]
 capacity_bytes = 67108864
+
+[identity]
+tracker_user_agent = ""
+peer_id_prefix = ""
+extended_handshake_client_version = ""
 ```
 
 `capacity_bytes` is a byte limit. An empty `socks5_url` disables the proxy;
@@ -79,6 +84,17 @@ The proxy applies to TCP peer connections and HTTP(S) tracker, metainfo, and
 webseed requests. UTP, DHT, and UDP tracker traffic are disabled or rejected in
 proxy mode, so there is no direct UDP fallback. Incoming TCP listening remains
 controlled by `[connections]` and is not routed through the SOCKS5 proxy.
+
+`[identity].tracker_user_agent` changes only the `User-Agent` header on HTTP
+tracker announce requests; it does not change metainfo, webseed, or scrape
+requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is limited
+to 20 bytes, and any remaining bytes are generated randomly for each session.
+An empty prefix inherits the dependency's default prefix and random suffix; a
+20-byte prefix leaves no random suffix. The generated peer ID is used for
+BitTorrent handshakes and announces. `extended_handshake_client_version` is
+the BEP 10 extended-handshake `v` value. Empty identity values inherit the
+anacrolix defaults, and `v` is sent only when the peer supports the extended
+handshake.
 
 ## Error behavior
 

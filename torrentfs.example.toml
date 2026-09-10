@@ -21,3 +21,12 @@ socks5_url = ""
 [cache]
 # Maximum in-memory piece cache size, in bytes (64 MiB by default).
 capacity_bytes = 67108864
+
+[identity]
+# User-Agent for HTTP tracker announces; empty inherits the client default.
+tracker_user_agent = ""
+# Prefix of the generated 20-byte peer ID, measured in bytes; empty inherits the client default.
+# The remaining bytes are random for each session.
+peer_id_prefix = ""
+# BEP 10 extended handshake v value; empty inherits the client default.
+extended_handshake_client_version = ""

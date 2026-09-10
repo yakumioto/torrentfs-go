@@ -24,6 +24,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
+	if cfg.Identity != (config.Identity{}) {
+		t.Fatalf("Default identity = %+v, want zero value", cfg.Identity)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Default().Validate: %v", err)
 	}
@@ -44,6 +47,11 @@ socks5_url = "socks5h://user:password@proxy.example:1080"
 
 [cache]
 capacity_bytes = 8192
+
+[identity]
+tracker_user_agent = "torrentfs-test/1.0"
+peer_id_prefix = "-TS1000-"
+extended_handshake_client_version = "torrentfs-test/1.0"
 `)
 
 	cfg, err := config.Load(path)
@@ -61,6 +69,57 @@ capacity_bytes = 8192
 	}
 	if cfg.Cache.CapacityBytes != 8192 {
 		t.Fatalf("CapacityBytes = %d, want 8192", cfg.Cache.CapacityBytes)
+	}
+	wantIdentity := config.Identity{
+		TrackerUserAgent:               "torrentfs-test/1.0",
+		PeerIDPrefix:                   "-TS1000-",
+		ExtendedHandshakeClientVersion: "torrentfs-test/1.0",
+	}
+	if cfg.Identity != wantIdentity {
+		t.Fatalf("Identity = %+v, want %+v", cfg.Identity, wantIdentity)
+	}
+}
+
+func TestLoadClientIdentityFormats(t *testing.T) {
+	tests := []struct {
+		name           string
+		trackerAgent   string
+		peerIDPrefix   string
+		handshakeValue string
+	}{
+		{
+			name:           "qBittorrent 4.4.0",
+			trackerAgent:   "qBittorrent/4.4.0",
+			peerIDPrefix:   "-qB4400-",
+			handshakeValue: "qBittorrent/4.4.0",
+		},
+		{
+			name:           "Transmission 3.00",
+			trackerAgent:   "Transmission/3.00",
+			peerIDPrefix:   "-TR3000-",
+			handshakeValue: "Transmission/3.00",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, "[paths]\ndata_dir = "+quote(filepath.Join(t.TempDir(), "data"))+"\n\n[identity]\n"+
+				"tracker_user_agent = "+quote(tt.trackerAgent)+"\n"+
+				"peer_id_prefix = "+quote(tt.peerIDPrefix)+"\n"+
+				"extended_handshake_client_version = "+quote(tt.handshakeValue)+"\n")
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Identity.TrackerUserAgent != tt.trackerAgent {
+				t.Fatalf("TrackerUserAgent = %q, want %q", cfg.Identity.TrackerUserAgent, tt.trackerAgent)
+			}
+			if cfg.Identity.PeerIDPrefix != tt.peerIDPrefix {
+				t.Fatalf("PeerIDPrefix = %q, want %q", cfg.Identity.PeerIDPrefix, tt.peerIDPrefix)
+			}
+			if cfg.Identity.ExtendedHandshakeClientVersion != tt.handshakeValue {
+				t.Fatalf("ExtendedHandshakeClientVersion = %q, want %q", cfg.Identity.ExtendedHandshakeClientVersion, tt.handshakeValue)
+			}
+		})
 	}
 }
 
@@ -81,6 +140,22 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	}
 	if cfg.Cache != defaults.Cache {
 		t.Fatalf("Cache = %+v, want defaults %+v", cfg.Cache, defaults.Cache)
+	}
+	if cfg.Identity != defaults.Identity {
+		t.Fatalf("Identity = %+v, want defaults %+v", cfg.Identity, defaults.Identity)
+	}
+}
+
+func TestLoadUsesDefaultsForEmptyIdentitySection(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	path := writeConfig(t, "[paths]\ndata_dir = "+quote(dataDir)+"\n\n[identity]\n")
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Identity != (config.Identity{}) {
+		t.Fatalf("Identity = %+v, want zero value", cfg.Identity)
 	}
 }
 
@@ -217,6 +292,73 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Validate error = %q, want field name", err)
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidIdentityValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*config.Config)
+		field string
+	}{
+		{
+			name: "peer ID prefix too long",
+			setup: func(cfg *config.Config) {
+				cfg.Identity.PeerIDPrefix = strings.Repeat("x", 21)
+			},
+			field: "identity.peer_id_prefix",
+		},
+		{
+			name: "tracker user agent contains carriage return",
+			setup: func(cfg *config.Config) {
+				cfg.Identity.TrackerUserAgent = "torrentfs\r/1.0"
+			},
+			field: "identity.tracker_user_agent",
+		},
+		{
+			name: "tracker user agent contains line feed",
+			setup: func(cfg *config.Config) {
+				cfg.Identity.TrackerUserAgent = "torrentfs\n/1.0"
+			},
+			field: "identity.tracker_user_agent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			tt.setup(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate succeeded")
+			}
+			if !errors.Is(err, config.ErrInvalid) {
+				t.Fatalf("Validate error = %v, want config.ErrInvalid", err)
+			}
+			var validationErr *config.ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("Validate error = %T %v, want *config.ValidationError", err, err)
+			}
+			if validationErr.Field != tt.field {
+				t.Fatalf("ValidationError.Field = %q, want %q", validationErr.Field, tt.field)
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsIdentityValues(t *testing.T) {
+	cfg := config.Default()
+	cfg.Identity = config.Identity{
+		TrackerUserAgent:               "torrentfs test/1.0 (linux)",
+		PeerIDPrefix:                   strings.Repeat("x", 20),
+		ExtendedHandshakeClientVersion: "torrentfs test/1.0 (linux)",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	cfg.Identity.PeerIDPrefix = "客户端"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate non-ASCII prefix: %v", err)
 	}
 }
 

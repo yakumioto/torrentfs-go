@@ -64,6 +64,15 @@ func newWithClientConfig(cfg config.Config, customize func(*torrent.ClientConfig
 	}
 
 	cc := torrent.NewDefaultClientConfig()
+	if cfg.Identity.TrackerUserAgent != "" {
+		cc.HTTPUserAgent = cfg.Identity.TrackerUserAgent
+	}
+	if cfg.Identity.PeerIDPrefix != "" {
+		cc.Bep20 = cfg.Identity.PeerIDPrefix
+	}
+	if cfg.Identity.ExtendedHandshakeClientVersion != "" {
+		cc.ExtendedHandshakeClientVersion = cfg.Identity.ExtendedHandshakeClientVersion
+	}
 	cc.DataDir = cfg.Paths.DataDir
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort

@@ -15,12 +15,14 @@ var (
 	// ErrInvalid identifies a configuration value that violates its contract.
 	ErrInvalid = errors.New("invalid configuration")
 
-	errRequired      = errors.New("value is required")
-	errPortRange     = errors.New("must be between 0 and 65535")
-	errCapacityRange = errors.New("must be non-negative")
-	errProxyScheme   = errors.New("must use socks5:// or socks5h://")
-	errProxyHost     = errors.New("must include a proxy host")
-	errProxyPort     = errors.New("proxy port must be between 1 and 65535")
+	errRequired         = errors.New("value is required")
+	errPortRange        = errors.New("must be between 0 and 65535")
+	errCapacityRange    = errors.New("must be non-negative")
+	errProxyScheme      = errors.New("must use socks5:// or socks5h://")
+	errProxyHost        = errors.New("must include a proxy host")
+	errProxyPort        = errors.New("proxy port must be between 1 and 65535")
+	errPeerIDPrefixSize = errors.New("must be at most 20 bytes")
+	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
 )
 
 const defaultCacheCapacityBytes int64 = 64 << 20
@@ -53,6 +55,7 @@ type Config struct {
 	Connections Connections `toml:"connections"`
 	Proxy       Proxy       `toml:"proxy"`
 	Cache       Cache       `toml:"cache"`
+	Identity    Identity    `toml:"identity"`
 }
 
 // Paths groups the filesystem paths torrentfs manages at runtime.
@@ -82,6 +85,16 @@ type Proxy struct {
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
 	CapacityBytes int64 `toml:"capacity_bytes"`
+}
+
+// Identity groups the client identity values sent to trackers and peers.
+type Identity struct {
+	// TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.
+	TrackerUserAgent string `toml:"tracker_user_agent"`
+	// PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.
+	PeerIDPrefix string `toml:"peer_id_prefix"`
+	// ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
+	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version"`
 }
 
 // Default returns the default configuration: a per-user data directory under
@@ -119,6 +132,12 @@ func (c Config) Validate() error {
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
 		return invalid("proxy.socks5_url", err)
+	}
+	if len(c.Identity.PeerIDPrefix) > 20 {
+		return invalid("identity.peer_id_prefix", errPeerIDPrefixSize)
+	}
+	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
+		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
 	}
 	return nil
 }

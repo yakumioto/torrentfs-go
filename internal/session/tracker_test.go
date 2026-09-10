@@ -26,6 +26,12 @@ type loopbackTracker struct {
 	mu        sync.Mutex
 	peers     map[string]map[string]struct{} // info hash hex -> "host:port" set
 	announced map[string]int                 // info hash hex -> announce count
+	announces map[string][]trackerAnnounce   // info hash hex -> announce details
+}
+
+type trackerAnnounce struct {
+	UserAgent string
+	PeerID    []byte
 }
 
 type trackerAnnounceResponse struct {
@@ -40,6 +46,7 @@ func newLoopbackTracker(t *testing.T) *loopbackTracker {
 	tr := &loopbackTracker{
 		peers:     make(map[string]map[string]struct{}),
 		announced: make(map[string]int),
+		announces: make(map[string][]trackerAnnounce),
 	}
 	tr.server = httptest.NewServer(http.HandlerFunc(tr.handleAnnounce))
 	t.Cleanup(tr.server.Close)
@@ -52,6 +59,20 @@ func (tr *loopbackTracker) announceCount(hash string) int {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	return tr.announced[hash]
+}
+
+func (tr *loopbackTracker) announceSnapshot(hash string) []trackerAnnounce {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	announces := tr.announces[hash]
+	out := make([]trackerAnnounce, len(announces))
+	for i, announce := range announces {
+		out[i] = trackerAnnounce{
+			UserAgent: announce.UserAgent,
+			PeerID:    append([]byte(nil), announce.PeerID...),
+		}
+	}
+	return out
 }
 
 func (tr *loopbackTracker) handleAnnounce(w http.ResponseWriter, r *http.Request) {
@@ -74,8 +95,13 @@ func (tr *loopbackTracker) handleAnnounce(w http.ResponseWriter, r *http.Request
 	}
 	addr := net.JoinHostPort(host, port)
 	stopped := query.Get("event") == "stopped"
+	announce := trackerAnnounce{
+		UserAgent: r.UserAgent(),
+		PeerID:    append([]byte(nil), query.Get("peer_id")...),
+	}
 
 	tr.mu.Lock()
+	tr.announces[infoHash] = append(tr.announces[infoHash], announce)
 	set := tr.peers[infoHash]
 	if set == nil {
 		set = make(map[string]struct{})
