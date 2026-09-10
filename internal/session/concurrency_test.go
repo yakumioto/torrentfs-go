@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -265,25 +266,48 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	drainErrors(t, errs)
 }
 
-// unmountServer unmounts without risking a permanently blocked test: the
-// unmount runs with a deadline and a failure is reported, not fatal.
-func unmountServer(t *testing.T, server interface{ Unmount() error }) {
+// unmountServer unmounts server and fails the test if the mount survives: a
+// silent unmount error would let the next test or job run into a live mount.
+// A mount that cannot be released gracefully is force-detached so it does not
+// leak. The unmount runs on its own goroutine with a deadline; the result
+// channel is buffered, so even a timed-out unmount cannot strand the goroutine.
+func unmountServer(t *testing.T, server interface{ Unmount() error }, mountpoint string) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- server.Unmount() }()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Logf("unmount returned %v", err)
+			t.Errorf("unmount %s: %v", mountpoint, err)
+			forceUnmount(t, mountpoint)
 		}
 	case <-time.After(30 * time.Second):
-		t.Errorf("unmount did not return within 30s; a FUSE mount may be left behind")
+		t.Errorf("unmount %s did not return within 30s", mountpoint)
+		forceUnmount(t, mountpoint)
 	}
 }
 
-// TestFuseReadUnmountCloseRace starts a reader, closes the session while reads
-// are in flight, then unmounts. Session.Close must not deadlock, the reader
-// must stop, and the mount must still unmount cleanly.
+// forceUnmount lazily detaches a mount that a graceful unmount could not
+// release, so a failing test does not leave a live mount behind.
+func forceUnmount(t *testing.T, mountpoint string) {
+	t.Helper()
+	for _, tool := range []string{"fusermount3", "fusermount"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			continue
+		}
+		if err := exec.Command(tool, "-uz", mountpoint).Run(); err == nil {
+			t.Logf("force-unmounted %s with %s -uz", mountpoint, tool)
+			return
+		}
+	}
+	t.Errorf("could not force-unmount %s; a FUSE mount may remain", mountpoint)
+}
+
+// TestFuseReadUnmountCloseRace races an active reader against Unmount and
+// Session.Close. The reader signals once it has served a real read, so both
+// calls start while requests are live; Unmount and Close are then started from
+// separate goroutines and both must return within one deadline. A deadlock or
+// data race between the three is exactly what this test exists to catch.
 func TestFuseReadUnmountCloseRace(t *testing.T) {
 	requireFuse(t)
 	ctx := testTimeout(t)
@@ -321,10 +345,14 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 		_ = sess.Close(context.Background())
 		t.Fatalf("Mount: %v", err)
 	}
-	defer unmountServer(t, server)
+	defer unmountServer(t, server, mnt)
 
 	path := filepath.Join(mnt, "payload.bin", "payload.bin")
-	stop := make(chan struct{})
+
+	// The reader holds a descriptor open and keeps issuing reads, reporting its
+	// first completed read so the test knows live requests are being served.
+	inRead := make(chan struct{})
+	readerStop := make(chan struct{})
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
@@ -335,45 +363,67 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 		defer func() { _ = f.Close() }()
 		buf := make([]byte, concurrencyReadChunk)
 		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
 			off := int64(i * concurrencyReadChunk % (len(content) - concurrencyReadChunk))
 			if _, err := f.ReadAt(buf, off); err != nil {
 				return
 			}
+			if i == 0 {
+				close(inRead)
+			}
+			select {
+			case <-readerStop:
+				return
+			default:
+			}
 		}
 	}()
-
-	// Let the reader get going, then close the session underneath it.
-	time.Sleep(50 * time.Millisecond)
-	closeResult := make(chan error, 1)
-	go func() { closeResult <- sess.Close(ctx) }()
 	select {
-	case err := <-closeResult:
-		if err != nil {
-			t.Errorf("Close: %v", err)
-		}
+	case <-inRead:
 	case <-ctx.Done():
-		t.Fatal("Session.Close deadlocked while reads were in flight")
+		t.Fatal("reader never completed a read")
 	}
 
-	// The data is local, so the kernel page cache keeps serving reads after
-	// Close; the reader is stopped explicitly. Reads must have been in flight
-	// concurrently with Close, which is the race this test is for.
-	close(stop)
+	// Start Unmount and Session.Close concurrently, from separate goroutines,
+	// while the reader is still going.
+	unmountDone := make(chan error, 1)
+	closeDone := make(chan error, 1)
+	go func() { unmountDone <- server.Unmount() }()
+	go func() { closeDone <- sess.Close(ctx) }()
+
+	// Give both calls room to overlap live reads, then release the reader so
+	// the kernel can drop the mount.
+	time.Sleep(30 * time.Millisecond)
+	close(readerStop)
+
+	var unmountErr, closeErr error
+	deadline := time.After(30 * time.Second)
+	for pending := 2; pending > 0; {
+		select {
+		case unmountErr = <-unmountDone:
+			pending--
+		case closeErr = <-closeDone:
+			pending--
+		case <-deadline:
+			t.Fatal("Unmount and Session.Close did not both return: deadlock")
+		}
+	}
+	if closeErr != nil {
+		t.Errorf("Session.Close: %v", closeErr)
+	}
+	if unmountErr != nil {
+		t.Errorf("Unmount while reads were in flight: %v", unmountErr)
+	}
+
 	select {
 	case <-readerDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("reader did not stop after being signalled")
+	case <-time.After(15 * time.Second):
+		t.Fatal("reader did not stop")
 	}
 
-	// A fresh open after Close must fail: the backend no longer serves files.
+	// The mount is gone, so a fresh open must fail.
 	if f, err := os.Open(path); err == nil {
 		_ = f.Close()
-		t.Error("open after Session.Close succeeded; want an error")
+		t.Error("open after Unmount and Close succeeded; want an error")
 	}
 }
 

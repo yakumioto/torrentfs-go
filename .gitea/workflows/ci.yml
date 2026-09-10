@@ -27,23 +27,33 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    env:
+      GOLANGCI_LINT_VERSION: v2.12.2
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      # Build golangci-lint with this job's Go toolchain instead of downloading
+      # a prebuilt release. golangci-lint refuses to load a module whose `go`
+      # directive is newer than the Go that built the binary, and release
+      # binaries can lag behind. Building from source keeps the two in step.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_LINT_VERSION }}
+      - name: Lint
+        run: $(go env GOPATH)/bin/golangci-lint run ./...
 
   # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
-  # skipping every real-mount test. The runner must expose /dev/fuse and
-  # allow mounting (typically SYS_ADMIN or an equivalent rootful setup); see
-  # the README for the runner and `docker run` requirements.
+  # skipping every real-mount test. The runner executes jobs in a container,
+  # so the FUSE device and the mount capability must be passed into that
+  # container; see the README for the equivalent `docker run` flags.
   fuse:
     name: real FUSE mount tests (required)
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-latest
+      options: --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
     env:
       TORRENTFS_FUSE_REQUIRED: "1"
     steps:

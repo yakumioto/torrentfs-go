@@ -178,7 +178,7 @@ func TestFuseMissingPathErrno(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	defer unmountServer(t, server)
+	defer unmountServer(t, server, mnt)
 
 	if _, err := os.Stat(filepath.Join(mnt, "no-such-torrent")); !errors.Is(err, syscall.ENOENT) {
 		t.Errorf("stat of unknown root entry = %v, want ENOENT", err)

@@ -114,7 +114,7 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	t.Cleanup(func() { _ = server.Unmount() })
+	t.Cleanup(func() { unmountServer(t, server, mnt) })
 
 	path := filepath.Join(mnt, "payload.bin", "payload.bin")
 	got := readFileWithin(t, ctx, path)
