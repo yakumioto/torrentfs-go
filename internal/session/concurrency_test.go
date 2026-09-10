@@ -379,12 +379,18 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 	// outstanding by construction rather than by timing.
 	readEntered := make(chan struct{})
 	readRelease := make(chan struct{})
-	var enteredOnce sync.Once
+	var enteredOnce, releaseOnce sync.Once
+	releaseReads := func() { releaseOnce.Do(func() { close(readRelease) }) }
 	restoreGate := session.SetReadGate(func() {
 		enteredOnce.Do(func() { close(readEntered) })
 		<-readRelease
 	})
-	defer restoreGate()
+	// A failed assertion anywhere below must not leave the hook installed or
+	// the readers blocked on the gate: release them, then clear the gate.
+	defer func() {
+		releaseReads()
+		restoreGate()
+	}()
 
 	const readers = 3
 	readerDone := make(chan error, readers)
@@ -430,7 +436,7 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 	// Let both calls overlap the outstanding reads, then release them so the
 	// kernel can drain the requests and drop the mount.
 	time.Sleep(50 * time.Millisecond)
-	close(readRelease)
+	releaseReads()
 
 	var unmountErr, closeErr error
 	deadline := time.After(30 * time.Second)
