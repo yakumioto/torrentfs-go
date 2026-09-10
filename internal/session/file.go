@@ -5,12 +5,25 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/anacrolix/torrent"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
+
+// readGate, when set, runs at the start of every real read before the read
+// touches the cache or the loader. Production leaves it nil; tests install one
+// through export_test.go so they can hold a read outstanding while racing
+// Unmount and Session.Close against it.
+var readGate atomic.Pointer[func()]
+
+func enterReadGate() {
+	if gate := readGate.Load(); gate != nil {
+		(*gate)()
+	}
+}
 
 type pieceSource interface {
 	prepare(*torrent.Torrent, int, int, int64) error
@@ -106,6 +119,7 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	enterReadGate()
 
 	f.mu.RLock()
 	if f.closed {

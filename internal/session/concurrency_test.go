@@ -303,11 +303,13 @@ func forceUnmount(t *testing.T, mountpoint string) {
 	t.Errorf("could not force-unmount %s; a FUSE mount may remain", mountpoint)
 }
 
-// TestFuseReadUnmountCloseRace races an active reader against Unmount and
-// Session.Close. The reader signals once it has served a real read, so both
-// calls start while requests are live; Unmount and Close are then started from
-// separate goroutines and both must return within one deadline. A deadlock or
-// data race between the three is exactly what this test exists to catch.
+// TestFuseReadUnmountCloseRace races Unmount and Session.Close against read
+// requests that are provably still outstanding. A test-only read gate holds
+// every backend read inside ReadAt, so when the test observes a read enter the
+// gate and confirms it has not returned, it knows a live FUSE request is
+// pending; only then do Unmount and Session.Close start, from separate
+// goroutines, and both must return within one deadline. A deadlock or data
+// race that needs all three to overlap is exactly what this test catches.
 func TestFuseReadUnmountCloseRace(t *testing.T) {
 	requireFuse(t)
 	ctx := testTimeout(t)
@@ -349,51 +351,63 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 
 	path := filepath.Join(mnt, "payload.bin", "payload.bin")
 
-	// The reader holds a descriptor open and keeps issuing reads, reporting its
-	// first completed read so the test knows live requests are being served.
-	inRead := make(chan struct{})
-	readerStop := make(chan struct{})
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		f, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer func() { _ = f.Close() }()
-		buf := make([]byte, concurrencyReadChunk)
-		for i := 0; ; i++ {
-			off := int64(i * concurrencyReadChunk % (len(content) - concurrencyReadChunk))
+	// Hold every backend read inside ReadAt until released. A reader blocked
+	// here has entered ReadAt and not returned, so its FUSE request is
+	// outstanding by construction rather than by timing.
+	readEntered := make(chan struct{})
+	readRelease := make(chan struct{})
+	var enteredOnce sync.Once
+	restoreGate := session.SetReadGate(func() {
+		enteredOnce.Do(func() { close(readEntered) })
+		<-readRelease
+	})
+	defer restoreGate()
+
+	const readers = 3
+	readerDone := make(chan error, readers)
+	var readerWG sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		readerWG.Add(1)
+		go func(seed int) {
+			defer readerWG.Done()
+			f, err := os.Open(path)
+			if err != nil {
+				readerDone <- fmt.Errorf("open: %w", err)
+				return
+			}
+			defer func() { _ = f.Close() }()
+			buf := make([]byte, concurrencyReadChunk)
+			off := int64(seed * concurrencyReadChunk % (len(content) - concurrencyReadChunk))
 			if _, err := f.ReadAt(buf, off); err != nil {
+				readerDone <- err
 				return
 			}
-			if i == 0 {
-				close(inRead)
-			}
-			select {
-			case <-readerStop:
-				return
-			default:
-			}
-		}
-	}()
-	select {
-	case <-inRead:
-	case <-ctx.Done():
-		t.Fatal("reader never completed a read")
+			readerDone <- nil
+		}(i)
 	}
 
-	// Start Unmount and Session.Close concurrently, from separate goroutines,
-	// while the reader is still going.
+	select {
+	case <-readEntered:
+	case <-ctx.Done():
+		t.Fatal("no read ever entered the gate")
+	}
+	// The gate is closed, so a read is inside ReadAt; confirm none has
+	// returned yet. Together these prove a live, unfinished read exists now.
+	select {
+	case err := <-readerDone:
+		t.Fatalf("a reader finished before Unmount/Close started: %v", err)
+	default:
+	}
+
 	unmountDone := make(chan error, 1)
 	closeDone := make(chan error, 1)
 	go func() { unmountDone <- server.Unmount() }()
 	go func() { closeDone <- sess.Close(ctx) }()
 
-	// Give both calls room to overlap live reads, then release the reader so
-	// the kernel can drop the mount.
-	time.Sleep(30 * time.Millisecond)
-	close(readerStop)
+	// Let both calls overlap the outstanding reads, then release them so the
+	// kernel can drain the requests and drop the mount.
+	time.Sleep(50 * time.Millisecond)
+	close(readRelease)
 
 	var unmountErr, closeErr error
 	deadline := time.After(30 * time.Second)
@@ -411,13 +425,18 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 		t.Errorf("Session.Close: %v", closeErr)
 	}
 	if unmountErr != nil {
-		t.Errorf("Unmount while reads were in flight: %v", unmountErr)
+		t.Errorf("Unmount while reads were outstanding: %v", unmountErr)
 	}
 
-	select {
-	case <-readerDone:
-	case <-time.After(15 * time.Second):
-		t.Fatal("reader did not stop")
+	waitGroupWithin(t, ctx, &readerWG, "outstanding readers")
+	for i := 0; i < readers; i++ {
+		// The reads were released only after Unmount and Close had started, so
+		// each must fail. The exact errno varies with which of the two tore the
+		// mount down first (EIO from the FUSE layer, EBADF from the closed
+		// session); what matters is that none reports success.
+		if err := <-readerDone; err == nil {
+			t.Error("a read completed successfully after Unmount and Session.Close; want an error")
+		}
 	}
 
 	// The mount is gone, so a fresh open must fail.

@@ -10,3 +10,20 @@ var NewWithClientConfig = newWithClientConfig
 // TorrentClientConfig is the concrete client configuration type tests adjust
 // through NewWithClientConfig.
 type TorrentClientConfig = torrent.ClientConfig
+
+// SetReadGate installs hook as the session read gate and returns a function
+// that restores the previous gate. hook runs at the start of every real read
+// and may block, which lets a test hold a read outstanding (its ReadAt has
+// entered and not returned) while it races Unmount and Session.Close. A nil
+// hook clears the gate. This is a test-only seam; production never sets it.
+func SetReadGate(hook func()) (restore func()) {
+	var next *func()
+	if hook != nil {
+		next = &hook
+	}
+	previous := readGate.Swap(next)
+	if previous == nil {
+		return func() {}
+	}
+	return func() { readGate.Store(previous) }
+}
