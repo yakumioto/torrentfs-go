@@ -1,0 +1,491 @@
+package session_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/session"
+)
+
+const concurrencyReadChunk = 4096
+
+// testTimeout bounds every concurrent test so a deadlock fails loudly instead
+// of hanging the suite.
+func testTimeout(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// waitGroupWithin waits for wg, failing the test if it has not drained by the
+// time ctx expires.
+func waitGroupWithin(t *testing.T, ctx context.Context, wg *sync.WaitGroup, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("%s did not finish: %v", what, ctx.Err())
+	}
+}
+
+func drainErrors(t *testing.T, errs chan error) {
+	t.Helper()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// TestFuseConcurrentReads opens many independent descriptors on one mounted
+// file and reads overlapping windows at varying offsets, checking every byte
+// against the source.
+func TestFuseConcurrentReads(t *testing.T) {
+	requireFuse(t)
+	ctx := testTimeout(t)
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+
+	content := make([]byte, testPieceLength+12345)
+	for i := range content {
+		content[i] = byte(i*17 + i/97)
+	}
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	maxOffset := len(content) - concurrencyReadChunk
+
+	const readers = 8
+	const iterations = 6
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for seed := 0; seed < readers; seed++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			for iter := 0; iter < iterations; iter++ {
+				off := int64((seed*7 + iter*13) % maxOffset)
+				f, err := os.Open(path)
+				if err != nil {
+					errs <- fmt.Errorf("open: %w", err)
+					return
+				}
+				buf := make([]byte, concurrencyReadChunk)
+				half := concurrencyReadChunk / 2
+				if _, err := f.ReadAt(buf[:half], off); err != nil && err != io.EOF {
+					_ = f.Close()
+					errs <- fmt.Errorf("read head at %d: %w", off, err)
+					return
+				}
+				// Second descriptor positions independently of the first.
+				if _, err := f.ReadAt(buf[half:], off+int64(half)); err != nil && err != io.EOF {
+					_ = f.Close()
+					errs <- fmt.Errorf("read tail at %d: %w", off+int64(half), err)
+					return
+				}
+				if err := f.Close(); err != nil {
+					errs <- fmt.Errorf("close: %w", err)
+					return
+				}
+				if !bytes.Equal(buf, content[off:off+concurrencyReadChunk]) {
+					errs <- fmt.Errorf("content mismatch at offset %d", off)
+					return
+				}
+			}
+		}(seed)
+	}
+	waitGroupWithin(t, ctx, &wg, "concurrent readers")
+	drainErrors(t, errs)
+}
+
+// TestFuseConcurrentNamespaceChurn hammers lookups and directory listings
+// while metadata files are created, renamed, and unlinked underneath, so the
+// dynamic namespace is exercised under contention.
+func TestFuseConcurrentNamespaceChurn(t *testing.T) {
+	requireFuse(t)
+	ctx := testTimeout(t)
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+
+	content := []byte("namespace churn payload")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	churnBytes, _ := buildSingleFileTorrentBytes(t, "churn.bin", []byte("churn payload"), nil)
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	metadataDir := filepath.Join(mnt, "metadata")
+	payloadDir := filepath.Join(mnt, "payload.bin")
+	payloadFile := filepath.Join(payloadDir, "payload.bin")
+
+	stop := make(chan struct{})
+	errs := make(chan error, 16)
+
+	var readers sync.WaitGroup
+	for worker := 0; worker < 6; worker++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := os.ReadDir(mnt); err != nil {
+					errs <- fmt.Errorf("readdir mount root: %w", err)
+					return
+				}
+				if _, err := os.Stat(payloadDir); err != nil {
+					errs <- fmt.Errorf("stat torrent dir: %w", err)
+					return
+				}
+				f, err := os.Open(payloadFile)
+				if err != nil {
+					errs <- fmt.Errorf("open payload: %w", err)
+					return
+				}
+				buf := make([]byte, len(content))
+				if _, err := f.ReadAt(buf, 0); err != nil && err != io.EOF {
+					_ = f.Close()
+					errs <- fmt.Errorf("read payload: %w", err)
+					return
+				}
+				_ = f.Close()
+				if !bytes.Equal(buf, content) {
+					errs <- errors.New("payload changed during namespace churn")
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	churnDone := make(chan struct{})
+	go func() {
+		defer close(churnDone)
+		for i := 0; i < 25; i++ {
+			name := fmt.Sprintf("churn-%d.torrent", i)
+			renamed := fmt.Sprintf("churn-%d-r.torrent", i)
+			if err := os.WriteFile(filepath.Join(metadataDir, name), churnBytes, 0o644); err != nil {
+				errs <- fmt.Errorf("write metadata %s: %w", name, err)
+				return
+			}
+			if err := os.Rename(filepath.Join(metadataDir, name), filepath.Join(metadataDir, renamed)); err != nil {
+				errs <- fmt.Errorf("rename metadata %s: %w", name, err)
+				return
+			}
+			if err := os.Remove(filepath.Join(metadataDir, renamed)); err != nil {
+				errs <- fmt.Errorf("unlink metadata %s: %w", renamed, err)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-churnDone:
+	case <-ctx.Done():
+		close(stop)
+		t.Fatalf("namespace churn did not finish: %v", ctx.Err())
+	}
+	close(stop)
+	waitGroupWithin(t, ctx, &readers, "namespace readers")
+	drainErrors(t, errs)
+}
+
+// unmountServer unmounts without risking a permanently blocked test: the
+// unmount runs with a deadline and a failure is reported, not fatal.
+func unmountServer(t *testing.T, server interface{ Unmount() error }) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- server.Unmount() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("unmount returned %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Errorf("unmount did not return within 30s; a FUSE mount may be left behind")
+	}
+}
+
+// TestFuseReadUnmountCloseRace starts a reader, closes the session while reads
+// are in flight, then unmounts. Session.Close must not deadlock, the reader
+// must stop, and the mount must still unmount cleanly.
+func TestFuseReadUnmountCloseRace(t *testing.T) {
+	requireFuse(t)
+	ctx := testTimeout(t)
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+
+	content := make([]byte, testPieceLength+777)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		_ = sess.Close(context.Background())
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		_ = sess.Close(context.Background())
+		t.Fatal("torrent not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		_ = sess.Close(context.Background())
+		t.Fatalf("Mount: %v", err)
+	}
+	defer unmountServer(t, server)
+
+	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		buf := make([]byte, concurrencyReadChunk)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			off := int64(i * concurrencyReadChunk % (len(content) - concurrencyReadChunk))
+			if _, err := f.ReadAt(buf, off); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Let the reader get going, then close the session underneath it.
+	time.Sleep(50 * time.Millisecond)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- sess.Close(ctx) }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Session.Close deadlocked while reads were in flight")
+	}
+
+	// The data is local, so the kernel page cache keeps serving reads after
+	// Close; the reader is stopped explicitly. Reads must have been in flight
+	// concurrently with Close, which is the race this test is for.
+	close(stop)
+	select {
+	case <-readerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reader did not stop after being signalled")
+	}
+
+	// A fresh open after Close must fail: the backend no longer serves files.
+	if f, err := os.Open(path); err == nil {
+		_ = f.Close()
+		t.Error("open after Session.Close succeeded; want an error")
+	}
+}
+
+// TestSessionOpenFileReadsStopAfterClose drives a read loop through an already
+// open file handle and closes the session underneath it. The loop must end on
+// ErrClosed rather than spinning forever, which is what makes the FUSE race
+// test meaningful.
+func TestSessionOpenFileReadsStopAfterClose(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := make([]byte, testPieceLength+777)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	ra, err := sess.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		buf := make([]byte, concurrencyReadChunk)
+		for {
+			if _, err := ra.ReadAt(buf, 0); err != nil {
+				return
+			}
+		}
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	if err := sess.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reads on an open handle kept succeeding after Session.Close")
+	}
+}
+
+// TestSessionConcurrentCloseIsSafe closes one session from many goroutines.
+// Every caller must return, and all must observe the same result.
+func TestSessionConcurrentCloseIsSafe(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	sess, err := session.New(testConfig(filepath.Join(work, "data")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const callers = 16
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- sess.Close(ctx)
+		}()
+	}
+	waitGroupWithin(t, ctx, &wg, "concurrent Close callers")
+	drainErrors(t, errs)
+}
+
+// TestSessionClosingStateRejectsOperations checks that reads, lookups, and
+// metadata mutations issued after Close map to the project's ErrClosed.
+func TestSessionClosingStateRejectsOperations(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("closed state"))
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	if err := sess.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := sess.OpenFile(hash, "payload.bin"); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("OpenFile after Close = %v, want ErrClosed", err)
+	}
+	if _, err := sess.PieceStates(hash); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("PieceStates after Close = %v, want ErrClosed", err)
+	}
+	if got := sess.Torrents(); got != nil {
+		t.Errorf("Torrents after Close = %v, want nil", got)
+	}
+	if _, err := sess.BeginMetadata(ctx, "late.torrent", uint32(syscall.O_WRONLY)); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("BeginMetadata after Close = %v, want ErrClosed", err)
+	}
+	if err := sess.RemoveMetadata(ctx, "late.torrent"); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("RemoveMetadata after Close = %v, want ErrClosed", err)
+	}
+}

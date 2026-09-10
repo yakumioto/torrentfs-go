@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -25,7 +26,12 @@ func TestErrnoForWrappedErrors(t *testing.T) {
 		{name: "read only", err: fmt.Errorf("outer: %w", ErrReadOnly), want: syscall.EROFS},
 		{name: "invalid", err: fmt.Errorf("outer: %w", ErrInvalidName), want: syscall.EINVAL},
 		{name: "cross dir", err: fmt.Errorf("outer: %w", ErrCrossDir), want: syscall.EXDEV},
+		{name: "closed", err: fmt.Errorf("outer: %w", ErrClosed), want: syscall.EBADF},
 		{name: "path error", err: &os.PathError{Op: "open", Path: "x", Err: fs.ErrNotExist}, want: syscall.ENOENT},
+		// A wrapped syscall errno is preserved rather than flattened to EIO,
+		// so healthy warnings like ENODATA reach the caller intact.
+		{name: "syscall errno passthrough", err: fmt.Errorf("outer: %w", syscall.ENODATA), want: syscall.ENODATA},
+		{name: "unknown maps to EIO", err: errors.New("unclassified failure"), want: syscall.EIO},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

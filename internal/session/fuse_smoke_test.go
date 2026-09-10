@@ -22,6 +22,27 @@ import (
 // whether this environment can mount FUSE at all.
 type fuseSmokeProbe struct{ fs.Inode }
 
+// fuseRequired reports whether this run must exercise real FUSE mounts. CI
+// sets it on the FUSE-enabled job so a missing device or capability fails the
+// job instead of silently skipping every real-mount test.
+func fuseRequired() bool {
+	return os.Getenv("TORRENTFS_FUSE_REQUIRED") == "1"
+}
+
+// requireFuse skips the calling test when FUSE is unusable, or fails it when
+// TORRENTFS_FUSE_REQUIRED demands a real mount. Either way the caller is told
+// why, so an all-skip run cannot masquerade as a green FUSE job.
+func requireFuse(t *testing.T) {
+	t.Helper()
+	if fuseUsable(t) {
+		return
+	}
+	if fuseRequired() {
+		t.Fatalf("TORRENTFS_FUSE_REQUIRED=1 but FUSE is not usable: /dev/fuse, fusermount, or mount permission is missing")
+	}
+	t.Skipf("FUSE not usable in this environment (/dev/fuse or mount permission missing); real-mount test skipped")
+}
+
 // fuseUsable reports whether this environment can mount a FUSE filesystem.
 // A missing /dev/fuse, a missing fusermount binary, or a mount refused by the
 // kernel (common in unprivileged containers) all mean "not usable"; the smoke
@@ -53,9 +74,7 @@ func fuseUsable(t *testing.T) bool {
 // where FUSE is available; elsewhere it skips with a reason and is not a green
 // result.
 func TestFuseSmokeMountsAndReads(t *testing.T) {
-	if !fuseUsable(t) {
-		t.Skipf("FUSE not usable in this environment (/dev/fuse or mount permission missing); real-mount smoke test skipped")
-	}
+	requireFuse(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -159,9 +178,7 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 }
 
 func TestFuseMetadataLifecycle(t *testing.T) {
-	if !fuseUsable(t) {
-		t.Skipf("FUSE not usable in this environment (/dev/fuse or mount permission missing); metadata integration test skipped")
-	}
+	requireFuse(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

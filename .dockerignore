@@ -1,0 +1,9 @@
+.git
+.gitignore
+.golangci.yml
+.gitea
+*.torrent
+*.torrentfs-data
+*metadata/
+Dockerfile
+.dockerignore

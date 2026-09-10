@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Everything that runs without a FUSE device. FUSE-dependent tests skip
+  # themselves here with a printed reason; the fuse job below requires them.
+  test:
+    name: build, vet, unit and race tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Race detector
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
+  # /dev/fuse, fusermount, or mount permission fails instead of silently
+  # skipping every real-mount test. The runner must expose /dev/fuse and
+  # allow mounting (typically SYS_ADMIN or an equivalent rootful setup); see
+  # the README for the runner and `docker run` requirements.
+  fuse:
+    name: real FUSE mount tests (required)
+    runs-on: ubuntu-latest
+    env:
+      TORRENTFS_FUSE_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Install FUSE
+        run: sudo apt-get update && sudo apt-get install -y fuse3
+      - name: Require /dev/fuse
+        run: test -e /dev/fuse
+      - name: Real-mount smoke, concurrency, error, and swarm tests
+        run: go test -race -run 'TestFuse|TestSessionIncomplete' ./...

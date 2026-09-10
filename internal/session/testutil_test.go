@@ -35,6 +35,19 @@ func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data
 		t.Fatalf("write data file: %v", err)
 	}
 
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
+	torrentPath = filepath.Join(torrentDir, name+".torrent")
+	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
+		t.Fatalf("write torrent: %v", err)
+	}
+	return torrentPath, hash
+}
+
+// buildSingleFileTorrentBytes encodes a single-file .torrent describing data
+// laid out as DataDir/<name>. Tracker tiers are embedded verbatim, so a test
+// can point the torrent at a loopback tracker without touching global config.
+func buildSingleFileTorrentBytes(t *testing.T, name string, data []byte, trackers [][]string) ([]byte, metainfo.Hash) {
+	t.Helper()
 	pieces := make([]byte, 0, (len(data)+testPieceLength-1)/testPieceLength*sha1.Size)
 	for off := 0; off < len(data); off += testPieceLength {
 		end := off + testPieceLength
@@ -54,16 +67,15 @@ func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data
 	if err != nil {
 		t.Fatalf("encode info: %v", err)
 	}
-	mi := metainfo.MetaInfo{InfoBytes: bencode.Bytes(infoBytes)}
+	mi := metainfo.MetaInfo{InfoBytes: bencode.Bytes(infoBytes), AnnounceList: trackers}
+	if len(trackers) > 0 && len(trackers[0]) > 0 {
+		mi.Announce = trackers[0][0]
+	}
 	torrentBytes, err := bencode.Marshal(mi)
 	if err != nil {
 		t.Fatalf("encode metainfo: %v", err)
 	}
-	torrentPath = filepath.Join(torrentDir, name+".torrent")
-	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
-		t.Fatalf("write torrent: %v", err)
-	}
-	return torrentPath, mi.HashInfoBytes()
+	return torrentBytes, mi.HashInfoBytes()
 }
 
 func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files map[string][]byte) (torrentPath string, hash metainfo.Hash, all []byte) {

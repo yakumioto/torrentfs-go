@@ -48,6 +48,10 @@ type Session struct {
 // directories are created if missing. The client is configured to seed and
 // existing metadata is restored before the session is returned.
 func New(cfg config.Config) (*Session, error) {
+	return newWithClientConfig(cfg, nil)
+}
+
+func newWithClientConfig(cfg config.Config, customize func(*torrent.ClientConfig)) (*Session, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("session: validate config: %w", err)
 	}
@@ -67,6 +71,9 @@ func New(cfg config.Config) (*Session, error) {
 	peerDialer, err := configureProxy(cc, cfg.Proxy.Socks5URL)
 	if err != nil {
 		return nil, err
+	}
+	if customize != nil {
+		customize(cc)
 	}
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
