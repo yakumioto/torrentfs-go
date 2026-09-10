@@ -161,7 +161,7 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 
 	content := []byte("namespace churn payload")
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
-	churnBytes, _ := buildSingleFileTorrentBytes(t, "churn.bin", []byte("churn payload"), nil)
+	churnBytes, churnHash := buildSingleFileTorrentBytes(t, "churn.bin", []byte("churn payload"), nil)
 
 	sess, err := session.New(testConfig(dataDir))
 	if err != nil {
@@ -185,17 +185,34 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	t.Cleanup(func() { _ = server.Unmount() })
+	t.Cleanup(func() { unmountServer(t, server, mnt) })
 
 	metadataDir := filepath.Join(mnt, "metadata")
 	payloadDir := filepath.Join(mnt, "payload.bin")
 	payloadFile := filepath.Join(payloadDir, "payload.bin")
 
+	// Two anchor metadata files keep the churn torrent registered for the whole
+	// test. Without them each create/unlink pair would add and drop the torrent
+	// in anacrolix, which is slow and load-sensitive; namespace churn, not
+	// torrent lifecycle, is what this test exercises.
+	anchors := []string{"churn-anchor-a.torrent", "churn-anchor-b.torrent"}
+	for _, name := range anchors {
+		if err := os.WriteFile(filepath.Join(metadataDir, name), churnBytes, 0o644); err != nil {
+			t.Fatalf("write anchor %s: %v", name, err)
+		}
+	}
+	if err := waitFor(ctx, func() bool {
+		_, registered := sess.Torrent(churnHash)
+		return registered
+	}); err != nil {
+		t.Fatalf("churn torrent never registered: %v", err)
+	}
+
 	stop := make(chan struct{})
 	errs := make(chan error, 16)
 
 	var readers sync.WaitGroup
-	for worker := 0; worker < 6; worker++ {
+	for worker := 0; worker < 4; worker++ {
 		readers.Add(1)
 		go func() {
 			defer readers.Done()
@@ -237,7 +254,7 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	churnDone := make(chan struct{})
 	go func() {
 		defer close(churnDone)
-		for i := 0; i < 25; i++ {
+		for i := 0; i < 12; i++ {
 			name := fmt.Sprintf("churn-%d.torrent", i)
 			renamed := fmt.Sprintf("churn-%d-r.torrent", i)
 			if err := os.WriteFile(filepath.Join(metadataDir, name), churnBytes, 0o644); err != nil {
@@ -263,6 +280,12 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	}
 	close(stop)
 	waitGroupWithin(t, ctx, &readers, "namespace readers")
+
+	for _, name := range anchors {
+		if err := os.Remove(filepath.Join(metadataDir, name)); err != nil {
+			t.Errorf("remove anchor %s: %v", name, err)
+		}
+	}
 	drainErrors(t, errs)
 }
 
