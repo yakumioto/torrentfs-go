@@ -457,6 +457,175 @@ func TestDeleteReleasesGoroutinesAndFileDescriptors(t *testing.T) {
 	}
 }
 
+func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	hexHash := strings.Repeat("b", 40)
+	hash := metainfo.NewHashFromHex(hexHash)
+	magnet := "magnet:?xt=urn:btih:" + hexHash + "&dn=adding-task"
+
+	sess := newManageSession(t, dataDir)
+	view, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: magnet})
+	if err != nil {
+		t.Fatalf("add magnet: %v", err)
+	}
+	if view.State != session.StateAdding {
+		t.Fatalf("state = %s, want adding", view.State)
+	}
+	if got := sess.PendingMetadataFetches(); got != 1 {
+		t.Fatalf("pending metadata fetches = %d, want 1", got)
+	}
+
+	op, err := sess.DeleteTorrent(ctx, hexHash, false)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
+		t.Fatalf("delete state = %s (%s), want deleted", final.State, final.Error)
+	}
+	// The worker is cancelled and waited on, so nothing is left tracking it.
+	if got := sess.PendingMetadataFetches(); got != 0 {
+		t.Fatalf("pending metadata fetches after delete = %d, want 0", got)
+	}
+	if _, ok := sess.Torrent(hash); ok {
+		t.Fatal("magnet torrent still registered after delete")
+	}
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hexHash+".torrent")
+	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("metadata sidecar present after delete: %v", err)
+	}
+	if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state sidecar present after delete: %v", err)
+	}
+}
+
+func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("late write"), nil)
+	sess := newManageSession(t, dataDir)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Force a failed delete by pointing the payload directory at a symlink.
+	outside := filepath.Join(work, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("make outside dir: %v", err)
+	}
+	if err := os.Symlink(outside, payloadDir(dataDir, hash)); err != nil {
+		t.Fatalf("make symlink: %v", err)
+	}
+	op, err := sess.DeleteTorrent(ctx, hash.HexString(), true)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleteFailed {
+		t.Fatalf("delete state = %s (%s), want delete_failed", final.State, final.Error)
+	}
+
+	// A late metadata write must be refused even with a live context, so it
+	// can never recreate the sidecar and revive the task.
+	err = sess.WriteMetadataForTest(context.Background(), hash, torrentBytes)
+	if !errors.Is(err, session.ErrDeleting) {
+		t.Fatalf("late metadata write = %v, want ErrDeleting", err)
+	}
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hash.HexString()+".torrent")
+	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("late metadata write recreated the sidecar: %v", err)
+	}
+}
+
+func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("resurrect"), nil)
+	sess := newManageSession(t, dataDir)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+
+	// Hold the metadata worker mid-flight so the deletion races a write that
+	// lands after the delete has begun.
+	gate := make(chan struct{})
+	restore := session.SetMetadataFetchHook(func(metainfo.Hash) { <-gate })
+	defer restore()
+	sess.StartMetadataFetch(st)
+	if got := sess.PendingMetadataFetches(); got != 1 {
+		t.Fatalf("pending metadata fetches = %d, want 1", got)
+	}
+
+	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	close(gate)
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
+		t.Fatalf("delete state = %s (%s), want deleted", final.State, final.Error)
+	}
+	if _, ok := sess.Torrent(hash); ok {
+		t.Fatal("late metadata write resurrected the deleted torrent")
+	}
+	if got := sess.PendingMetadataFetches(); got != 0 {
+		t.Fatalf("pending metadata fetches after delete = %d, want 0", got)
+	}
+	if views := sess.ListTorrents(); len(views) != 0 {
+		t.Fatalf("ListTorrents = %+v, want empty", views)
+	}
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hash.HexString()+".torrent")
+	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("late metadata fetch recreated the sidecar: %v", err)
+	}
+}
+
+func TestResumeDeletionClearsMetadataIndexAndAllowsRepersist(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentsDir := filepath.Join(work, "torrents")
+	content := []byte("resume metadata index")
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+
+	metadataDir := filepath.Join(torrentsDir, ".metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	seedPayload(t, dataDir, hash, "payload.bin", content)
+	writeRegistry(t, dataDir, hash, string(session.StateDeleting), false, "op-resume-index")
+
+	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("torrent survived resume: %v", err)
+	}
+	// The in-memory metadata index must have been cleared too: a fresh add of
+	// the same hash has to persist its metainfo again instead of silently
+	// skipping it.
+	if _, err := sess.AddTorrentAndPersist(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("re-add after resume: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, hash.HexString()+".torrent")); err != nil {
+		t.Fatalf("re-added torrent was not persisted (stale metadata index): %v", err)
+	}
+}
+
 func openFDCount(t *testing.T) int {
 	t.Helper()
 	entries, err := os.ReadDir("/proc/self/fd")

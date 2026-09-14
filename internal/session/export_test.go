@@ -1,6 +1,41 @@
 package session
 
-import "github.com/anacrolix/torrent"
+import (
+	"context"
+
+	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
+)
+
+// StartMetadataFetch starts the real magnet metadata-persist worker for a
+// torrent whose info is already known, so tests can drive the persistence path
+// deterministically. Test-only.
+func (s *Session) StartMetadataFetch(st *Torrent) {
+	s.startMetadataFetch(st.InfoHash(), st)
+}
+
+// PendingMetadataFetches reports how many metadata workers are still tracked.
+// Test-only.
+func (s *Session) PendingMetadataFetches() int {
+	s.fetchMu.Lock()
+	defer s.fetchMu.Unlock()
+	return len(s.metadataFetches)
+}
+
+// SetMetadataFetchHook installs fn as the post-resolution metadata fetch hook
+// and returns a function that restores the previous value. A nil hook clears
+// it. Test-only.
+func SetMetadataFetchHook(fn func(metainfo.Hash)) func() {
+	previous := metadataFetchHook
+	metadataFetchHook = fn
+	return func() { metadataFetchHook = previous }
+}
+
+// WriteMetadataForTest exercises the metadata persistence path with a caller
+// supplied context. Test-only.
+func (s *Session) WriteMetadataForTest(ctx context.Context, hash metainfo.Hash, data []byte) error {
+	return s.writeMetadataBytes(ctx, hash, data)
+}
 
 // NewWithClientConfig exposes the test-only client configuration seam so
 // integration tests can disable discovery traffic (DHT, UTP) and keep every

@@ -122,6 +122,11 @@ func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.Torren
 	if err := ctx.Err(); err != nil {
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
+	if s.deletionPendingLocked(spec.InfoHash) {
+		// Refuse to (re-)register a hash that is being deleted or whose delete
+		// failed; only an explicit retry or a fresh add may revive it.
+		return nil, false, fmt.Errorf("%w: %s", ErrDeleting, spec.InfoHash)
+	}
 	if s.cfg.Proxy.Socks5URL != "" {
 		spec.Trackers = filterProxyTrackers(spec.Trackers)
 	}

@@ -72,8 +72,19 @@ type Session struct {
 	bgCancel context.CancelFunc
 	bgWg     sync.WaitGroup
 
+	// metadataFetches tracks the per-hash magnet metadata-persist workers so a
+	// deletion can cancel exactly its own hash and wait for it to exit.
+	fetchMu         sync.Mutex
+	metadataFetches map[metainfo.Hash]*metadataFetch
+
 	opMu    sync.Mutex
 	opLocks map[metainfo.Hash]*sync.Mutex
+}
+
+// metadataFetch is one in-flight magnet metadata-persist worker.
+type metadataFetch struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // New creates a session and its anacrolix client. The torrents directory must
@@ -174,6 +185,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		activeOps:       make(map[metainfo.Hash]string),
 		lastOps:         make(map[metainfo.Hash]string),
 		opLocks:         make(map[metainfo.Hash]*sync.Mutex),
+		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
 	if err := s.rescanMetadata(); err != nil {
@@ -296,6 +308,7 @@ func (s *Session) Close(ctx context.Context) error {
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)
 	s.lastOps = make(map[metainfo.Hash]string)
+	s.metadataFetches = make(map[metainfo.Hash]*metadataFetch)
 	s.scanCancel = nil
 	s.scanDone = nil
 	s.storageCloser = nil

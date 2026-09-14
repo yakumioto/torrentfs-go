@@ -135,7 +135,13 @@ func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, da
 	name := hash.HexString() + ".torrent"
 	s.mu.RLock()
 	_, exists := s.metadata[name]
+	pending := s.deletionPendingLocked(hash)
 	s.mu.RUnlock()
+	if pending {
+		// A late metadata write for a torrent that is being (or failed to be)
+		// deleted must never recreate its sidecar or re-register it.
+		return fmt.Errorf("%w: %s", ErrDeleting, hash)
+	}
 	if exists {
 		return nil
 	}
@@ -159,23 +165,68 @@ func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, da
 }
 
 // startMetadataFetch waits for a magnet source's info in the background and
-// then persists the metainfo. The goroutine is bound to the session lifetime.
+// then persists the metainfo. Each worker is cancellable per info hash so a
+// deletion stops exactly its own hash instead of leaving the worker alive
+// until the session closes.
 func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
+	ctx, cancel := context.WithCancel(s.bgCtx)
+	fetch := &metadataFetch{cancel: cancel, done: make(chan struct{})}
+
+	s.fetchMu.Lock()
+	if _, running := s.metadataFetches[hash]; running {
+		// A worker is already tracking this hash; do not stack another.
+		s.fetchMu.Unlock()
+		cancel()
+		return
+	}
+	s.metadataFetches[hash] = fetch
+	s.fetchMu.Unlock()
+
 	s.bgWg.Add(1)
 	go func() {
 		defer s.bgWg.Done()
+		defer cancel()
+		defer close(fetch.done)
+
 		select {
-		case <-s.bgCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-st.GotInfo():
+		}
+		if metadataFetchHook != nil {
+			metadataFetchHook(hash)
 		}
 		mi := st.tor.Metainfo()
 		var buf bytes.Buffer
 		if err := mi.Write(&buf); err != nil {
 			return
 		}
-		_ = s.writeMetadataBytes(s.bgCtx, hash, buf.Bytes())
+		_ = s.writeMetadataBytes(ctx, hash, buf.Bytes())
 	}()
+}
+
+// metadataFetchHook is a test-only seam that runs after a metadata fetch
+// resolves, before it persists. Production never sets it.
+var metadataFetchHook func(metainfo.Hash)
+
+// stopMetadataFetch cancels the metadata worker for hash, if any, and returns
+// it so the caller can wait for it to exit.
+func (s *Session) stopMetadataFetch(hash metainfo.Hash) *metadataFetch {
+	s.fetchMu.Lock()
+	fetch := s.metadataFetches[hash]
+	delete(s.metadataFetches, hash)
+	s.fetchMu.Unlock()
+	if fetch != nil {
+		fetch.cancel()
+	}
+	return fetch
+}
+
+// deletionPendingLocked reports whether the hash is mid-delete or in a failed
+// delete that still owns the task. Callers must hold s.mu.
+func (s *Session) deletionPendingLocked(hash metainfo.Hash) bool {
+	entry, ok := s.states[hash]
+	return ok && (entry.State == StateDeleting || entry.State == StateDeleteFailed)
 }
 
 // ListTorrents returns a snapshot of every task, including tasks whose
@@ -354,14 +405,7 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	// Drop the references that keep the torrent alive, but keep the
 	// s.torrents entry so the task stays visible while deleting.
 	delete(s.manualRefs, hash)
-	if name, ok := metadataNameForHash(s.metadata, hash); ok {
-		delete(s.metadata, name)
-		if refs := s.metadataRefs[hash]; refs > 1 {
-			s.metadataRefs[hash] = refs - 1
-		} else {
-			delete(s.metadataRefs, hash)
-		}
-	}
+	s.releaseMetadataIndexLocked(hash)
 	out := op.clone()
 	s.mu.Unlock()
 
@@ -386,6 +430,12 @@ func (s *Session) Operation(id string) (Operation, bool) {
 
 // runDelete performs the cleanup outside s.mu and records the outcome.
 func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID string) {
+	// Stop the hash's metadata worker and wait for it to exit, so no late
+	// write can recreate the sidecar or re-register the torrent after this
+	// deletion finalizes.
+	if fetch := s.stopMetadataFetch(hash); fetch != nil {
+		<-fetch.done
+	}
 	err := s.performDelete(hash, st, purge)
 
 	s.mu.Lock()
@@ -408,6 +458,7 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID st
 		if cur, ok := s.torrents[hash]; ok && cur == st {
 			delete(s.torrents, hash)
 		}
+		s.releaseMetadataIndexLocked(hash)
 		_ = s.removeRegistryEntryLocked(hash)
 		if op != nil {
 			op.State = StateDeleted
@@ -545,6 +596,22 @@ func (s *Session) resumeDeletions() error {
 		s.runDelete(item.hash, st, item.purge, item.opID)
 	}
 	return nil
+}
+
+// releaseMetadataIndexLocked drops the in-memory metadata mapping and one
+// reference for the hash so no ghost sidecar/index survives a deletion.
+// Callers must hold s.mu.
+func (s *Session) releaseMetadataIndexLocked(hash metainfo.Hash) {
+	name, ok := metadataNameForHash(s.metadata, hash)
+	if !ok {
+		return
+	}
+	delete(s.metadata, name)
+	if refs := s.metadataRefs[hash]; refs > 1 {
+		s.metadataRefs[hash] = refs - 1
+	} else {
+		delete(s.metadataRefs, hash)
+	}
 }
 
 func metadataNameForHash(metadata map[string]metainfo.Hash, hash metainfo.Hash) (string, bool) {
