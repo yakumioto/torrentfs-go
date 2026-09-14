@@ -12,15 +12,19 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/status"
 )
 
-// statsFileNode is the reserved, read-only status file at a torrent root.
+// statsFileNode is a read-only status leaf in the stats/ control tree. It
+// mirrors one data file of one torrent and renders that file's piece-state
+// slice, taken fresh on every open; nothing is written to disk and no media
+// bytes are involved.
 type statsFileNode struct {
 	fs.Inode
 	state *fsState
 	hash  metainfo.Hash
+	path  string // torrent-relative display path of the mirrored data file
 }
 
 func (n *statsFileNode) snapshot() ([]byte, error) {
-	states, err := n.state.backend.PieceStates(n.hash)
+	states, err := n.state.backend.FilePieceStates(n.hash, n.path)
 	if err != nil {
 		return nil, err
 	}

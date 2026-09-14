@@ -148,3 +148,68 @@ func TestSessionPieceStatesUnknownTorrent(t *testing.T) {
 		t.Fatalf("PieceStates error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestSessionFilePieceStatesSlicesPerFile checks the per-file projection the
+// stats/ mirror renders: each file reports exactly the pieces that back its
+// byte range, and boundary pieces shared with a neighbour are reported by both
+// files without being duplicated or dropped.
+func TestSessionFilePieceStatesSlicesPerFile(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	files := map[string][]byte{
+		"first.bin":  []byte(strings.Repeat("A", 128<<10)),
+		"second.bin": []byte(strings.Repeat("B", 200<<10)),
+		"third.bin":  []byte("tail"),
+	}
+	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	sess := openWarmSession(t, dataDir, torrentPath, hash)
+
+	whole, err := sess.PieceStates(hash)
+	if err != nil {
+		t.Fatalf("PieceStates: %v", err)
+	}
+	if len(whole) != 2 {
+		t.Fatalf("whole snapshot = %d pieces, want 2", len(whole))
+	}
+
+	// first.bin [0, 128KiB) lies inside piece 0; second.bin [128KiB, 328KiB)
+	// spans pieces 0 and 1; third.bin [328KiB, 328KiB+4) lies in piece 1.
+	wantPieces := map[string]int{"first.bin": 1, "second.bin": 2, "third.bin": 1}
+	for path, want := range wantPieces {
+		got, err := sess.FilePieceStates(hash, path)
+		if err != nil {
+			t.Fatalf("FilePieceStates(%s): %v", path, err)
+		}
+		if len(got) != want {
+			t.Fatalf("FilePieceStates(%s) = %d pieces, want %d", path, len(got), want)
+		}
+		for i, state := range got {
+			if !state.Known || !state.Complete {
+				t.Fatalf("FilePieceStates(%s)[%d] = %+v, want complete", path, i, state)
+			}
+		}
+	}
+
+	// The single-file projection equals the whole-torrent snapshot.
+	singleDataDir := filepath.Join(work, "single-data")
+	singlePath, singleHash := buildSingleFileTorrent(t, singleDataDir, work, "payload.bin", []byte(strings.Repeat("x", testPieceLength+8)))
+	single := openWarmSession(t, singleDataDir, singlePath, singleHash)
+	whole, err = single.PieceStates(singleHash)
+	if err != nil {
+		t.Fatalf("single PieceStates: %v", err)
+	}
+	projected, err := single.FilePieceStates(singleHash, "payload.bin")
+	if err != nil {
+		t.Fatalf("single FilePieceStates: %v", err)
+	}
+	if len(projected) != len(whole) {
+		t.Fatalf("single-file projection = %d pieces, want %d (whole)", len(projected), len(whole))
+	}
+
+	if _, err := sess.FilePieceStates(hash, "missing.bin"); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("FilePieceStates(missing) = %v, want ErrNotFound", err)
+	}
+	if _, err := sess.FilePieceStates(metainfo.Hash{}, "first.bin"); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("FilePieceStates(unknown torrent) = %v, want ErrNotFound", err)
+	}
+}

@@ -106,6 +106,9 @@ func TestSessionReadsExistingData(t *testing.T) {
 	if len(v.Files) != 1 || v.Files[0].Path != "payload.bin" || v.Files[0].Size != int64(len(content)) {
 		t.Fatalf("view files = %+v, want single payload.bin of %d bytes", v.Files, len(content))
 	}
+	if !v.SingleFile {
+		t.Fatal("single-file torrent view must set SingleFile so the mount exposes it directly")
+	}
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
 	if err != nil {
@@ -644,5 +647,71 @@ func TestSessionCloseIsIdempotentAndRejectsNewOperations(t *testing.T) {
 	}
 	if err := sess.AddTorrent(context.Background(), session.Source{MetainfoPath: "missing.torrent"}); !errors.Is(err, filesystem.ErrClosed) {
 		t.Fatalf("AddTorrent after Close = %v, want ErrClosed", err)
+	}
+}
+
+// TestSessionLayoutFlagMatchesMetainfo pins the layout classifier the mount
+// uses: an info without directory structure is single-file (one direct regular
+// file), and a multi-file info is a directory even when it holds one file.
+func TestSessionLayoutFlagMatchesMetainfo(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	singlePath, singleHash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("single layout"))
+	multiFiles := map[string][]byte{"only.bin": []byte("one file but a directory")}
+	multiPath, multiHash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", multiFiles)
+
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: singlePath}); err != nil {
+		t.Fatalf("AddTorrent(single): %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: multiPath}); err != nil {
+		t.Fatalf("AddTorrent(multi): %v", err)
+	}
+
+	byHash := map[string]filesystem.TorrentView{}
+	for _, v := range sess.Torrents() {
+		byHash[v.Hash.HexString()] = v
+	}
+	if v := byHash[singleHash.HexString()]; !v.SingleFile {
+		t.Fatalf("single-file view = %+v, want SingleFile", v)
+	}
+	if v := byHash[multiHash.HexString()]; v.SingleFile {
+		t.Fatalf("one-file multi-file view = %+v, want directory layout", v)
+	}
+}
+
+// TestSessionStatsControlAnchor checks the physical anchor of the stats
+// control namespace is created next to the metadata sidecar.
+func TestSessionStatsControlAnchor(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentsDir := testTorrentDir(t, dataDir)
+
+	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	for _, name := range []string{".metadata", ".stats"} {
+		info, err := os.Stat(filepath.Join(torrentsDir, name))
+		if err != nil || !info.IsDir() {
+			t.Fatalf("%s = (%v, %v), want directory", name, info, err)
+		}
 	}
 }

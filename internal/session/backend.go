@@ -9,6 +9,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
@@ -34,7 +35,7 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 		if info == nil {
 			continue
 		}
-		view := filesystem.TorrentView{Name: t.Name(), Hash: t.InfoHash()}
+		view := filesystem.TorrentView{Name: t.Name(), Hash: t.InfoHash(), SingleFile: !info.IsDir()}
 		for _, f := range t.tor.Files() {
 			view.Files = append(view.Files, filesystem.FileView{
 				Path: f.DisplayPath(),
@@ -83,6 +84,63 @@ func (s *Session) PieceStates(hash metainfo.Hash) ([]filesystem.PieceState, erro
 		return nil, err
 	}
 	return states, nil
+}
+
+// FilePieceStates implements filesystem.Backend: it projects the whole-torrent
+// piece snapshot onto the pieces that back one file. The file's absolute byte
+// range is mapped to piece indices with the same interval logic reads use, so
+// a file that shares a boundary piece with a neighbour reports that piece.
+func (s *Session) FilePieceStates(hash metainfo.Hash, path string) ([]filesystem.PieceState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.ensureActiveLocked(); err != nil {
+		return nil, err
+	}
+	t, ok := s.torrents[hash]
+	if !ok {
+		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
+	}
+	info := t.tor.Info()
+	if info == nil {
+		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
+	}
+	f := fileByDisplayPath(t.tor, path)
+	if f == nil {
+		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", path, hash, filesystem.ErrNotFound)
+	}
+
+	states, err := pieceStatesSnapshot(t.tor, info)
+	if err != nil {
+		return nil, err
+	}
+	plan := cache.Plan(cache.ReadRequest{
+		FileOffset:    0,
+		Length:        f.Length(),
+		FileStart:     f.Offset(),
+		FileSize:      f.Length(),
+		PieceLength:   info.PieceLength,
+		TorrentLength: t.tor.Length(),
+	})
+	if len(plan.Wanted) == 0 {
+		// A zero-length file (or one outside the torrent) covers no pieces.
+		return nil, nil
+	}
+	first, last := plan.Wanted[0], plan.Wanted[len(plan.Wanted)-1]+1
+	if first < 0 || last > len(states) || first >= last {
+		return nil, errPieceStateSnapshotUnstable
+	}
+	return states[first:last], nil
+}
+
+// fileByDisplayPath returns the torrent file with the given display path, or
+// nil when the torrent has no such file.
+func fileByDisplayPath(t *torrent.Torrent, displayPath string) *torrent.File {
+	for _, f := range t.Files() {
+		if f.DisplayPath() == displayPath {
+			return f
+		}
+	}
+	return nil
 }
 
 type pieceStateSource interface {

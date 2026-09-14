@@ -99,7 +99,7 @@ func TestFuseConcurrentReads(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Unmount() })
 
-	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	path := filepath.Join(mnt, "payload.bin")
 	maxOffset := len(content) - concurrencyReadChunk
 
 	const readers = 8
@@ -188,8 +188,8 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	t.Cleanup(func() { unmountServer(t, server, mnt) })
 
 	metadataDir := filepath.Join(mnt, "metadata")
-	payloadDir := filepath.Join(mnt, "payload.bin")
-	payloadFile := filepath.Join(payloadDir, "payload.bin")
+	payloadFile := filepath.Join(mnt, "payload.bin")
+	statsFile := filepath.Join(mnt, "stats", "payload.bin")
 
 	// Two anchor metadata files keep the churn torrent registered for the whole
 	// test. Without them each create/unlink pair would add and drop the torrent
@@ -226,8 +226,8 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 					errs <- fmt.Errorf("readdir mount root: %w", err)
 					return
 				}
-				if _, err := os.Stat(payloadDir); err != nil {
-					errs <- fmt.Errorf("stat torrent dir: %w", err)
+				if _, err := os.Stat(payloadFile); err != nil {
+					errs <- fmt.Errorf("stat payload file: %w", err)
 					return
 				}
 				f, err := os.Open(payloadFile)
@@ -244,6 +244,18 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 				_ = f.Close()
 				if !bytes.Equal(buf, content) {
 					errs <- errors.New("payload changed during namespace churn")
+					return
+				}
+				// The stats mirror must stay readable and correct while the
+				// metadata namespace churns; reading it must not disturb the
+				// media read above.
+				stats, err := os.ReadFile(statsFile)
+				if err != nil {
+					errs <- fmt.Errorf("read stats: %w", err)
+					return
+				}
+				if string(stats) != "[x]\n" {
+					errs <- fmt.Errorf("stats = %q, want [x]", stats)
 					return
 				}
 				time.Sleep(time.Millisecond)
@@ -372,7 +384,7 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 	}
 	defer unmountServer(t, server, mnt)
 
-	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	path := filepath.Join(mnt, "payload.bin")
 
 	// Hold every backend read inside ReadAt until released. A reader blocked
 	// here has entered ReadAt and not returned, so its FUSE request is

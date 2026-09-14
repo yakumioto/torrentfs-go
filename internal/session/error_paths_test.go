@@ -183,15 +183,23 @@ func TestFuseMissingPathErrno(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(mnt, "no-such-torrent")); !errors.Is(err, syscall.ENOENT) {
 		t.Errorf("stat of unknown root entry = %v, want ENOENT", err)
 	}
-	if _, err := os.Stat(filepath.Join(mnt, "payload.bin", "no-such-file")); !errors.Is(err, syscall.ENOENT) {
-		t.Errorf("stat of missing torrent file = %v, want ENOENT", err)
+	// A single-file torrent is a regular file at the root, so trailing path
+	// components below it are ENOTDIR rather than a missing-file ENOENT.
+	if _, err := os.Stat(filepath.Join(mnt, "payload.bin", "no-such-file")); !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("stat below a single-file torrent = %v, want ENOTDIR", err)
 	}
-	if _, err := os.Open(filepath.Join(mnt, "payload.bin", "no-such-file")); !errors.Is(err, syscall.ENOENT) {
-		t.Errorf("open of missing torrent file = %v, want ENOENT", err)
+	if _, err := os.Open(filepath.Join(mnt, "payload.bin", "no-such-file")); !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("open below a single-file torrent = %v, want ENOTDIR", err)
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "stats", "no-such-torrent")); !errors.Is(err, syscall.ENOENT) {
+		t.Errorf("stat of missing stats entry = %v, want ENOENT", err)
 	}
 	// The torrent tree is read-only; writes must be refused rather than
 	// silently accepted.
-	if err := os.WriteFile(filepath.Join(mnt, "payload.bin", "payload.bin"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
+	if err := os.WriteFile(filepath.Join(mnt, "payload.bin"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
 		t.Errorf("write into torrent tree = %v, want EROFS", err)
+	}
+	if err := os.WriteFile(filepath.Join(mnt, "stats", "payload.bin"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
+		t.Errorf("write into stats tree = %v, want EROFS", err)
 	}
 }

@@ -72,28 +72,69 @@ func lookupChild(files []FileView, relPrefix, name string) (fsEntry, bool) {
 	return fsEntry{}, false
 }
 
-// rootEntry is one immediate child of the mount root: a top directory for a
-// single torrent.
+// rootEntryKind says what one immediate child of the mount root is: a torrent
+// node (a regular file for a single-file torrent, a directory otherwise), the
+// metadata control directory, or the stats control directory.
+type rootEntryKind uint8
+
+const (
+	rootTorrentKind rootEntryKind = iota
+	rootMetadataKind
+	rootStatsKind
+)
+
+// rootEntry is one immediate child of the mount root.
 type rootEntry struct {
-	Name     string
-	View     TorrentView
-	Metadata bool
+	Name string
+	Kind rootEntryKind
+	View TorrentView
 }
 
-// rootEntries returns the sorted top-level directories, one per torrent.
+// isDir reports whether the entry is a directory entry. Only a single-file
+// torrent root is a regular file; every control directory and every
+// multi-file torrent root is a directory.
+func (e rootEntry) isDir() bool {
+	if e.Kind != rootTorrentKind {
+		return true
+	}
+	_, single := mediaRoot(e.View)
+	return !single
+}
+
+// mediaRoot returns the file a torrent view exposes directly at the mount
+// root, when it has one. A single-file torrent (and only that) is exposed as
+// one regular file; mislabelled views without exactly one file fall back to
+// the directory layout.
+func mediaRoot(view TorrentView) (FileView, bool) {
+	if view.SingleFile && len(view.Files) == 1 {
+		return view.Files[0], true
+	}
+	return FileView{}, false
+}
+
+// reservedRootNames are mount-root names the control directories occupy. A
+// torrent whose display name collides with one is disambiguated by the same
+// hash-suffix rule as any other duplicate.
+func reservedRootNames() map[string]bool {
+	return map[string]bool{metadataName: true, statsRootName: true}
+}
+
+// rootEntries returns the sorted top-level torrent entries, one per torrent.
 // Torrents sharing a display name are disambiguated by appending a hash
 // prefix to the later ones. Assignment order is deterministic (torrents are
-// visited in hash order) so the same set always maps to the same names.
+// visited in hash order) so the same set always maps to the same names. The
+// names are shared with the mirrored stats/ tree, which derives its layout
+// from the same function.
 func rootEntries(views []TorrentView) []rootEntry {
 	ordered := slices.Clone(views)
 	slices.SortFunc(ordered, func(a, b TorrentView) int {
 		return strings.Compare(a.Hash.HexString(), b.Hash.HexString())
 	})
-	used := map[string]bool{metadataName: true}
+	used := reservedRootNames()
 	entries := make([]rootEntry, 0, len(ordered))
 	for _, v := range ordered {
 		name := uniqueTorrentName(v, used)
-		entries = append(entries, rootEntry{Name: name, View: v})
+		entries = append(entries, rootEntry{Name: name, Kind: rootTorrentKind, View: v})
 	}
 	slices.SortFunc(entries, func(a, b rootEntry) int {
 		return strings.Compare(a.Name, b.Name)
@@ -124,8 +165,11 @@ func uniqueTorrentName(v TorrentView, used map[string]bool) string {
 	}
 }
 
-// metadataKey is the inode identity of the control directory.
+// metadataKey is the inode identity of the metadata control directory.
 func metadataKey() string { return "metadata" }
+
+// statsKey is the inode identity of the stats control directory.
+func statsKey() string { return "stats" }
 
 // torrentKey is the inode identity of a torrent's top directory.
 func torrentKey(hash metainfo.Hash) string { return "t/" + hash.HexString() }
@@ -135,12 +179,14 @@ func fileKey(hash metainfo.Hash, displayPath string) string {
 	return "f/" + hash.HexString() + "/" + displayPath
 }
 
-// statsName is the reserved virtual status file at a torrent root.
-const statsName = ".stats"
+// statsDirKey is the inode identity of a mirrored directory inside stats/.
+func statsDirKey(hash metainfo.Hash, relPrefix string) string {
+	return "sd/" + hash.HexString() + "/" + relPrefix
+}
 
-// statsKey is the inode identity of a torrent's virtual status file.
-func statsKey(hash metainfo.Hash) string {
-	return "s/" + hash.HexString()
+// statsFileKey is the inode identity of a mirrored status file inside stats/.
+func statsFileKey(hash metainfo.Hash, displayPath string) string {
+	return "sf/" + hash.HexString() + "/" + displayPath
 }
 
 // dirKey is the inode identity of a (virtual) subdirectory inside a torrent.

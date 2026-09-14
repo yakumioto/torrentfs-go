@@ -26,10 +26,16 @@ type FileView struct {
 
 // TorrentView is the read-only snapshot of a torrent exposed to the
 // filesystem layer. Files is non-empty once the torrent's metainfo is known.
+// SingleFile marks a torrent whose metainfo has no directory structure
+// (metainfo.Info.IsDir() is false): its one file is exposed directly as a
+// regular file at the mount root instead of inside a directory. The zero
+// value keeps the directory layout, so a Backend that never sets it still gets
+// the historical behaviour.
 type TorrentView struct {
-	Name  string
-	Hash  metainfo.Hash
-	Files []FileView
+	Name       string
+	Hash       metainfo.Hash
+	Files      []FileView
+	SingleFile bool
 }
 
 // PieceState is the status value exposed by the filesystem backend.
@@ -46,6 +52,11 @@ type Backend interface {
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 	// PieceStates returns a snapshot of all pieces in ascending piece order.
 	PieceStates(hash metainfo.Hash) ([]PieceState, error)
+	// FilePieceStates returns the slice of the piece-state snapshot covering
+	// the pieces that back the file at the given display path. It is the
+	// per-file projection the mirrored stats/ tree renders; a file not in the
+	// torrent is ErrNotFound.
+	FilePieceStates(hash metainfo.Hash, path string) ([]PieceState, error)
 }
 
 // MetadataView describes one metadata file in the control directory.

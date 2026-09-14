@@ -188,13 +188,7 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 	if r, ok := t.readers[displayPath]; ok {
 		return r, nil
 	}
-	var f *torrent.File
-	for _, ff := range t.tor.Files() {
-		if ff.DisplayPath() == displayPath {
-			f = ff
-			break
-		}
-	}
+	f := fileByDisplayPath(t.tor, displayPath)
 	if f == nil {
 		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), filesystem.ErrNotFound)
 	}

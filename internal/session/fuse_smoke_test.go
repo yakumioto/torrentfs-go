@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -119,8 +120,16 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	// behind. The explicit Unmount below is the real assertion.
 	defer func() { _ = server.Unmount() }()
 
-	// Full read through the mount: <mount>/<torrent>/<file>.
-	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	// Full read through the mount: a single-file torrent is exposed directly as
+	// <mount>/<name>, a regular file a player can open and seek.
+	path := filepath.Join(mnt, "payload.bin")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%s mode = %v, want a regular file", path, info.Mode())
+	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
@@ -134,19 +143,22 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 		}
 	}
 
-	stats, err := os.ReadFile(filepath.Join(mnt, "payload.bin", ".stats"))
+	// The status tree mirrors the data tree under stats/ and reports the same
+	// piece state the old per-torrent .stats file did.
+	statsPath := filepath.Join(mnt, "stats", "payload.bin")
+	stats, err := os.ReadFile(statsPath)
 	if err != nil {
-		t.Fatalf("ReadFile(.stats): %v", err)
+		t.Fatalf("ReadFile(stats/payload.bin): %v", err)
 	}
 	if string(stats) != "[x]\n" {
-		t.Fatalf(".stats = %q, want [x]", stats)
+		t.Fatalf("stats/payload.bin = %q, want [x]", stats)
 	}
-	statsInfo, err := os.Stat(filepath.Join(mnt, "payload.bin", ".stats"))
+	statsInfo, err := os.Stat(statsPath)
 	if err != nil {
-		t.Fatalf("Stat(.stats): %v", err)
+		t.Fatalf("Stat(stats/payload.bin): %v", err)
 	}
 	if got, want := statsInfo.Size(), int64(len(stats)); got != want {
-		t.Fatalf(".stats size = %d, want %d", got, want)
+		t.Fatalf("stats size = %d, want %d", got, want)
 	}
 
 	// Seeked read: read a window from the middle of the mounted file.
@@ -335,5 +347,112 @@ func waitFor(ctx context.Context, condition func() bool) error {
 				return nil
 			}
 		}
+	}
+}
+
+// TestFuseMultiFileTreeAndStatsMirror checks a real mount keeps the multi-file
+// directory tree, drops the old per-torrent .stats, and mirrors the data tree
+// under stats/ with read-only status leaves.
+func TestFuseMultiFileTreeAndStatsMirror(t *testing.T) {
+	requireFuse(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	files := map[string][]byte{
+		"a.txt":     []byte("alpha file"),
+		"sub/b.txt": []byte("beta file"),
+	}
+	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	waitComplete(t, ctx, st)
+
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	// The multi-file data tree is unchanged.
+	root := filepath.Join(mnt, "multi")
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		t.Fatalf("multi root = (%v, %v), want directory", info, err)
+	}
+	for path, want := range files {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		info, err := os.Stat(full)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("%s = (%v, %v), want regular file", path, info, err)
+		}
+		got, err := os.ReadFile(full)
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("read %s = (%q, %v), want %q", path, got, err, want)
+		}
+	}
+
+	// The old per-torrent .stats location no longer exists.
+	if _, err := os.Stat(filepath.Join(root, ".stats")); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("multi/.stats = %v, want ENOENT", err)
+	}
+
+	// The stats control tree mirrors the data tree.
+	statsRoot := filepath.Join(mnt, "stats", "multi")
+	if info, err := os.Stat(statsRoot); err != nil || !info.IsDir() {
+		t.Fatalf("stats/multi = (%v, %v), want directory", info, err)
+	}
+	entries, err := os.ReadDir(statsRoot)
+	if err != nil {
+		t.Fatalf("readdir stats/multi: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if want := []string{"a.txt", "sub"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("stats/multi entries = %v, want %v", names, want)
+	}
+	for path := range files {
+		statsPath := filepath.Join(statsRoot, filepath.FromSlash(path))
+		got, err := os.ReadFile(statsPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", statsPath, err)
+		}
+		if string(got) != "[x]\n" {
+			t.Fatalf("%s = %q, want [x]", statsPath, got)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(statsRoot, "a.txt"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("write into stats mirror = %v, want EROFS", err)
+	}
+
+	// Reading the mirror must not disturb the media content.
+	got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+	if err != nil || string(got) != string(files["a.txt"]) {
+		t.Fatalf("media read after stats = (%q, %v), want %q", got, err, files["a.txt"])
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
 	}
 }

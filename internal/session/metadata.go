@@ -25,6 +25,14 @@ func metadataRoot(torrentsDir string) string {
 	return filepath.Join(filepath.Clean(torrentsDir), ".metadata")
 }
 
+// statsRoot is the physical anchor of the read-only stats control namespace,
+// the sibling of the metadata sidecar directory. It carries no persisted state
+// — the mounted stats/ tree renders piece state live — but its presence keeps
+// the control namespace layout explicit on disk.
+func statsRoot(torrentsDir string) string {
+	return filepath.Join(filepath.Clean(torrentsDir), ".stats")
+}
+
 func (s *Session) metadataPath(name string) string {
 	return filepath.Join(s.metadataDir, name)
 }

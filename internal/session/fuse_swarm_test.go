@@ -120,7 +120,7 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	}
 	t.Cleanup(func() { unmountServer(t, server, mnt) })
 
-	path := filepath.Join(mnt, "payload.bin", "payload.bin")
+	path := filepath.Join(mnt, "payload.bin")
 	got := readFileWithin(t, ctx, path)
 	if !bytes.Equal(got, content) {
 		t.Fatalf("streamed content differs: got %d bytes, want %d", len(got), len(content))

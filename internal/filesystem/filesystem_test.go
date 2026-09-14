@@ -19,10 +19,11 @@ import (
 // fakeBackend is an in-memory Backend: no network, no anacrolix client, no
 // real mount. Data is stored per (hash, display path).
 type fakeBackend struct {
-	views     []TorrentView
-	data      map[string][]byte
-	states    map[string][]PieceState
-	statesErr error
+	views      []TorrentView
+	data       map[string][]byte
+	states     map[string][]PieceState
+	fileStates map[string][]PieceState
+	statesErr  error
 }
 
 func (b *fakeBackend) Torrents() []TorrentView { return b.views }
@@ -38,6 +39,19 @@ func (b *fakeBackend) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, er
 func (b *fakeBackend) PieceStates(hash metainfo.Hash) ([]PieceState, error) {
 	if b.statesErr != nil {
 		return nil, b.statesErr
+	}
+	return append([]PieceState(nil), b.states[hash.HexString()]...), nil
+}
+
+// FilePieceStates returns the per-file projection when one was registered and
+// otherwise falls back to the whole-torrent snapshot, so a test that only
+// cares about node wiring can leave the projection unset.
+func (b *fakeBackend) FilePieceStates(hash metainfo.Hash, path string) ([]PieceState, error) {
+	if b.statesErr != nil {
+		return nil, b.statesErr
+	}
+	if states, ok := b.fileStates[hash.HexString()+"\x00"+path]; ok {
+		return append([]PieceState(nil), states...), nil
 	}
 	return append([]PieceState(nil), b.states[hash.HexString()]...), nil
 }
@@ -328,7 +342,7 @@ func TestReaddirStream(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("Readdir errno = %v", errno)
 	}
-	want := []string{".stats", "a.txt", "b.txt", "sub"}
+	want := []string{"a.txt", "b.txt", "sub"}
 	var got []fuse.DirEntry
 	for stream.HasNext() {
 		e, errno := stream.Next()
@@ -345,61 +359,125 @@ func TestReaddirStream(t *testing.T) {
 			t.Fatalf("Readdir[%d] = %q, want %q", i, got[i].Name, name)
 		}
 	}
-	if got[0].Mode&syscall.S_IFMT != syscall.S_IFREG || got[3].Mode&syscall.S_IFMT != syscall.S_IFDIR {
+	if got[0].Mode&syscall.S_IFMT != syscall.S_IFREG || got[2].Mode&syscall.S_IFMT != syscall.S_IFDIR {
 		t.Fatalf("entry modes wrong: %v", got)
 	}
 }
 
-func TestStatsFileRendersSnapshotAndReservesName(t *testing.T) {
+func TestTorrentDirHasNoStatsEntry(t *testing.T) {
 	ctx := context.Background()
 	hash := hashN(0x09)
-	b := &fakeBackend{
-		views: []TorrentView{{
-			Name: "t",
-			Hash: hash,
-			Files: []FileView{
-				{Path: ".stats", Size: 99},
-				{Path: "sub/file", Size: 4},
-			},
-		}},
-		states: map[string][]PieceState{
-			hash.HexString(): {
-				{Known: true, Complete: true},
-				{Known: true, Partial: true, Bytes: 3},
-				{Known: true},
-				{Known: true, Wanted: true},
-			},
-		},
+	files := []FileView{
+		{Path: ".stats", Size: 99}, // an ordinary data file, not a reserved name
+		{Path: "sub/file", Size: 4},
 	}
-	state := &fsState{backend: b, inoByKey: make(map[string]uint64), nextIno: 1}
-	dir := &torrentDirNode{state: state, hash: hash, files: b.views[0].Files}
-	entries := dir.entries()
+	dir := &torrentDirNode{hash: hash, files: files}
 	var names []string
-	for _, entry := range entries {
+	for _, entry := range dir.entries() {
 		names = append(names, entry.Name)
 	}
 	if want := []string{".stats", "sub"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("top-level entries = %v, want %v", names, want)
 	}
-	if _, errno := (&torrentDirNode{state: state, hash: hash, files: b.views[0].Files, prefix: "sub"}).Lookup(ctx, ".stats", &fuse.EntryOut{}); errno != syscall.ENOENT {
+	if _, errno := (&torrentDirNode{hash: hash, files: files, prefix: "sub"}).Lookup(ctx, ".stats", &fuse.EntryOut{}); errno != syscall.ENOENT {
 		t.Fatalf("nested .stats lookup errno = %v, want ENOENT", errno)
 	}
+}
 
-	stats := &statsFileNode{state: state, hash: hash}
+func TestMediaRootClassification(t *testing.T) {
+	one := FileView{Path: "payload.bin", Size: 11}
+	single := TorrentView{Name: "p", Hash: hashN(0x01), Files: []FileView{one}, SingleFile: true}
+	if f, ok := mediaRoot(single); !ok || f.Path != "payload.bin" {
+		t.Fatalf("mediaRoot(single) = %+v, %v; want payload.bin", f, ok)
+	}
+	// A one-file multi-file torrent (SingleFile false) is still a directory.
+	oneFileMulti := TorrentView{Name: "p", Hash: hashN(0x01), Files: []FileView{one}}
+	if _, ok := mediaRoot(oneFileMulti); ok {
+		t.Fatal("one-file multi-file torrent must not be exposed as a regular file")
+	}
+	// A view flagged single-file without exactly one file falls back to a
+	// directory rather than fabricating a media path.
+	if _, ok := mediaRoot(TorrentView{Name: "p", Hash: hashN(0x01), SingleFile: true}); ok {
+		t.Fatal("single-file view without one file must fall back")
+	}
+	two := TorrentView{Name: "p", Hash: hashN(0x01), Files: []FileView{one, {Path: "b", Size: 1}}, SingleFile: true}
+	if _, ok := mediaRoot(two); ok {
+		t.Fatal("view with two files must fall back to a directory")
+	}
+}
+
+func TestRootEntryIsDir(t *testing.T) {
+	single := rootEntry{Name: "a", Kind: rootTorrentKind, View: TorrentView{SingleFile: true, Files: []FileView{{Path: "a", Size: 1}}}}
+	if single.isDir() {
+		t.Fatal("single-file torrent root must be a regular file")
+	}
+	multi := rootEntry{Name: "a", Kind: rootTorrentKind, View: TorrentView{Files: []FileView{{Path: "a/b", Size: 1}}}}
+	if !multi.isDir() {
+		t.Fatal("multi-file torrent root must be a directory")
+	}
+	for _, kind := range []rootEntryKind{rootMetadataKind, rootStatsKind} {
+		if !(&rootEntry{Kind: kind}).isDir() {
+			t.Fatalf("control entry kind %d must be a directory", kind)
+		}
+	}
+}
+
+func TestRootEntriesReserveControlNames(t *testing.T) {
+	views := []TorrentView{
+		{Name: "stats", Hash: hashN(0x01)},
+		{Name: "metadata", Hash: hashN(0x02)},
+	}
+	entries := rootEntries(views)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	names := []string{entries[0].Name, entries[1].Name}
+	if names[0] > names[1] {
+		t.Fatalf("entries not sorted: %v", names)
+	}
+	for _, name := range names {
+		if name == statsRootName || name == metadataName {
+			t.Fatalf("torrent name collided with a control name: %v", names)
+		}
+	}
+}
+
+func TestStatsFileRendersFileSnapshot(t *testing.T) {
+	ctx := context.Background()
+	hash := hashN(0x0b)
+	states := []PieceState{
+		{Known: true, Complete: true},
+		{Known: true, Partial: true, Bytes: 3},
+		{Known: true},
+		{Known: true, Wanted: true},
+	}
+	b := &fakeBackend{
+		states:     map[string][]PieceState{hash.HexString(): {{Known: true, Complete: true}}},
+		fileStates: map[string][]PieceState{hash.HexString() + "\x00sub/file": states},
+	}
+	state := newFSState(b)
+	stats := &statsFileNode{state: state, hash: hash, path: "sub/file"}
+
+	want := "[x] [X 3] [N] []\n"
 	var attr fuse.AttrOut
 	if errno := stats.Getattr(ctx, nil, &attr); errno != 0 {
 		t.Fatalf("Getattr errno = %v", errno)
 	}
-	want := "[x] [X 3] [N] []\n"
+	if attr.Mode&0o7777 != 0o444 {
+		t.Fatalf("stats file mode = %o, want 0444", attr.Mode)
+	}
 	if attr.Size != uint64(len(want)) {
 		t.Fatalf("attr size = %d, want %d", attr.Size, len(want))
 	}
+
 	fh, _, errno := stats.Open(ctx, syscall.O_RDONLY)
 	if errno != 0 {
 		t.Fatalf("Open errno = %v", errno)
 	}
 	oldHandle := fh.(*readHandle)
-	b.states[hash.HexString()] = []PieceState{{Known: true, Complete: true}}
+	// The open snapshot is captured at open time; later state changes are not
+	// visible through the existing handle.
+	b.fileStates[hash.HexString()+"\x00sub/file"] = []PieceState{{Known: true, Complete: true}}
 	read := make([]byte, len(want))
 	result, errno := oldHandle.Read(ctx, read, 0)
 	if errno != 0 {
@@ -428,7 +506,7 @@ func TestStatsFileRejectsWriteAndMapsBackendError(t *testing.T) {
 	ctx := context.Background()
 	hash := hashN(0x0a)
 	b := &fakeBackend{statesErr: errors.New("backend failed")}
-	stats := &statsFileNode{state: &fsState{backend: b}, hash: hash}
+	stats := &statsFileNode{state: newFSState(b), hash: hash, path: "f"}
 	var attr fuse.AttrOut
 	if errno := stats.Getattr(ctx, nil, &attr); errno != syscall.EIO {
 		t.Fatalf("Getattr errno = %v, want EIO", errno)
@@ -440,6 +518,241 @@ func TestStatsFileRejectsWriteAndMapsBackendError(t *testing.T) {
 		if _, _, errno := stats.Open(ctx, flags); errno != syscall.EROFS {
 			t.Fatalf("Open(0x%x) = %v, want EROFS", flags, errno)
 		}
+	}
+}
+
+// bridgedRoot attaches root to a go-fuse bridge so node constructors such as
+// NewInode work in unit tests without a kernel mount.
+func bridgedRoot(t *testing.T, root fs.InodeEmbedder) {
+	t.Helper()
+	if fs.NewNodeFS(root, nil) == nil {
+		t.Fatal("NewNodeFS returned nil")
+	}
+}
+
+func namedEntry(t *testing.T, stream fs.DirStream) []fuse.DirEntry {
+	t.Helper()
+	var got []fuse.DirEntry
+	for stream.HasNext() {
+		e, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		got = append(got, e)
+	}
+	return got
+}
+
+func TestRootLookupSingleFileIsRegularFile(t *testing.T) {
+	ctx := context.Background()
+	hash := hashN(0x21)
+	content := []byte("hello world")
+	b := &fakeBackend{
+		views: []TorrentView{{
+			Name:       "payload.bin",
+			Hash:       hash,
+			SingleFile: true,
+			Files:      []FileView{{Path: "payload.bin", Size: int64(len(content))}},
+		}},
+		data: map[string][]byte{hash.HexString() + "\x00payload.bin": content},
+	}
+	root := &rootNode{state: newFSState(b)}
+	bridgedRoot(t, root)
+
+	// Readdir marks the single-file torrent root as a regular file and still
+	// lists the stats control directory.
+	stream, errno := root.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v", errno)
+	}
+	entries := namedEntry(t, stream)
+	if len(entries) != 2 || entries[0].Name != "payload.bin" || entries[1].Name != statsRootName {
+		t.Fatalf("root entries = %v, want payload.bin and stats", entries)
+	}
+	if entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG {
+		t.Fatalf("payload.bin mode = %o, want regular file", entries[0].Mode)
+	}
+	if entries[1].Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		t.Fatalf("stats mode = %o, want directory", entries[1].Mode)
+	}
+
+	var entry fuse.EntryOut
+	inode, errno := root.Lookup(ctx, "payload.bin", &entry)
+	if errno != 0 {
+		t.Fatalf("Lookup(payload.bin) errno = %v", errno)
+	}
+	// Lookup's EntryOut carries permission bits; the file type lives in the
+	// StableAttr the bridge hands the kernel.
+	if inode.StableAttr().Mode&syscall.S_IFMT != syscall.S_IFREG {
+		t.Fatalf("payload.bin inode mode = %o, want regular file", inode.StableAttr().Mode)
+	}
+	if entry.Size != uint64(len(content)) {
+		t.Fatalf("payload.bin entry size = %d, want %d", entry.Size, len(content))
+	}
+	file, ok := inode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("payload.bin node = %T, want *torrentFileNode", inode.Operations())
+	}
+	if file.path != "payload.bin" {
+		t.Fatalf("media node path = %q, want the original display path", file.path)
+	}
+	handle, _, errno := file.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("Open media file errno = %v", errno)
+	}
+	got, status := mustRead(t, ctx, handle.(*readHandle), len(content))
+	if status != fuse.OK || string(got) != string(content) {
+		t.Fatalf("media read = %q, status %v; want %q", got, status, content)
+	}
+}
+
+// mustRead reads exactly n bytes from a read handle starting at offset 0.
+func mustRead(t *testing.T, ctx context.Context, h *readHandle, n int) ([]byte, fuse.Status) {
+	t.Helper()
+	res, errno := h.Read(ctx, make([]byte, n), 0)
+	if errno != 0 {
+		t.Fatalf("Read errno = %v", errno)
+	}
+	return res.Bytes(nil)
+}
+
+func TestStatsRootMirrorsDataTree(t *testing.T) {
+	ctx := context.Background()
+	singleHash := hashN(0x31)
+	multiHash := hashN(0x32)
+	b := &fakeBackend{
+		views: []TorrentView{
+			{
+				Name:       "payload.bin",
+				Hash:       singleHash,
+				SingleFile: true,
+				Files:      []FileView{{Path: "payload.bin", Size: 4}},
+			},
+			{
+				Name: "multi",
+				Hash: multiHash,
+				Files: []FileView{
+					{Path: "a.txt", Size: 1},
+					{Path: "sub/b.txt", Size: 2},
+				},
+			},
+		},
+		states: map[string][]PieceState{
+			singleHash.HexString(): {{Known: true, Complete: true}},
+			multiHash.HexString():  {{Known: true, Complete: true}},
+		},
+	}
+	root := &rootNode{state: newFSState(b)}
+	bridgedRoot(t, root)
+
+	statsInode, errno := root.Lookup(ctx, statsRootName, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("Lookup(stats) errno = %v", errno)
+	}
+	statsRoot, ok := statsInode.Operations().(*statsRootNode)
+	if !ok {
+		t.Fatalf("stats node = %T, want *statsRootNode", statsInode.Operations())
+	}
+
+	// The stats root mirrors the data tree's names and node types.
+	stream, errno := statsRoot.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("stats Readdir errno = %v", errno)
+	}
+	entries := namedEntry(t, stream)
+	if len(entries) != 2 || entries[0].Name != "multi" || entries[1].Name != "payload.bin" {
+		t.Fatalf("stats entries = %v, want multi and payload.bin", entries)
+	}
+	if entries[0].Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		t.Fatalf("stats multi mode = %o, want directory", entries[0].Mode)
+	}
+	if entries[1].Mode&syscall.S_IFMT != syscall.S_IFREG {
+		t.Fatalf("stats payload.bin mode = %o, want regular file", entries[1].Mode)
+	}
+
+	// The single-file torrent yields one status leaf named for the media root.
+	leafInode, errno := statsRoot.Lookup(ctx, "payload.bin", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("stats Lookup(payload.bin) errno = %v", errno)
+	}
+	leaf, ok := leafInode.Operations().(*statsFileNode)
+	if !ok || leaf.path != "payload.bin" {
+		t.Fatalf("stats payload.bin node = %#v, want leaf for payload.bin", leafInode.Operations())
+	}
+
+	// The multi-file torrent mirrors its directory tree.
+	multiInode, errno := statsRoot.Lookup(ctx, "multi", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("stats Lookup(multi) errno = %v", errno)
+	}
+	multiDir, ok := multiInode.Operations().(*statsDirNode)
+	if !ok {
+		t.Fatalf("stats multi node = %T, want *statsDirNode", multiInode.Operations())
+	}
+	stream, errno = multiDir.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("stats multi Readdir errno = %v", errno)
+	}
+	names := make([]string, 0, 2)
+	for _, e := range namedEntry(t, stream) {
+		names = append(names, e.Name)
+	}
+	if want := []string{"a.txt", "sub"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("stats multi entries = %v, want %v", names, want)
+	}
+	subInode, errno := multiDir.Lookup(ctx, "sub", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("stats Lookup(sub) errno = %v", errno)
+	}
+	subDir, ok := subInode.Operations().(*statsDirNode)
+	if !ok {
+		t.Fatalf("stats sub node = %T, want *statsDirNode", subInode.Operations())
+	}
+	subLeaf, errno := subDir.Lookup(ctx, "b.txt", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("stats Lookup(sub/b.txt) errno = %v", errno)
+	}
+	if leaf, ok := subLeaf.Operations().(*statsFileNode); !ok || leaf.path != "sub/b.txt" {
+		t.Fatalf("stats sub/b.txt node = %#v, want leaf for sub/b.txt", subLeaf.Operations())
+	}
+}
+
+func TestStatsTreeReadOnly(t *testing.T) {
+	ctx := context.Background()
+	hash := hashN(0x41)
+	files := []FileView{{Path: "sub/b.txt", Size: 2}}
+	state := newFSState(&fakeBackend{})
+	root := &statsRootNode{state: state}
+	dir := &statsDirNode{state: state, hash: hash, files: files}
+
+	type writeOps struct {
+		name string
+		node interface {
+			Mkdir(context.Context, string, uint32, *fuse.EntryOut) (*fs.Inode, syscall.Errno)
+			Create(context.Context, string, uint32, uint32, *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
+			Unlink(context.Context, string) syscall.Errno
+			Rmdir(context.Context, string) syscall.Errno
+		}
+	}
+	for _, tc := range []writeOps{{"stats root", root}, {"stats dir", dir}} {
+		if _, errno := tc.node.Mkdir(ctx, "x", 0o755, &fuse.EntryOut{}); errno != syscall.EROFS {
+			t.Errorf("%s mkdir = %v, want EROFS", tc.name, errno)
+		}
+		if _, _, _, errno := tc.node.Create(ctx, "x", 0, 0o644, &fuse.EntryOut{}); errno != syscall.EROFS {
+			t.Errorf("%s create = %v, want EROFS", tc.name, errno)
+		}
+		if errno := tc.node.Unlink(ctx, "x"); errno != syscall.EROFS {
+			t.Errorf("%s unlink = %v, want EROFS", tc.name, errno)
+		}
+		if errno := tc.node.Rmdir(ctx, "x"); errno != syscall.EROFS {
+			t.Errorf("%s rmdir = %v, want EROFS", tc.name, errno)
+		}
+	}
+	if errno := root.Rename(ctx, "x", root, "y", 0); errno != syscall.EROFS {
+		t.Errorf("stats root rename = %v, want EROFS", errno)
+	}
+	if errno := dir.Rename(ctx, "x", dir, "y", 0); errno != syscall.EROFS {
+		t.Errorf("stats dir rename = %v, want EROFS", errno)
 	}
 }
 

@@ -29,10 +29,12 @@ Flags:
 
 <torrents-dir> must be an existing directory. Its direct regular, non-symlink
 files whose names end in .torrent are scanned at startup and while running.
-Each torrent is exposed under the mount point as a directory. Existing
-metadata files are restored from <torrents-dir>/.metadata, and complete
-.torrent files may also be written to metadata/ while mounted. Send SIGINT or
-SIGTERM to unmount and exit.
+A single-file torrent is exposed under the mount point as a regular file
+directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
+directory tree. A read-only stats/ control tree mirrors the data tree and
+reports piece state. Existing metadata files are restored from
+<torrents-dir>/.metadata, and complete .torrent files may also be written to
+metadata/ while mounted. Send SIGINT or SIGTERM to unmount and exit.
 `
 
 func main() {

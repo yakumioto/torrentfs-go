@@ -2,16 +2,22 @@ package filesystem
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-const metadataName = "metadata"
+const (
+	metadataName  = "metadata"
+	statsRootName = "stats"
+)
 
 // rootNode is the mount root. Its children are dynamically read from the
-// Backend, plus the optional metadata control directory.
+// Backend, plus the optional metadata control directory and the always-present
+// read-only stats control directory.
 type rootNode struct {
 	fs.Inode
 	state *fsState
@@ -24,11 +30,12 @@ func (n *rootNode) torrentViews() []TorrentView {
 func (n *rootNode) children() []rootEntry {
 	entries := rootEntries(n.torrentViews())
 	if n.state.metadata != nil && n.state.metadataExists() {
-		entries = append(entries, rootEntry{Name: metadataName, Metadata: true})
-		for i := len(entries) - 1; i > 0 && entries[i].Name < entries[i-1].Name; i-- {
-			entries[i], entries[i-1] = entries[i-1], entries[i]
-		}
+		entries = append(entries, rootEntry{Name: metadataName, Kind: rootMetadataKind})
 	}
+	entries = append(entries, rootEntry{Name: statsRootName, Kind: rootStatsKind})
+	slices.SortFunc(entries, func(a, b rootEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return entries
 }
 
@@ -46,12 +53,29 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		if c.Name != name {
 			continue
 		}
-		if c.Metadata {
+		switch {
+		case c.Kind == rootMetadataKind:
 			out.Mode = 0o755
 			child := &metadataDirNode{state: n.state}
 			return n.NewInode(ctx, child, fs.StableAttr{
 				Mode: syscall.S_IFDIR,
 				Ino:  n.state.inoFor(metadataKey()),
+			}), 0
+		case c.Kind == rootStatsKind:
+			out.Mode = 0o555
+			child := &statsRootNode{state: n.state}
+			return n.NewInode(ctx, child, fs.StableAttr{
+				Mode: syscall.S_IFDIR,
+				Ino:  n.state.inoFor(statsKey()),
+			}), 0
+		}
+		if f, ok := mediaRoot(c.View); ok {
+			out.Mode = 0o444
+			out.Size = uint64(f.Size)
+			child := &torrentFileNode{state: n.state, hash: c.View.Hash, path: f.Path, size: f.Size}
+			return n.NewInode(ctx, child, fs.StableAttr{
+				Mode: syscall.S_IFREG,
+				Ino:  n.state.inoFor(fileKey(c.View.Hash, f.Path)),
 			}), 0
 		}
 		out.Mode = 0o555
@@ -72,7 +96,11 @@ func (n *rootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	cs := n.children()
 	entries := make([]fuse.DirEntry, 0, len(cs))
 	for _, c := range cs {
-		entries = append(entries, fuse.DirEntry{Name: c.Name, Mode: syscall.S_IFDIR})
+		mode := uint32(syscall.S_IFDIR)
+		if !c.isDir() {
+			mode = syscall.S_IFREG
+		}
+		entries = append(entries, fuse.DirEntry{Name: c.Name, Mode: mode})
 	}
 	return fs.NewListDirStream(entries), 0
 }
@@ -116,7 +144,10 @@ func (n *rootNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		n.state.setMetadataExists(false)
 		return 0
 	}
-	if _, ok := lookupRootEntry(n.children(), name); ok {
+	if entry, ok := lookupRootEntry(n.children(), name); ok {
+		if !entry.isDir() {
+			return errnoFor(ErrNotDir)
+		}
 		return errnoFor(ErrReadOnly)
 	}
 	return errnoFor(ErrNotFound)

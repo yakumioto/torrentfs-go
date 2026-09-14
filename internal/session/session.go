@@ -74,6 +74,10 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create metadata dir: %w", err)
 	}
+	statsDir := statsRoot(torrentsDir)
+	if err := os.MkdirAll(statsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("session: create stats dir: %w", err)
+	}
 
 	cc := torrent.NewDefaultClientConfig()
 	if cfg.Identity.TrackerUserAgent != "" {
