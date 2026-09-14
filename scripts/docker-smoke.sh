@@ -7,14 +7,16 @@ readonly FIXTURE_DIR="$ROOT_DIR/examples/docker"
 readonly FIXTURE_TORRENT="$FIXTURE_DIR/example.torrent"
 readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt/payload.txt"
-readonly IMAGE="torrentfs-mio16-smoke:${BASHPID}"
-readonly CONTAINER="torrentfs-mio16-${BASHPID}"
-readonly NEGATIVE_CONTAINER="torrentfs-mio16-negative-${BASHPID}"
+readonly IMAGE="torrentfs-mio17-smoke:${BASHPID}"
+readonly CONTAINER="torrentfs-mio17-${BASHPID}"
+readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
+readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
 
 TMP_DIR=""
 IMAGE_TAGGED=0
 POSITIVE_STARTED=0
-NEGATIVE_CREATED=0
+FILE_INPUT_CREATED=0
+MISSING_DIR_CREATED=0
 
 fail() {
 	printf 'docker smoke: %s\n' "$*" >&2
@@ -32,8 +34,11 @@ cleanup() {
 	if [[ -n "$CONTAINER" ]]; then
 		docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 	fi
-	if ((NEGATIVE_CREATED)); then
-		docker rm -f "$NEGATIVE_CONTAINER" >/dev/null 2>&1 || true
+	if ((FILE_INPUT_CREATED)); then
+		docker rm -f "$FILE_INPUT_CONTAINER" >/dev/null 2>&1 || true
+	fi
+	if ((MISSING_DIR_CREATED)); then
+		docker rm -f "$MISSING_DIR_CONTAINER" >/dev/null 2>&1 || true
 	fi
 	if ((IMAGE_TAGGED)); then
 		docker image rm "$IMAGE" >/dev/null 2>&1 || true
@@ -55,15 +60,14 @@ docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 [[ -f "$FIXTURE_TORRENT" ]] || fail "fixture is missing: $FIXTURE_TORRENT"
 [[ -f "$FIXTURE_PAYLOAD" ]] || fail "fixture payload is missing: $FIXTURE_PAYLOAD"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-mio16.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-mio17.XXXXXX")"
 TORRENT_HOST_DIR="$TMP_DIR/torrents"
 DATA_HOST_DIR="$TMP_DIR/data"
 MOUNT_HOST_DIR="$TMP_DIR/mnt"
-EMPTY_TORRENTS_DIR="$TMP_DIR/empty-torrents"
 NEGATIVE_DATA_DIR="$TMP_DIR/negative-data"
 NEGATIVE_MOUNT_DIR="$TMP_DIR/negative-mnt"
 mkdir -p "$TORRENT_HOST_DIR" "$DATA_HOST_DIR" "$MOUNT_HOST_DIR" \
-	"$EMPTY_TORRENTS_DIR" "$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
+	"$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
 cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/example.torrent"
 cp -- "$FIXTURE_PAYLOAD" "$DATA_HOST_DIR/payload.txt"
 EXPECTED_HASH="$(sha256sum "$DATA_HOST_DIR/payload.txt")"
@@ -81,9 +85,9 @@ if ! docker run --detach --name "$CONTAINER" \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$DATA_HOST_DIR,dst=/data" \
-	--mount "type=bind,src=$TORRENT_HOST_DIR/example.torrent,dst=/torrents/example.torrent,readonly" \
+	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/example.torrent >/dev/null; then
+	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
 fi
 POSITIVE_STARTED=1
@@ -122,28 +126,54 @@ fi
 POSITIVE_STARTED=0
 printf 'docker smoke: FUSE container stopped cleanly\n'
 
-printf 'docker smoke: checking missing torrent failure\n'
-NEGATIVE_CREATED=1
+printf 'docker smoke: checking rejected single-file input\n'
+FILE_INPUT_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
-if NEGATIVE_OUTPUT="$(timeout --foreground 15s docker run --name "$NEGATIVE_CONTAINER" \
+if NEGATIVE_OUTPUT="$(timeout --foreground 15s docker run --name "$FILE_INPUT_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$NEGATIVE_DATA_DIR,dst=/data" \
-	--mount "type=bind,src=$EMPTY_TORRENTS_DIR,dst=/torrents,readonly" \
+	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/missing.torrent 2>&1)"; then
+	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/example.torrent 2>&1)"; then
 	NEGATIVE_STATUS=0
 else
 	NEGATIVE_STATUS=$?
 fi
-[[ "$NEGATIVE_STATUS" == "1" ]] || \
-	fail "missing torrent exited with $NEGATIVE_STATUS instead of 1:$'\n'$NEGATIVE_OUTPUT"
-[[ "$NEGATIVE_OUTPUT" == *"/torrents/missing.torrent"* ]] || \
-	fail "missing torrent error omitted the container path:$'\n'$NEGATIVE_OUTPUT"
+[[ "$NEGATIVE_STATUS" == "2" ]] || \
+	fail "single-file input exited with $NEGATIVE_STATUS instead of 2:$'\n'$NEGATIVE_OUTPUT"
+[[ "$NEGATIVE_OUTPUT" == *"/torrents/example.torrent"* ]] || \
+	fail "single-file error omitted the container path:$'\n'$NEGATIVE_OUTPUT"
+[[ "$NEGATIVE_OUTPUT" == *"existing directory"* ]] || \
+	fail "single-file error did not require a directory:$'\n'$NEGATIVE_OUTPUT"
+printf 'docker smoke: single-file input rejected accurately\n'
+
+printf 'docker smoke: checking missing torrent directory failure\n'
+MISSING_DIR_CREATED=1
+NEGATIVE_STATUS=0
+NEGATIVE_OUTPUT=""
+if NEGATIVE_OUTPUT="$(timeout --foreground 15s docker run --name "$MISSING_DIR_CONTAINER" \
+	--device /dev/fuse \
+	--cap-add SYS_ADMIN \
+	--security-opt apparmor=unconfined \
+	--mount "type=bind,src=$NEGATIVE_DATA_DIR,dst=/data" \
+	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
+	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
+	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/missing 2>&1)"; then
+	NEGATIVE_STATUS=0
+else
+	NEGATIVE_STATUS=$?
+fi
+[[ "$NEGATIVE_STATUS" == "2" ]] || \
+	fail "missing directory exited with $NEGATIVE_STATUS instead of 2:$'\n'$NEGATIVE_OUTPUT"
+[[ "$NEGATIVE_OUTPUT" == *"/torrents/missing"* ]] || \
+	fail "missing-directory error omitted the container path:$'\n'$NEGATIVE_OUTPUT"
+[[ "$NEGATIVE_OUTPUT" == *"existing directory"* ]] || \
+	fail "missing-directory error did not require a directory:$'\n'$NEGATIVE_OUTPUT"
 [[ "$NEGATIVE_OUTPUT" == *"no such file or directory"* ]] || \
-	fail "missing torrent error omitted the ENOENT text:$'\n'$NEGATIVE_OUTPUT"
-printf 'docker smoke: missing torrent failed accurately\n'
+	fail "missing-directory error omitted the ENOENT text:$'\n'$NEGATIVE_OUTPUT"
+printf 'docker smoke: missing directory rejected accurately\n'
 
 printf 'docker smoke: all checks passed\n'

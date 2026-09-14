@@ -32,33 +32,45 @@ type Session struct {
 	cl  *torrent.Client
 	cfg config.Config
 
-	pieceCache     *cache.Cache
-	mu             sync.RWMutex
-	state          lifecycle
-	closeDone      chan struct{}
-	closeErr       error
-	torrents       map[metainfo.Hash]*Torrent
-	metadata       map[string]metainfo.Hash
-	metadataRefs   map[metainfo.Hash]int
-	pendingWriters map[string]*metadataWriter
-	metadataDir    string
+	pieceCache      *cache.Cache
+	mu              sync.RWMutex
+	state           lifecycle
+	closeDone       chan struct{}
+	closeErr        error
+	torrents        map[metainfo.Hash]*Torrent
+	metadata        map[string]metainfo.Hash
+	metadataRefs    map[metainfo.Hash]int
+	directoryRefs   map[metainfo.Hash]int
+	directorySource map[string]torrentDirSource
+	manualRefs      map[metainfo.Hash]struct{}
+	pendingWriters  map[string]*metadataWriter
+	torrentsDir     string
+	metadataDir     string
+	scanCancel      context.CancelFunc
+	scanDone        chan struct{}
 }
 
-// New creates a session and its anacrolix client. The data and metadata
-// directories are created if missing. The client is configured to seed and
-// existing metadata is restored before the session is returned.
-func New(cfg config.Config) (*Session, error) {
-	return newWithClientConfig(cfg, nil)
+// New creates a session and its anacrolix client. The torrents directory must
+// already exist; the session creates only its .metadata directory. The client
+// is configured to seed, existing metadata is restored, and the torrents
+// directory is watched before the session is returned.
+func New(cfg config.Config, torrentsDir string) (*Session, error) {
+	return newWithClientConfig(cfg, torrentsDir, nil)
 }
 
-func newWithClientConfig(cfg config.Config, customize func(*torrent.ClientConfig)) (*Session, error) {
+func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*torrent.ClientConfig)) (*Session, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("session: validate config: %w", err)
+	}
+	var err error
+	torrentsDir, err = validateTorrentDir(torrentsDir)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create data dir: %w", err)
 	}
-	metadataDir := metadataRoot(cfg.Paths.DataDir)
+	metadataDir := metadataRoot(torrentsDir)
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create metadata dir: %w", err)
 	}
@@ -92,22 +104,36 @@ func newWithClientConfig(cfg config.Config, customize func(*torrent.ClientConfig
 		cl.AddDialer(peerDialer)
 	}
 	s := &Session{
-		cl:             cl,
-		cfg:            cfg,
-		pieceCache:     cache.New(cfg.Cache.CapacityBytes),
-		closeDone:      make(chan struct{}),
-		torrents:       make(map[metainfo.Hash]*Torrent),
-		metadata:       make(map[string]metainfo.Hash),
-		metadataRefs:   make(map[metainfo.Hash]int),
-		pendingWriters: make(map[string]*metadataWriter),
-		metadataDir:    metadataDir,
+		cl:              cl,
+		cfg:             cfg,
+		pieceCache:      cache.New(cfg.Cache.CapacityBytes),
+		closeDone:       make(chan struct{}),
+		torrents:        make(map[metainfo.Hash]*Torrent),
+		metadata:        make(map[string]metainfo.Hash),
+		metadataRefs:    make(map[metainfo.Hash]int),
+		directoryRefs:   make(map[metainfo.Hash]int),
+		directorySource: make(map[string]torrentDirSource),
+		manualRefs:      make(map[metainfo.Hash]struct{}),
+		pendingWriters:  make(map[string]*metadataWriter),
+		torrentsDir:     torrentsDir,
+		metadataDir:     metadataDir,
 	}
 	if err := s.rescanMetadata(); err != nil {
-		if closeErr := errors.Join(cl.Close()...); closeErr != nil {
+		if closeErr := s.Close(context.Background()); closeErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("session: close client after metadata restore: %w", closeErr))
 		}
 		return nil, err
 	}
+	if err := s.scanTorrentDir(context.Background(), true); err != nil {
+		if closeErr := s.Close(context.Background()); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("session: close client after torrent scan: %w", closeErr))
+		}
+		return nil, err
+	}
+	scanCtx, scanCancel := context.WithCancel(context.Background())
+	s.scanCancel = scanCancel
+	s.scanDone = make(chan struct{})
+	go s.watchTorrentDir(scanCtx, s.scanDone)
 	return s, nil
 }
 
@@ -134,6 +160,18 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 
 	s.state = stateClosing
+	scanCancel := s.scanCancel
+	scanDone := s.scanDone
+	s.mu.Unlock()
+
+	if scanCancel != nil {
+		scanCancel()
+		if scanDone != nil {
+			<-scanDone
+		}
+	}
+
+	s.mu.Lock()
 	torrents := make([]*Torrent, 0, len(s.torrents))
 	for _, t := range s.torrents {
 		torrents = append(torrents, t)
@@ -167,7 +205,12 @@ func (s *Session) Close(ctx context.Context) error {
 	s.torrents = make(map[metainfo.Hash]*Torrent)
 	s.metadata = make(map[string]metainfo.Hash)
 	s.metadataRefs = make(map[metainfo.Hash]int)
+	s.directoryRefs = make(map[metainfo.Hash]int)
+	s.directorySource = make(map[string]torrentDirSource)
+	s.manualRefs = make(map[metainfo.Hash]struct{})
 	s.pendingWriters = make(map[string]*metadataWriter)
+	s.scanCancel = nil
+	s.scanDone = nil
 	s.state = stateClosed
 	s.closeErr = err
 	close(s.closeDone)

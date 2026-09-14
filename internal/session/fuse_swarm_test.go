@@ -19,7 +19,11 @@ import (
 func newLoopbackSession(t *testing.T, cfg config.Config) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	sess, err := session.NewWithClientConfig(cfg, func(cc *session.TorrentClientConfig) {
+	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
+	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	sess, err := session.NewWithClientConfig(cfg, torrentsDir, func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true

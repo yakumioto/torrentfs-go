@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -16,6 +15,7 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	code := run([]string{
 		"-mountpoint", t.TempDir(),
 		"-config", missing,
+		t.TempDir(),
 	}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
@@ -35,11 +35,76 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	code := run([]string{
 		"-mountpoint", t.TempDir(),
 		"-config", path,
+		t.TempDir(),
 	}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
 	for _, want := range []string{path, "paths.data_dir", "value is required"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestRunRequiresExactlyOneTorrentsDirectory(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing",
+			args: nil,
+			want: "exactly one existing torrents directory",
+		},
+		{
+			name: "multiple",
+			args: []string{t.TempDir(), t.TempDir()},
+			want: "exactly one existing torrents directory",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			args := append([]string{"-mountpoint", t.TempDir()}, tt.args...)
+			if code := run(args, &stderr); code != 2 {
+				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsNonDirectoryTorrentInput(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "input.torrent")
+	if err := os.WriteFile(file, []byte("not a torrent"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	var stderr bytes.Buffer
+
+	code := run([]string{"-mountpoint", t.TempDir(), file}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2", code)
+	}
+	for _, want := range []string{file, "existing directory"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestRunRejectsMissingTorrentDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-torrents")
+	var stderr bytes.Buffer
+
+	code := run([]string{"-mountpoint", t.TempDir(), missing}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2", code)
+	}
+	for _, want := range []string{missing, "existing directory", "no such file or directory"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -78,36 +143,16 @@ func TestLoadConfigKeepsFileDataDirWhenFlagWasOmitted(t *testing.T) {
 	}
 }
 
-func TestExpandTorrentInputScansDirectory(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"z.torrent", "a.torrent", "ignore.txt", "upper.TORRENT"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("not parsed here"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o755); err != nil {
-		t.Fatalf("make nested directory: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "nested", "nested.torrent"), []byte("nested"), 0o644); err != nil {
-		t.Fatalf("write nested torrent: %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(dir, "directory.torrent"), 0o755); err != nil {
-		t.Fatalf("make torrent-named directory: %v", err)
-	}
-	if err := os.Symlink(filepath.Join(dir, "a.torrent"), filepath.Join(dir, "link.torrent")); err != nil {
-		t.Fatalf("make torrent symlink: %v", err)
+func TestValidateTorrentDirRejectsSymlink(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "torrents")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("make symlink: %v", err)
 	}
 
-	got, err := expandTorrentInput(dir)
-	if err != nil {
-		t.Fatalf("expandTorrentInput: %v", err)
-	}
-	want := []string{
-		filepath.Join(dir, "a.torrent"),
-		filepath.Join(dir, "z.torrent"),
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("expanded paths = %#v, want %#v", got, want)
+	err := validateTorrentDir(link)
+	if err == nil || !strings.Contains(err.Error(), "existing directory") {
+		t.Fatalf("validateTorrentDir(%q) = %v, want existing-directory error", link, err)
 	}
 }
 
@@ -132,40 +177,6 @@ func TestRunDirectoryInputReportsExpandedTorrentError(t *testing.T) {
 		t.Fatalf("run exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), badTorrent) {
-		t.Fatalf("stderr = %q, want expanded torrent path", stderr.String())
-	}
-}
-
-func TestExpandTorrentInputKeepsNonDirectories(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "file.data")
-	if err := os.WriteFile(file, []byte("file"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	link := filepath.Join(dir, "link.data")
-	if err := os.Symlink(file, link); err != nil {
-		t.Fatalf("make file symlink: %v", err)
-	}
-	missing := filepath.Join(dir, "missing.torrent")
-
-	for _, input := range []string{file, link, missing} {
-		got, err := expandTorrentInput(input)
-		if err != nil {
-			t.Fatalf("expandTorrentInput(%q): %v", input, err)
-		}
-		want := []string{input}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("expandTorrentInput(%q) = %#v, want %#v", input, got, want)
-		}
-	}
-}
-
-func TestExpandTorrentInputAcceptsEmptyDirectory(t *testing.T) {
-	got, err := expandTorrentInput(t.TempDir())
-	if err != nil {
-		t.Fatalf("expandTorrentInput: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("expanded paths = %#v, want empty", got)
+		t.Fatalf("stderr = %q, want torrent path", stderr.String())
 	}
 }

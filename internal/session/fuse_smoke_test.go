@@ -92,7 +92,7 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	}
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestFuseMetadataLifecycle(t *testing.T) {
 		t.Fatalf("read other torrent: %v", err)
 	}
 
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

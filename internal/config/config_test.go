@@ -24,8 +24,13 @@ func TestDefault(t *testing.T) {
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
-	if cfg.Identity != (config.Identity{}) {
-		t.Fatalf("Default identity = %+v, want zero value", cfg.Identity)
+	wantIdentity := config.Identity{
+		TrackerUserAgent:               "qBittorrent/4.4.0",
+		PeerIDPrefix:                   "-qB4400-",
+		ExtendedHandshakeClientVersion: "qBittorrent/4.4.0",
+	}
+	if cfg.Identity != wantIdentity {
+		t.Fatalf("Default identity = %+v, want %+v", cfg.Identity, wantIdentity)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Default().Validate: %v", err)
@@ -154,8 +159,21 @@ func TestLoadUsesDefaultsForEmptyIdentitySection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	wantIdentity := config.Default().Identity
+	if cfg.Identity != wantIdentity {
+		t.Fatalf("Identity = %+v, want defaults %+v", cfg.Identity, wantIdentity)
+	}
+}
+
+func TestLoadAllowsExplicitEmptyIdentityValues(t *testing.T) {
+	path := writeConfig(t, "[identity]\ntracker_user_agent = \"\"\npeer_id_prefix = \"\"\nextended_handshake_client_version = \"\"\n")
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.Identity != (config.Identity{}) {
-		t.Fatalf("Identity = %+v, want zero value", cfg.Identity)
+		t.Fatalf("Identity = %+v, want explicit empty values", cfg.Identity)
 	}
 }
 

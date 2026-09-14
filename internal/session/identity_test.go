@@ -51,10 +51,19 @@ func (e *handshakeEvents) configure(cc *session.TorrentClientConfig) {
 	}
 }
 
+func identityTorrentsDir(t *testing.T, dataDir string) string {
+	t.Helper()
+	dir := filepath.Join(dataDir, "torrents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	return dir
+}
+
 func newIdentitySession(t *testing.T, cfg config.Config, events *handshakeEvents) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	sess, err := session.NewWithClientConfig(cfg, func(cc *session.TorrentClientConfig) {
+	sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true
@@ -76,10 +85,10 @@ func newIdentitySession(t *testing.T, cfg config.Config, events *handshakeEvents
 }
 
 func TestIdentityMapsToClientConfig(t *testing.T) {
-	t.Run("defaults are inherited", func(t *testing.T) {
+	t.Run("defaults use qBittorrent identity", func(t *testing.T) {
 		var got clientIdentity
 		cfg := testConfig(t.TempDir())
-		sess, err := session.NewWithClientConfig(cfg, func(cc *session.TorrentClientConfig) {
+		sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
 			got = clientIdentity{
 				trackerUserAgent:               cc.HTTPUserAgent,
 				peerIDPrefix:                   cc.Bep20,
@@ -100,12 +109,11 @@ func TestIdentityMapsToClientConfig(t *testing.T) {
 			}
 		}()
 
-		defaults := torrent.NewDefaultClientConfig()
 		want := clientIdentity{
-			trackerUserAgent:               defaults.HTTPUserAgent,
-			peerIDPrefix:                   defaults.Bep20,
-			extendedHandshakeClientVersion: defaults.ExtendedHandshakeClientVersion,
-			peerID:                         defaults.PeerID,
+			trackerUserAgent:               "qBittorrent/4.4.0",
+			peerIDPrefix:                   "-qB4400-",
+			extendedHandshakeClientVersion: "qBittorrent/4.4.0",
+			peerID:                         "",
 		}
 		if got != want {
 			t.Fatalf("client identity = %+v, want %+v", got, want)
@@ -141,7 +149,7 @@ func TestIdentityMapsToClientConfig(t *testing.T) {
 			cfg := testConfig(t.TempDir())
 			cfg.Identity = tt.identity
 			var got clientIdentity
-			sess, err := session.NewWithClientConfig(cfg, func(cc *session.TorrentClientConfig) {
+			sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
 				got = clientIdentity{
 					trackerUserAgent:               cc.HTTPUserAgent,
 					peerIDPrefix:                   cc.Bep20,
@@ -185,11 +193,6 @@ func TestIdentityReachesTrackerAndPeerHandshake(t *testing.T) {
 		t.Fatalf("write torrent: %v", err)
 	}
 
-	qbIdentity := config.Identity{
-		TrackerUserAgent:               "qBittorrent/4.4.0",
-		PeerIDPrefix:                   "-qB4400-",
-		ExtendedHandshakeClientVersion: "qBittorrent/4.4.0",
-	}
 	transmissionIdentity := config.Identity{
 		TrackerUserAgent:               "Transmission/3.00",
 		PeerIDPrefix:                   "-TR3000-",
@@ -206,7 +209,6 @@ func TestIdentityReachesTrackerAndPeerHandshake(t *testing.T) {
 		t.Fatalf("write qBittorrent payload: %v", err)
 	}
 	qbConfig := testConfig(qbDataDir)
-	qbConfig.Identity = qbIdentity
 	transmissionConfig := testConfig(filepath.Join(work, "transmission-data"))
 	transmissionConfig.Identity = transmissionIdentity
 	qb := newIdentitySession(t, qbConfig, qbEvents)

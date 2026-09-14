@@ -24,7 +24,7 @@ func TestSessionErrorPathsForUnknownTorrentAndFile(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("error paths"))
 
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestFuseMissingPathErrno(t *testing.T) {
 	content := []byte("errno payload")
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

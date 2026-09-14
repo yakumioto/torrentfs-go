@@ -43,7 +43,10 @@ func (s *Session) AddTorrent(ctx context.Context, src Source) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, _, err := s.addTorrentLockedResult(ctx, src)
+	st, _, err := s.addTorrentLockedResult(ctx, src)
+	if err == nil {
+		s.manualRefs[st.InfoHash()] = struct{}{}
+	}
 	return err
 }
 
@@ -77,6 +80,16 @@ func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torr
 		return nil, false, errors.New("session: Source needs MetainfoPath or MagnetURI")
 	}
 	if err != nil {
+		return nil, false, fmt.Errorf("session: add torrent: %w", err)
+	}
+	return s.addTorrentSpecLocked(ctx, spec)
+}
+
+func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.TorrentSpec) (*Torrent, bool, error) {
+	if err := s.ensureActiveLocked(); err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 	if s.cfg.Proxy.Socks5URL != "" {

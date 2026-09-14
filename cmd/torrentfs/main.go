@@ -9,8 +9,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -21,7 +19,7 @@ import (
 const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem.
 
 Usage:
-  torrentfs -mountpoint <dir> [flags] [torrent-file-or-directory]...
+  torrentfs -mountpoint <dir> [flags] <torrents-dir>
 
 Flags:
   -mountpoint <dir>  directory to mount on (required)
@@ -29,12 +27,12 @@ Flags:
   -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
 
-Each [torrent-file-or-directory] is either a .torrent file or a directory.
-Directories contribute their direct regular, non-symlink .torrent files in
-filename order. Each torrent is exposed under the mount point as a directory.
-Existing metadata files are restored at startup, and complete .torrent files
-may also be written to metadata/ while mounted. Send SIGINT or SIGTERM to
-unmount and exit.
+<torrents-dir> must be an existing directory. Its direct regular, non-symlink
+files whose names end in .torrent are scanned at startup and while running.
+Each torrent is exposed under the mount point as a directory. Existing
+metadata files are restored from <torrents-dir>/.metadata, and complete
+.torrent files may also be written to metadata/ while mounted. Send SIGINT or
+SIGTERM to unmount and exit.
 `
 
 func main() {
@@ -63,6 +61,16 @@ func run(args []string, stderr io.Writer) int {
 		flags.Usage()
 		return 2
 	}
+	if len(flags.Args()) != 1 {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: exactly one existing torrents directory is required (got %d positional arguments)\n", len(flags.Args()))
+		flags.Usage()
+		return 2
+	}
+	torrentsDir := flags.Args()[0]
+	if err := validateTorrentDir(torrentsDir); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
 
 	dataDirSet := false
 	flags.Visit(func(f *flag.Flag) {
@@ -82,28 +90,13 @@ func run(args []string, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	sess, err := session.New(cfg)
+	sess, err := session.New(cfg, torrentsDir)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {
 			return 2
 		}
 		return 1
-	}
-	for _, p := range flags.Args() {
-		paths, err := expandTorrentInput(p)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
-			_ = sess.Close(context.Background())
-			return 1
-		}
-		for _, torrentPath := range paths {
-			if err := sess.AddTorrent(rootCtx, session.Source{MetainfoPath: torrentPath}); err != nil {
-				_, _ = fmt.Fprintf(stderr, "torrentfs: add torrent %s: %v\n", torrentPath, err)
-				_ = sess.Close(context.Background())
-				return 1
-			}
-		}
 	}
 
 	server, err := filesystem.Mount(*mountpoint, sess, nil)
@@ -129,32 +122,18 @@ func run(args []string, stderr io.Writer) int {
 	return 0
 }
 
-func expandTorrentInput(path string) ([]string, error) {
+func validateTorrentDir(path string) error {
+	if path == "" {
+		return errors.New("torrents directory is required")
+	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() {
-		return []string{path}, nil
-	}
-
-	entries, err := os.ReadDir(path)
 	if err != nil {
-		return nil, fmt.Errorf("scan torrent directory %q: %w", path, err)
+		return fmt.Errorf("torrents directory %q must be an existing directory: %w", path, err)
 	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".torrent") {
-			continue
-		}
-		entryPath := filepath.Join(path, entry.Name())
-		entryInfo, err := os.Lstat(entryPath)
-		if err != nil {
-			return nil, fmt.Errorf("inspect torrent %q: %w", entryPath, err)
-		}
-		if entryInfo.Mode()&os.ModeSymlink != 0 || !entryInfo.Mode().IsRegular() {
-			continue
-		}
-		paths = append(paths, entryPath)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("torrents path %q must be an existing directory", path)
 	}
-	return paths, nil
+	return nil
 }
 
 func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {

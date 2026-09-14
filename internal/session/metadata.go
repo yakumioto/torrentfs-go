@@ -21,8 +21,8 @@ func validMetadataName(name string) bool {
 		filepath.Base(name) == name && strings.HasSuffix(name, ".torrent")
 }
 
-func metadataRoot(dataDir string) string {
-	return filepath.Clean(dataDir) + ".metadata"
+func metadataRoot(torrentsDir string) string {
+	return filepath.Join(filepath.Clean(torrentsDir), ".metadata")
 }
 
 func (s *Session) metadataPath(name string) string {
@@ -276,7 +276,7 @@ func (w *metadataWriter) Commit() error {
 	hash := st.InfoHash()
 	if err := os.Rename(w.tempPath, w.s.metadataPath(w.name)); err != nil {
 		if added {
-			_ = w.s.removeTorrentLocked(hash, st)
+			_ = w.s.releaseTorrentIfUnreferencedLocked(hash)
 		}
 		w.s.mu.Unlock()
 		return w.failLocked(fmt.Errorf("session: publish metadata %q: %w", w.name, err))
@@ -347,16 +347,12 @@ func (s *Session) removeMetadata(ctx context.Context, name string) error {
 	if !registered {
 		return nil
 	}
-	s.metadataRefs[hash]--
-	if s.metadataRefs[hash] > 0 {
+	if refs := s.metadataRefs[hash]; refs > 1 {
+		s.metadataRefs[hash] = refs - 1
 		return nil
 	}
 	delete(s.metadataRefs, hash)
-	st, ok := s.torrents[hash]
-	if !ok {
-		return nil
-	}
-	return s.removeTorrentLocked(hash, st)
+	return s.releaseTorrentIfUnreferencedLocked(hash)
 }
 
 func (s *Session) removeTorrentLocked(hash metainfo.Hash, st *Torrent) error {

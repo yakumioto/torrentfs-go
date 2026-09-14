@@ -22,6 +22,15 @@ func testConfig(dataDir string) config.Config {
 	return cfg
 }
 
+func testTorrentDir(t *testing.T, dataDir string) string {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(dataDir), "torrents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	return dir
+}
+
 // buildSingleFileTorrent writes data into the session data directory (using
 // anacrolix's default file storage layout: DataDir/<info name>) and produces
 // a .torrent file that describes it. The torrent has no trackers, so nothing

@@ -1,10 +1,12 @@
 # torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
-# mountpoint remains a required command-line flag. Configuration is loaded on
-# every startup; an explicit -data-dir flag overrides paths.data_dir.
+# mountpoint and one existing torrents directory remain required command-line
+# inputs. Configuration is loaded on every startup; an explicit -data-dir flag
+# overrides paths.data_dir.
 
 [paths]
-# Writable directory for downloaded data and the metadata sidecar.
+# Writable directory for downloaded payload data.
+# The required positional torrents directory stores .metadata separately.
 # Omitting this key uses <user cache dir>/torrentfs.
 data_dir = "./torrentfs-data"
 
@@ -23,10 +25,10 @@ socks5_url = ""
 capacity_bytes = 67108864
 
 [identity]
-# User-Agent for HTTP tracker announces; empty inherits the client default.
-tracker_user_agent = ""
-# Prefix of the generated 20-byte peer ID, measured in bytes; empty inherits the client default.
+# User-Agent for HTTP tracker announces. Explicit empty values use the anacrolix default.
+tracker_user_agent = "qBittorrent/4.4.0"
+# Prefix of the generated 20-byte peer ID, measured in bytes.
 # The remaining bytes are random for each session.
-peer_id_prefix = ""
-# BEP 10 extended handshake v value; empty inherits the client default.
-extended_handshake_client_version = ""
+peer_id_prefix = "-qB4400-"
+# BEP 10 extended handshake v value.
+extended_handshake_client_version = "qBittorrent/4.4.0"

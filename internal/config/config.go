@@ -99,7 +99,8 @@ type Identity struct {
 
 // Default returns the default configuration: a per-user data directory under
 // the OS cache dir (falling back to the temp dir), an ephemeral listen port,
-// an empty proxy, and a 64 MiB in-memory piece cache.
+// an empty proxy, qBittorrent 4.4.0 identity values, and a 64 MiB in-memory
+// piece cache.
 func Default() Config {
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
@@ -115,6 +116,11 @@ func Default() Config {
 		},
 		Cache: Cache{
 			CapacityBytes: defaultCacheCapacityBytes,
+		},
+		Identity: Identity{
+			TrackerUserAgent:               "qBittorrent/4.4.0",
+			PeerIDPrefix:                   "-qB4400-",
+			ExtendedHandshakeClientVersion: "qBittorrent/4.4.0",
 		},
 	}
 }

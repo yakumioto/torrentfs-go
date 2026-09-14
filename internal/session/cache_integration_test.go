@@ -17,7 +17,7 @@ import (
 
 func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Hash) *session.Session {
 	t.Helper()
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestSessionPieceStatesCompleteTorrent(t *testing.T) {
 func TestSessionPieceStatesUnknownTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	sess, err := session.New(testConfig(dataDir))
+	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

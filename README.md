@@ -2,11 +2,11 @@
 
 Mount BitTorrent downloads as a FUSE filesystem.
 
-> **Status: M5 — robustness and release.** `torrentfs` loads one or more
-> `.torrent` files or scans supplied directories, mounts a torrent tree, serves
-> file content on demand, and exposes a writable `metadata/` control directory
-> for adding and removing torrents. Each torrent root exposes a read-only
-> `.stats` file with one status
+> **Status: M5 — robustness and release.** `torrentfs` takes one writable
+> `torrents` directory, continuously reconciles its direct `.torrent` files,
+> mounts a torrent tree, serves file content on demand, and exposes a writable
+> `metadata/` control directory for adding and removing torrents. Each torrent
+> root exposes a read-only `.stats` file with one status
 > token per piece; repeated reads use an in-memory piece cache. `.stats` is a
 > reserved virtual name, so a top-level torrent file with that name is hidden.
 >
@@ -30,28 +30,43 @@ golangci-lint run ./...
 ## Usage
 
 ```sh
-go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] [torrent-file-or-directory]...
+go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] <torrents-dir>
 ```
 
-`-mountpoint` is required. Without `-config`, defaults are used; a TOML file
-loads the five sections shown in `torrentfs.example.toml`, and an explicit
-`-data-dir` overrides `[paths].data_dir`. Positional torrent inputs are optional.
-Each input can be a `.torrent` file or a directory; directories contribute only
-direct regular, non-symlink files whose names end in `.torrent`, in filename
-order, and are not scanned recursively. The session restores metadata first,
-then adds those inputs idempotently.
-Configuration is read at every startup; changing the file takes effect after a
-restart, not through SIGHUP.
+`-mountpoint` is required, and `<torrents-dir>` is exactly one existing,
+readable and writable directory. A file path such as
+`/data/torrentfs/input.torrent` is rejected: single-file positional input is
+not supported. Without `-config`, defaults are used; a TOML file loads the five
+sections shown in `torrentfs.example.toml`, and an explicit `-data-dir`
+overrides `[paths].data_dir`. `-data-dir` stores downloaded torrent data only;
+it is distinct from `<torrents-dir>`.
+
+At startup, torrentfs restores metadata and scans only direct regular,
+non-symlink files in `<torrents-dir>` whose names end in lower-case `.torrent`.
+It does not recurse into subdirectories. The directory is reconciled about
+once per 100 ms while the process runs: adding a stable valid `.torrent` loads
+it without restart, and removing a source releases its torrent when no other
+directory source or metadata file refers to the same info hash. Duplicate files
+for one hash share one torrent. Configuration is read at every startup;
+changing the file takes effect after a restart, not through SIGHUP.
+
+Write sources through a temporary filename such as `input.torrent.part`, then
+atomically rename it to `input.torrent`. Torrentfs checks file identity, size,
+and modification time before and after parsing, so it does not load a file that
+changes while being read. A malformed runtime replacement leaves an already
+loaded source active and is retried after the file changes; a stable malformed
+file present at startup fails startup with its path. Symlinks, temporary files,
+other extensions, and torrent-named directories are ignored.
 
 Data already present under the data directory (default: `<user cache
 dir>/torrentfs`) is served without contacting the network; missing pieces are
 fetched from peers while the mount is live. Write a complete `.torrent` file to
-`<mountpoint>/metadata/` to add a torrent, and unlink it to remove that torrent.
-On disk, the control directory is the sidecar path
-`filepath.Clean(data_dir)+".metadata"`; startup scans its regular, non-symlink
-`*.torrent` files in filename order. Temporary files, symlinks, and other
-entries are ignored. A malformed `.torrent` file makes startup fail instead of
-silently dropping a torrent.
+`<mountpoint>/metadata/` to add a persistent metadata source, and unlink it to
+remove that source. On disk, metadata is always `<torrents-dir>/.metadata`;
+that directory is not scanned as an ordinary source and is not exposed as a
+torrent node. This is a development-stage breaking layout change: the former
+sibling `filepath.Clean(data_dir)+".metadata"` is not read, migrated, reported,
+or written.
 
 Metadata restores the torrent set and references, while no SQLite or other
 progress database is used. Downloaded data is rechecked by anacrolix after a
@@ -77,9 +92,9 @@ socks5_url = ""
 capacity_bytes = 67108864
 
 [identity]
-tracker_user_agent = ""
-peer_id_prefix = ""
-extended_handshake_client_version = ""
+tracker_user_agent = "qBittorrent/4.4.0"
+peer_id_prefix = "-qB4400-"
+extended_handshake_client_version = "qBittorrent/4.4.0"
 ```
 
 `capacity_bytes` is a byte limit. An empty `socks5_url` disables the proxy;
@@ -89,16 +104,17 @@ webseed requests. UTP, DHT, and UDP tracker traffic are disabled or rejected in
 proxy mode, so there is no direct UDP fallback. Incoming TCP listening remains
 controlled by `[connections]` and is not routed through the SOCKS5 proxy.
 
-`[identity].tracker_user_agent` changes only the `User-Agent` header on HTTP
-tracker announce requests; it does not change metainfo, webseed, or scrape
-requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is limited
-to 20 bytes, and any remaining bytes are generated randomly for each session.
-An empty prefix inherits the dependency's default prefix and random suffix; a
-20-byte prefix leaves no random suffix. The generated peer ID is used for
-BitTorrent handshakes and announces. `extended_handshake_client_version` is
-the BEP 10 extended-handshake `v` value. Empty identity values inherit the
-anacrolix defaults, and `v` is sent only when the peer supports the extended
-handshake.
+The default identity is qBittorrent 4.4.0: `tracker_user_agent` and the BEP 10
+extended-handshake `v` value are `qBittorrent/4.4.0`, and `peer_id_prefix` is
+`-qB4400-`. `[identity].tracker_user_agent` changes only the `User-Agent`
+header on HTTP tracker announce requests; it does not change metainfo, webseed,
+or scrape requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is
+limited to 20 bytes, and any remaining bytes are generated randomly for each
+session. A 20-byte prefix leaves no random suffix. The generated peer ID is
+used for BitTorrent handshakes and announces. Explicit TOML values override
+the defaults; explicitly setting an identity value to an empty string delegates
+that field to the anacrolix default. `v` is sent only when the peer supports the
+extended handshake.
 
 ## Error behavior
 
@@ -156,57 +172,36 @@ From the repository root, run:
 ./scripts/docker-smoke.sh
 ```
 
-The script builds the image, bind mounts `examples/docker/example.torrent` as a
-single file at `/torrents/example.torrent`, preloads its matching payload under
-`/data`, reads that payload through the FUSE mount, and verifies the missing-file
-error path. It requires a working Docker daemon, `/dev/fuse`, `SYS_ADMIN` mount
+The script builds the image, bind mounts a writable temporary `torrents`
+directory at `/torrents`, preloads the matching payload under `/data`, reads it
+through the FUSE mount, and verifies rejected single-file and missing-directory
+CLI inputs. It requires a working Docker daemon, `/dev/fuse`, `SYS_ADMIN` mount
 permission, and (on AppArmor hosts) permission to use
 `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
 not copied into the production image.
 
-To load every torrent in a host directory, bind mount that directory at
-`/torrents` and pass `/torrents` as the positional input:
+Mount a host directory at `/torrents` and pass that directory as the sole
+positional argument:
 
 ```sh
-docker run --rm \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor=unconfined \
-  -v /srv/torrentfs-data:/data \
-  -v /srv/torrents:/torrents:ro \
-  -v /srv/mnt:/mnt \
-  torrentfs -mountpoint /mnt -data-dir /data /torrents
-```
-
-Only direct regular, non-symlink `*.torrent` files are loaded; subdirectories
-are not scanned.
-
-To run the image with a real torrent, set `TORRENT_FILE` to that existing
-absolute `.torrent` file. The image does not contain user torrent files, and a
-host directory bind mount does not create `/torrents/example.torrent` for you:
-
-```sh
-TORRENT_FILE=/srv/torrents/real-file.torrent
-test -f "$TORRENT_FILE" || {
-  printf 'torrent file not found: %s\n' "$TORRENT_FILE" >&2
-  exit 1
-}
+mkdir -p /srv/torrentfs-data /srv/torrents /srv/mnt
 docker build -t torrentfs .
 docker run --rm \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
   -v /srv/torrentfs-data:/data \
-  --mount "type=bind,src=$TORRENT_FILE,dst=/torrents/input.torrent,readonly" \
+  -v /srv/torrents:/torrents \
   -v /srv/mnt:/mnt \
-  torrentfs -mountpoint /mnt -data-dir /data /torrents/input.torrent
+  torrentfs -mountpoint /mnt -data-dir /data /torrents
 ```
 
-`TORRENT_FILE` must be a readable regular file, `/srv/torrentfs-data` must be
-writable for torrent data, and `/srv/mnt` must be a writable mountpoint. The
-single-file `--mount` destination and the positional argument must match.
-`-data-dir` controls torrent data storage; it does not change the torrent input
-path.
+`/srv/torrents` must be writable because torrentfs creates and updates
+`/torrents/.metadata`; do not mount it read-only. Add and remove direct regular
+lower-case `*.torrent` files in that directory while the container is running.
+Use a temporary filename followed by an atomic rename for writers. `/srv/torrentfs-data`
+stores downloaded payload data and `/srv/mnt` must be a writable mountpoint;
+`-data-dir` does not change the torrent source directory.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
 mount capability. The image installs `fuse3` and mount helpers and runs
