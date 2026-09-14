@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Everything that runs without a FUSE device. FUSE-dependent tests skip
+  # themselves here with a printed reason; the fuse job below requires them.
+  test:
+    name: build, vet, unit and race tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Race detector
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    env:
+      GOLANGCI_LINT_VERSION: v2.12.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Build golangci-lint with this job's Go toolchain instead of downloading
+      # a prebuilt release. golangci-lint refuses to load a module whose `go`
+      # directive is newer than the Go that built the binary, and release
+      # binaries can lag behind. Building from source keeps the two in step.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_LINT_VERSION }}
+      - name: Lint
+        run: $(go env GOPATH)/bin/golangci-lint run ./...
+
+  # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
+  # /dev/fuse, fusermount, or mount permission fails instead of silently
+  # skipping every real-mount test.
+  fuse:
+    name: real FUSE mount tests (required)
+    runs-on: ubuntu-latest
+    env:
+      TORRENTFS_FUSE_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install FUSE
+        run: sudo apt-get update && sudo apt-get install -y fuse3
+      - name: Require /dev/fuse
+        run: test -e /dev/fuse
+      - name: Real-mount smoke, concurrency, error, and swarm tests
+        run: go test -race -run 'TestFuse|TestSessionIncomplete' ./...
