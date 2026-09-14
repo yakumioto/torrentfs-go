@@ -1,0 +1,1 @@
+MIO-16 Docker fixture payload.

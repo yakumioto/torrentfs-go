@@ -145,17 +145,47 @@ DHT and UTP, so it never contacts the public network.
 
 ## Docker (rootful)
 
+The repository includes an offline fixture and an end-to-end Docker/FUSE check.
+From the repository root, run:
+
 ```sh
+./scripts/docker-smoke.sh
+```
+
+The script builds the image, bind mounts `examples/docker/example.torrent` as a
+single file at `/torrents/example.torrent`, preloads its matching payload under
+`/data`, reads that payload through the FUSE mount, and verifies the missing-file
+error path. It requires a working Docker daemon, `/dev/fuse`, `SYS_ADMIN` mount
+permission, and (on AppArmor hosts) permission to use
+`--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
+not copied into the production image.
+
+To run the image with a real torrent, set `TORRENT_FILE` to that existing
+absolute `.torrent` file. The image does not contain user torrent files, and a
+host directory bind mount does not create `/torrents/example.torrent` for you:
+
+```sh
+TORRENT_FILE=/srv/torrents/real-file.torrent
+test -f "$TORRENT_FILE" || {
+  printf 'torrent file not found: %s\n' "$TORRENT_FILE" >&2
+  exit 1
+}
 docker build -t torrentfs .
 docker run --rm \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
   -v /srv/torrentfs-data:/data \
-  -v /srv/torrents:/torrents:ro \
+  --mount "type=bind,src=$TORRENT_FILE,dst=/torrents/input.torrent,readonly" \
   -v /srv/mnt:/mnt \
-  torrentfs -mountpoint /mnt -data-dir /data /torrents/example.torrent
+  torrentfs -mountpoint /mnt -data-dir /data /torrents/input.torrent
 ```
+
+`TORRENT_FILE` must be a readable regular file, `/srv/torrentfs-data` must be
+writable for torrent data, and `/srv/mnt` must be a writable mountpoint. The
+single-file `--mount` destination and the positional argument must match.
+`-data-dir` controls torrent data storage; it does not change the torrent input
+path.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
 mount capability. The image installs `fuse3` and mount helpers and runs

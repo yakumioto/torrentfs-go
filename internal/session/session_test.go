@@ -129,6 +129,38 @@ func TestSessionReadsExistingData(t *testing.T) {
 	}
 }
 
+func TestSessionAddTorrentMissingMetainfoPreservesPathError(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	missing := filepath.Join(work, "inputs", "missing.torrent")
+
+	sess, err := session.New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	err = sess.AddTorrent(context.Background(), session.Source{MetainfoPath: missing})
+	if err == nil {
+		t.Fatal("AddTorrent succeeded for missing metainfo")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AddTorrent error = %v, want os.ErrNotExist", err)
+	}
+	for _, want := range []string{"session: add torrent", missing, "no such file or directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("AddTorrent error = %q, want %q", err, want)
+		}
+	}
+	if got := len(sess.List()); got != 0 {
+		t.Fatalf("List after missing metainfo = %d, want 0", got)
+	}
+}
+
 // TestSessionDuplicateAddIsIdempotent registers the same torrent twice.
 func TestSessionDuplicateAddIsIdempotent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
