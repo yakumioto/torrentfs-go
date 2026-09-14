@@ -3,9 +3,10 @@
 Mount BitTorrent downloads as a FUSE filesystem.
 
 > **Status: M5 — robustness and release.** `torrentfs` loads one or more
-> `.torrent` files, mounts a torrent tree, serves file content on demand, and
-> exposes a writable `metadata/` control directory for adding and removing
-> torrents. Each torrent root exposes a read-only `.stats` file with one status
+> `.torrent` files or scans supplied directories, mounts a torrent tree, serves
+> file content on demand, and exposes a writable `metadata/` control directory
+> for adding and removing torrents. Each torrent root exposes a read-only
+> `.stats` file with one status
 > token per piece; repeated reads use an in-memory piece cache. `.stats` is a
 > reserved virtual name, so a top-level torrent file with that name is hidden.
 >
@@ -29,13 +30,16 @@ golangci-lint run ./...
 ## Usage
 
 ```sh
-go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] [torrent-file]...
+go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] [torrent-file-or-directory]...
 ```
 
 `-mountpoint` is required. Without `-config`, defaults are used; a TOML file
 loads the five sections shown in `torrentfs.example.toml`, and an explicit
-`-data-dir` overrides `[paths].data_dir`. Positional torrent files are optional:
-the session restores metadata first, then adds those files idempotently.
+`-data-dir` overrides `[paths].data_dir`. Positional torrent inputs are optional.
+Each input can be a `.torrent` file or a directory; directories contribute only
+direct regular, non-symlink files whose names end in `.torrent`, in filename
+order, and are not scanned recursively. The session restores metadata first,
+then adds those inputs idempotently.
 Configuration is read at every startup; changing the file takes effect after a
 restart, not through SIGHUP.
 
@@ -159,6 +163,23 @@ error path. It requires a working Docker daemon, `/dev/fuse`, `SYS_ADMIN` mount
 permission, and (on AppArmor hosts) permission to use
 `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
 not copied into the production image.
+
+To load every torrent in a host directory, bind mount that directory at
+`/torrents` and pass `/torrents` as the positional input:
+
+```sh
+docker run --rm \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
+  -v /srv/torrentfs-data:/data \
+  -v /srv/torrents:/torrents:ro \
+  -v /srv/mnt:/mnt \
+  torrentfs -mountpoint /mnt -data-dir /data /torrents
+```
+
+Only direct regular, non-symlink `*.torrent` files are loaded; subdirectories
+are not scanned.
 
 To run the image with a real torrent, set `TORRENT_FILE` to that existing
 absolute `.torrent` file. The image does not contain user torrent files, and a

@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -19,7 +21,7 @@ import (
 const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem.
 
 Usage:
-  torrentfs -mountpoint <dir> [flags] [torrent-file]...
+  torrentfs -mountpoint <dir> [flags] [torrent-file-or-directory]...
 
 Flags:
   -mountpoint <dir>  directory to mount on (required)
@@ -27,10 +29,12 @@ Flags:
   -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
 
-Each [torrent-file] is a .torrent file to expose under the mount point as a
-directory. Existing metadata files are restored at startup, and complete
-.torrent files may also be written to metadata/ while mounted. Send SIGINT or
-SIGTERM to unmount and exit.
+Each [torrent-file-or-directory] is either a .torrent file or a directory.
+Directories contribute their direct regular, non-symlink .torrent files in
+filename order. Each torrent is exposed under the mount point as a directory.
+Existing metadata files are restored at startup, and complete .torrent files
+may also be written to metadata/ while mounted. Send SIGINT or SIGTERM to
+unmount and exit.
 `
 
 func main() {
@@ -87,10 +91,18 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	for _, p := range flags.Args() {
-		if err := sess.AddTorrent(rootCtx, session.Source{MetainfoPath: p}); err != nil {
-			_, _ = fmt.Fprintf(stderr, "torrentfs: add torrent %s: %v\n", p, err)
+		paths, err := expandTorrentInput(p)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 			_ = sess.Close(context.Background())
 			return 1
+		}
+		for _, torrentPath := range paths {
+			if err := sess.AddTorrent(rootCtx, session.Source{MetainfoPath: torrentPath}); err != nil {
+				_, _ = fmt.Fprintf(stderr, "torrentfs: add torrent %s: %v\n", torrentPath, err)
+				_ = sess.Close(context.Background())
+				return 1
+			}
 		}
 	}
 
@@ -115,6 +127,34 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func expandTorrentInput(path string) ([]string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return []string{path}, nil
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("scan torrent directory %q: %w", path, err)
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".torrent") {
+			continue
+		}
+		entryPath := filepath.Join(path, entry.Name())
+		entryInfo, err := os.Lstat(entryPath)
+		if err != nil {
+			return nil, fmt.Errorf("inspect torrent %q: %w", entryPath, err)
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 || !entryInfo.Mode().IsRegular() {
+			continue
+		}
+		paths = append(paths, entryPath)
+	}
+	return paths, nil
 }
 
 func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {
