@@ -11,18 +11,22 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem.
+const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem and serves a
+torrent management HTTP API.
 
 Usage:
   torrentfs -mountpoint <dir> [flags] <torrents-dir>
 
 Flags:
-  -mountpoint <dir>  directory to mount on (required)
+  -mountpoint <dir>  directory to mount on (required unless the HTTP API is enabled)
   -config <file>     TOML configuration file
   -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
@@ -34,7 +38,11 @@ directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
 directory tree. A read-only stats/ control tree mirrors the data tree and
 reports piece state. Existing metadata files are restored from
 <torrents-dir>/.metadata, and complete .torrent files may also be written to
-metadata/ while mounted. Send SIGINT or SIGTERM to unmount and exit.
+metadata/ while mounted.
+
+When http.listen_addr is set the management API is served; unless a required
+Bearer Token is configured it must bind loopback only. Omitting -mountpoint
+then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
 `
 
 func main() {
@@ -57,10 +65,6 @@ func run(args []string, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
-		return 2
-	}
-	if *mountpoint == "" {
-		flags.Usage()
 		return 2
 	}
 	if len(flags.Args()) != 1 {
@@ -86,6 +90,12 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
+	httpEnabled := cfg.HTTP.ListenAddr != ""
+	if *mountpoint == "" && !httpEnabled {
+		flags.Usage()
+		return 2
+	}
+
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signals := make(chan os.Signal, 1)
@@ -101,24 +111,50 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	server, err := filesystem.Mount(*mountpoint, sess, nil)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
-		_ = sess.Close(context.Background())
-		return 1
+	var server *fuse.Server
+	if *mountpoint != "" {
+		server, err = filesystem.Mount(*mountpoint, sess, nil)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
+			_ = sess.Close(context.Background())
+			return 1
+		}
 	}
 
-	<-signals
-	unmountErr := server.Unmount()
+	var apiServer *api.Server
+	serveErr := make(chan error, 1)
+	if httpEnabled {
+		apiServer = api.New(cfg, sess)
+		go func() { serveErr <- apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr) }()
+	}
+
+	var serveFailure error
+	select {
+	case <-signals:
+	case serveFailure = <-serveErr:
+	}
+
+	var unmountErr error
+	if server != nil {
+		unmountErr = server.Unmount()
+	}
+	if apiServer != nil {
+		if err := apiServer.Shutdown(context.Background()); err != nil && serveFailure == nil {
+			serveFailure = err
+		}
+	}
 	closeErr := sess.Close(rootCtx)
 	cancel()
 	if unmountErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: unmount %s: %v\n", *mountpoint, unmountErr)
 	}
+	if serveFailure != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: http server: %v\n", serveFailure)
+	}
 	if closeErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", closeErr)
 	}
-	if unmountErr != nil || closeErr != nil {
+	if unmountErr != nil || serveFailure != nil || closeErr != nil {
 		return 1
 	}
 	return 0

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ type Source struct {
 	MetainfoPath string
 	// MagnetURI is a magnet link whose metadata may still need fetching.
 	MagnetURI string
+	// Metainfo is raw .torrent bytes, used by callers that already hold the
+	// file contents (for example an HTTP upload).
+	Metainfo []byte
 }
 
 // Torrent is a session handle on one registered torrent. It exposes the
@@ -63,26 +67,52 @@ func (s *Session) addTorrentLockedResult(ctx context.Context, src Source) (*Torr
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 
-	var spec *torrent.TorrentSpec
-	var err error
-	switch {
-	case src.MagnetURI != "" && src.MetainfoPath != "":
-		return nil, false, errors.New("session: Source sets both MetainfoPath and MagnetURI")
-	case src.MagnetURI != "":
-		spec, err = torrent.TorrentSpecFromMagnetUri(src.MagnetURI)
-	case src.MetainfoPath != "":
-		var mi *metainfo.MetaInfo
-		mi, err = metainfo.LoadFromFile(src.MetainfoPath)
-		if err == nil {
-			spec, err = torrent.TorrentSpecFromMetaInfoErr(mi)
-		}
-	default:
-		return nil, false, errors.New("session: Source needs MetainfoPath or MagnetURI")
-	}
+	spec, err := specFromSource(src)
 	if err != nil {
-		return nil, false, fmt.Errorf("session: add torrent: %w", err)
+		return nil, false, err
 	}
 	return s.addTorrentSpecLocked(ctx, spec)
+}
+
+// specFromSource builds a torrent spec from exactly one of a .torrent path, a
+// magnet link, or raw metainfo bytes.
+func specFromSource(src Source) (*torrent.TorrentSpec, error) {
+	set := 0
+	if src.MetainfoPath != "" {
+		set++
+	}
+	if src.MagnetURI != "" {
+		set++
+	}
+	if len(src.Metainfo) > 0 {
+		set++
+	}
+	if set != 1 {
+		return nil, errors.New("session: Source must set exactly one of MetainfoPath, MagnetURI, or Metainfo")
+	}
+
+	if src.MagnetURI != "" {
+		spec, err := torrent.TorrentSpecFromMagnetUri(src.MagnetURI)
+		if err != nil {
+			return nil, fmt.Errorf("session: add torrent: %w", err)
+		}
+		return spec, nil
+	}
+	var mi *metainfo.MetaInfo
+	var err error
+	if src.MetainfoPath != "" {
+		mi, err = metainfo.LoadFromFile(src.MetainfoPath)
+	} else {
+		mi, err = metainfo.Load(bytes.NewReader(src.Metainfo))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session: add torrent: %w", err)
+	}
+	spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
+	if err != nil {
+		return nil, fmt.Errorf("session: add torrent: %w", err)
+	}
+	return spec, nil
 }
 
 func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.TorrentSpec) (*Torrent, bool, error) {
@@ -116,6 +146,8 @@ func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.Torren
 	}
 	st := &Torrent{tor: t, readers: make(map[string]*raFile), cache: s.pieceCache}
 	s.torrents[hash] = st
+	// A newly registered task supersedes any completed deletion operation.
+	delete(s.lastOps, hash)
 	return st, true, nil
 }
 

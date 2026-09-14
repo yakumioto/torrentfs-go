@@ -258,12 +258,6 @@ func buildInternalTestTorrent(t *testing.T, dataDir, torrentDir string, content 
 
 func buildInternalTestTorrentWithPieceLength(t *testing.T, dataDir, torrentDir string, content []byte, pieceLength int64) (string, metainfo.Hash) {
 	t.Helper()
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("make data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dataDir, "payload.bin"), content, 0o644); err != nil {
-		t.Fatalf("write data: %v", err)
-	}
 	pieceSize := int(pieceLength)
 	pieces := make([]byte, 0, (len(content)+pieceSize-1)/pieceSize*sha1.Size)
 	for off := 0; off < len(content); off += pieceSize {
@@ -289,11 +283,19 @@ func buildInternalTestTorrentWithPieceLength(t *testing.T, dataDir, torrentDir s
 	if err != nil {
 		t.Fatalf("encode metainfo: %v", err)
 	}
+	hash := mi.HashInfoBytes()
+	dir := filepath.Join(dataDir, "payload", hash.HexString())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("make data dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "payload.bin"), content, 0o644); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
 	path := filepath.Join(torrentDir, "payload.bin.torrent")
 	if err := os.WriteFile(path, encoded, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
 	}
-	return path, mi.HashInfoBytes()
+	return path, hash
 }
 
 func waitInternalTorrentComplete(t *testing.T, ctx context.Context, st *Torrent) {

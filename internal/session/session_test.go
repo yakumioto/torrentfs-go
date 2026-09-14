@@ -297,7 +297,7 @@ func TestSessionMetadataRootDoesNotConflictWithTorrentNamedMetadata(t *testing.T
 		}
 	}()
 
-	dataPath := filepath.Join(dataDir, "metadata")
+	dataPath := filepath.Join(payloadDir(dataDir, hash), "metadata")
 	if info, err := os.Stat(dataPath); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("torrent data path = (%v, %v), want regular file", info, err)
 	}

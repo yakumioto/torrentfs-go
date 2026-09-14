@@ -31,20 +31,27 @@ func testTorrentDir(t *testing.T, dataDir string) string {
 	return dir
 }
 
-// buildSingleFileTorrent writes data into the session data directory (using
-// anacrolix's default file storage layout: DataDir/<info name>) and produces
-// a .torrent file that describes it. The torrent has no trackers, so nothing
-// in the test touches the network.
+// payloadDir is the per-torrent payload directory the session's storage uses
+// for one info hash: <data_dir>/payload/<info_hash>.
+func payloadDir(dataDir string, hash metainfo.Hash) string {
+	return filepath.Join(dataDir, "payload", hash.HexString())
+}
+
+// buildSingleFileTorrent writes data into the torrent's own payload directory
+// (the session storage layout payload/<info_hash>/<name>) and produces a
+// .torrent file that describes it. The torrent has no trackers, so nothing in
+// the test touches the network.
 func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data []byte) (torrentPath string, hash metainfo.Hash) {
 	t.Helper()
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
+	dir := payloadDir(dataDir, hash)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("make data dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, name), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 		t.Fatalf("write data file: %v", err)
 	}
 
-	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
@@ -89,10 +96,6 @@ func buildSingleFileTorrentBytes(t *testing.T, name string, data []byte, tracker
 
 func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files map[string][]byte) (torrentPath string, hash metainfo.Hash, all []byte) {
 	t.Helper()
-	root := filepath.Join(dataDir, name)
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("make multi-file root: %v", err)
-	}
 	paths := make([]string, 0, len(files))
 	for path := range files {
 		paths = append(paths, path)
@@ -101,13 +104,6 @@ func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files
 	infoFiles := make([]metainfo.FileInfo, 0, len(paths))
 	for _, path := range paths {
 		data := files[path]
-		fullPath := filepath.Join(root, filepath.FromSlash(path))
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-			t.Fatalf("make parent for %q: %v", path, err)
-		}
-		if err := os.WriteFile(fullPath, data, 0o644); err != nil {
-			t.Fatalf("write %q: %v", path, err)
-		}
 		infoFiles = append(infoFiles, metainfo.FileInfo{
 			Length: int64(len(data)),
 			Path:   strings.Split(path, "/"),
@@ -138,9 +134,20 @@ func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files
 	if err != nil {
 		t.Fatalf("encode multi-file metainfo: %v", err)
 	}
+	hash = mi.HashInfoBytes()
+	root := filepath.Join(payloadDir(dataDir, hash), name)
+	for _, path := range paths {
+		fullPath := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatalf("make parent for %q: %v", path, err)
+		}
+		if err := os.WriteFile(fullPath, files[path], 0o644); err != nil {
+			t.Fatalf("write %q: %v", path, err)
+		}
+	}
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write multi-file torrent: %v", err)
 	}
-	return torrentPath, mi.HashInfoBytes(), all
+	return torrentPath, hash, all
 }

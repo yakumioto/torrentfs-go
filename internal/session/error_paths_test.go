@@ -69,10 +69,11 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	}
 	// Only half of the first piece exists on disk; nothing else is available
 	// and no seeder ever joins the swarm.
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	partialDir := payloadDir(dataDir, hash)
+	if err := os.MkdirAll(partialDir, 0o755); err != nil {
 		t.Fatalf("make data dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, "payload.bin"), content[:testPieceLength/2], 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(partialDir, "payload.bin"), content[:testPieceLength/2], 0o644); err != nil {
 		t.Fatalf("write partial data: %v", err)
 	}
 

@@ -63,10 +63,11 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 
 	// Seeder: the data already sits in its own data directory.
 	seederDir := filepath.Join(work, "seeder-data")
-	if err := os.MkdirAll(seederDir, 0o755); err != nil {
+	seederPayload := payloadDir(seederDir, hash)
+	if err := os.MkdirAll(seederPayload, 0o755); err != nil {
 		t.Fatalf("make seeder data dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(seederDir, "payload.bin"), content, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(seederPayload, "payload.bin"), content, 0o644); err != nil {
 		t.Fatalf("write seeder data: %v", err)
 	}
 	seederTorrent := filepath.Join(work, "seeder.torrent")

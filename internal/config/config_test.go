@@ -24,6 +24,15 @@ func TestDefault(t *testing.T) {
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
+	if cfg.HTTP.ListenAddr != "127.0.0.1:8080" {
+		t.Fatalf("Default listen address = %q, want 127.0.0.1:8080", cfg.HTTP.ListenAddr)
+	}
+	if cfg.HTTP.MaxUploadBytes != 10<<20 {
+		t.Fatalf("Default max upload = %d, want %d", cfg.HTTP.MaxUploadBytes, 10<<20)
+	}
+	if cfg.HTTP.BearerToken != "" {
+		t.Fatalf("Default bearer token = %q, want empty", cfg.HTTP.BearerToken)
+	}
 	wantIdentity := config.Identity{
 		TrackerUserAgent:               "qBittorrent/4.4.0",
 		PeerIDPrefix:                   "-qB4400-",
@@ -82,6 +91,38 @@ extended_handshake_client_version = "torrentfs-test/1.0"
 	}
 	if cfg.Identity != wantIdentity {
 		t.Fatalf("Identity = %+v, want %+v", cfg.Identity, wantIdentity)
+	}
+}
+
+func TestLoadHTTPSection(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	payloadDir := filepath.Join(t.TempDir(), "payload")
+	path := writeConfig(t, `
+[paths]
+data_dir = `+quote(dataDir)+`
+payload_dir = `+quote(payloadDir)+`
+
+[http]
+listen_addr = "127.0.0.1:9000"
+bearer_token = "secret-token"
+max_upload_bytes = 2048
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Paths.PayloadDir != payloadDir {
+		t.Fatalf("PayloadDir = %q, want %q", cfg.Paths.PayloadDir, payloadDir)
+	}
+	if cfg.HTTP.ListenAddr != "127.0.0.1:9000" {
+		t.Fatalf("ListenAddr = %q", cfg.HTTP.ListenAddr)
+	}
+	if cfg.HTTP.BearerToken != "secret-token" {
+		t.Fatalf("BearerToken = %q", cfg.HTTP.BearerToken)
+	}
+	if cfg.HTTP.MaxUploadBytes != 2048 {
+		t.Fatalf("MaxUploadBytes = %d, want 2048", cfg.HTTP.MaxUploadBytes)
 	}
 }
 
@@ -287,6 +328,41 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 			},
 			field: "proxy.socks5_url",
 		},
+		{
+			name: "invalid listen address",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.ListenAddr = "127.0.0.1"
+			},
+			field: "http.listen_addr",
+		},
+		{
+			name: "non-positive max upload",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.MaxUploadBytes = 0
+			},
+			field: "http.max_upload_bytes",
+		},
+		{
+			name: "bearer token with newline",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.BearerToken = "token\n"
+			},
+			field: "http.bearer_token",
+		},
+		{
+			name: "non-loopback address without token",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.ListenAddr = "0.0.0.0:8080"
+			},
+			field: "http.listen_addr",
+		},
+		{
+			name: "empty host without token",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.ListenAddr = ":8080"
+			},
+			field: "http.listen_addr",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -377,6 +453,22 @@ func TestValidateAcceptsIdentityValues(t *testing.T) {
 	cfg.Identity.PeerIDPrefix = "客户端"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate non-ASCII prefix: %v", err)
+	}
+}
+
+func TestValidateAcceptsExposedAddressWithToken(t *testing.T) {
+	cfg := config.Default()
+	cfg.HTTP.ListenAddr = "0.0.0.0:9000"
+	cfg.HTTP.BearerToken = "secret"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate exposed address with token: %v", err)
+	}
+
+	cfg = config.Default()
+	cfg.HTTP.ListenAddr = "" // HTTP disabled
+	cfg.HTTP.BearerToken = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate disabled HTTP: %v", err)
 	}
 }
 

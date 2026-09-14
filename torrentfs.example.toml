@@ -1,7 +1,8 @@
 # torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
-# mountpoint and one existing torrents directory remain required command-line
-# inputs. Configuration is loaded on every startup; an explicit -data-dir flag
+# One existing torrents directory remains a required command-line input.
+# mountpoint is required unless the HTTP API is enabled (http.listen_addr).
+# Configuration is loaded on every startup; an explicit -data-dir flag
 # overrides paths.data_dir.
 
 [paths]
@@ -9,6 +10,19 @@
 # The required positional torrents directory stores .metadata separately.
 # Omitting this key uses <user cache dir>/torrentfs.
 data_dir = "./torrentfs-data"
+# Managed root for per-torrent payload directories. Each torrent owns
+# <payload_dir>/<info_hash>, which is the only directory ever purged when a
+# deletion requests purge_data=true. Empty uses <data_dir>/payload.
+payload_dir = ""
+
+[http]
+# Address of the torrent management API. Empty disables the service. The
+# default binds loopback only; exposing it requires a bearer_token.
+listen_addr = "127.0.0.1:8080"
+# When non-empty, every request must send Authorization: Bearer <token>.
+bearer_token = ""
+# Maximum size of an uploaded .torrent request body, in bytes (10 MiB default).
+max_upload_bytes = 10485760
 
 [connections]
 # Empty listens on all suitable local interfaces.

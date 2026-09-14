@@ -202,10 +202,11 @@ func TestIdentityReachesTrackerAndPeerHandshake(t *testing.T) {
 	transmissionEvents := newHandshakeEvents()
 
 	qbDataDir := filepath.Join(work, "qbittorrent-data")
-	if err := os.MkdirAll(qbDataDir, 0o755); err != nil {
+	qbPayload := payloadDir(qbDataDir, hash)
+	if err := os.MkdirAll(qbPayload, 0o755); err != nil {
 		t.Fatalf("make qBittorrent data dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(qbDataDir, "payload.bin"), content, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(qbPayload, "payload.bin"), content, 0o644); err != nil {
 		t.Fatalf("write qBittorrent payload: %v", err)
 	}
 	qbConfig := testConfig(qbDataDir)

@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,9 +24,17 @@ var (
 	errProxyPort        = errors.New("proxy port must be between 1 and 65535")
 	errPeerIDPrefixSize = errors.New("must be at most 20 bytes")
 	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
+	errListenAddr       = errors.New("must be a host:port address")
+	errPositive         = errors.New("must be positive")
+	errBearerToken      = errors.New("must not contain carriage return or line feed")
+	errExposedNoToken   = errors.New("exposing a non-loopback address requires bearer_token")
 )
 
-const defaultCacheCapacityBytes int64 = 64 << 20
+const (
+	defaultCacheCapacityBytes int64 = 64 << 20
+	defaultHTTPListenAddr           = "127.0.0.1:8080"
+	defaultMaxUploadBytes     int64 = 10 << 20
+)
 
 // ValidationError identifies the configuration field that failed validation.
 type ValidationError struct {
@@ -56,6 +65,7 @@ type Config struct {
 	Proxy       Proxy       `toml:"proxy"`
 	Cache       Cache       `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
+	HTTP        HTTP        `toml:"http"`
 }
 
 // Paths groups the filesystem paths torrentfs manages at runtime.
@@ -63,6 +73,20 @@ type Paths struct {
 	// DataDir is where the torrent session stores and reads torrent data.
 	// It must exist and be writable; the session creates it if missing.
 	DataDir string `toml:"data_dir"`
+	// PayloadDir is the managed root under which every torrent gets its own
+	// per-info-hash directory. Empty uses <data_dir>/payload.
+	PayloadDir string `toml:"payload_dir"`
+}
+
+// HTTP groups the optional torrent-management HTTP service settings.
+type HTTP struct {
+	// ListenAddr is the address the HTTP service binds. Empty disables the
+	// service. The default binds loopback only.
+	ListenAddr string `toml:"listen_addr"`
+	// BearerToken, when non-empty, requires Authorization: Bearer <token>.
+	BearerToken string `toml:"bearer_token"`
+	// MaxUploadBytes caps an uploaded .torrent request body.
+	MaxUploadBytes int64 `toml:"max_upload_bytes"`
 }
 
 // Connections groups network settings of the torrent session.
@@ -117,6 +141,10 @@ func Default() Config {
 		Cache: Cache{
 			CapacityBytes: defaultCacheCapacityBytes,
 		},
+		HTTP: HTTP{
+			ListenAddr:     defaultHTTPListenAddr,
+			MaxUploadBytes: defaultMaxUploadBytes,
+		},
 		Identity: Identity{
 			TrackerUserAgent:               "qBittorrent/4.4.0",
 			PeerIDPrefix:                   "-qB4400-",
@@ -145,7 +173,32 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
 		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
 	}
+	if c.HTTP.ListenAddr != "" {
+		host, _, err := net.SplitHostPort(c.HTTP.ListenAddr)
+		if err != nil {
+			return invalid("http.listen_addr", errListenAddr)
+		}
+		if c.HTTP.BearerToken == "" && !isLoopbackHost(host) {
+			return invalid("http.listen_addr", errExposedNoToken)
+		}
+	}
+	if c.HTTP.MaxUploadBytes <= 0 {
+		return invalid("http.max_upload_bytes", errPositive)
+	}
+	if strings.ContainsAny(c.HTTP.BearerToken, "\r\n") {
+		return invalid("http.bearer_token", errBearerToken)
+	}
 	return nil
+}
+
+// isLoopbackHost reports whether an HTTP listen host is confined to the local
+// machine. An empty host binds every interface and is therefore not loopback.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateProxyURL(raw string) error {
