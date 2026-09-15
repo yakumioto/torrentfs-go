@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"io"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -45,6 +46,25 @@ var NewWithClientConfig = newWithClientConfig
 // TorrentClientConfig is the concrete client configuration type tests adjust
 // through NewWithClientConfig.
 type TorrentClientConfig = torrent.ClientConfig
+
+// SetReadaheadForTest changes the session reader's byte window for a cold-read
+// integration test. It is not part of the public API.
+func SetReadaheadForTest(reader io.ReaderAt, readahead int64) bool {
+	file, ok := reader.(*raFile)
+	if !ok {
+		return false
+	}
+	file.mu.Lock()
+	file.readahead = readahead
+	file.mu.Unlock()
+	return true
+}
+
+// PieceStateRunsForTest exposes the underlying torrent priority/completion
+// snapshot to session integration tests. It is not part of the public API.
+func PieceStateRunsForTest(st *Torrent) torrent.PieceStateRuns {
+	return st.tor.PieceStateRuns()
+}
 
 // SetReadGate installs hook as the session read gate and returns a function
 // that restores the previous gate. hook runs at the start of every real read

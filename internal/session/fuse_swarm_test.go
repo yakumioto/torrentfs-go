@@ -17,6 +17,10 @@ import (
 // newLoopbackSession creates a session whose client is confined to loopback:
 // no DHT, no uTP, no port forwarding. The session is closed automatically.
 func newLoopbackSession(t *testing.T, cfg config.Config) *session.Session {
+	return newLoopbackSessionWithCustomize(t, cfg, nil)
+}
+
+func newLoopbackSessionWithCustomize(t *testing.T, cfg config.Config, customize func(*session.TorrentClientConfig)) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
 	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
@@ -28,6 +32,9 @@ func newLoopbackSession(t *testing.T, cfg config.Config) *session.Session {
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true
 		cc.NoDefaultPortForwarding = true
+		if customize != nil {
+			customize(cc)
+		}
 	})
 	if err != nil {
 		t.Fatalf("NewWithClientConfig: %v", err)

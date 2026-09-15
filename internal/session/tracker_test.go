@@ -61,6 +61,12 @@ func (tr *loopbackTracker) announceCount(hash string) int {
 	return tr.announced[hash]
 }
 
+func (tr *loopbackTracker) peerCount(hash string) int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return len(tr.peers[hash])
+}
+
 func (tr *loopbackTracker) announceSnapshot(hash string) []trackerAnnounce {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
