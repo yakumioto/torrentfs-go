@@ -6,7 +6,12 @@ readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly FIXTURE_DIR="$ROOT_DIR/examples/docker"
 readonly FIXTURE_TORRENT="$FIXTURE_DIR/example.torrent"
 readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
+# Info hash of examples/docker/example.torrent. The session storage reads
+# payload data from <payload_dir>/<info-hash>/<name>, so the fixture payload
+# must be preloaded at that path for the mount to serve real bytes.
+readonly FIXTURE_INFO_HASH="dd45d0108ac27c3c0fb1d7b28fd2b313c753bc9b"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt"
+readonly LEGACY_STATS_MARKER="/torrents/.stats/leftover.txt"
 readonly IMAGE="torrentfs-mio17-smoke:${BASHPID}"
 readonly CONTAINER="torrentfs-mio17-${BASHPID}"
 readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
@@ -69,9 +74,15 @@ NEGATIVE_MOUNT_DIR="$TMP_DIR/negative-mnt"
 mkdir -p "$TORRENT_HOST_DIR" "$DATA_HOST_DIR" "$MOUNT_HOST_DIR" \
 	"$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
 cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/example.torrent"
-cp -- "$FIXTURE_PAYLOAD" "$DATA_HOST_DIR/payload.txt"
-EXPECTED_HASH="$(sha256sum "$DATA_HOST_DIR/payload.txt")"
+mkdir -p "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH"
+cp -- "$FIXTURE_PAYLOAD" "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
+EXPECTED_HASH="$(sha256sum "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH/payload.txt")"
 EXPECTED_HASH="${EXPECTED_HASH%% *}"
+
+# A legacy empty .stats directory must survive startup untouched: the new
+# layout neither creates nor removes it.
+mkdir -p "$TORRENT_HOST_DIR/.stats"
+printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
 printf 'docker smoke: building %s\n' "$IMAGE"
 IMAGE_TAGGED=1
@@ -115,6 +126,18 @@ ACTUAL_HASH="${ACTUAL_HASH%% *}"
 [[ "$ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
 	fail "mounted payload hash $ACTUAL_HASH does not match fixture hash $EXPECTED_HASH"
 printf 'docker smoke: mounted payload verified (%s)\n' "$ACTUAL_HASH"
+
+# The mount exposes torrent data only: the former control directories must be
+# absent, and the legacy .stats directory must be untouched.
+for control_path in /mnt/metadata /mnt/stats; do
+	if docker exec "$CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
+		fail "$control_path exists in the mount; the data mount must expose data only"
+	fi
+done
+if ! docker exec "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
+	fail "legacy $LEGACY_STATS_MARKER was removed or rewritten by startup"
+fi
+printf 'docker smoke: control paths absent and legacy .stats preserved\n'
 
 if ! docker kill --signal TERM "$CONTAINER" >/dev/null; then
 	fail "could not send SIGTERM to the FUSE container"

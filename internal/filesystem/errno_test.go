@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
@@ -39,26 +38,6 @@ func TestErrnoForWrappedErrors(t *testing.T) {
 				t.Fatalf("errnoFor(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestValidMetadataName(t *testing.T) {
-	for _, name := range []string{"payload.x0.torrent", ".hidden.torrent", "a-b.torrent"} {
-		if !validMetadataName(name) {
-			t.Errorf("validMetadataName(%q) = false", name)
-		}
-	}
-	for _, name := range []string{"", ".", "..", "payload", "../payload.torrent", "a/b.torrent", "a\\b.torrent", "payload.torrent.tmp"} {
-		if validMetadataName(name) {
-			t.Errorf("validMetadataName(%q) = true", name)
-		}
-	}
-}
-
-func TestRootEntriesReserveMetadata(t *testing.T) {
-	entries := rootEntries([]TorrentView{{Name: metadataName, Hash: metainfo.Hash{1}}})
-	if len(entries) != 1 || entries[0].Name == metadataName {
-		t.Fatalf("rootEntries = %+v, metadata name was not disambiguated", entries)
 	}
 }
 

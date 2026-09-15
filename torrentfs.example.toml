@@ -4,6 +4,10 @@
 # mountpoint is required unless the HTTP API is enabled (http.listen_addr).
 # Configuration is loaded on every startup; an explicit -data-dir flag
 # overrides paths.data_dir.
+#
+# The FUSE mount exposes torrent data only, read-only. Torrent management
+# (add, delete, status) happens over the HTTP API below; there is no
+# metadata/ or stats/ control directory in the mount.
 
 [paths]
 # Writable directory for downloaded payload data.

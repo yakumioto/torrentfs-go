@@ -23,6 +23,7 @@ type Backend interface {
 	AddTorrentAndPersist(ctx context.Context, src session.Source) (*session.TorrentView, error)
 	ListTorrents() []session.TorrentView
 	TorrentViewFor(id string) (session.TorrentView, error)
+	TorrentStatusFor(id string) (session.TorrentStatusView, error)
 	DeleteTorrent(ctx context.Context, id string, purgeData bool) (*session.Operation, error)
 	Operation(id string) (session.Operation, bool)
 }
@@ -47,6 +48,8 @@ func New(cfg config.Config, backend Backend) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/torrents", s.handleAdd)
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
+	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
+	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.handler = s.authenticate(mux)

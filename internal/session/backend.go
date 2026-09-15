@@ -14,11 +14,49 @@ import (
 )
 
 var (
-	_ filesystem.Backend         = (*Session)(nil)
-	_ filesystem.MetadataBackend = (*Session)(nil)
+	_ filesystem.Backend = (*Session)(nil)
 
 	errPieceStateSnapshotUnstable = errors.New("session: piece state snapshot is unstable")
 )
+
+// PieceStatus is one absolute, zero-based piece state in a torrent status
+// snapshot.
+type PieceStatus struct {
+	Index          int
+	Known          bool
+	Complete       bool
+	Partial        bool
+	Wanted         bool
+	Checking       bool
+	AvailableBytes *int64
+}
+
+// FileStatus maps one torrent file to its half-open range in a status
+// snapshot's Pieces array.
+type FileStatus struct {
+	Path       string
+	Size       int64
+	PieceStart int
+	PieceEnd   int
+}
+
+// TorrentStatusView is one consistent status snapshot for a torrent.
+type TorrentStatusView struct {
+	Torrent       TorrentView
+	MetainfoReady bool
+	PieceLength   int64
+	Pieces        []PieceStatus
+	Files         []FileStatus
+}
+
+type pieceState struct {
+	Known    bool
+	Complete bool
+	Partial  bool
+	Wanted   bool
+	Checking bool
+	Bytes    int64
+}
 
 // Torrents implements filesystem.Backend. Torrents whose metainfo is not yet
 // available (magnet sources still resolving) are excluded: without info there
@@ -62,56 +100,77 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 	return t.readerFor(path)
 }
 
-// PieceStates implements filesystem.Backend with a value snapshot of the
-// anacrolix piece state for the requested torrent.
-func (s *Session) PieceStates(hash metainfo.Hash) ([]filesystem.PieceState, error) {
+// TorrentStatusFor returns one fresh, consistent status snapshot for id.
+func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
+	hash, err := parseInfoHash(id)
+	if err != nil {
+		return TorrentStatusView{}, ErrUnknownTorrent
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.ensureActiveLocked(); err != nil {
-		return nil, err
+		return TorrentStatusView{}, err
 	}
-	t, ok := s.torrents[hash]
-	if !ok {
-		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
-	}
-	info := t.tor.Info()
-	if info == nil {
-		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
+	st, ok := s.torrents[hash]
+	entry := s.states[hash]
+	if !ok && entry == nil {
+		return TorrentStatusView{}, ErrUnknownTorrent
 	}
 
-	states, err := pieceStatesSnapshot(t.tor, info)
-	if err != nil {
-		return nil, err
+	view := TorrentStatusView{
+		Torrent: buildView(hash, st, entry),
+		Pieces:  make([]PieceStatus, 0),
+		Files:   make([]FileStatus, 0),
 	}
-	return states, nil
+	if st == nil {
+		return view, nil
+	}
+	info := st.tor.Info()
+	if info == nil {
+		return view, nil
+	}
+
+	states, err := pieceStatesSnapshot(st.tor, info)
+	if err != nil {
+		return TorrentStatusView{}, err
+	}
+	view.MetainfoReady = true
+	view.PieceLength = info.PieceLength
+	view.Pieces = make([]PieceStatus, len(states))
+	for index, state := range states {
+		piece := PieceStatus{
+			Index:    index,
+			Known:    state.Known,
+			Complete: state.Complete,
+			Partial:  state.Partial,
+			Wanted:   state.Wanted,
+			Checking: state.Checking,
+		}
+		if state.Known && state.Partial {
+			available := state.Bytes
+			piece.AvailableBytes = &available
+		}
+		view.Pieces[index] = piece
+	}
+	for _, f := range st.tor.Files() {
+		start, end, err := filePieceRange(f, info, st.tor.Length(), len(states))
+		if err != nil {
+			return TorrentStatusView{}, err
+		}
+		view.Files = append(view.Files, FileStatus{
+			Path:       f.DisplayPath(),
+			Size:       f.Length(),
+			PieceStart: start,
+			PieceEnd:   end,
+		})
+	}
+	return view, nil
 }
 
-// FilePieceStates implements filesystem.Backend: it projects the whole-torrent
-// piece snapshot onto the pieces that back one file. The file's absolute byte
-// range is mapped to piece indices with the same interval logic reads use, so
-// a file that shares a boundary piece with a neighbour reports that piece.
-func (s *Session) FilePieceStates(hash metainfo.Hash, path string) ([]filesystem.PieceState, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return nil, err
-	}
-	t, ok := s.torrents[hash]
-	if !ok {
-		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
-	}
-	info := t.tor.Info()
-	if info == nil {
-		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
-	}
-	f := fileByDisplayPath(t.tor, path)
-	if f == nil {
-		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", path, hash, filesystem.ErrNotFound)
-	}
-
-	states, err := pieceStatesSnapshot(t.tor, info)
-	if err != nil {
-		return nil, err
+func filePieceRange(f *torrent.File, info *metainfo.Info, torrentLength int64, pieceCount int) (int, int, error) {
+	if info.PieceLength <= 0 {
+		return 0, 0, errPieceStateSnapshotUnstable
 	}
 	plan := cache.Plan(cache.ReadRequest{
 		FileOffset:    0,
@@ -119,17 +178,23 @@ func (s *Session) FilePieceStates(hash metainfo.Hash, path string) ([]filesystem
 		FileStart:     f.Offset(),
 		FileSize:      f.Length(),
 		PieceLength:   info.PieceLength,
-		TorrentLength: t.tor.Length(),
+		TorrentLength: torrentLength,
 	})
 	if len(plan.Wanted) == 0 {
-		// A zero-length file (or one outside the torrent) covers no pieces.
-		return nil, nil
+		at := f.Offset() / info.PieceLength
+		if at < 0 {
+			return 0, 0, errPieceStateSnapshotUnstable
+		}
+		if at > int64(pieceCount) {
+			at = int64(pieceCount)
+		}
+		return int(at), int(at), nil
 	}
 	first, last := plan.Wanted[0], plan.Wanted[len(plan.Wanted)-1]+1
-	if first < 0 || last > len(states) || first >= last {
-		return nil, errPieceStateSnapshotUnstable
+	if first < 0 || last > pieceCount || first >= last {
+		return 0, 0, errPieceStateSnapshotUnstable
 	}
-	return states[first:last], nil
+	return first, last, nil
 }
 
 // fileByDisplayPath returns the torrent file with the given display path, or
@@ -151,14 +216,14 @@ type pieceStateSource interface {
 
 var _ pieceStateSource = (*torrent.Torrent)(nil)
 
-func pieceStatesSnapshot(t pieceStateSource, info *metainfo.Info) ([]filesystem.PieceState, error) {
+func pieceStatesSnapshot(t pieceStateSource, info *metainfo.Info) ([]pieceState, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		runs := t.PieceStateRuns()
-		states := make([]filesystem.PieceState, 0)
+		states := make([]pieceState, 0)
 		for _, run := range runs {
 			for range run.Length {
 				index := len(states)
-				piece := filesystem.PieceState{
+				piece := pieceState{
 					Known:    run.Ok,
 					Complete: run.Complete,
 					Partial:  run.Partial,

@@ -43,8 +43,8 @@ func TestSessionErrorPathsForUnknownTorrentAndFile(t *testing.T) {
 	if _, err := sess.OpenFile(hash, "does-not-exist.bin"); !errors.Is(err, filesystem.ErrNotFound) {
 		t.Errorf("OpenFile(missing path) = %v, want ErrNotFound", err)
 	}
-	if _, err := sess.PieceStates(metainfo.Hash{}); !errors.Is(err, filesystem.ErrNotFound) {
-		t.Errorf("PieceStates(unknown torrent) = %v, want ErrNotFound", err)
+	if _, err := sess.TorrentStatusFor(metainfo.Hash{}.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Errorf("TorrentStatusFor(unknown torrent) = %v, want ErrUnknownTorrent", err)
 	}
 }
 
@@ -94,20 +94,20 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 		t.Fatal("torrent with partial data must not be complete")
 	}
 
-	// The piece state snapshot must show an incomplete torrent rather than
-	// claiming every piece is present.
-	states, err := sess.PieceStates(hash)
+	// The structured status snapshot must show an incomplete torrent rather
+	// than claiming every piece is present.
+	status, err := sess.TorrentStatusFor(hash.HexString())
 	if err != nil {
-		t.Fatalf("PieceStates: %v", err)
+		t.Fatalf("TorrentStatusFor: %v", err)
 	}
 	complete := 0
-	for _, state := range states {
-		if state.Complete {
+	for _, piece := range status.Pieces {
+		if piece.Complete {
 			complete++
 		}
 	}
-	if complete == len(states) && len(states) > 0 {
-		t.Fatalf("all %d pieces reported complete for a partial torrent", len(states))
+	if complete == len(status.Pieces) && len(status.Pieces) > 0 {
+		t.Fatalf("all %d pieces reported complete for a partial torrent", len(status.Pieces))
 	}
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
@@ -192,15 +192,14 @@ func TestFuseMissingPathErrno(t *testing.T) {
 	if _, err := os.Open(filepath.Join(mnt, "payload.bin", "no-such-file")); !errors.Is(err, syscall.ENOTDIR) {
 		t.Errorf("open below a single-file torrent = %v, want ENOTDIR", err)
 	}
-	if _, err := os.Stat(filepath.Join(mnt, "stats", "no-such-torrent")); !errors.Is(err, syscall.ENOENT) {
-		t.Errorf("stat of missing stats entry = %v, want ENOENT", err)
+	for _, name := range []string{"metadata", "stats"} {
+		if _, err := os.Stat(filepath.Join(mnt, name)); !errors.Is(err, syscall.ENOENT) {
+			t.Errorf("stat of removed control path %q = %v, want ENOENT", name, err)
+		}
 	}
 	// The torrent tree is read-only; writes must be refused rather than
 	// silently accepted.
 	if err := os.WriteFile(filepath.Join(mnt, "payload.bin"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
 		t.Errorf("write into torrent tree = %v, want EROFS", err)
-	}
-	if err := os.WriteFile(filepath.Join(mnt, "stats", "payload.bin"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
-		t.Errorf("write into stats tree = %v, want EROFS", err)
 	}
 }

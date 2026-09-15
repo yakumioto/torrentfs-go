@@ -11,7 +11,6 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -110,29 +109,70 @@ func TestSessionPieceCacheReadsAcrossFileBoundary(t *testing.T) {
 	}
 }
 
-func TestSessionPieceStatesCompleteTorrent(t *testing.T) {
+func TestTorrentStatusCompleteSnapshot(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("state ", (testPieceLength/5)+1))
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 	sess := openWarmSession(t, dataDir, torrentPath, hash)
 
-	states, err := sess.PieceStates(hash)
+	status, err := sess.TorrentStatusFor(hash.HexString())
 	if err != nil {
-		t.Fatalf("PieceStates: %v", err)
+		t.Fatalf("TorrentStatusFor: %v", err)
 	}
-	numPieces := (len(content) + testPieceLength - 1) / testPieceLength
-	if len(states) != numPieces {
-		t.Fatalf("len(states) = %d, want %d", len(states), numPieces)
+	if !status.MetainfoReady || status.PieceLength != testPieceLength {
+		t.Fatalf("status = %+v, want metainfo and piece length", status)
 	}
-	for i, state := range states {
-		if !state.Known || !state.Complete {
-			t.Fatalf("piece %d state = %+v, want complete", i, state)
+	wantPieces := (len(content) + testPieceLength - 1) / testPieceLength
+	if len(status.Pieces) != wantPieces {
+		t.Fatalf("pieces = %d, want %d", len(status.Pieces), wantPieces)
+	}
+	for index, piece := range status.Pieces {
+		if piece.Index != index || !piece.Known || !piece.Complete {
+			t.Fatalf("piece %d = %+v, want complete absolute piece", index, piece)
+		}
+	}
+	if len(status.Files) != 1 || status.Files[0].Path != "payload.bin" || status.Files[0].PieceStart != 0 || status.Files[0].PieceEnd != wantPieces {
+		t.Fatalf("files = %+v, want payload range [0,%d)", status.Files, wantPieces)
+	}
+}
+
+func TestTorrentStatusSharesBoundaryPieces(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	files := map[string][]byte{
+		"first.bin":  []byte(strings.Repeat("A", 128<<10)),
+		"second.bin": []byte(strings.Repeat("B", 200<<10)),
+		"third.bin":  []byte("tail"),
+	}
+	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	sess := openWarmSession(t, dataDir, torrentPath, hash)
+
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Pieces) != 2 {
+		t.Fatalf("pieces = %d, want 2", len(status.Pieces))
+	}
+	byPath := make(map[string]session.FileStatus, len(status.Files))
+	for _, file := range status.Files {
+		byPath[file.Path] = file
+	}
+	want := map[string][2]int{
+		"first.bin":  {0, 1},
+		"second.bin": {0, 2},
+		"third.bin":  {1, 2},
+	}
+	for path, interval := range want {
+		file, ok := byPath[path]
+		if !ok || file.PieceStart != interval[0] || file.PieceEnd != interval[1] {
+			t.Fatalf("file %q = %+v, want [%d,%d)", path, file, interval[0], interval[1])
 		}
 	}
 }
 
-func TestSessionPieceStatesUnknownTorrent(t *testing.T) {
+func TestTorrentStatusUnknownTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
@@ -144,72 +184,7 @@ func TestSessionPieceStatesUnknownTorrent(t *testing.T) {
 			t.Errorf("Close: %v", err)
 		}
 	}()
-	if _, err := sess.PieceStates(metainfo.Hash{}); !errors.Is(err, filesystem.ErrNotFound) {
-		t.Fatalf("PieceStates error = %v, want ErrNotFound", err)
-	}
-}
-
-// TestSessionFilePieceStatesSlicesPerFile checks the per-file projection the
-// stats/ mirror renders: each file reports exactly the pieces that back its
-// byte range, and boundary pieces shared with a neighbour are reported by both
-// files without being duplicated or dropped.
-func TestSessionFilePieceStatesSlicesPerFile(t *testing.T) {
-	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
-	files := map[string][]byte{
-		"first.bin":  []byte(strings.Repeat("A", 128<<10)),
-		"second.bin": []byte(strings.Repeat("B", 200<<10)),
-		"third.bin":  []byte("tail"),
-	}
-	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
-	sess := openWarmSession(t, dataDir, torrentPath, hash)
-
-	whole, err := sess.PieceStates(hash)
-	if err != nil {
-		t.Fatalf("PieceStates: %v", err)
-	}
-	if len(whole) != 2 {
-		t.Fatalf("whole snapshot = %d pieces, want 2", len(whole))
-	}
-
-	// first.bin [0, 128KiB) lies inside piece 0; second.bin [128KiB, 328KiB)
-	// spans pieces 0 and 1; third.bin [328KiB, 328KiB+4) lies in piece 1.
-	wantPieces := map[string]int{"first.bin": 1, "second.bin": 2, "third.bin": 1}
-	for path, want := range wantPieces {
-		got, err := sess.FilePieceStates(hash, path)
-		if err != nil {
-			t.Fatalf("FilePieceStates(%s): %v", path, err)
-		}
-		if len(got) != want {
-			t.Fatalf("FilePieceStates(%s) = %d pieces, want %d", path, len(got), want)
-		}
-		for i, state := range got {
-			if !state.Known || !state.Complete {
-				t.Fatalf("FilePieceStates(%s)[%d] = %+v, want complete", path, i, state)
-			}
-		}
-	}
-
-	// The single-file projection equals the whole-torrent snapshot.
-	singleDataDir := filepath.Join(work, "single-data")
-	singlePath, singleHash := buildSingleFileTorrent(t, singleDataDir, work, "payload.bin", []byte(strings.Repeat("x", testPieceLength+8)))
-	single := openWarmSession(t, singleDataDir, singlePath, singleHash)
-	whole, err = single.PieceStates(singleHash)
-	if err != nil {
-		t.Fatalf("single PieceStates: %v", err)
-	}
-	projected, err := single.FilePieceStates(singleHash, "payload.bin")
-	if err != nil {
-		t.Fatalf("single FilePieceStates: %v", err)
-	}
-	if len(projected) != len(whole) {
-		t.Fatalf("single-file projection = %d pieces, want %d (whole)", len(projected), len(whole))
-	}
-
-	if _, err := sess.FilePieceStates(hash, "missing.bin"); !errors.Is(err, filesystem.ErrNotFound) {
-		t.Fatalf("FilePieceStates(missing) = %v, want ErrNotFound", err)
-	}
-	if _, err := sess.FilePieceStates(metainfo.Hash{}, "first.bin"); !errors.Is(err, filesystem.ErrNotFound) {
-		t.Fatalf("FilePieceStates(unknown torrent) = %v, want ErrNotFound", err)
+	if _, err := sess.TorrentStatusFor(metainfo.Hash{}.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("TorrentStatusFor error = %v, want ErrUnknownTorrent", err)
 	}
 }

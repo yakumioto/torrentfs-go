@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -187,26 +187,8 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	}
 	t.Cleanup(func() { unmountServer(t, server, mnt) })
 
-	metadataDir := filepath.Join(mnt, "metadata")
 	payloadFile := filepath.Join(mnt, "payload.bin")
-	statsFile := filepath.Join(mnt, "stats", "payload.bin")
-
-	// Two anchor metadata files keep the churn torrent registered for the whole
-	// test. Without them each create/unlink pair would add and drop the torrent
-	// in anacrolix, which is slow and load-sensitive; namespace churn, not
-	// torrent lifecycle, is what this test exercises.
-	anchors := []string{"churn-anchor-a.torrent", "churn-anchor-b.torrent"}
-	for _, name := range anchors {
-		if err := os.WriteFile(filepath.Join(metadataDir, name), churnBytes, 0o644); err != nil {
-			t.Fatalf("write anchor %s: %v", name, err)
-		}
-	}
-	if err := waitFor(ctx, func() bool {
-		_, registered := sess.Torrent(churnHash)
-		return registered
-	}); err != nil {
-		t.Fatalf("churn torrent never registered: %v", err)
-	}
+	churnRoot := filepath.Join(mnt, "churn.bin")
 
 	stop := make(chan struct{})
 	errs := make(chan error, 16)
@@ -246,16 +228,11 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 					errs <- errors.New("payload changed during namespace churn")
 					return
 				}
-				// The stats mirror must stay readable and correct while the
-				// metadata namespace churns; reading it must not disturb the
-				// media read above.
-				stats, err := os.ReadFile(statsFile)
-				if err != nil {
-					errs <- fmt.Errorf("read stats: %w", err)
-					return
-				}
-				if string(stats) != "[x]\n" {
-					errs <- fmt.Errorf("stats = %q, want [x]", stats)
+				// The churn torrent's data node appears and disappears while the
+				// stable payload stays readable; the data read above must never
+				// be disturbed by that namespace churn.
+				if _, err := os.Stat(churnRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+					errs <- fmt.Errorf("stat churn node: %w", err)
 					return
 				}
 				time.Sleep(time.Millisecond)
@@ -266,20 +243,28 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	churnDone := make(chan struct{})
 	go func() {
 		defer close(churnDone)
-		for i := 0; i < 12; i++ {
-			name := fmt.Sprintf("churn-%d.torrent", i)
-			renamed := fmt.Sprintf("churn-%d-r.torrent", i)
-			if err := os.WriteFile(filepath.Join(metadataDir, name), churnBytes, 0o644); err != nil {
-				errs <- fmt.Errorf("write metadata %s: %w", name, err)
+		for i := 0; i < 6; i++ {
+			view, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: churnBytes})
+			if err != nil {
+				errs <- fmt.Errorf("add churn torrent %d: %w", i, err)
 				return
 			}
-			if err := os.Rename(filepath.Join(metadataDir, name), filepath.Join(metadataDir, renamed)); err != nil {
-				errs <- fmt.Errorf("rename metadata %s: %w", name, err)
+			op, err := sess.DeleteTorrent(ctx, view.ID, false)
+			if err != nil {
+				errs <- fmt.Errorf("delete churn torrent %d: %w", i, err)
 				return
 			}
-			if err := os.Remove(filepath.Join(metadataDir, renamed)); err != nil {
-				errs <- fmt.Errorf("unlink metadata %s: %w", renamed, err)
-				return
+			for {
+				current, ok := sess.Operation(op.ID)
+				if ok && current.State != session.StateDeleting {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					errs <- fmt.Errorf("churn deletion %d never finished: %w", i, ctx.Err())
+					return
+				case <-time.After(time.Millisecond):
+				}
 			}
 		}
 	}()
@@ -293,10 +278,8 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	close(stop)
 	waitGroupWithin(t, ctx, &readers, "namespace readers")
 
-	for _, name := range anchors {
-		if err := os.Remove(filepath.Join(metadataDir, name)); err != nil {
-			t.Errorf("remove anchor %s: %v", name, err)
-		}
+	if _, ok := sess.Torrent(churnHash); ok {
+		t.Error("churn torrent survived its deletion")
 	}
 	drainErrors(t, errs)
 }
@@ -565,7 +548,7 @@ func TestSessionConcurrentCloseIsSafe(t *testing.T) {
 }
 
 // TestSessionClosingStateRejectsOperations checks that reads, lookups, and
-// metadata mutations issued after Close map to the project's ErrClosed.
+// management queries issued after Close map to the project's ErrClosed.
 func TestSessionClosingStateRejectsOperations(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
@@ -586,16 +569,13 @@ func TestSessionClosingStateRejectsOperations(t *testing.T) {
 	if _, err := sess.OpenFile(hash, "payload.bin"); !errors.Is(err, filesystem.ErrClosed) {
 		t.Errorf("OpenFile after Close = %v, want ErrClosed", err)
 	}
-	if _, err := sess.PieceStates(hash); !errors.Is(err, filesystem.ErrClosed) {
-		t.Errorf("PieceStates after Close = %v, want ErrClosed", err)
+	if _, err := sess.TorrentStatusFor(hash.HexString()); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("TorrentStatusFor after Close = %v, want ErrClosed", err)
 	}
 	if got := sess.Torrents(); got != nil {
 		t.Errorf("Torrents after Close = %v, want nil", got)
 	}
-	if _, err := sess.BeginMetadata(ctx, "late.torrent", uint32(syscall.O_WRONLY)); !errors.Is(err, filesystem.ErrClosed) {
-		t.Errorf("BeginMetadata after Close = %v, want ErrClosed", err)
-	}
-	if err := sess.RemoveMetadata(ctx, "late.torrent"); !errors.Is(err, filesystem.ErrClosed) {
-		t.Errorf("RemoveMetadata after Close = %v, want ErrClosed", err)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: "magnet:?xt=urn:btih:" + strings.Repeat("a", 40)}); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("AddTorrentAndPersist after Close = %v, want ErrClosed", err)
 	}
 }
