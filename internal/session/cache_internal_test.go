@@ -160,7 +160,7 @@ type gatedPieceSource struct {
 	data    []byte
 }
 
-func (s *gatedPieceSource) prepare(*torrent.Torrent, int, int, int64) error {
+func (s *gatedPieceSource) prepare(int64) error {
 	return nil
 }
 
@@ -176,6 +176,277 @@ func (s *gatedPieceSource) ReadAt(dst []byte, off int64) (int, error) {
 
 func (s *gatedPieceSource) Close() error {
 	return nil
+}
+
+type operationReader struct {
+	mu sync.Mutex
+
+	ctx context.Context
+
+	started     chan struct{}
+	startedOnce sync.Once
+	readCalls   int
+	seekCalls   int
+	activeReads int
+	maxActive   int
+	readaheads  []int64
+}
+
+func (r *operationReader) SetContext(ctx context.Context) {
+	r.mu.Lock()
+	r.ctx = ctx
+	r.mu.Unlock()
+}
+
+func (r *operationReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	ctx := r.ctx
+	r.readCalls++
+	call := r.readCalls
+	r.activeReads++
+	if r.activeReads > r.maxActive {
+		r.maxActive = r.activeReads
+	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.activeReads--
+		r.mu.Unlock()
+	}()
+
+	if call == 1 {
+		r.startedOnce.Do(func() { close(r.started) })
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	for i := range p {
+		p[i] = byte(i)
+	}
+	return len(p), nil
+}
+
+func (r *operationReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+	r.SetContext(ctx)
+	return r.Read(p)
+}
+
+func (r *operationReader) Seek(off int64, _ int) (int64, error) {
+	r.mu.Lock()
+	r.seekCalls++
+	r.mu.Unlock()
+	return off, nil
+}
+
+func (r *operationReader) Close() error {
+	return nil
+}
+
+func (r *operationReader) SetReadahead(readahead int64) {
+	r.mu.Lock()
+	r.readaheads = append(r.readaheads, readahead)
+	r.mu.Unlock()
+}
+
+func (r *operationReader) SetReadaheadFunc(torrent.ReadaheadFunc) {}
+
+func (r *operationReader) SetResponsive() {}
+
+func (r *operationReader) snapshot() (seekCalls, maxActive int, readaheads []int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seekCalls, r.maxActive, append([]int64(nil), r.readaheads...)
+}
+
+func TestPieceLoaderPrepareCancelsBlockedRead(t *testing.T) {
+	reader := &operationReader{started: make(chan struct{})}
+	rootContext, rootCancel := context.WithCancel(context.Background())
+	loader := &pieceLoader{
+		r:           reader,
+		rootContext: rootContext,
+		rootCancel:  rootCancel,
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := loader.ReadAt(make([]byte, 32), 0)
+		readDone <- err
+	}()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("initial read did not block")
+	}
+
+	prepareDone := make(chan error, 1)
+	go func() {
+		prepareDone <- loader.prepare(defaultStreamingReadahead)
+	}()
+
+	select {
+	case err := <-readDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled read error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not cancel the blocked read")
+	}
+	if err := <-prepareDone; err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	readResult := make(chan struct {
+		n   int
+		err error
+	}, 1)
+	go func() {
+		var data [32]byte
+		n, err := loader.ReadAt(data[:], 128)
+		readResult <- struct {
+			n   int
+			err error
+		}{n: n, err: err}
+	}()
+	select {
+	case result := <-readResult:
+		if result.err != nil || result.n != 32 {
+			t.Fatalf("replacement read = %d bytes, %v; want 32, nil", result.n, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement read did not acquire the loader")
+	}
+
+	seekCalls, maxActive, readaheads := reader.snapshot()
+	if seekCalls != 2 {
+		t.Fatalf("Seek calls = %d, want 2", seekCalls)
+	}
+	if maxActive != 1 {
+		t.Fatalf("maximum concurrent reads = %d, want 1", maxActive)
+	}
+	if len(readaheads) != 1 || readaheads[0] != defaultStreamingReadahead {
+		t.Fatalf("readaheads = %v, want [%d]", readaheads, defaultStreamingReadahead)
+	}
+	if err := loader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+type recordingPieceSource struct {
+	mu         sync.Mutex
+	data       []byte
+	readaheads []int64
+}
+
+func (s *recordingPieceSource) prepare(readahead int64) error {
+	s.mu.Lock()
+	s.readaheads = append(s.readaheads, readahead)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *recordingPieceSource) ReadAt(dst []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(s.data)) {
+		return 0, io.EOF
+	}
+	n := copy(dst, s.data[off:])
+	if n < len(dst) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (s *recordingPieceSource) Close() error {
+	return nil
+}
+
+func (s *recordingPieceSource) readaheadValues() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int64(nil), s.readaheads...)
+}
+
+func TestRaFileCacheMissPreemptsBlockedRead(t *testing.T) {
+	reader := &operationReader{started: make(chan struct{})}
+	rootContext, rootCancel := context.WithCancel(context.Background())
+	loader := &pieceLoader{
+		r:           reader,
+		rootContext: rootContext,
+		rootCancel:  rootCancel,
+	}
+	store := cache.New(128)
+	first := &raFile{
+		loader:      loader,
+		cache:       store,
+		torrentKey:  "seek-preemption",
+		fileSize:    64,
+		pieceLength: 32,
+		torrentSize: 64,
+	}
+	second := &raFile{
+		loader:      loader,
+		cache:       store,
+		torrentKey:  "seek-preemption",
+		fileSize:    64,
+		pieceLength: 32,
+		torrentSize: 64,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := first.ReadAt(make([]byte, 32), 0)
+		firstDone <- err
+	}()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("initial cache-miss read did not block")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := second.ReadAt(make([]byte, 32), 32)
+		secondDone <- err
+	}()
+	select {
+	case err := <-firstDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("old cache-miss read error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new cache-miss did not cancel the old read")
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("replacement cache-miss read: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement cache-miss did not complete")
+	}
+	if err := loader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestRaFileUsesFixedStreamingReadahead(t *testing.T) {
+	source := &recordingPieceSource{data: []byte("piece")}
+	file := &raFile{
+		loader:      source,
+		cache:       cache.New(64),
+		torrentKey:  "streaming",
+		fileSize:    int64(len(source.data)),
+		pieceLength: int64(len(source.data)),
+		torrentSize: int64(len(source.data)),
+	}
+	got := make([]byte, len(source.data))
+	if n, err := file.ReadAt(got, 0); err != nil || n != len(got) {
+		t.Fatalf("ReadAt = %d bytes, %v; want %d, nil", n, err, len(got))
+	}
+	if string(got) != string(source.data) {
+		t.Fatalf("ReadAt data = %q, want %q", got, source.data)
+	}
+	if got := source.readaheadValues(); len(got) != 1 || got[0] != defaultStreamingReadahead {
+		t.Fatalf("readaheads = %v, want [%d]", got, defaultStreamingReadahead)
+	}
 }
 
 type unstablePieceStateSource struct {
