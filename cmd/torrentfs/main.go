@@ -19,8 +19,8 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-const usageText = `torrentfs mounts BitTorrent downloads as a FUSE filesystem and serves a
-torrent management HTTP API.
+const usageText = `torrentfs mounts BitTorrent downloads as a read-only FUSE filesystem and
+serves a torrent management HTTP API.
 
 Usage:
   torrentfs -mountpoint <dir> [flags] <torrents-dir>
@@ -35,10 +35,13 @@ Flags:
 files whose names end in .torrent are scanned at startup and while running.
 A single-file torrent is exposed under the mount point as a regular file
 directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
-directory tree. A read-only stats/ control tree mirrors the data tree and
-reports piece state. Existing metadata files are restored from
-<torrents-dir>/.metadata, and complete .torrent files may also be written to
-metadata/ while mounted.
+directory tree. The mount is data only and every path in it is read-only:
+there is no metadata/ or stats/ control directory.
+
+Managing torrents happens over the HTTP API: add by upload or magnet, list,
+delete, and query per-torrent piece status. Durable managed metainfo and
+pending magnet intents live in <torrents-dir>/.metadata, which is an
+implementation detail and is never mounted.
 
 When http.listen_addr is set the management API is served; unless a required
 Bearer Token is configured it must bind loopback only. Omitting -mountpoint

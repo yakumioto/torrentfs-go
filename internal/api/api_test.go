@@ -30,8 +30,12 @@ type fakeBackend struct {
 	addView *session.TorrentView
 	addErr  error
 
-	views   []session.TorrentView
-	viewErr error
+	views      []session.TorrentView
+	detailView session.TorrentView
+	viewErr    error
+
+	statusView session.TorrentStatusView
+	statusErr  error
 
 	deleteOp  *session.Operation
 	deleteErr error
@@ -58,7 +62,13 @@ func (f *fakeBackend) ListTorrents() []session.TorrentView {
 func (f *fakeBackend) TorrentViewFor(string) (session.TorrentView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return session.TorrentView{}, f.viewErr
+	return f.detailView, f.viewErr
+}
+
+func (f *fakeBackend) TorrentStatusFor(string) (session.TorrentStatusView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statusView, f.statusErr
 }
 
 func (f *fakeBackend) DeleteTorrent(_ context.Context, _ string, _ bool) (*session.Operation, error) {
@@ -227,6 +237,107 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 		if _, ok := got[0][key]; !ok {
 			t.Fatalf("list entry missing %q: %v", key, got[0])
 		}
+	}
+}
+
+func TestTorrentDetailAndStatus(t *testing.T) {
+	available := int64(42)
+	view := session.TorrentView{
+		ID:             strings.Repeat("a", 40),
+		InfoHash:       strings.Repeat("a", 40),
+		Name:           "payload",
+		State:          session.StateDownloading,
+		TotalBytes:     100,
+		CompletedBytes: 42,
+		Progress:       0.42,
+		CreatedAt:      time.Now().UTC(),
+	}
+	backend := &fakeBackend{
+		detailView: view,
+		statusView: session.TorrentStatusView{
+			Torrent:       view,
+			MetainfoReady: true,
+			PieceLength:   64,
+			Pieces: []session.PieceStatus{{
+				Index:          0,
+				Known:          true,
+				Partial:        true,
+				Wanted:         true,
+				AvailableBytes: &available,
+			}},
+			Files: []session.FileStatus{{Path: "payload", Size: 100, PieceStart: 0, PieceEnd: 2}},
+		},
+	}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+view.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail["id"] != view.ID || detail["state"] != string(session.StateDownloading) {
+		t.Fatalf("detail = %v, want torrent response", detail)
+	}
+
+	rec = do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+view.ID+"/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		MetainfoReady bool  `json:"metainfo_ready"`
+		PieceLength   int64 `json:"piece_length"`
+		Pieces        []struct {
+			Index          int    `json:"index"`
+			AvailableBytes *int64 `json:"available_bytes"`
+		} `json:"pieces"`
+		Files []struct {
+			Path       string `json:"path"`
+			PieceStart int    `json:"piece_start"`
+			PieceEnd   int    `json:"piece_end"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !got.MetainfoReady || got.PieceLength != 64 || len(got.Pieces) != 1 || got.Pieces[0].Index != 0 || got.Pieces[0].AvailableBytes == nil || *got.Pieces[0].AvailableBytes != available {
+		t.Fatalf("status pieces = %+v, want one partial piece", got.Pieces)
+	}
+	if len(got.Files) != 1 || got.Files[0].Path != "payload" || got.Files[0].PieceStart != 0 || got.Files[0].PieceEnd != 2 {
+		t.Fatalf("status files = %+v, want one piece range", got.Files)
+	}
+}
+
+func TestTorrentStatusPendingAndUnknown(t *testing.T) {
+	id := strings.Repeat("b", 40)
+	view := session.TorrentView{ID: id, InfoHash: id, State: session.StateAdding}
+	backend := &fakeBackend{statusView: session.TorrentStatusView{
+		Torrent: view,
+		Pieces:  []session.PieceStatus{},
+		Files:   []session.FileStatus{},
+	}}
+	srv := newTestServer(t, backend, nil)
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+id+"/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var pending map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
+		t.Fatalf("decode pending status: %v", err)
+	}
+	if pending["metainfo_ready"] != false {
+		t.Fatalf("pending metainfo_ready = %v, want false", pending["metainfo_ready"])
+	}
+	if pieces, ok := pending["pieces"].([]any); !ok || len(pieces) != 0 {
+		t.Fatalf("pending pieces = %v, want []", pending["pieces"])
+	}
+
+	backend.statusErr = session.ErrUnknownTorrent
+	rec = do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/missing/status", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown status = %d, want 404; body %s", rec.Code, rec.Body.String())
 	}
 }
 

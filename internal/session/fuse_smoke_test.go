@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -143,22 +142,11 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 		}
 	}
 
-	// The status tree mirrors the data tree under stats/ and reports the same
-	// piece state the old per-torrent .stats file did.
-	statsPath := filepath.Join(mnt, "stats", "payload.bin")
-	stats, err := os.ReadFile(statsPath)
-	if err != nil {
-		t.Fatalf("ReadFile(stats/payload.bin): %v", err)
-	}
-	if string(stats) != "[x]\n" {
-		t.Fatalf("stats/payload.bin = %q, want [x]", stats)
-	}
-	statsInfo, err := os.Stat(statsPath)
-	if err != nil {
-		t.Fatalf("Stat(stats/payload.bin): %v", err)
-	}
-	if got, want := statsInfo.Size(), int64(len(stats)); got != want {
-		t.Fatalf("stats size = %d, want %d", got, want)
+	// The mount exposes data only: the former control directories are gone.
+	for _, name := range []string{"metadata", "stats"} {
+		if _, err := os.Stat(filepath.Join(mnt, name)); !errors.Is(err, syscall.ENOENT) {
+			t.Fatalf("mount root %q = %v, want ENOENT", name, err)
+		}
 	}
 
 	// Seeked read: read a window from the middle of the mounted file.
@@ -189,149 +177,6 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	}
 }
 
-func TestFuseMetadataLifecycle(t *testing.T) {
-	requireFuse(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
-	mnt := filepath.Join(work, "mnt")
-	if err := os.Mkdir(mnt, 0o755); err != nil {
-		t.Fatalf("make mountpoint: %v", err)
-	}
-	content := []byte("metadata lifecycle data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
-	otherContent := []byte("different metadata lifecycle data")
-	otherTorrentPath, otherHash := buildSingleFileTorrent(t, dataDir, work, "other.bin", otherContent)
-	torrentBytes, err := os.ReadFile(torrentPath)
-	if err != nil {
-		t.Fatalf("read torrent: %v", err)
-	}
-	otherTorrentBytes, err := os.ReadFile(otherTorrentPath)
-	if err != nil {
-		t.Fatalf("read other torrent: %v", err)
-	}
-
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	server, err := filesystem.Mount(mnt, sess, nil)
-	if err != nil {
-		_ = sess.Close(context.Background())
-		t.Fatalf("Mount: %v", err)
-	}
-	unmounted, closed := false, false
-	defer func() {
-		if !unmounted {
-			_ = server.Unmount()
-		}
-		if !closed {
-			_ = sess.Close(context.Background())
-		}
-	}()
-
-	metadataDir := filepath.Join(mnt, "metadata")
-	first := filepath.Join(metadataDir, "first.torrent")
-	second := filepath.Join(metadataDir, "second.torrent")
-	renamed := filepath.Join(metadataDir, "renamed.torrent")
-	if err := os.WriteFile(first, torrentBytes, 0o644); err != nil {
-		t.Fatalf("write first metadata: %v", err)
-	}
-	if err := waitFor(ctx, func() bool {
-		_, ok := sess.Torrent(hash)
-		return ok
-	}); err != nil {
-		t.Fatalf("wait for first metadata add: %v", err)
-	}
-	if err := os.WriteFile(second, torrentBytes, 0o644); err != nil {
-		t.Fatalf("write second metadata: %v", err)
-	}
-	if err := waitFor(ctx, func() bool { return len(sess.MetadataFiles()) == 2 }); err != nil {
-		t.Fatalf("wait for metadata files: %v", err)
-	}
-
-	if err := os.Rename(second, first); !errors.Is(err, syscall.EEXIST) {
-		t.Fatalf("rename over existing metadata = %v, want EEXIST", err)
-	}
-	firstInfo, err := os.Stat(first)
-	if err != nil {
-		t.Fatalf("stat original metadata: %v", err)
-	}
-	if err := os.Rename(first, renamed); err != nil {
-		t.Fatalf("rename metadata: %v", err)
-	}
-	renamedInfo, err := os.Stat(renamed)
-	if err != nil {
-		t.Fatalf("stat renamed FUSE path: %v", err)
-	}
-	if !os.SameFile(firstInfo, renamedInfo) {
-		t.Fatal("rename changed the metadata inode")
-	}
-	if got, err := os.ReadFile(renamed); err != nil || string(got) != string(torrentBytes) {
-		t.Fatalf("read renamed metadata: bytes=%d err=%v", len(got), err)
-	}
-
-	if err := os.WriteFile(first, otherTorrentBytes, 0o644); err != nil {
-		t.Fatalf("recreate original metadata name: %v", err)
-	}
-	if err := waitFor(ctx, func() bool { return len(sess.MetadataFiles()) == 3 }); err != nil {
-		t.Fatalf("wait for recreated metadata: %v", err)
-	}
-	newFirstInfo, err := os.Stat(first)
-	if err != nil {
-		t.Fatalf("stat recreated metadata: %v", err)
-	}
-	if os.SameFile(firstInfo, newFirstInfo) || os.SameFile(renamedInfo, newFirstInfo) {
-		t.Fatal("recreated metadata reused the renamed inode")
-	}
-	if got, err := os.ReadFile(first); err != nil || string(got) != string(otherTorrentBytes) {
-		t.Fatalf("read recreated metadata: bytes=%d err=%v", len(got), err)
-	}
-
-	if err := os.Rename(second, renamed); !errors.Is(err, syscall.EEXIST) {
-		t.Fatalf("rename over renamed metadata = %v, want EEXIST", err)
-	}
-	if err := os.Remove(metadataDir); !errors.Is(err, syscall.ENOTEMPTY) {
-		t.Fatalf("rmdir non-empty metadata = %v, want ENOTEMPTY", err)
-	}
-	if err := os.Remove(renamed); err != nil {
-		t.Fatalf("unlink renamed metadata: %v", err)
-	}
-	if err := os.Remove(second); err != nil {
-		t.Fatalf("unlink second metadata: %v", err)
-	}
-	if err := os.Remove(first); err != nil {
-		t.Fatalf("unlink recreated metadata: %v", err)
-	}
-	if err := waitFor(ctx, func() bool {
-		if _, ok := sess.Torrent(hash); ok {
-			return false
-		}
-		_, ok := sess.Torrent(otherHash)
-		return !ok
-	}); err != nil {
-		t.Fatalf("wait for metadata removal: %v", err)
-	}
-	if err := os.Remove(metadataDir); err != nil {
-		t.Fatalf("rmdir empty metadata: %v", err)
-	}
-	if err := os.Mkdir(metadataDir, 0o755); err != nil {
-		t.Fatalf("mkdir metadata after rmdir: %v", err)
-	}
-
-	if err := server.Unmount(); err != nil {
-		t.Fatalf("Unmount: %v", err)
-	}
-	unmounted = true
-	if err := sess.Close(ctx); err != nil {
-		t.Fatalf("Close after unmount: %v", err)
-	}
-	closed = true
-}
-
 func waitFor(ctx context.Context, condition func() bool) error {
 	if condition() {
 		return nil
@@ -350,10 +195,10 @@ func waitFor(ctx context.Context, condition func() bool) error {
 	}
 }
 
-// TestFuseMultiFileTreeAndStatsMirror checks a real mount keeps the multi-file
-// directory tree, drops the old per-torrent .stats, and mirrors the data tree
-// under stats/ with read-only status leaves.
-func TestFuseMultiFileTreeAndStatsMirror(t *testing.T) {
+// TestFuseReadOnlyDataTree checks a real mount exposes only the torrent data
+// tree: the former metadata/ and stats/ control paths are absent, mutations at
+// the root are refused, and the data itself still reads correctly.
+func TestFuseReadOnlyDataTree(t *testing.T) {
 	requireFuse(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -411,45 +256,29 @@ func TestFuseMultiFileTreeAndStatsMirror(t *testing.T) {
 		}
 	}
 
-	// The old per-torrent .stats location no longer exists.
+	// The control directories are no longer part of the mount.
+	for _, name := range []string{"metadata", "stats"} {
+		if _, err := os.Stat(filepath.Join(mnt, name)); !errors.Is(err, syscall.ENOENT) {
+			t.Fatalf("mount root %q = %v, want ENOENT", name, err)
+		}
+	}
+	// The old per-torrent .stats location no longer exists either.
 	if _, err := os.Stat(filepath.Join(root, ".stats")); !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("multi/.stats = %v, want ENOENT", err)
 	}
 
-	// The stats control tree mirrors the data tree.
-	statsRoot := filepath.Join(mnt, "stats", "multi")
-	if info, err := os.Stat(statsRoot); err != nil || !info.IsDir() {
-		t.Fatalf("stats/multi = (%v, %v), want directory", info, err)
+	// Every mutation in the mount root is refused.
+	if err := os.Mkdir(filepath.Join(mnt, "newdir"), 0o755); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("mkdir in mount root = %v, want EROFS", err)
 	}
-	entries, err := os.ReadDir(statsRoot)
-	if err != nil {
-		t.Fatalf("readdir stats/multi: %v", err)
+	if err := os.WriteFile(filepath.Join(mnt, "new.torrent"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("write in mount root = %v, want EROFS", err)
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("write into torrent tree = %v, want EROFS", err)
 	}
-	if want := []string{"a.txt", "sub"}; !reflect.DeepEqual(names, want) {
-		t.Fatalf("stats/multi entries = %v, want %v", names, want)
-	}
-	for path := range files {
-		statsPath := filepath.Join(statsRoot, filepath.FromSlash(path))
-		got, err := os.ReadFile(statsPath)
-		if err != nil {
-			t.Fatalf("read %s: %v", statsPath, err)
-		}
-		if string(got) != "[x]\n" {
-			t.Fatalf("%s = %q, want [x]", statsPath, got)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(statsRoot, "a.txt"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
-		t.Fatalf("write into stats mirror = %v, want EROFS", err)
-	}
-
-	// Reading the mirror must not disturb the media content.
-	got, err := os.ReadFile(filepath.Join(root, "a.txt"))
-	if err != nil || string(got) != string(files["a.txt"]) {
-		t.Fatalf("media read after stats = (%q, %v), want %q", got, err, files["a.txt"])
+	if err := os.Remove(filepath.Join(root, "a.txt")); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("unlink in torrent tree = %v, want EROFS", err)
 	}
 
 	if err := server.Unmount(); err != nil {

@@ -6,14 +6,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
-	"syscall"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
-
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
+
+type managedMagnet struct {
+	name string
+	uri  string
+}
+
+type managedSources struct {
+	metadata []string
+	magnets  []managedMagnet
+}
 
 func validMetadataName(name string) bool {
 	return name != "" && name != "." && name != ".." &&
@@ -25,12 +33,23 @@ func metadataRoot(torrentsDir string) string {
 	return filepath.Join(filepath.Clean(torrentsDir), ".metadata")
 }
 
-// statsRoot is the physical anchor of the read-only stats control namespace,
-// the sibling of the metadata sidecar directory. It carries no persisted state
-// — the mounted stats/ tree renders piece state live — but its presence keeps
-// the control namespace layout explicit on disk.
-func statsRoot(torrentsDir string) string {
-	return filepath.Join(filepath.Clean(torrentsDir), ".stats")
+func metadataName(hash metainfo.Hash) string {
+	return hash.HexString() + ".torrent"
+}
+
+func magnetName(hash metainfo.Hash) string {
+	return hash.HexString() + ".magnet"
+}
+
+func magnetHashFromName(name string) (metainfo.Hash, bool) {
+	if !strings.HasSuffix(name, ".magnet") {
+		return metainfo.Hash{}, false
+	}
+	hash, err := parseInfoHash(strings.TrimSuffix(name, ".magnet"))
+	if err != nil || name != magnetName(hash) {
+		return metainfo.Hash{}, false
+	}
+	return hash, true
 }
 
 func (s *Session) metadataPath(name string) string {
@@ -59,272 +78,165 @@ func (s *Session) rescanMetadata() error {
 		s.mu.Lock()
 		st, _, err := s.addTorrentLockedResult(context.Background(), Source{MetainfoPath: path})
 		if err == nil {
-			hash := st.InfoHash()
-			s.metadata[name] = hash
-			s.metadataRefs[hash]++
+			s.recordMetadataLocked(name, st.InfoHash())
 		}
 		s.mu.Unlock()
 		if err != nil {
 			return fmt.Errorf("session: restore metadata %q: %w", name, err)
 		}
 	}
-	return nil
+	return s.scanPendingMagnets()
 }
 
-// MetadataDirExists reports whether the control directory is present.
-func (s *Session) MetadataDirExists() bool {
-	info, err := os.Lstat(s.metadataDir)
-	return err == nil && info.Mode().IsDir()
-}
-
-// MetadataFiles returns the current regular .torrent files in metadata/ in
-// filename order. Temporary commit files and symlinks are never exposed.
-func (s *Session) MetadataFiles() []filesystem.MetadataView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.state != stateActive {
-		return nil
-	}
+func (s *Session) scanPendingMagnets() error {
 	entries, err := os.ReadDir(s.metadataDir)
 	if err != nil {
-		return nil
+		return fmt.Errorf("session: scan pending magnets: %w", err)
 	}
-	views := make([]filesystem.MetadataView, 0, len(entries))
 	for _, entry := range entries {
-		if !validMetadataName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 {
+		hash, ok := magnetHashFromName(entry.Name())
+		if !ok {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
+		path := s.metadataPath(entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("session: inspect pending magnet %q: %w", entry.Name(), err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			continue
 		}
-		views = append(views, filesystem.MetadataView{Name: entry.Name(), Size: info.Size()})
-	}
-	return views
-}
-
-// OpenMetadata opens one regular metadata file for reading.
-func (s *Session) OpenMetadata(name string) (filesystem.MetadataReader, error) {
-	if !validMetadataName(name) {
-		return nil, fmt.Errorf("session: metadata name %q: %w", name, filesystem.ErrInvalidName)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return nil, err
-	}
-	path := s.metadataPath(name)
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrNotFound)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("session: read pending magnet %q: %w", entry.Name(), err)
 		}
-		return nil, fmt.Errorf("session: stat metadata %q: %w", name, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("session: metadata %q is a symlink: %w", name, filesystem.ErrPermission)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrIsDir)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("session: open metadata %q: %w", name, err)
-	}
-	return f, nil
-}
-
-// BeginMetadata reserves name and opens a private temporary file. The final
-// metadata file becomes visible only after Commit validates and registers it.
-func (s *Session) BeginMetadata(ctx context.Context, name string, flags uint32) (filesystem.MetadataWriter, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if !validMetadataName(name) {
-		return nil, fmt.Errorf("session: metadata name %q: %w", name, filesystem.ErrInvalidName)
-	}
-	if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
-		return nil, fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrPermission)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("session: begin metadata %q: %w", name, err)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return nil, err
-	}
-	if _, ok := s.pendingWriters[name]; ok {
-		return nil, fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrExists)
-	}
-	if _, err := os.Lstat(s.metadataPath(name)); err == nil {
-		return nil, fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrExists)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("session: stat metadata %q: %w", name, err)
-	}
-
-	f, err := os.CreateTemp(s.metadataDir, ".torrentfs-*.tmp")
-	if err != nil {
-		return nil, fmt.Errorf("session: create metadata temporary file: %w", err)
-	}
-	w := &metadataWriter{
-		s:        s,
-		name:     name,
-		tempPath: f.Name(),
-		file:     f,
-		ctx:      ctx,
-	}
-	s.pendingWriters[name] = w
-	return w, nil
-}
-
-type metadataWriter struct {
-	s        *Session
-	name     string
-	tempPath string
-	ctx      context.Context
-
-	mu        sync.Mutex
-	file      *os.File
-	committed bool
-	aborted   bool
-}
-
-var _ filesystem.MetadataWriter = (*metadataWriter)(nil)
-
-func (w *metadataWriter) WriteAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, filesystem.ErrInvalidName
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.committed || w.aborted || w.file == nil {
-		return 0, filesystem.ErrClosed
-	}
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := w.file.WriteAt(p, off)
-	if err != nil {
-		return n, fmt.Errorf("session: write metadata %q: %w", w.name, err)
-	}
-	return n, nil
-}
-
-func (w *metadataWriter) cleanupLocked() error {
-	var errs []error
-	if w.file != nil {
-		if err := w.file.Close(); err != nil {
-			errs = append(errs, err)
+		uri := strings.TrimSpace(string(data))
+		spec, err := specFromSource(Source{MagnetURI: uri})
+		if err != nil || spec.InfoHash != hash {
+			continue
 		}
-		w.file = nil
-	}
-	if err := os.Remove(w.tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
-	}
-	w.s.mu.Lock()
-	if w.s.pendingWriters[w.name] == w {
-		delete(w.s.pendingWriters, w.name)
-	}
-	w.s.mu.Unlock()
-	w.aborted = true
-	return errors.Join(errs...)
-}
 
-func (w *metadataWriter) failLocked(err error) error {
-	return errors.Join(err, w.cleanupLocked())
-}
-
-func (w *metadataWriter) Commit() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.committed {
-		return nil
+		s.mu.Lock()
+		// The intent is always tracked so a later deletion removes it, even
+		// when a canonical .torrent already won the crash race below.
+		s.pendingMagnets[hash] = managedMagnet{name: entry.Name(), uri: uri}
+		s.mu.Unlock()
 	}
-	if w.aborted {
-		return filesystem.ErrClosed
-	}
-	if err := w.ctx.Err(); err != nil {
-		return w.failLocked(fmt.Errorf("session: commit metadata %q: %w", w.name, err))
-	}
-	if w.file != nil {
-		if err := w.file.Sync(); err != nil {
-			return w.failLocked(fmt.Errorf("session: sync metadata %q: %w", w.name, err))
-		}
-		if err := w.file.Close(); err != nil {
-			w.file = nil
-			return w.failLocked(fmt.Errorf("session: close metadata %q: %w", w.name, err))
-		}
-		w.file = nil
-	}
-
-	w.s.mu.Lock()
-	if err := w.s.ensureActiveLocked(); err != nil {
-		w.s.mu.Unlock()
-		return w.failLocked(err)
-	}
-	if w.s.pendingWriters[w.name] != w {
-		w.s.mu.Unlock()
-		return w.failLocked(fmt.Errorf("session: metadata %q: %w", w.name, filesystem.ErrClosed))
-	}
-	if _, err := os.Lstat(w.s.metadataPath(w.name)); err == nil {
-		w.s.mu.Unlock()
-		return w.failLocked(fmt.Errorf("session: metadata %q: %w", w.name, filesystem.ErrExists))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		w.s.mu.Unlock()
-		return w.failLocked(fmt.Errorf("session: stat metadata %q: %w", w.name, err))
-	}
-
-	st, added, err := w.s.addTorrentLockedResult(w.ctx, Source{MetainfoPath: w.tempPath})
-	if err != nil {
-		w.s.mu.Unlock()
-		return w.failLocked(err)
-	}
-	hash := st.InfoHash()
-	if err := os.Rename(w.tempPath, w.s.metadataPath(w.name)); err != nil {
-		if added {
-			_ = w.s.releaseTorrentIfUnreferencedLocked(hash)
-		}
-		w.s.mu.Unlock()
-		return w.failLocked(fmt.Errorf("session: publish metadata %q: %w", w.name, err))
-	}
-	w.s.metadata[w.name] = hash
-	w.s.metadataRefs[hash]++
-	delete(w.s.pendingWriters, w.name)
-	w.committed = true
-	w.s.mu.Unlock()
 	return nil
 }
 
-func (w *metadataWriter) Abort() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.committed || w.aborted {
-		return nil
+func (s *Session) restorePendingMagnets(ctx context.Context) error {
+	s.mu.RLock()
+	pending := make(map[metainfo.Hash]managedMagnet, len(s.pendingMagnets))
+	for hash, source := range s.pendingMagnets {
+		pending[hash] = source
 	}
-	return w.cleanupLocked()
+	s.mu.RUnlock()
+
+	hashes := make([]metainfo.Hash, 0, len(pending))
+	for hash := range pending {
+		hashes = append(hashes, hash)
+	}
+	sort.Slice(hashes, func(i, j int) bool {
+		return hashes[i].HexString() < hashes[j].HexString()
+	})
+	for _, hash := range hashes {
+		source := pending[hash]
+		unlock := s.lockHash(hash)
+		s.mu.Lock()
+		if err := s.ensureActiveLocked(); err != nil {
+			s.mu.Unlock()
+			unlock()
+			return err
+		}
+		if s.deletionPendingLocked(hash) || s.metadataRefs[hash] > 0 || s.directoryRefs[hash] > 0 {
+			s.mu.Unlock()
+			unlock()
+			continue
+		}
+		st, _, err := s.addTorrentLockedResult(ctx, Source{MagnetURI: source.uri})
+		if err == nil && s.states[hash] == nil {
+			s.states[hash] = &registryEntry{
+				ID:        hash.HexString(),
+				InfoHash:  hash.HexString(),
+				Name:      st.Name(),
+				State:     StateAdding,
+				CreatedAt: time.Now().UTC(),
+			}
+		}
+		s.mu.Unlock()
+		unlock()
+		if err != nil {
+			return fmt.Errorf("session: restore pending magnet %s: %w", hash, err)
+		}
+		s.startMetadataFetch(hash, st)
+	}
+	return nil
 }
 
-// Remove removes a metadata file and drops its torrent when no other metadata
-// file refers to the same info hash.
-func (s *Session) Remove(name string) error {
-	return s.removeMetadata(context.Background(), name)
+func (s *Session) recordMetadataLocked(name string, hash metainfo.Hash) {
+	if current, ok := s.metadata[name]; ok {
+		if current == hash {
+			return
+		}
+		if refs := s.metadataRefs[current]; refs > 1 {
+			s.metadataRefs[current] = refs - 1
+		} else {
+			delete(s.metadataRefs, current)
+		}
+	}
+	s.metadata[name] = hash
+	s.metadataRefs[hash]++
 }
 
-func (s *Session) RemoveMetadata(ctx context.Context, name string) error {
-	return s.removeMetadata(ctx, name)
-}
-
-func (s *Session) removeMetadata(ctx context.Context, name string) error {
+func (s *Session) persistMagnetIntent(ctx context.Context, hash metainfo.Hash, uri string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !validMetadataName(name) {
-		return fmt.Errorf("session: metadata name %q: %w", name, filesystem.ErrInvalidName)
-	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("session: remove metadata %q: %w", name, err)
+		return fmt.Errorf("session: persist magnet %s: %w", hash, err)
+	}
+	uri = strings.TrimSpace(uri)
+	spec, err := specFromSource(Source{MagnetURI: uri})
+	if err != nil || spec.InfoHash != hash {
+		return fmt.Errorf("%w: magnet does not match %s", ErrInvalidSource, hash)
+	}
+
+	s.mu.RLock()
+	if s.deletionPendingLocked(hash) {
+		s.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrDeleting, hash)
+	}
+	if s.metadataRefs[hash] > 0 {
+		s.mu.RUnlock()
+		return nil
+	}
+	if _, ok := s.pendingMagnets[hash]; ok {
+		s.mu.RUnlock()
+		return nil
+	}
+	s.mu.RUnlock()
+
+	name := magnetName(hash)
+	path := s.metadataPath(name)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("session: pending magnet %q is not a regular file", name)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("session: read pending magnet %q: %w", name, err)
+		}
+		existing := strings.TrimSpace(string(data))
+		existingSpec, err := specFromSource(Source{MagnetURI: existing})
+		if err != nil || existingSpec.InfoHash != hash {
+			return fmt.Errorf("session: pending magnet %q does not match its filename", name)
+		}
+		uri = existing
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("session: inspect pending magnet %q: %w", name, err)
+	} else if err := writeFileAtomic(path, []byte(uri+"\n")); err != nil {
+		return fmt.Errorf("session: persist magnet %s: %w", hash, err)
 	}
 
 	s.mu.Lock()
@@ -332,127 +244,122 @@ func (s *Session) removeMetadata(ctx context.Context, name string) error {
 	if err := s.ensureActiveLocked(); err != nil {
 		return err
 	}
-	path := s.metadataPath(name)
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrNotFound)
-		}
-		return fmt.Errorf("session: stat metadata %q: %w", name, err)
+	if s.deletionPendingLocked(hash) {
+		return fmt.Errorf("%w: %s", ErrDeleting, hash)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("session: metadata %q is a symlink: %w", name, filesystem.ErrPermission)
+	if s.metadataRefs[hash] == 0 {
+		s.pendingMagnets[hash] = managedMagnet{name: name, uri: uri}
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("session: metadata %q: %w", name, filesystem.ErrIsDir)
+	return nil
+}
+
+func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, data []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("session: remove metadata %q: %w", name, err)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
+	}
+	spec, err := specFromSource(Source{Metainfo: data})
+	if err != nil || spec.InfoHash != hash {
+		return fmt.Errorf("%w: metainfo does not match %s", ErrInvalidSource, hash)
 	}
 
-	hash, registered := s.metadata[name]
-	delete(s.metadata, name)
-	if !registered {
-		return nil
+	name := metadataName(hash)
+	path := s.metadataPath(name)
+	s.mu.RLock()
+	if s.deletionPendingLocked(hash) {
+		s.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrDeleting, hash)
 	}
-	if refs := s.metadataRefs[hash]; refs > 1 {
-		s.metadataRefs[hash] = refs - 1
-		return nil
+	if existing, ok := s.metadata[name]; ok {
+		s.mu.RUnlock()
+		if existing == hash {
+			return nil
+		}
+		return fmt.Errorf("session: metadata %q has a different info hash", name)
+	}
+	s.mu.RUnlock()
+
+	published := false
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("session: metadata %q is not a regular file", name)
+		}
+		existing, err := specFromSource(Source{MetainfoPath: path})
+		if err != nil || existing.InfoHash != hash {
+			return fmt.Errorf("session: metadata %q does not match its filename", name)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("session: inspect metadata %q: %w", name, err)
+	} else if err := writeFileAtomic(path, data); err != nil {
+		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
+	} else {
+		published = true
+	}
+
+	s.mu.Lock()
+	if err := s.ensureActiveLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.deletionPendingLocked(hash) {
+		s.mu.Unlock()
+		if published {
+			_ = os.Remove(path)
+		}
+		return fmt.Errorf("%w: %s", ErrDeleting, hash)
+	}
+	s.recordMetadataLocked(name, hash)
+	// The canonical metainfo supersedes any unresolved magnet intent for the
+	// same hash, so a crashed promotion cannot register the task twice.
+	source, hasMagnet := s.pendingMagnets[hash]
+	s.mu.Unlock()
+	if hasMagnet {
+		if err := os.Remove(s.metadataPath(source.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("session: remove pending magnet %q: %w", source.name, err)
+		}
+		s.mu.Lock()
+		if current, ok := s.pendingMagnets[hash]; ok && current.name == source.name {
+			delete(s.pendingMagnets, hash)
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *Session) managedSourcesForHashLocked(hash metainfo.Hash) managedSources {
+	var sources managedSources
+	for name, current := range s.metadata {
+		if current == hash {
+			sources.metadata = append(sources.metadata, name)
+		}
+	}
+	if source, ok := s.pendingMagnets[hash]; ok {
+		sources.magnets = append(sources.magnets, source)
+	}
+	sort.Strings(sources.metadata)
+	sort.Slice(sources.magnets, func(i, j int) bool {
+		return sources.magnets[i].name < sources.magnets[j].name
+	})
+	return sources
+}
+
+func (s *Session) restoreManagedSourcesLocked(hash metainfo.Hash, sources managedSources) {
+	for _, name := range sources.metadata {
+		s.recordMetadataLocked(name, hash)
+	}
+	for _, source := range sources.magnets {
+		s.pendingMagnets[hash] = source
+	}
+}
+
+func (s *Session) releaseManagedSourcesLocked(hash metainfo.Hash) {
+	for name, current := range s.metadata {
+		if current == hash {
+			delete(s.metadata, name)
+		}
 	}
 	delete(s.metadataRefs, hash)
-	return s.releaseTorrentIfUnreferencedLocked(hash)
-}
-
-func (s *Session) removeTorrentLocked(hash metainfo.Hash, st *Torrent) error {
-	if current, ok := s.torrents[hash]; ok && current == st {
-		delete(s.torrents, hash)
-	}
-	stErr := st.close()
-	st.tor.Drop()
-	return stErr
-}
-
-func (s *Session) RenameMetadata(ctx context.Context, oldName, newName string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if !validMetadataName(oldName) || !validMetadataName(newName) || oldName == newName {
-		return fmt.Errorf("session: metadata rename %q to %q: %w", oldName, newName, filesystem.ErrInvalidName)
-	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("session: rename metadata: %w", err)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return err
-	}
-	if _, ok := s.pendingWriters[newName]; ok {
-		return fmt.Errorf("session: metadata %q: %w", newName, filesystem.ErrExists)
-	}
-	oldPath, newPath := s.metadataPath(oldName), s.metadataPath(newName)
-	oldInfo, err := os.Lstat(oldPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("session: metadata %q: %w", oldName, filesystem.ErrNotFound)
-		}
-		return fmt.Errorf("session: stat metadata %q: %w", oldName, err)
-	}
-	if oldInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("session: metadata %q is a symlink: %w", oldName, filesystem.ErrPermission)
-	}
-	if !oldInfo.Mode().IsRegular() {
-		return fmt.Errorf("session: metadata %q: %w", oldName, filesystem.ErrIsDir)
-	}
-	if _, err := os.Lstat(newPath); err == nil {
-		return fmt.Errorf("session: metadata %q: %w", newName, filesystem.ErrExists)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("session: stat metadata %q: %w", newName, err)
-	}
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("session: rename metadata %q to %q: %w", oldName, newName, err)
-	}
-	if hash, ok := s.metadata[oldName]; ok {
-		delete(s.metadata, oldName)
-		s.metadata[newName] = hash
-	}
-	return nil
-}
-
-func (s *Session) EnsureMetadataDir() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return err
-	}
-	if err := os.Mkdir(s.metadataDir, 0o755); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("session: metadata dir: %w", filesystem.ErrExists)
-		}
-		return fmt.Errorf("session: create metadata dir: %w", err)
-	}
-	return nil
-}
-
-func (s *Session) RemoveMetadataDir() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureActiveLocked(); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(s.metadataDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("session: metadata dir: %w", filesystem.ErrNotFound)
-		}
-		return fmt.Errorf("session: read metadata dir: %w", err)
-	}
-	if len(entries) != 0 {
-		return fmt.Errorf("session: remove metadata dir: %w", filesystem.ErrNotEmpty)
-	}
-	if err := os.Remove(s.metadataDir); err != nil {
-		return fmt.Errorf("session: remove metadata dir: %w", err)
-	}
-	return nil
+	delete(s.pendingMagnets, hash)
 }

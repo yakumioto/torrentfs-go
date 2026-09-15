@@ -1,11 +1,7 @@
-// Package filesystem adapts torrent session data to a FUSE filesystem. It
-// contains no network or download logic of its own: every piece of torrent
-// data it serves comes through the Backend interface it declares, which the
-// session implements and main injects.
+// Package filesystem adapts torrent session data to a read-only FUSE filesystem.
 package filesystem
 
 import (
-	"context"
 	"io"
 	"sync"
 	"time"
@@ -13,8 +9,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-
-	"github.com/yakumioto/torrentfs-go/internal/status"
 )
 
 // FileView describes one file of a torrent, addressed by its path relative to
@@ -38,92 +32,32 @@ type TorrentView struct {
 	SingleFile bool
 }
 
-// PieceState is the status value exposed by the filesystem backend.
-type PieceState = status.PieceState
-
-// Backend supplies the filesystem layer with torrent snapshots, piece states,
-// and file handles.
+// Backend supplies the filesystem layer with torrent snapshots and file
+// handles.
 type Backend interface {
 	// Torrents returns the torrents to expose. Only torrents whose metainfo
 	// is available are included.
 	Torrents() []TorrentView
-	// OpenFile returns a handle for reading the file at the given display
-	// path inside the torrent identified by hash.
+	// OpenFile returns a handle for reading the file at the given display path
+	// inside the torrent identified by hash.
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
-	// PieceStates returns a snapshot of all pieces in ascending piece order.
-	PieceStates(hash metainfo.Hash) ([]PieceState, error)
-	// FilePieceStates returns the slice of the piece-state snapshot covering
-	// the pieces that back the file at the given display path. It is the
-	// per-file projection the mirrored stats/ tree renders; a file not in the
-	// torrent is ErrNotFound.
-	FilePieceStates(hash metainfo.Hash, path string) ([]PieceState, error)
 }
 
-// MetadataView describes one metadata file in the control directory.
-type MetadataView struct {
-	Name string
-	Size int64
-}
-
-// MetadataReader is a per-open metadata file handle.
-type MetadataReader interface {
-	io.ReaderAt
-	io.Closer
-}
-
-// MetadataWriter receives an atomically committed metadata file.
-type MetadataWriter interface {
-	io.WriterAt
-	Commit() error
-	Abort() error
-}
-
-// MetadataBackend supplies the optional metadata control directory. It is
-// deliberately narrower than the session implementation so read-only fakes
-// only need to implement Backend.
-type MetadataBackend interface {
-	Backend
-	MetadataFiles() []MetadataView
-	OpenMetadata(name string) (MetadataReader, error)
-	BeginMetadata(ctx context.Context, name string, flags uint32) (MetadataWriter, error)
-	RemoveMetadata(ctx context.Context, name string) error
-	RenameMetadata(ctx context.Context, oldName, newName string) error
-	EnsureMetadataDir() error
-	RemoveMetadataDir() error
-}
-
-// metadataDirState is an optional extension used to distinguish an empty
-// metadata directory from one removed through the filesystem.
-type metadataDirState interface {
-	MetadataDirExists() bool
-}
-
-// fsState carries the pieces shared by every node in a mount: the Backend,
-// optional metadata support, and the stable inode allocator.
+// fsState carries the pieces shared by every node in a mount: the Backend and
+// the stable inode allocator.
 type fsState struct {
-	backend  Backend
-	metadata MetadataBackend
+	backend Backend
 
-	mu              sync.Mutex
-	nextIno         uint64
-	inoByKey        map[string]uint64
-	metadataNodes   map[string]*metadataFileNode
-	metadataPresent bool
+	mu       sync.Mutex
+	nextIno  uint64
+	inoByKey map[string]uint64
 }
 
 func newFSState(backend Backend) *fsState {
-	metadata, _ := backend.(MetadataBackend)
-	metadataPresent := metadata != nil
-	if checker, ok := backend.(metadataDirState); ok {
-		metadataPresent = checker.MetadataDirExists()
-	}
 	return &fsState{
-		backend:         backend,
-		metadata:        metadata,
-		nextIno:         1, // root takes inode 1; children start at 2
-		inoByKey:        make(map[string]uint64),
-		metadataNodes:   make(map[string]*metadataFileNode),
-		metadataPresent: metadataPresent,
+		backend:  backend,
+		nextIno:  1,
+		inoByKey: make(map[string]uint64),
 	}
 }
 
@@ -140,57 +74,9 @@ func (s *fsState) inoFor(key string) uint64 {
 	return s.nextIno
 }
 
-func (s *fsState) metadataExists() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.metadataPresent
-}
-
-func (s *fsState) setMetadataExists(present bool) {
-	s.mu.Lock()
-	s.metadataPresent = present
-	s.mu.Unlock()
-}
-
-func (s *fsState) rememberMetadataNode(name string, node *metadataFileNode) {
-	s.mu.Lock()
-	if s.metadataNodes == nil {
-		s.metadataNodes = make(map[string]*metadataFileNode)
-	}
-	s.metadataNodes[name] = node
-	s.mu.Unlock()
-}
-
-func (s *fsState) forgetMetadataNode(name string) {
-	s.mu.Lock()
-	delete(s.metadataNodes, name)
-	delete(s.inoByKey, metadataFileKey(name))
-	s.mu.Unlock()
-}
-
-func (s *fsState) renameMetadataNode(oldName, newName string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	node := s.metadataNodes[oldName]
-	delete(s.metadataNodes, oldName)
-	if node != nil {
-		s.metadataNodes[newName] = node
-		node.mu.Lock()
-		node.name = newName
-		node.mu.Unlock()
-	}
-
-	oldKey, newKey := metadataFileKey(oldName), metadataFileKey(newName)
-	if ino, ok := s.inoByKey[oldKey]; ok {
-		delete(s.inoByKey, oldKey)
-		s.inoByKey[newKey] = ino
-	}
-}
-
-// Mount mounts backend on mnt and returns the running server. Dynamic
-// metadata and torrent views use zero kernel cache timeouts so namespace
-// changes become visible without explicit invalidation calls.
+// Mount mounts backend on mnt and returns the running server. Dynamic torrent
+// views use zero kernel cache timeouts so namespace changes become visible
+// without explicit invalidation calls.
 func Mount(mnt string, backend Backend, opts *fs.Options) (*fuse.Server, error) {
 	if opts == nil {
 		opts = &fs.Options{}

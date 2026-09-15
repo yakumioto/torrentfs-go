@@ -9,12 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
-
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
 var (
@@ -75,20 +72,27 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 	unlock := s.lockHash(hash)
 	defer unlock()
 
+	if src.MagnetURI != "" {
+		if err := s.persistMagnetIntent(ctx, hash, src.MagnetURI); err != nil {
+			return nil, err
+		}
+	}
+
 	s.mu.Lock()
 	if err := s.ensureActiveLocked(); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	if entry, ok := s.states[hash]; ok && (entry.State == StateDeleting || entry.State == StateDeleteFailed) {
+	if s.deletionPendingLocked(hash) {
 		s.mu.Unlock()
 		return nil, ErrDeleting
 	}
-	st, _, err := s.addTorrentSpecLocked(ctx, spec)
+	st, added, err := s.addTorrentSpecLocked(ctx, spec)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
+	stateCreated := false
 	if s.states[hash] == nil {
 		s.states[hash] = &registryEntry{
 			ID:        hash.HexString(),
@@ -97,13 +101,17 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 			State:     StateAdding,
 			CreatedAt: time.Now().UTC(),
 		}
+		stateCreated = true
 	}
 	s.mu.Unlock()
 
-	// Persist the metainfo so the torrent survives a restart. Magnet sources
-	// persist asynchronously once their info arrives.
 	if len(src.Metainfo) > 0 || src.MetainfoPath != "" {
 		if err := s.persistMetainfo(ctx, hash, src); err != nil {
+			if added {
+				s.mu.Lock()
+				s.rollbackAddedTorrentLocked(hash, st, stateCreated)
+				s.mu.Unlock()
+			}
 			return nil, err
 		}
 	} else {
@@ -112,8 +120,8 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 	return s.viewFor(hash, st), nil
 }
 
-// persistMetainfo publishes the torrent's metainfo into the metadata control
-// directory, skipping the write when the hash is already persisted.
+// persistMetainfo publishes the torrent's metainfo into the internal metadata
+// directory.
 func (s *Session) persistMetainfo(ctx context.Context, hash metainfo.Hash, src Source) error {
 	var data []byte
 	switch {
@@ -131,50 +139,40 @@ func (s *Session) persistMetainfo(ctx context.Context, hash metainfo.Hash, src S
 	return s.writeMetadataBytes(ctx, hash, data)
 }
 
-func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, data []byte) error {
-	name := hash.HexString() + ".torrent"
-	s.mu.RLock()
-	_, exists := s.metadata[name]
-	pending := s.deletionPendingLocked(hash)
-	s.mu.RUnlock()
-	if pending {
-		// A late metadata write for a torrent that is being (or failed to be)
-		// deleted must never recreate its sidecar or re-register it.
-		return fmt.Errorf("%w: %s", ErrDeleting, hash)
+func (s *Session) rollbackAddedTorrentLocked(hash metainfo.Hash, st *Torrent, stateCreated bool) {
+	if current, ok := s.torrents[hash]; !ok || current != st {
+		return
 	}
-	if exists {
-		return nil
+	if s.metadataRefs[hash] > 0 || s.directoryRefs[hash] > 0 {
+		return
 	}
-	w, err := s.BeginMetadata(ctx, name, syscall.O_WRONLY)
-	if err != nil {
-		// A racing writer or an existing file means the hash is already
-		// persisted; anything else is a real failure.
-		if errors.Is(err, filesystem.ErrExists) {
-			return nil
-		}
-		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
+	if _, ok := s.manualRefs[hash]; ok {
+		return
 	}
-	if _, err := w.WriteAt(data, 0); err != nil {
-		_ = w.Abort()
-		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
+	_ = s.removeTorrentLocked(hash, st)
+	if stateCreated {
+		delete(s.states, hash)
 	}
-	if err := w.Commit(); err != nil {
-		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
+}
+
+func (s *Session) removeTorrentLocked(hash metainfo.Hash, st *Torrent) error {
+	if current, ok := s.torrents[hash]; ok && current == st {
+		delete(s.torrents, hash)
 	}
-	return nil
+	stErr := st.close()
+	st.tor.Drop()
+	return stErr
 }
 
 // startMetadataFetch waits for a magnet source's info in the background and
-// then persists the metainfo. Each worker is cancellable per info hash so a
-// deletion stops exactly its own hash instead of leaving the worker alive
-// until the session closes.
+// then promotes its durable intent to metainfo. Each worker is cancellable per
+// info hash so a deletion stops exactly its own hash.
 func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 	ctx, cancel := context.WithCancel(s.bgCtx)
 	fetch := &metadataFetch{cancel: cancel, done: make(chan struct{})}
 
 	s.fetchMu.Lock()
 	if _, running := s.metadataFetches[hash]; running {
-		// A worker is already tracking this hash; do not stack another.
 		s.fetchMu.Unlock()
 		cancel()
 		return
@@ -187,6 +185,13 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 		defer s.bgWg.Done()
 		defer cancel()
 		defer close(fetch.done)
+		defer func() {
+			s.fetchMu.Lock()
+			if s.metadataFetches[hash] == fetch {
+				delete(s.metadataFetches, hash)
+			}
+			s.fetchMu.Unlock()
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -196,13 +201,35 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 		if metadataFetchHook != nil {
 			metadataFetchHook(hash)
 		}
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		mi := st.tor.Metainfo()
 		var buf bytes.Buffer
 		if err := mi.Write(&buf); err != nil {
+			s.recordMetadataFetchFailure(hash, err)
 			return
 		}
-		_ = s.writeMetadataBytes(ctx, hash, buf.Bytes())
+
+		unlock := s.lockHash(hash)
+		err := s.writeMetadataBytes(ctx, hash, buf.Bytes())
+		unlock()
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrDeleting) {
+			s.recordMetadataFetchFailure(hash, err)
+		}
 	}()
+}
+
+func (s *Session) recordMetadataFetchFailure(hash metainfo.Hash, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deletionPendingLocked(hash) {
+		return
+	}
+	if entry := s.states[hash]; entry != nil {
+		entry.State = StateError
+		entry.Error = err.Error()
+	}
 }
 
 // metadataFetchHook is a test-only seam that runs after a metadata fetch
@@ -295,7 +322,7 @@ func buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentVie
 	if view.TotalBytes > 0 {
 		view.Progress = float64(view.CompletedBytes) / float64(view.TotalBytes)
 	}
-	if view.State == StateDeleting || view.State == StateDeleteFailed {
+	if view.State == StateDeleting || view.State == StateDeleteFailed || view.State == StateError {
 		return view
 	}
 	switch {
@@ -402,17 +429,18 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	s.operations[opID] = op
 	s.activeOps[hash] = opID
 	s.lastOps[hash] = opID
+	sources := s.managedSourcesForHashLocked(hash)
 	// Drop the references that keep the torrent alive, but keep the
 	// s.torrents entry so the task stays visible while deleting.
 	delete(s.manualRefs, hash)
-	s.releaseMetadataIndexLocked(hash)
+	s.releaseManagedSourcesLocked(hash)
 	out := op.clone()
 	s.mu.Unlock()
 
 	s.bgWg.Add(1)
 	go func() {
 		defer s.bgWg.Done()
-		s.runDelete(hash, st, purgeData, opID)
+		s.runDelete(hash, st, purgeData, opID, sources)
 	}()
 	return &out, nil
 }
@@ -429,19 +457,19 @@ func (s *Session) Operation(id string) (Operation, bool) {
 }
 
 // runDelete performs the cleanup outside s.mu and records the outcome.
-func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID string) {
+func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID string, sources managedSources) {
 	// Stop the hash's metadata worker and wait for it to exit, so no late
-	// write can recreate the sidecar or re-register the torrent after this
-	// deletion finalizes.
+	// write can recreate a managed source after this deletion finalizes.
 	if fetch := s.stopMetadataFetch(hash); fetch != nil {
 		<-fetch.done
 	}
-	err := s.performDelete(hash, st, purge)
+	err := s.performDelete(hash, st, purge, sources)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op := s.operations[opID]
 	if err != nil {
+		s.restoreManagedSourcesLocked(hash, sources)
 		if entry, ok := s.states[hash]; ok {
 			entry.State = StateDeleteFailed
 			entry.Error = err.Error()
@@ -453,12 +481,10 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID st
 			op.UpdatedAt = time.Now().UTC()
 		}
 	} else {
-		// Only remove the handle this deletion started with; a torrent
-		// registered while the deletion ran keeps its own entry.
 		if cur, ok := s.torrents[hash]; ok && cur == st {
 			delete(s.torrents, hash)
 		}
-		s.releaseMetadataIndexLocked(hash)
+		s.releaseManagedSourcesLocked(hash)
 		_ = s.removeRegistryEntryLocked(hash)
 		if op != nil {
 			op.State = StateDeleted
@@ -469,9 +495,10 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID st
 	delete(s.activeOps, hash)
 }
 
-// performDelete stops the task, releases its resources, removes the managed
-// metainfo, and applies the payload policy. It runs without s.mu held.
-func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, purge bool) error {
+// performDelete stops the task, releases its resources, removes every internal
+// source for the hash, and applies the payload policy. It runs without s.mu
+// held.
+func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, purge bool, sources managedSources) error {
 	var errs []error
 	if st != nil {
 		if err := st.close(); err != nil {
@@ -479,9 +506,15 @@ func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, purge bool) err
 		}
 		st.tor.Drop()
 	}
-	name := hash.HexString() + ".torrent"
-	if err := os.Remove(s.metadataPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("session: remove metadata %s: %w", name, err))
+	for _, name := range sources.metadata {
+		if err := os.Remove(s.metadataPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("session: remove metadata %s: %w", name, err))
+		}
+	}
+	for _, source := range sources.magnets {
+		if err := os.Remove(s.metadataPath(source.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("session: remove pending magnet %s: %w", source.name, err))
+		}
 	}
 	if purge {
 		if err := s.purgePayload(hash); err != nil {
@@ -543,9 +576,10 @@ func (s *Session) purgePayload(hash metainfo.Hash) error {
 // the session is returned so a restart never reports a deleting task as live.
 func (s *Session) resumeDeletions() error {
 	type pendingDelete struct {
-		hash  metainfo.Hash
-		opID  string
-		purge bool
+		hash    metainfo.Hash
+		opID    string
+		purge   bool
+		sources managedSources
 	}
 	s.mu.Lock()
 	pending := make([]pendingDelete, 0)
@@ -581,8 +615,10 @@ func (s *Session) resumeDeletions() error {
 		}
 		s.activeOps[hash] = opID
 		s.lastOps[hash] = opID
+		sources := s.managedSourcesForHashLocked(hash)
 		delete(s.manualRefs, hash)
-		pending = append(pending, pendingDelete{hash: hash, opID: opID, purge: entry.PurgeRequested})
+		s.releaseManagedSourcesLocked(hash)
+		pending = append(pending, pendingDelete{hash: hash, opID: opID, purge: entry.PurgeRequested, sources: sources})
 	}
 	for _, hash := range stale {
 		_ = s.removeRegistryEntryLocked(hash)
@@ -593,32 +629,7 @@ func (s *Session) resumeDeletions() error {
 		s.mu.RLock()
 		st := s.torrents[item.hash]
 		s.mu.RUnlock()
-		s.runDelete(item.hash, st, item.purge, item.opID)
+		s.runDelete(item.hash, st, item.purge, item.opID, item.sources)
 	}
 	return nil
-}
-
-// releaseMetadataIndexLocked drops the in-memory metadata mapping and one
-// reference for the hash so no ghost sidecar/index survives a deletion.
-// Callers must hold s.mu.
-func (s *Session) releaseMetadataIndexLocked(hash metainfo.Hash) {
-	name, ok := metadataNameForHash(s.metadata, hash)
-	if !ok {
-		return
-	}
-	delete(s.metadata, name)
-	if refs := s.metadataRefs[hash]; refs > 1 {
-		s.metadataRefs[hash] = refs - 1
-	} else {
-		delete(s.metadataRefs, hash)
-	}
-}
-
-func metadataNameForHash(metadata map[string]metainfo.Hash, hash metainfo.Hash) (string, bool) {
-	for name, h := range metadata {
-		if h == hash {
-			return name, true
-		}
-	}
-	return "", false
 }

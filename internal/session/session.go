@@ -45,7 +45,7 @@ type Session struct {
 	directoryRefs   map[metainfo.Hash]int
 	directorySource map[string]torrentDirSource
 	manualRefs      map[metainfo.Hash]struct{}
-	pendingWriters  map[string]*metadataWriter
+	pendingMagnets  map[metainfo.Hash]managedMagnet
 	torrentsDir     string
 	metadataDir     string
 	scanCancel      context.CancelFunc
@@ -111,10 +111,6 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("session: create metadata dir: %w", err)
 	}
-	statsDir := statsRoot(torrentsDir)
-	if err := os.MkdirAll(statsDir, 0o755); err != nil {
-		return nil, fmt.Errorf("session: create stats dir: %w", err)
-	}
 	payloadRoot := cfg.Paths.PayloadDir
 	if payloadRoot == "" {
 		payloadRoot = filepath.Join(cfg.Paths.DataDir, "payload")
@@ -174,7 +170,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		directoryRefs:   make(map[metainfo.Hash]int),
 		directorySource: make(map[string]torrentDirSource),
 		manualRefs:      make(map[metainfo.Hash]struct{}),
-		pendingWriters:  make(map[string]*metadataWriter),
+		pendingMagnets:  make(map[metainfo.Hash]managedMagnet),
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
 		payloadRoot:     payloadRoot,
@@ -209,6 +205,12 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if err := s.resumeDeletions(); err != nil {
 		if closeErr := s.Close(context.Background()); closeErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("session: close client after delete resume: %w", closeErr))
+		}
+		return nil, err
+	}
+	if err := s.restorePendingMagnets(context.Background()); err != nil {
+		if closeErr := s.Close(context.Background()); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("session: close client after pending magnet restore: %w", closeErr))
 		}
 		return nil, err
 	}
@@ -266,18 +268,9 @@ func (s *Session) Close(ctx context.Context) error {
 	for _, t := range s.torrents {
 		torrents = append(torrents, t)
 	}
-	writers := make([]*metadataWriter, 0, len(s.pendingWriters))
-	for _, w := range s.pendingWriters {
-		writers = append(writers, w)
-	}
 	s.mu.Unlock()
 
 	var errs []error
-	for _, w := range writers {
-		if err := w.Abort(); err != nil {
-			errs = append(errs, fmt.Errorf("abort metadata %q: %w", w.name, err))
-		}
-	}
 	for _, t := range torrents {
 		if err := t.close(); err != nil {
 			errs = append(errs, err)
@@ -303,7 +296,7 @@ func (s *Session) Close(ctx context.Context) error {
 	s.directoryRefs = make(map[metainfo.Hash]int)
 	s.directorySource = make(map[string]torrentDirSource)
 	s.manualRefs = make(map[metainfo.Hash]struct{})
-	s.pendingWriters = make(map[string]*metadataWriter)
+	s.pendingMagnets = make(map[metainfo.Hash]managedMagnet)
 	s.states = make(map[metainfo.Hash]*registryEntry)
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)

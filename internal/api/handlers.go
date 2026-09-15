@@ -33,6 +33,31 @@ type operationResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type pieceStatusResponse struct {
+	Index          int    `json:"index"`
+	Known          bool   `json:"known"`
+	Complete       bool   `json:"complete"`
+	Partial        bool   `json:"partial"`
+	Wanted         bool   `json:"wanted"`
+	Checking       bool   `json:"checking"`
+	AvailableBytes *int64 `json:"available_bytes,omitempty"`
+}
+
+type fileStatusResponse struct {
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	PieceStart int    `json:"piece_start"`
+	PieceEnd   int    `json:"piece_end"`
+}
+
+type torrentStatusResponse struct {
+	Torrent       torrentResponse       `json:"torrent"`
+	MetainfoReady bool                  `json:"metainfo_ready"`
+	PieceLength   int64                 `json:"piece_length"`
+	Pieces        []pieceStatusResponse `json:"pieces"`
+	Files         []fileStatusResponse  `json:"files"`
+}
+
 func newTorrentResponse(view session.TorrentView) torrentResponse {
 	return torrentResponse{
 		ID:             view.ID,
@@ -45,6 +70,36 @@ func newTorrentResponse(view session.TorrentView) torrentResponse {
 		CreatedAt:      view.CreatedAt,
 		Error:          view.Error,
 	}
+}
+
+func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusResponse {
+	out := torrentStatusResponse{
+		Torrent:       newTorrentResponse(view.Torrent),
+		MetainfoReady: view.MetainfoReady,
+		PieceLength:   view.PieceLength,
+		Pieces:        make([]pieceStatusResponse, len(view.Pieces)),
+		Files:         make([]fileStatusResponse, len(view.Files)),
+	}
+	for i, piece := range view.Pieces {
+		out.Pieces[i] = pieceStatusResponse{
+			Index:          piece.Index,
+			Known:          piece.Known,
+			Complete:       piece.Complete,
+			Partial:        piece.Partial,
+			Wanted:         piece.Wanted,
+			Checking:       piece.Checking,
+			AvailableBytes: piece.AvailableBytes,
+		}
+	}
+	for i, file := range view.Files {
+		out.Files[i] = fileStatusResponse{
+			Path:       file.Path,
+			Size:       file.Size,
+			PieceStart: file.PieceStart,
+			PieceEnd:   file.PieceEnd,
+		}
+	}
+	return out
 }
 
 func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +169,24 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, newTorrentResponse(view))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
+	view, err := s.backend.TorrentViewFor(r.PathValue("id"))
+	if err != nil {
+		writeSessionError(w, "get torrent", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newTorrentResponse(view))
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	view, err := s.backend.TorrentStatusFor(r.PathValue("id"))
+	if err != nil {
+		writeSessionError(w, "get torrent status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newTorrentStatusResponse(view))
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {

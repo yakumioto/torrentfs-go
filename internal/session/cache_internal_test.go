@@ -201,7 +201,7 @@ func (s *unstablePieceStateSource) Length() int64 {
 	return 100
 }
 
-func TestPieceStatesRejectsUnstableSnapshot(t *testing.T) {
+func TestPieceSnapshotRejectsUnstableSource(t *testing.T) {
 	source := &unstablePieceStateSource{}
 	states, err := pieceStatesSnapshot(source, &metainfo.Info{PieceLength: 100})
 	if !errors.Is(err, errPieceStateSnapshotUnstable) {

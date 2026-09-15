@@ -244,24 +244,26 @@ func TestSessionKeepsDuplicateDirectoryAndMetadataReferences(t *testing.T) {
 		t.Fatal("removing one duplicate source dropped the torrent")
 	}
 
-	commitMetadata(t, sess, "saved.torrent", bytes)
+	// A managed internal source keeps the task alive after the user's own
+	// .torrent file is gone.
+	persistManaged(t, sess, bytes)
 	if err := os.Remove(second); err != nil {
 		t.Fatalf("remove second source: %v", err)
 	}
 	time.Sleep(350 * time.Millisecond)
 	if _, ok := sess.Torrent(hash); !ok {
-		t.Fatal("metadata reference did not preserve the torrent")
+		t.Fatal("managed metadata reference did not preserve the torrent")
 	}
-	if err := sess.RemoveMetadata(context.Background(), "saved.torrent"); err != nil {
-		t.Fatalf("RemoveMetadata: %v", err)
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), directorySyncTimeout)
 	defer cancel()
-	if err := waitFor(ctx, func() bool {
-		_, ok := sess.Torrent(hash)
-		return !ok
-	}); err != nil {
-		t.Fatalf("wait for final reference removal: %v", err)
+	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	if err != nil {
+		t.Fatalf("DeleteTorrent: %v", err)
+	}
+	waitOperationDone(t, ctx, sess, op.ID)
+	if _, ok := sess.Torrent(hash); ok {
+		t.Fatal("deleted torrent is still registered")
 	}
 }
 
@@ -289,9 +291,10 @@ func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 	if info, err := os.Stat(metadataDir); err != nil || !info.IsDir() {
 		t.Fatalf("new metadata dir = (%v, %v), want directory", info, err)
 	}
-	commitMetadata(t, first, "current.torrent", bytes)
-	if _, err := os.Stat(filepath.Join(metadataDir, "current.torrent")); err != nil {
-		t.Fatalf("new metadata file missing: %v", err)
+	persistManaged(t, first, bytes)
+	canonical := filepath.Join(metadataDir, hash.HexString()+".torrent")
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical metadata file missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(oldMetadataDir, "current.torrent")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy metadata directory was written: %v", err)
@@ -302,8 +305,8 @@ func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 
 	second := newDirectorySession(t, dataDir, torrentsDir)
 	waitForTorrent(t, second, hash)
-	if files := second.MetadataFiles(); len(files) != 1 || files[0].Name != "current.torrent" {
-		t.Fatalf("MetadataFiles after restart = %+v", files)
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical metadata file lost after restart: %v", err)
 	}
 }
 
