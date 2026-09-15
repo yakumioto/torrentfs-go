@@ -239,12 +239,12 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 	r := &raFile{
 		loader:      t.loader,
 		cache:       t.cache,
-		tor:         t.tor,
 		torrentKey:  t.InfoHash().HexString(),
 		fileOffset:  f.Offset(),
 		fileSize:    f.Length(),
 		pieceLength: info.PieceLength,
 		torrentSize: t.tor.Length(),
+		readahead:   defaultStreamingReadahead,
 	}
 	t.readers[displayPath] = r
 	return r, nil

@@ -26,16 +26,25 @@ func enterReadGate() {
 }
 
 type pieceSource interface {
-	prepare(*torrent.Torrent, int, int, int64) error
+	prepare(int64) error
 	ReadAt([]byte, int64) (int, error)
 	Close() error
 }
 
+const defaultStreamingReadahead int64 = 16 << 20
+
 // pieceLoader serializes access to one whole-torrent anacrolix reader.
 type pieceLoader struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+
+	operationMu     sync.Mutex
+	rootContext     context.Context
+	rootCancel      context.CancelFunc
+	activeCancel    context.CancelFunc
+	nextOperation   uint64
+	activeOperation uint64
+
 	r      torrent.Reader
-	cancel context.CancelFunc
 	closed bool
 	err    error
 }
@@ -46,16 +55,50 @@ func newPieceLoader(t *torrent.Torrent) *pieceLoader {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := t.NewReader()
 	r.SetContext(ctx)
-	return &pieceLoader{r: r, cancel: cancel}
+	return &pieceLoader{
+		r:           r,
+		rootContext: ctx,
+		rootCancel:  cancel,
+	}
 }
 
-func (l *pieceLoader) prepare(t *torrent.Torrent, begin, end int, readahead int64) error {
+func (l *pieceLoader) cancelActive() {
+	l.operationMu.Lock()
+	cancel := l.activeCancel
+	l.operationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (l *pieceLoader) beginOperation() (context.Context, uint64, context.CancelFunc) {
+	l.operationMu.Lock()
+	defer l.operationMu.Unlock()
+	ctx, cancel := context.WithCancel(l.rootContext)
+	l.nextOperation++
+	operation := l.nextOperation
+	l.activeOperation = operation
+	l.activeCancel = cancel
+	return ctx, operation, cancel
+}
+
+func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) {
+	l.operationMu.Lock()
+	if l.activeOperation == operation {
+		l.activeOperation = 0
+		l.activeCancel = nil
+	}
+	l.operationMu.Unlock()
+	cancel()
+}
+
+func (l *pieceLoader) prepare(readahead int64) error {
+	l.cancelActive()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
 		return filesystem.ErrClosed
 	}
-	t.DownloadPieces(begin, end)
 	l.r.SetReadahead(readahead)
 	return nil
 }
@@ -69,6 +112,9 @@ func (l *pieceLoader) ReadAt(p []byte, off int64) (int, error) {
 	if l.closed {
 		return 0, filesystem.ErrClosed
 	}
+	ctx, operation, cancel := l.beginOperation()
+	defer l.endOperation(operation, cancel)
+	l.r.SetContext(ctx)
 	if _, err := l.r.Seek(off, io.SeekStart); err != nil {
 		return 0, err
 	}
@@ -80,7 +126,8 @@ func (l *pieceLoader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (l *pieceLoader) Close() error {
-	l.cancel()
+	l.rootCancel()
+	l.cancelActive()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
@@ -100,12 +147,12 @@ type raFile struct {
 
 	loader      pieceSource
 	cache       *cache.Cache
-	tor         *torrent.Torrent
 	torrentKey  string
 	fileOffset  int64
 	fileSize    int64
 	pieceLength int64
 	torrentSize int64
+	readahead   int64
 	closed      bool
 }
 
@@ -149,7 +196,7 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 		}
 	}
 	if needsLoad {
-		if err := f.requestPieces(plan); err != nil {
+		if err := f.requestPieces(); err != nil {
 			return 0, err
 		}
 	}
@@ -168,15 +215,18 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 	return written, nil
 }
 
-func (f *raFile) requestPieces(plan cache.ReadPlan) error {
+func (f *raFile) requestPieces() error {
 	f.mu.RLock()
 	if f.closed {
 		f.mu.RUnlock()
 		return filesystem.ErrClosed
 	}
-	loader, tor := f.loader, f.tor
+	loader, readahead := f.loader, f.readahead
 	f.mu.RUnlock()
-	return loader.prepare(tor, plan.Wanted[0], plan.Wanted[len(plan.Wanted)-1]+1, plan.Readahead)
+	if readahead <= 0 {
+		readahead = defaultStreamingReadahead
+	}
+	return loader.prepare(readahead)
 }
 
 func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
