@@ -26,16 +26,17 @@ func enterReadGate() {
 }
 
 type pieceSource interface {
-	prepare(int64) error
-	ReadAt([]byte, int64) (int, error)
+	ReadAt([]byte, int64, int64) (int, error)
 	Close() error
 }
 
-const defaultStreamingReadahead int64 = 16 << 20
+const defaultStreamingReadahead int64 = 8 << 20
 
 // pieceLoader serializes access to one whole-torrent anacrolix reader.
 type pieceLoader struct {
 	mu sync.Mutex
+	// admissionMu serializes operation admission through the full Reader use.
+	admissionMu sync.Mutex
 
 	operationMu     sync.Mutex
 	rootContext     context.Context
@@ -92,28 +93,22 @@ func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) 
 	cancel()
 }
 
-func (l *pieceLoader) prepare(readahead int64) error {
-	l.cancelActive()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
-		return filesystem.ErrClosed
-	}
-	l.r.SetReadahead(readahead)
-	return nil
-}
-
-func (l *pieceLoader) ReadAt(p []byte, off int64) (int, error) {
+func (l *pieceLoader) ReadAt(p []byte, off, readahead int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
 	}
+	l.cancelActive()
+	l.admissionMu.Lock()
+	defer l.admissionMu.Unlock()
+	l.cancelActive()
+	ctx, operation, cancel := l.beginOperation()
+	defer l.endOperation(operation, cancel)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
 		return 0, filesystem.ErrClosed
 	}
-	ctx, operation, cancel := l.beginOperation()
-	defer l.endOperation(operation, cancel)
+	l.r.SetReadahead(readahead)
 	l.r.SetContext(ctx)
 	if _, err := l.r.Seek(off, io.SeekStart); err != nil {
 		return 0, err
@@ -127,6 +122,9 @@ func (l *pieceLoader) ReadAt(p []byte, off int64) (int, error) {
 
 func (l *pieceLoader) Close() error {
 	l.rootCancel()
+	l.cancelActive()
+	l.admissionMu.Lock()
+	defer l.admissionMu.Unlock()
 	l.cancelActive()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -188,19 +186,6 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 
-	needsLoad := false
-	for _, span := range plan.Spans {
-		if !f.cache.Has(cache.Key{Torrent: f.torrentKey, Piece: span.Index}) {
-			needsLoad = true
-			break
-		}
-	}
-	if needsLoad {
-		if err := f.requestPieces(); err != nil {
-			return 0, err
-		}
-	}
-
 	written := 0
 	for _, span := range plan.Spans {
 		data, err := f.span(span)
@@ -215,18 +200,14 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 	return written, nil
 }
 
-func (f *raFile) requestPieces() error {
+func (f *raFile) readaheadBytes() int64 {
 	f.mu.RLock()
-	if f.closed {
-		f.mu.RUnlock()
-		return filesystem.ErrClosed
-	}
-	loader, readahead := f.loader, f.readahead
+	readahead := f.readahead
 	f.mu.RUnlock()
 	if readahead <= 0 {
-		readahead = defaultStreamingReadahead
+		return defaultStreamingReadahead
 	}
-	return loader.prepare(readahead)
+	return readahead
 }
 
 func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
@@ -248,7 +229,7 @@ func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
 			return nil, io.EOF
 		}
 		data := make([]byte, int(pieceSpan.Length))
-		n, err := f.loader.ReadAt(data, start)
+		n, err := f.loader.ReadAt(data, start, f.readaheadBytes())
 		if err != nil && !(err == io.EOF && n == len(data)) {
 			return nil, err
 		}
@@ -283,7 +264,7 @@ func (f *raFile) piece(index int) ([]byte, error) {
 		return nil, io.EOF
 	}
 	data := make([]byte, int(length))
-	n, err := f.loader.ReadAt(data, start)
+	n, err := f.loader.ReadAt(data, start, f.readaheadBytes())
 	if err != nil && !(err == io.EOF && n == len(data)) {
 		return nil, err
 	}

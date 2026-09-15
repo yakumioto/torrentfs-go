@@ -160,11 +160,7 @@ type gatedPieceSource struct {
 	data    []byte
 }
 
-func (s *gatedPieceSource) prepare(int64) error {
-	return nil
-}
-
-func (s *gatedPieceSource) ReadAt(dst []byte, off int64) (int, error) {
+func (s *gatedPieceSource) ReadAt(dst []byte, off, _ int64) (int, error) {
 	s.once.Do(func() { close(s.started) })
 	<-s.release
 	if off < 0 || off >= int64(len(s.data)) {
@@ -257,7 +253,7 @@ func (r *operationReader) snapshot() (seekCalls, maxActive int, readaheads []int
 	return r.seekCalls, r.maxActive, append([]int64(nil), r.readaheads...)
 }
 
-func TestPieceLoaderPrepareCancelsBlockedRead(t *testing.T) {
+func TestPieceLoaderAdmissionCancellationBeforeReaderLock(t *testing.T) {
 	reader := &operationReader{started: make(chan struct{})}
 	rootContext, rootCancel := context.WithCancel(context.Background())
 	loader := &pieceLoader{
@@ -266,10 +262,81 @@ func TestPieceLoaderPrepareCancelsBlockedRead(t *testing.T) {
 		rootCancel:  rootCancel,
 	}
 
-	readDone := make(chan error, 1)
+	loader.mu.Lock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { loader.mu.Unlock() }) }
+	defer release()
+
+	firstDone := make(chan error, 1)
 	go func() {
-		_, err := loader.ReadAt(make([]byte, 32), 0)
-		readDone <- err
+		_, err := loader.ReadAt(make([]byte, 32), 0, defaultStreamingReadahead)
+		firstDone <- err
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		loader.operationMu.Lock()
+		admitted := loader.activeCancel != nil
+		loader.operationMu.Unlock()
+		if admitted {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("ReadAt did not register before waiting for the Reader lock")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	secondDone := make(chan struct {
+		n   int
+		err error
+	}, 1)
+	go func() {
+		var data [32]byte
+		n, err := loader.ReadAt(data[:], 64, defaultStreamingReadahead)
+		secondDone <- struct {
+			n   int
+			err error
+		}{n: n, err: err}
+	}()
+	release()
+
+	select {
+	case err := <-firstDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("read waiting for Reader lock error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement read did not cancel the admitted read")
+	}
+	select {
+	case result := <-secondDone:
+		if result.err != nil || result.n != 32 {
+			t.Fatalf("replacement read = %d bytes, %v; want 32, nil", result.n, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement read did not acquire the loader")
+	}
+	if err := loader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestPieceLoaderReadCancelsBlockedRead(t *testing.T) {
+	reader := &operationReader{started: make(chan struct{})}
+	rootContext, rootCancel := context.WithCancel(context.Background())
+	loader := &pieceLoader{
+		r:           reader,
+		rootContext: rootContext,
+		rootCancel:  rootCancel,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := loader.ReadAt(make([]byte, 32), 0, defaultStreamingReadahead)
+		firstDone <- err
 	}()
 	select {
 	case <-reader.started:
@@ -277,42 +344,34 @@ func TestPieceLoaderPrepareCancelsBlockedRead(t *testing.T) {
 		t.Fatal("initial read did not block")
 	}
 
-	prepareDone := make(chan error, 1)
-	go func() {
-		prepareDone <- loader.prepare(defaultStreamingReadahead)
-	}()
-
-	select {
-	case err := <-readDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancelled read error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("prepare did not cancel the blocked read")
-	}
-	if err := <-prepareDone; err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-
-	readResult := make(chan struct {
+	secondDone := make(chan struct {
 		n   int
 		err error
 	}, 1)
 	go func() {
 		var data [32]byte
-		n, err := loader.ReadAt(data[:], 128)
-		readResult <- struct {
+		n, err := loader.ReadAt(data[:], 128, defaultStreamingReadahead)
+		secondDone <- struct {
 			n   int
 			err error
 		}{n: n, err: err}
 	}()
+
 	select {
-	case result := <-readResult:
+	case err := <-firstDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled read error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement read did not cancel the blocked read")
+	}
+	select {
+	case result := <-secondDone:
 		if result.err != nil || result.n != 32 {
 			t.Fatalf("replacement read = %d bytes, %v; want 32, nil", result.n, result.err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("replacement read did not acquire the loader")
+		t.Fatal("replacement read did not complete")
 	}
 
 	seekCalls, maxActive, readaheads := reader.snapshot()
@@ -322,8 +381,8 @@ func TestPieceLoaderPrepareCancelsBlockedRead(t *testing.T) {
 	if maxActive != 1 {
 		t.Fatalf("maximum concurrent reads = %d, want 1", maxActive)
 	}
-	if len(readaheads) != 1 || readaheads[0] != defaultStreamingReadahead {
-		t.Fatalf("readaheads = %v, want [%d]", readaheads, defaultStreamingReadahead)
+	if len(readaheads) != 2 || readaheads[0] != defaultStreamingReadahead || readaheads[1] != defaultStreamingReadahead {
+		t.Fatalf("readaheads = %v, want two [%d] values", readaheads, defaultStreamingReadahead)
 	}
 	if err := loader.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -336,14 +395,10 @@ type recordingPieceSource struct {
 	readaheads []int64
 }
 
-func (s *recordingPieceSource) prepare(readahead int64) error {
+func (s *recordingPieceSource) ReadAt(dst []byte, off, readahead int64) (int, error) {
 	s.mu.Lock()
 	s.readaheads = append(s.readaheads, readahead)
 	s.mu.Unlock()
-	return nil
-}
-
-func (s *recordingPieceSource) ReadAt(dst []byte, off int64) (int, error) {
 	if off < 0 || off >= int64(len(s.data)) {
 		return 0, io.EOF
 	}
