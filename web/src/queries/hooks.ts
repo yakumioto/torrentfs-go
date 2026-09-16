@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
+import { ApiError } from '../api/errors';
 import type { Operation, Torrent } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
@@ -71,12 +72,19 @@ export function useDeleteTorrent(api: ApiClient) {
   });
 }
 
+export function operationRefetchInterval(operation: Operation | undefined, error: unknown): number | false {
+  if (error instanceof ApiError && error.status === 404) {
+    return false;
+  }
+  return operation?.state === 'deleting' ? 1500 : false;
+}
+
 export function useOperation(api: ApiClient, operationId: string, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.operation(operationId),
     queryFn: ({ signal }) => api.getOperation(operationId, signal),
     enabled: enabled && operationId !== '',
-    refetchInterval: (query) => query.state.data?.state === 'deleting' ? 1500 : false,
+    refetchInterval: (query) => operationRefetchInterval(query.state.data, query.state.error),
     retry: shouldRetry,
     retryDelay,
   });

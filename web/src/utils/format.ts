@@ -18,7 +18,14 @@ export function formatBytes(value: number): string {
   return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${unit}`;
 }
 
+export function isGoZeroTime(value: string): boolean {
+  return value === '0001-01-01T00:00:00Z';
+}
+
 export function formatDate(value: string): string {
+  if (isGoZeroTime(value)) {
+    return '—';
+  }
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) {
     return '—';

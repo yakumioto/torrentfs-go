@@ -3,6 +3,7 @@ import type { FileStatus, PieceStatus, Torrent } from '../types/api';
 import { fileCoverage } from '../components/detail/file-coverage';
 import { pieceVisualState } from '../components/detail/piece-state';
 import { sortTorrents } from '../queries/sort';
+import { formatDate } from '../utils/format';
 
 const piece = (overrides: Partial<PieceStatus> = {}): PieceStatus => ({ index: 0, known: true, complete: false, partial: false, wanted: true, checking: false, ...overrides });
 
@@ -28,6 +29,12 @@ describe('file coverage', () => {
 
 describe('torrent sorting', () => {
   it('sorts by name, puts invalid dates after valid dates, then id', () => {
-    expect(sortTorrents([torrent({ id: 'b', name: 'Beta' }), torrent({ id: 'a', name: 'alpha' }), torrent({ id: 'z', name: 'alpha', created_at: '' })]).map((item) => item.id)).toEqual(['a', 'z', 'b']);
+    expect(sortTorrents([torrent({ id: 'b', name: 'Beta' }), torrent({ id: 'a', name: 'alpha' }), torrent({ id: 'z', name: 'alpha', created_at: '0001-01-01T00:00:00Z' })]).map((item) => item.id)).toEqual(['a', 'z', 'b']);
+  });
+});
+
+describe('created dates', () => {
+  it('renders Go time.Time zero values as an empty marker', () => {
+    expect(formatDate('0001-01-01T00:00:00Z')).toBe('—');
   });
 });

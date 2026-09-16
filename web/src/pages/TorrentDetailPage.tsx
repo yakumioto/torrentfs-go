@@ -37,10 +37,11 @@ export function TorrentDetailPage() {
     );
   }
 
-  const torrent = detail.data;
-  if (torrent === undefined) {
+  const detailTorrent = detail.data;
+  if (detailTorrent === undefined) {
     return null;
   }
+  const torrent = status.data?.torrent ?? detailTorrent;
   const pending = torrent.state === 'adding' || status.data?.metainfo_ready === false;
 
   return (

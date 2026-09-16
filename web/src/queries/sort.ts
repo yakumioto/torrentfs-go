@@ -1,4 +1,5 @@
 import type { Torrent } from '../types/api';
+import { isGoZeroTime } from '../utils/format';
 
 export function sortTorrents(torrents: Torrent[]): Torrent[] {
   return [...torrents].sort((left, right) => {
@@ -9,8 +10,8 @@ export function sortTorrents(torrents: Torrent[]): Torrent[] {
 
     const leftCreated = Date.parse(left.created_at);
     const rightCreated = Date.parse(right.created_at);
-    const leftHasDate = Number.isFinite(leftCreated);
-    const rightHasDate = Number.isFinite(rightCreated);
+    const leftHasDate = !isGoZeroTime(left.created_at) && Number.isFinite(leftCreated);
+    const rightHasDate = !isGoZeroTime(right.created_at) && Number.isFinite(rightCreated);
     if (leftHasDate !== rightHasDate) {
       return leftHasDate ? -1 : 1;
     }
