@@ -69,10 +69,12 @@ func TestLoginAndDynamicBearerAuthentication(t *testing.T) {
 		t.Fatalf("login response = %+v, want Bearer and 60 seconds", response)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil)
-	req.Header.Set("Authorization", "Bearer "+response.Token)
-	if rec := do(t, srv, req); rec.Code != http.StatusOK {
-		t.Fatalf("authenticated list status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	for _, scheme := range []string{"Bearer", "bearer", "bEaReR"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil)
+		req.Header.Set("Authorization", scheme+" "+response.Token)
+		if rec := do(t, srv, req); rec.Code != http.StatusOK {
+			t.Fatalf("authenticated list with %q status = %d, want 200; body %s", scheme, rec.Code, rec.Body.String())
+		}
 	}
 
 	for _, header := range []string{"Basic " + response.Token, "Bearer wrong", "Bearer "} {
@@ -81,6 +83,41 @@ func TestLoginAndDynamicBearerAuthentication(t *testing.T) {
 		if rec := do(t, srv, req); rec.Code != http.StatusUnauthorized {
 			t.Errorf("Authorization %q status = %d, want 401", header, rec.Code)
 		}
+	}
+}
+
+func TestLoginExpiresInRoundsSubsecondTTLUp(t *testing.T) {
+	tests := []struct {
+		name      string
+		ttl       time.Duration
+		expiresIn int64
+	}{
+		{name: "half second", ttl: 500 * time.Millisecond, expiresIn: 1},
+		{name: "one and a half seconds", ttl: 1500 * time.Millisecond, expiresIn: 2},
+		{name: "one nanosecond", ttl: time.Nanosecond, expiresIn: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeBackend{}, func(cfg *config.Config) {
+				dynamicAuth(cfg)
+				cfg.HTTP.Auth.TokenTTL = config.Duration(tt.ttl)
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"password"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := do(t, srv, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("login status = %d, want 200; body %s", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				ExpiresIn int64 `json:"expires_in"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode login response: %v", err)
+			}
+			if response.ExpiresIn != tt.expiresIn {
+				t.Fatalf("expires_in = %d, want %d", response.ExpiresIn, tt.expiresIn)
+			}
+		})
 	}
 }
 

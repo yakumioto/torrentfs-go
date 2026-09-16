@@ -152,8 +152,8 @@ func authorizationToken(r *http.Request) (string, bool) {
 	if len(values) != 1 {
 		return "", false
 	}
-	token, ok := strings.CutPrefix(values[0], "Bearer ")
-	return token, ok && token != ""
+	scheme, token, ok := strings.Cut(values[0], " ")
+	return token, ok && strings.EqualFold(scheme, "Bearer") && token != ""
 }
 
 func writeUnauthorized(w http.ResponseWriter) {
