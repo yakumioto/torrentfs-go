@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -30,8 +31,11 @@ func TestDefault(t *testing.T) {
 	if cfg.HTTP.MaxUploadBytes != 10<<20 {
 		t.Fatalf("Default max upload = %d, want %d", cfg.HTTP.MaxUploadBytes, 10<<20)
 	}
-	if cfg.HTTP.BearerToken != "" {
-		t.Fatalf("Default bearer token = %q, want empty", cfg.HTTP.BearerToken)
+	if cfg.HTTP.Auth.Enabled {
+		t.Fatal("Default authentication enabled, want disabled")
+	}
+	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 30*time.Minute {
+		t.Fatalf("Default token TTL = %s, want 30m", cfg.HTTP.Auth.TokenTTL)
 	}
 	wantIdentity := config.Identity{
 		TrackerUserAgent:               "qBittorrent/4.4.0",
@@ -104,8 +108,13 @@ payload_dir = `+quote(payloadDir)+`
 
 [http]
 listen_addr = "127.0.0.1:9000"
-bearer_token = "secret-token"
 max_upload_bytes = 2048
+
+[http.auth]
+enabled = true
+username = "test-user"
+password_hash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+token_ttl = "45m"
 `)
 
 	cfg, err := config.Load(path)
@@ -118,8 +127,14 @@ max_upload_bytes = 2048
 	if cfg.HTTP.ListenAddr != "127.0.0.1:9000" {
 		t.Fatalf("ListenAddr = %q", cfg.HTTP.ListenAddr)
 	}
-	if cfg.HTTP.BearerToken != "secret-token" {
-		t.Fatalf("BearerToken = %q", cfg.HTTP.BearerToken)
+	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.Auth.Username != "test-user" {
+		t.Fatalf("Auth = %+v, want enabled test-user", cfg.HTTP.Auth)
+	}
+	if cfg.HTTP.Auth.PasswordHash == "" || cfg.HTTP.Auth.PasswordHashFile != "" {
+		t.Fatalf("Auth password hash source = %+v, want inline hash", cfg.HTTP.Auth)
+	}
+	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 45*time.Minute {
+		t.Fatalf("Auth token TTL = %s, want 45m", cfg.HTTP.Auth.TokenTTL)
 	}
 	if cfg.HTTP.MaxUploadBytes != 2048 {
 		t.Fatalf("MaxUploadBytes = %d, want 2048", cfg.HTTP.MaxUploadBytes)
@@ -190,6 +205,9 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	if cfg.Identity != defaults.Identity {
 		t.Fatalf("Identity = %+v, want defaults %+v", cfg.Identity, defaults.Identity)
 	}
+	if cfg.HTTP.Auth != defaults.HTTP.Auth {
+		t.Fatalf("Auth = %+v, want defaults %+v", cfg.HTTP.Auth, defaults.HTTP.Auth)
+	}
 }
 
 func TestLoadUsesDefaultsForEmptyIdentitySection(t *testing.T) {
@@ -247,6 +265,10 @@ func TestLoadWrapsSyntaxAndTypeErrors(t *testing.T) {
 			name: "type",
 			body: "[paths]\ndata_dir = \"/tmp/torrentfs\"\n\n[connections]\nlisten_port = \"bad\"\n",
 		},
+		{
+			name: "duration",
+			body: "[paths]\ndata_dir = \"/tmp/torrentfs\"\n\n[http.auth]\ntoken_ttl = \"not-a-duration\"\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,6 +292,108 @@ func TestLoadWrapsOpenError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Fatalf("Load missing error = %q, want path %q", err, path)
+	}
+}
+
+func TestLoadRejectsRemovedBearerToken(t *testing.T) {
+	_, err := config.Load(writeConfig(t, "[http]\nbearer_token = \"legacy\"\n"))
+	if err == nil {
+		t.Fatal("Load with removed bearer_token succeeded")
+	}
+	var strictErr *toml.StrictMissingError
+	if !errors.As(err, &strictErr) {
+		t.Fatalf("Load error = %T %v, want *toml.StrictMissingError", err, err)
+	}
+}
+
+func TestValidateRejectsInvalidAuth(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*config.Config)
+		field string
+	}{
+		{
+			name: "enabled without username",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth.Enabled = true
+				cfg.HTTP.Auth.PasswordHash = "hash"
+			},
+			field: "http.auth.username",
+		},
+		{
+			name: "enabled without password hash",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth.Enabled = true
+				cfg.HTTP.Auth.Username = "alice"
+			},
+			field: "http.auth.password_hash",
+		},
+		{
+			name: "both password hash sources",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth = config.Auth{
+					Enabled:          true,
+					Username:         "alice",
+					PasswordHash:     "hash",
+					PasswordHashFile: "hash-file",
+					TokenTTL:         config.Duration(30 * time.Minute),
+				}
+			},
+			field: "http.auth.password_hash",
+		},
+		{
+			name: "disabled with credentials",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth.Username = "alice"
+			},
+			field: "http.auth.username",
+		},
+		{
+			name: "username control character",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth = config.Auth{
+					Enabled:      true,
+					Username:     "alice\n",
+					PasswordHash: "hash",
+					TokenTTL:     config.Duration(time.Minute),
+				}
+			},
+			field: "http.auth.username",
+		},
+		{
+			name: "non-positive token TTL",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth.TokenTTL = 0
+			},
+			field: "http.auth.token_ttl",
+		},
+		{
+			name: "token TTL too long",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Auth.TokenTTL = config.Duration(24*time.Hour + time.Nanosecond)
+			},
+			field: "http.auth.token_ttl",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			tt.setup(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate succeeded")
+			}
+			if !errors.Is(err, config.ErrInvalid) {
+				t.Fatalf("Validate error = %v, want config.ErrInvalid", err)
+			}
+			var validationErr *config.ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("Validate error = %T %v, want *config.ValidationError", err, err)
+			}
+			if validationErr.Field != tt.field {
+				t.Fatalf("ValidationError.Field = %q, want %q", validationErr.Field, tt.field)
+			}
+		})
 	}
 }
 
@@ -341,13 +465,6 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				cfg.HTTP.MaxUploadBytes = 0
 			},
 			field: "http.max_upload_bytes",
-		},
-		{
-			name: "bearer token with newline",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.BearerToken = "token\n"
-			},
-			field: "http.bearer_token",
 		},
 		{
 			name: "non-loopback address without token",
@@ -456,17 +573,21 @@ func TestValidateAcceptsIdentityValues(t *testing.T) {
 	}
 }
 
-func TestValidateAcceptsExposedAddressWithToken(t *testing.T) {
+func TestValidateAcceptsExposedAddressWithAuth(t *testing.T) {
 	cfg := config.Default()
 	cfg.HTTP.ListenAddr = "0.0.0.0:9000"
-	cfg.HTTP.BearerToken = "secret"
+	cfg.HTTP.Auth = config.Auth{
+		Enabled:      true,
+		Username:     "test-user",
+		PasswordHash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
+		TokenTTL:     config.Duration(30 * time.Minute),
+	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate exposed address with token: %v", err)
+		t.Fatalf("Validate exposed address with auth: %v", err)
 	}
 
 	cfg = config.Default()
 	cfg.HTTP.ListenAddr = "" // HTTP disabled
-	cfg.HTTP.BearerToken = ""
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate disabled HTTP: %v", err)
 	}

@@ -43,9 +43,9 @@ delete, and query per-torrent piece status. Durable managed metainfo and
 pending magnet intents live in <torrents-dir>/.metadata, which is an
 implementation detail and is never mounted.
 
-When http.listen_addr is set the management API is served; unless a required
-Bearer Token is configured it must bind loopback only. Omitting -mountpoint
-then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
+When http.listen_addr is set the management API is served; an enabled
+http.auth configuration is required for non-loopback listeners. Omitting
+-mountpoint then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
 `
 
 func main() {
@@ -114,20 +114,34 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
+	var apiServer *api.Server
+	if httpEnabled {
+		apiServer, err = api.New(cfg, sess)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
+			_ = sess.Close(context.Background())
+			if errors.Is(err, config.ErrInvalid) {
+				return 2
+			}
+			return 1
+		}
+	}
+
 	var server *fuse.Server
 	if *mountpoint != "" {
 		server, err = filesystem.Mount(*mountpoint, sess, nil)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
+			if apiServer != nil {
+				_ = apiServer.Shutdown(context.Background())
+			}
 			_ = sess.Close(context.Background())
 			return 1
 		}
 	}
 
-	var apiServer *api.Server
 	serveErr := make(chan error, 1)
-	if httpEnabled {
-		apiServer = api.New(cfg, sess)
+	if apiServer != nil {
 		go func() { serveErr <- apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr) }()
 	}
 

@@ -93,7 +93,11 @@ func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config))
 	if tune != nil {
 		tune(&cfg)
 	}
-	return api.New(cfg, backend)
+	srv, err := api.New(cfg, backend)
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	return srv
 }
 
 func do(t *testing.T, srv *api.Server, req *http.Request) *httptest.ResponseRecorder {
@@ -411,29 +415,6 @@ func TestOperationLookup(t *testing.T) {
 	}
 }
 
-func TestBearerTokenAuthentication(t *testing.T) {
-	srv := newTestServer(t, &fakeBackend{}, func(cfg *config.Config) {
-		cfg.HTTP.BearerToken = "s3cret"
-	})
-
-	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("no token status = %d, want 401", rec.Code)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	if rec := do(t, srv, req); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token status = %d, want 401", rec.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil)
-	req.Header.Set("Authorization", "Bearer s3cret")
-	if rec := do(t, srv, req); rec.Code != http.StatusOK {
-		t.Fatalf("valid token status = %d, want 200", rec.Code)
-	}
-}
-
 func TestServerAgainstRealSession(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
@@ -453,7 +434,10 @@ func TestServerAgainstRealSession(t *testing.T) {
 			t.Errorf("Close: %v", err)
 		}
 	}()
-	srv := api.New(cfg, sess)
+	srv, err := api.New(cfg, sess)
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
 
 	torrentBytes := buildTestTorrent(t, "payload.bin", []byte("api end to end payload"))
 	var buf bytes.Buffer
