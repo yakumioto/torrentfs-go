@@ -1,0 +1,366 @@
+name: Nightly
+
+on:
+  # GitHub Actions cron uses UTC: 16:17 UTC is 00:17 the next day in Beijing.
+  schedule:
+    - cron: "17 16 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: torrentfs-nightly-main
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Verify trusted main source
+    if: ${{ github.repository == 'yakumioto/torrentfs-go' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Confirm repository and ref
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "yakumioto/torrentfs-go"
+          test "${GITHUB_REF}" = "refs/heads/main"
+
+  test:
+    name: build, vet, unit and race tests
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: test
+
+  lint:
+    name: golangci-lint
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: lint
+
+  fuse:
+    name: real FUSE mount tests (required)
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TORRENTFS_FUSE_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: fuse
+
+  package:
+    name: Build and upload Linux amd64 package
+    needs: [guard, test, lint, fuse]
+    if: ${{ needs.guard.result == 'success' && needs.test.result == 'success' && needs.lint.result == 'success' && needs.fuse.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      nightly_tag: ${{ steps.metadata.outputs.tag }}
+      archive_name: ${{ steps.build.outputs.archive }}
+      checksum_name: ${{ steps.build.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Derive immutable nightly identity
+        id: metadata
+        shell: bash
+        env:
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Unexpected event SHA: %s\n' "$COMMIT" >&2
+            exit 1
+          fi
+          if [[ ! "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            printf 'Unexpected workflow run ID: %s\n' "$RUN_ID" >&2
+            exit 1
+          fi
+          commit_timestamp="$(git show -s --format=%cI "$COMMIT")"
+          date_utc="$(date -u -d "$commit_timestamp" +%Y%m%d)"
+          tag="nightly-${date_utc}-${COMMIT:0:7}-${RUN_ID}"
+          printf 'date=%s\n' "$date_utc" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+      - name: Build nightly archive and checksum
+        id: build
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NIGHTLY_DATE: ${{ steps.metadata.outputs.date }}
+          NIGHTLY_TAG: ${{ steps.metadata.outputs.tag }}
+        run: ./scripts/nightly-build.sh
+      - name: Upload nightly artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: torrentfs-nightly-${{ steps.metadata.outputs.tag }}
+          path: dist/${{ steps.metadata.outputs.tag }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create nightly prerelease
+    needs: package
+    if: ${{ needs.package.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      nightly_tag: ${{ needs.package.outputs.nightly_tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_SERVER_URL: ${{ github.server_url }}
+      GITHUB_SHA: ${{ github.sha }}
+      GITHUB_RUN_ID: ${{ github.run_id }}
+      NIGHTLY_TAG: ${{ needs.package.outputs.nightly_tag }}
+      ARCHIVE_NAME: ${{ needs.package.outputs.archive_name }}
+      CHECKSUM_NAME: ${{ needs.package.outputs.checksum_name }}
+    steps:
+      - name: Download nightly artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: torrentfs-nightly-${{ needs.package.outputs.nightly_tag }}
+          path: release-dist
+      - name: Verify and publish nightly prerelease
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL is required}"
+          : "${GITHUB_SHA:?GITHUB_SHA is required}"
+          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+          : "${NIGHTLY_TAG:?NIGHTLY_TAG is required}"
+          : "${ARCHIVE_NAME:?ARCHIVE_NAME is required}"
+          : "${CHECKSUM_NAME:?CHECKSUM_NAME is required}"
+
+          if [[ ! "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            printf 'Unexpected repository: %s\n' "$GITHUB_REPOSITORY" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Unexpected event SHA: %s\n' "$GITHUB_SHA" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]; then
+            printf 'Unexpected workflow run ID: %s\n' "$GITHUB_RUN_ID" >&2
+            exit 1
+          fi
+          if [[ "$NIGHTLY_TAG" =~ ^nightly-([0-9]{8})-([0-9a-f]{7})-([0-9]+)$ ]]; then
+            nightly_date="${BASH_REMATCH[1]}"
+            nightly_short_sha="${BASH_REMATCH[2]}"
+            nightly_run_id="${BASH_REMATCH[3]}"
+          else
+            printf 'Unexpected nightly tag: %s\n' "$NIGHTLY_TAG" >&2
+            exit 1
+          fi
+          [[ "$nightly_short_sha" == "${GITHUB_SHA:0:7}" ]]
+          [[ "$nightly_run_id" == "$GITHUB_RUN_ID" ]]
+
+          release_dir="$GITHUB_WORKSPACE/release-dist"
+          archive_path="$release_dir/$ARCHIVE_NAME"
+          checksum_path="$release_dir/$CHECKSUM_NAME"
+          expected_archive="torrentfs-${NIGHTLY_TAG}-linux-amd64.tar.gz"
+          expected_checksum="${expected_archive}.sha256"
+          [[ "$ARCHIVE_NAME" == "$expected_archive" ]]
+          [[ "$CHECKSUM_NAME" == "$expected_checksum" ]]
+          test -f "$archive_path"
+          test -f "$checksum_path"
+
+          (
+            cd -- "$release_dir"
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+
+          extract_dir="$(mktemp -d)"
+          state_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$extract_dir" "$state_dir"' EXIT
+          tar --extract --gzip --file="$archive_path" --directory="$extract_dir"
+          test -x "$extract_dir/torrentfs"
+          test -f "$extract_dir/BUILD_INFO"
+          test -f "$extract_dir/LICENSE"
+
+          build_info_value() {
+            local key="$1"
+            local line
+            line="$(grep -m1 -E "^${key}=" "$extract_dir/BUILD_INFO" || true)"
+            [[ -n "$line" ]] || return 1
+            printf '%s' "${line#*=}"
+          }
+
+          [[ "$(build_info_value COMMIT)" == "$GITHUB_SHA" ]]
+          [[ "$(build_info_value UTC_DATE)" == "$nightly_date" ]]
+          [[ "$(build_info_value NIGHTLY_TAG)" == "$NIGHTLY_TAG" ]]
+          [[ "$(build_info_value GOOS)" == "linux" ]]
+          [[ "$(build_info_value GOARCH)" == "amd64" ]]
+          [[ "$(build_info_value CGO_ENABLED)" == "0" ]]
+          [[ "$(build_info_value GITHUB_RUN_ID)" == "$GITHUB_RUN_ID" ]]
+          [[ "$(build_info_value RUN_URL)" == "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" ]]
+
+          tag_status="$state_dir/tag-status"
+          if gh api --include --silent "repos/${GITHUB_REPOSITORY}/git/ref/tags/${NIGHTLY_TAG}" >"$tag_status" 2>"$state_dir/tag-error"; then
+            tag_exists=true
+          else
+            tag_http_status="$(grep -m1 '^HTTP/' "$tag_status" || true)"
+            if [[ "$tag_http_status" == *" 404 "* ]]; then
+              tag_exists=false
+            else
+              printf 'Unable to determine whether tag exists: %s\n' "$NIGHTLY_TAG" >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "$tag_exists" == true ]]; then
+            tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${NIGHTLY_TAG}" --jq '.sha')"
+            [[ "$tag_commit" == "$GITHUB_SHA" ]]
+          fi
+
+          release_status="$state_dir/release-status"
+          if gh api --include --silent "repos/${GITHUB_REPOSITORY}/releases/tags/${NIGHTLY_TAG}" >"$release_status" 2>"$state_dir/release-error"; then
+            release_exists=true
+          else
+            release_http_status="$(grep -m1 '^HTTP/' "$release_status" || true)"
+            if [[ "$release_http_status" == *" 404 "* ]]; then
+              release_exists=false
+            else
+              printf 'Unable to determine whether release exists: %s\n' "$NIGHTLY_TAG" >&2
+              exit 1
+            fi
+          fi
+
+          release_json=''
+          if [[ "$release_exists" == true ]]; then
+            [[ "$tag_exists" == true ]]
+            release_json="$(gh release view "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,assets)"
+            if ! jq -e '.isPrerelease == true and .isDraft == false' >/dev/null <<<"$release_json"; then
+              printf 'Existing release is not a published prerelease: %s\n' "$NIGHTLY_TAG" >&2
+              exit 1
+            fi
+
+            existing_dir="$state_dir/existing"
+            mkdir -p -- "$existing_dir"
+            missing_assets=()
+            for asset_name in "$ARCHIVE_NAME" "$CHECKSUM_NAME"; do
+              if jq -e --arg name "$asset_name" 'any(.assets[]; .name == $name)' >/dev/null <<<"$release_json"; then
+                gh release download "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset_name" --dir "$existing_dir" --clobber
+                cmp -- "$release_dir/$asset_name" "$existing_dir/$asset_name"
+              else
+                missing_assets+=("$asset_name")
+              fi
+            done
+
+            if ((${#missing_assets[@]} > 0)); then
+              upload_paths=()
+              for asset_name in "${missing_assets[@]}"; do
+                upload_paths+=("$release_dir/$asset_name")
+              done
+              gh release upload "$NIGHTLY_TAG" "${upload_paths[@]}" --repo "$GITHUB_REPOSITORY"
+            fi
+            printf 'Verified existing nightly release %s\n' "$NIGHTLY_TAG"
+            exit 0
+          fi
+
+          notes_file="$state_dir/release-notes.md"
+          {
+            printf 'Nightly build for `%s` at `%s`.\n\n' "$GITHUB_SHA" "$NIGHTLY_TAG"
+            printf '%s\n' "- Target: Linux amd64 (CGO_ENABLED=0)"
+            printf '%s\n' "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            printf '%s\n' '- Verify the downloaded archive with its `.sha256` file before use.'
+            printf '%s\n' '- This is a nightly prerelease, not a stable release.'
+          } > "$notes_file"
+
+          gh release create "$NIGHTLY_TAG" \
+            "$archive_path" "$checksum_path" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "torrentfs nightly ${nightly_date} (${nightly_short_sha})" \
+            --notes-file "$notes_file" \
+            --prerelease \
+            --latest=false
+          printf 'Created nightly prerelease %s\n' "$NIGHTLY_TAG"
+
+  cleanup:
+    name: Remove expired nightly prereleases
+    needs: release
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      CURRENT_NIGHTLY_TAG: ${{ needs.release.outputs.nightly_tag }}
+    steps:
+      - name: Delete nightly releases older than 30 days
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${CURRENT_NIGHTLY_TAG:?CURRENT_NIGHTLY_TAG is required}"
+          if [[ ! "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            printf 'Unexpected repository: %s\n' "$GITHUB_REPOSITORY" >&2
+            exit 1
+          fi
+
+          state_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$state_dir"' EXIT
+          cutoff="$(date -u -d '30 days ago' +%s)"
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$state_dir/releases.json"
+          jq -r --argjson cutoff "$cutoff" --arg current_tag "$CURRENT_NIGHTLY_TAG" '
+            .[][]
+            | select(.prerelease == true)
+            | select(.tag_name | test("^nightly-[0-9]{8}-[0-9a-f]{7}-[0-9]+$"))
+            | select(.tag_name != $current_tag)
+            | select(((.published_at // .created_at) | fromdateiso8601) < $cutoff)
+            | .tag_name
+          ' "$state_dir/releases.json" > "$state_dir/expired-tags"
+
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            [[ "$tag" =~ ^nightly-[0-9]{8}-[0-9a-f]{7}-[0-9]+$ ]]
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done < "$state_dir/expired-tags"
