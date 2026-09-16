@@ -118,6 +118,8 @@ All management happens over the authenticated HTTP API (`/api/v1`):
 
 | Request | Purpose |
 | --- | --- |
+| `POST /api/v1/auth/login` | Exchange the configured username and password for an in-memory Bearer token |
+| `POST /api/v1/auth/logout` | Revoke the presented in-memory Bearer token |
 | `POST /api/v1/torrents` | Add a torrent from an uploaded `.torrent` (multipart) or a magnet URI (JSON) |
 | `GET /api/v1/torrents` | List every task |
 | `GET /api/v1/torrents/{id}` | One task's aggregate state |
@@ -191,8 +193,15 @@ payload_dir = ""
 
 [http]
 listen_addr = "127.0.0.1:8080"
-bearer_token = ""
 max_upload_bytes = 10485760
+
+[http.auth]
+enabled = false
+username = ""
+# Use either password_hash or password_hash_file, never both.
+password_hash = ""
+password_hash_file = ""
+token_ttl = "30m"
 
 [connections]
 listen_host = ""
@@ -215,10 +224,29 @@ torrent owns `<payload_dir>/<info_hash>`, and that is the only directory ever
 purged by `purge_data=true`. An empty value uses `<data_dir>/payload`.
 
 An empty `[http].listen_addr` disables the API. The default binds loopback
-only: binding a non-loopback address without a `bearer_token` is a
-configuration error. When `bearer_token` is non-empty, every API request must
-send `Authorization: Bearer <token>`. `max_upload_bytes` caps an uploaded
-`.torrent` body.
+only. Binding a non-loopback address requires a complete enabled
+`[http.auth]` configuration; this service does not provide TLS, so put
+non-loopback deployments behind a TLS reverse proxy.
+
+When `http.auth.enabled` is true, `username` and exactly one bcrypt
+`password_hash` or owner-readable-only `password_hash_file` are required.
+`password_hash` is a bcrypt hash, never a plaintext password.
+`password_hash_file` must point to a regular, non-symlink file readable only by
+its owner. The default `token_ttl` is 30 minutes and may not exceed 24 hours. Log in with
+`POST /api/v1/auth/login` using `{"username":"...","password":"..."}`;
+the response contains an opaque Bearer token. Send it explicitly as
+`Authorization: Bearer <token>` on later requests. Tokens are held only in
+memory, expire after a period without a valid request, and slide their expiry
+by `token_ttl` after every valid authenticated request, so continuous use can
+slide indefinitely and there is no absolute session lifetime. They are all
+invalidated when the process restarts. `POST /api/v1/auth/logout` revokes the presented
+token. There is no JWT, refresh endpoint, refresh token, Cookie authentication,
+or automatic Cookie renewal; because authentication uses an explicit header,
+this configuration does not add Cookie-based CSRF behavior.
+
+When authentication is disabled, loopback HTTP retains the anonymous development
+behavior. Authentication is not optional for non-loopback listeners.
+`max_upload_bytes` caps an uploaded `.torrent` body.
 
 `capacity_bytes` is a byte limit. An empty `socks5_url` disables the proxy;
 otherwise use `socks5://` or `socks5h://`, optionally with username/password.

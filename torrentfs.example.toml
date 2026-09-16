@@ -21,12 +21,20 @@ payload_dir = ""
 
 [http]
 # Address of the torrent management API. Empty disables the service. The
-# default binds loopback only; exposing it requires a bearer_token.
+# default binds loopback only; non-loopback listeners require http.auth.
 listen_addr = "127.0.0.1:8080"
-# When non-empty, every request must send Authorization: Bearer <token>.
-bearer_token = ""
 # Maximum size of an uploaded .torrent request body, in bytes (10 MiB default).
 max_upload_bytes = 10485760
+
+[http.auth]
+# Login returns an in-memory opaque Bearer token when enabled.
+enabled = false
+username = ""
+# Set exactly one bcrypt hash source; never put a plaintext password here.
+password_hash = ""
+password_hash_file = ""
+# A valid token request slides this inactivity window (30 minutes by default).
+token_ttl = "30m"
 
 [connections]
 # Empty listens on all suitable local interfaces.

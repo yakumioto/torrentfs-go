@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,29 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
+	work := t.TempDir()
+	configPath := filepath.Join(work, "config.toml")
+	configBody := "[paths]\ndata_dir = " + strconv.Quote(filepath.Join(work, "data")) + "\n\n" +
+		"[http]\nlisten_addr = \"127.0.0.1:8080\"\n\n" +
+		"[http.auth]\nenabled = true\nusername = \"alice\"\npassword_hash = \"not-a-bcrypt-hash\"\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	torrentsDir := filepath.Join(work, "torrents")
+	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := run([]string{"-config", configPath, torrentsDir}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "password_hash") {
+		t.Fatalf("stderr = %q, want password_hash error", stderr.String())
 	}
 }
 

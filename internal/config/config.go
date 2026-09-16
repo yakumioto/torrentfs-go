@@ -10,24 +10,30 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 )
 
 var (
 	// ErrInvalid identifies a configuration value that violates its contract.
 	ErrInvalid = errors.New("invalid configuration")
 
-	errRequired         = errors.New("value is required")
-	errPortRange        = errors.New("must be between 0 and 65535")
-	errCapacityRange    = errors.New("must be non-negative")
-	errProxyScheme      = errors.New("must use socks5:// or socks5h://")
-	errProxyHost        = errors.New("must include a proxy host")
-	errProxyPort        = errors.New("proxy port must be between 1 and 65535")
-	errPeerIDPrefixSize = errors.New("must be at most 20 bytes")
-	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
-	errListenAddr       = errors.New("must be a host:port address")
-	errPositive         = errors.New("must be positive")
-	errBearerToken      = errors.New("must not contain carriage return or line feed")
-	errExposedNoToken   = errors.New("exposing a non-loopback address requires bearer_token")
+	errRequired             = errors.New("value is required")
+	errPortRange            = errors.New("must be between 0 and 65535")
+	errCapacityRange        = errors.New("must be non-negative")
+	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
+	errProxyHost            = errors.New("must include a proxy host")
+	errProxyPort            = errors.New("proxy port must be between 1 and 65535")
+	errPeerIDPrefixSize     = errors.New("must be at most 20 bytes")
+	errTrackerUserAgent     = errors.New("must not contain carriage return or line feed")
+	errListenAddr           = errors.New("must be a host:port address")
+	errPositive             = errors.New("must be positive")
+	errAuthUsernameRequired = errors.New("must not be empty when authentication is enabled")
+	errAuthUsernameControl  = errors.New("must not contain control characters")
+	errAuthHashRequired     = errors.New("exactly one password hash source is required when authentication is enabled")
+	errAuthCredentialsSet   = errors.New("authentication credentials must be empty when authentication is disabled")
+	errAuthTokenTTLMax      = errors.New("must not exceed 24 hours")
+	errExposedNoAuth        = errors.New("exposing a non-loopback address requires enabled http.auth")
 )
 
 const (
@@ -83,10 +89,37 @@ type HTTP struct {
 	// ListenAddr is the address the HTTP service binds. Empty disables the
 	// service. The default binds loopback only.
 	ListenAddr string `toml:"listen_addr"`
-	// BearerToken, when non-empty, requires Authorization: Bearer <token>.
-	BearerToken string `toml:"bearer_token"`
+	// Auth configures the optional single-user HTTP authentication service.
+	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps an uploaded .torrent request body.
 	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+}
+
+// Duration is a time.Duration decoded from a TOML duration string.
+type Duration time.Duration
+
+// UnmarshalText decodes a Go duration string from TOML.
+func (d *Duration) UnmarshalText(text []byte) error {
+	value, err := time.ParseDuration(string(text))
+	if err != nil {
+		return fmt.Errorf("invalid duration: %w", err)
+	}
+	*d = Duration(value)
+	return nil
+}
+
+// String returns the duration in Go's standard duration format.
+func (d Duration) String() string {
+	return time.Duration(d).String()
+}
+
+// Auth configures single-user password login and in-memory Bearer tokens.
+type Auth struct {
+	Enabled          bool     `toml:"enabled"`
+	Username         string   `toml:"username"`
+	PasswordHash     string   `toml:"password_hash"`
+	PasswordHashFile string   `toml:"password_hash_file"`
+	TokenTTL         Duration `toml:"token_ttl"`
 }
 
 // Connections groups network settings of the torrent session.
@@ -142,7 +175,10 @@ func Default() Config {
 			CapacityBytes: defaultCacheCapacityBytes,
 		},
 		HTTP: HTTP{
-			ListenAddr:     defaultHTTPListenAddr,
+			ListenAddr: defaultHTTPListenAddr,
+			Auth: Auth{
+				TokenTTL: Duration(30 * time.Minute),
+			},
 			MaxUploadBytes: defaultMaxUploadBytes,
 		},
 		Identity: Identity{
@@ -173,20 +209,54 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
 		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
 	}
+	if err := validateAuth(c.HTTP.Auth); err != nil {
+		return err
+	}
 	if c.HTTP.ListenAddr != "" {
 		host, _, err := net.SplitHostPort(c.HTTP.ListenAddr)
 		if err != nil {
 			return invalid("http.listen_addr", errListenAddr)
 		}
-		if c.HTTP.BearerToken == "" && !isLoopbackHost(host) {
-			return invalid("http.listen_addr", errExposedNoToken)
+		if !c.HTTP.Auth.Enabled && !isLoopbackHost(host) {
+			return invalid("http.listen_addr", errExposedNoAuth)
 		}
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
 		return invalid("http.max_upload_bytes", errPositive)
 	}
-	if strings.ContainsAny(c.HTTP.BearerToken, "\r\n") {
-		return invalid("http.bearer_token", errBearerToken)
+	return nil
+}
+
+func validateAuth(auth Auth) error {
+	if auth.TokenTTL <= 0 {
+		return invalid("http.auth.token_ttl", errPositive)
+	}
+	if time.Duration(auth.TokenTTL) > 24*time.Hour {
+		return invalid("http.auth.token_ttl", errAuthTokenTTLMax)
+	}
+
+	hasPasswordHash := auth.PasswordHash != ""
+	hasPasswordHashFile := auth.PasswordHashFile != ""
+	if !auth.Enabled {
+		switch {
+		case auth.Username != "":
+			return invalid("http.auth.username", errAuthCredentialsSet)
+		case hasPasswordHash:
+			return invalid("http.auth.password_hash", errAuthCredentialsSet)
+		case hasPasswordHashFile:
+			return invalid("http.auth.password_hash_file", errAuthCredentialsSet)
+		default:
+			return nil
+		}
+	}
+	if auth.Username == "" {
+		return invalid("http.auth.username", errAuthUsernameRequired)
+	}
+	if strings.IndexFunc(auth.Username, unicode.IsControl) >= 0 {
+		return invalid("http.auth.username", errAuthUsernameControl)
+	}
+	if hasPasswordHash == hasPasswordHashFile {
+		return invalid("http.auth.password_hash", errAuthHashRequired)
 	}
 	return nil
 }
