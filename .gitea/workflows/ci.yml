@@ -12,6 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Frontend checks and embedded assets
+        run: |
+          set -euo pipefail
+          npm ci --prefix web
+          npm run typecheck --prefix web
+          npm run lint --prefix web
+          npm test --prefix web -- --run
+          npm run build --prefix web
+          rm -rf -- web/node_modules
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"
@@ -31,6 +45,20 @@ jobs:
       GOLANGCI_LINT_VERSION: v2.12.2
     steps:
       - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Frontend checks and embedded assets
+        run: |
+          set -euo pipefail
+          npm ci --prefix web
+          npm run typecheck --prefix web
+          npm run lint --prefix web
+          npm test --prefix web -- --run
+          npm run build --prefix web
+          rm -rf -- web/node_modules
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"
@@ -58,6 +86,20 @@ jobs:
       TORRENTFS_FUSE_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Frontend checks and embedded assets
+        run: |
+          set -euo pipefail
+          npm ci --prefix web
+          npm run typecheck --prefix web
+          npm run lint --prefix web
+          npm test --prefix web -- --run
+          npm run build --prefix web
+          rm -rf -- web/node_modules
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"

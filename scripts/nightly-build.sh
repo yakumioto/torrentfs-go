@@ -51,6 +51,8 @@ cd -- "$repo_root"
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "$work_dir"' EXIT
 
+./scripts/build-web.sh
+
 binary_path="$work_dir/torrentfs"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-mod=readonly \
   go build -trimpath -ldflags="-s -w" -o "$binary_path" ./cmd/torrentfs

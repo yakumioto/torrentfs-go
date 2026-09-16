@@ -20,8 +20,9 @@ data_dir = "./torrentfs-data"
 payload_dir = ""
 
 [http]
-# Address of the torrent management API. Empty disables the service. The
-# default binds loopback only; non-loopback listeners require http.auth.
+# The listener serves both the embedded Web UI and the management API. Empty
+# disables both. The default binds loopback only; non-loopback listeners require
+# http.auth. Static UI files are public; /api/ remains protected when auth is on.
 listen_addr = "127.0.0.1:8080"
 # Maximum size of an uploaded .torrent request body, in bytes (10 MiB default).
 max_upload_bytes = 10485760

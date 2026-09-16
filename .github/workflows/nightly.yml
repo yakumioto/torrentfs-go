@@ -104,6 +104,11 @@ jobs:
           go-version-file: go.mod
           cache: true
           check-latest: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Verify Go toolchain from go.mod
         shell: bash
         run: |

@@ -4,6 +4,8 @@
 *.test
 *.out
 coverage.*
+/web/node_modules/
+/web/dist/
 
 # Go workspace files
 go.work
