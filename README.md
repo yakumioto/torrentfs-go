@@ -30,6 +30,32 @@ go vet ./...
 golangci-lint run ./...
 ```
 
+## Nightly builds
+
+The `Nightly` GitHub Actions workflow runs every day at **16:17 UTC** (**00:17
+Beijing time the following day**) against the exact `main` commit that triggered
+it. It can also be started from the Actions page with `workflow_dispatch`; select
+`main` in the branch selector. Pull requests, forks, and other refs are not
+published.
+
+A successful run publishes a Linux/amd64, `CGO_ENABLED=0` tarball and its
+`.sha256` file as an immutable prerelease. The nightly tag's UTC date comes from
+the triggering commit so rerunning the same workflow run keeps the same tag. The
+archive includes `BUILD_INFO`,
+which records the full commit SHA, UTC date, nightly tag, Go version, target,
+and workflow run. Actions artifacts are retained for 14 days; nightly
+prereleases are retained for 30 days before the workflow removes only matching
+`nightly-*` prereleases and tags. Nightly builds are for validation and testing,
+not stable releases, and running the binary requires the Linux FUSE facilities
+described below.
+
+After downloading both files, verify and unpack them from the same directory:
+
+```sh
+sha256sum --check torrentfs-nightly-<date>-<short-sha>-<run-id>-linux-amd64.tar.gz.sha256
+tar -xzf torrentfs-nightly-<date>-<short-sha>-<run-id>-linux-amd64.tar.gz
+```
+
 ## Usage
 
 ```sh

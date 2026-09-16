@@ -1,5 +1,6 @@
 # Build artifacts
 /torrentfs
+/dist/
 *.test
 *.out
 coverage.*

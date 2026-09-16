@@ -1,0 +1,85 @@
+name: Go quality checks
+description: Run the repository's shared Go build, test, lint, or FUSE checks
+
+inputs:
+  mode:
+    description: "Quality check mode: test, lint, or fuse"
+    required: false
+    default: test
+  golangci-lint-version:
+    description: golangci-lint version to build and run in lint mode
+    required: false
+    default: v2.12.2
+
+runs:
+  using: composite
+  steps:
+    - name: Validate quality mode
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          test|lint|fuse) ;;
+          *)
+            printf 'Unsupported quality mode: %s\n' "$MODE" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Set up Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Build
+      if: ${{ inputs.mode == 'test' }}
+      shell: bash
+      run: go build ./...
+
+    - name: Vet
+      if: ${{ inputs.mode == 'test' }}
+      shell: bash
+      run: go vet ./...
+
+    - name: Unit and integration tests
+      if: ${{ inputs.mode == 'test' }}
+      shell: bash
+      run: go test ./...
+
+    - name: Race detector
+      if: ${{ inputs.mode == 'test' }}
+      shell: bash
+      run: go test -race ./...
+
+    - name: Install golangci-lint
+      if: ${{ inputs.mode == 'lint' }}
+      shell: bash
+      env:
+        GOLANGCI_LINT_VERSION: ${{ inputs.golangci-lint-version }}
+      run: go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+
+    - name: Lint
+      if: ${{ inputs.mode == 'lint' }}
+      shell: bash
+      run: "$(go env GOPATH)/bin/golangci-lint run ./..."
+
+    - name: Install FUSE
+      if: ${{ inputs.mode == 'fuse' }}
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y fuse3
+
+    - name: Require FUSE
+      if: ${{ inputs.mode == 'fuse' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "${TORRENTFS_FUSE_REQUIRED:-}" = "1"
+        test -e /dev/fuse
+
+    - name: Real-mount smoke, concurrency, error, and swarm tests
+      if: ${{ inputs.mode == 'fuse' }}
+      shell: bash
+      run: go test -race -run 'TestFuse|TestSessionIncomplete' ./...

@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   # Everything that runs without a FUSE device. FUSE-dependent tests skip
   # themselves here with a printed reason; the fuse job below requires them.
@@ -13,19 +16,12 @@ jobs:
     name: build, vet, unit and race tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build
-        run: go build ./...
-      - name: Vet
-        run: go vet ./...
-      - name: Unit and integration tests
-        run: go test ./...
-      - name: Race detector
-        run: go test -race ./...
+          persist-credentials: false
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: test
 
   lint:
     name: golangci-lint
@@ -33,19 +29,17 @@ jobs:
     env:
       GOLANGCI_LINT_VERSION: v2.12.2
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          go-version-file: go.mod
-          cache: true
+          persist-credentials: false
       # Build golangci-lint with this job's Go toolchain instead of downloading
       # a prebuilt release. golangci-lint refuses to load a module whose `go`
       # directive is newer than the Go that built the binary, and release
       # binaries can lag behind. Building from source keeps the two in step.
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_LINT_VERSION }}
-      - name: Lint
-        run: $(go env GOPATH)/bin/golangci-lint run ./...
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: lint
+          golangci-lint-version: ${{ env.GOLANGCI_LINT_VERSION }}
 
   # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
@@ -56,14 +50,9 @@ jobs:
     env:
       TORRENTFS_FUSE_REQUIRED: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y fuse3
-      - name: Require /dev/fuse
-        run: test -e /dev/fuse
-      - name: Real-mount smoke, concurrency, error, and swarm tests
-        run: go test -race -run 'TestFuse|TestSessionIncomplete' ./...
+          persist-credentials: false
+      - uses: ./.github/actions/go-quality
+        with:
+          mode: fuse
