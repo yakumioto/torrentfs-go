@@ -23,7 +23,7 @@ const (
 	tokenSize            = 32
 	minimumPasswordCost  = 10
 	maxPasswordHashBytes = 1024
-	dummyPasswordHash    = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+	dummyPasswordHash    = "$2a$10$abcdefghijklmnopqrstuubhYm9gDaOV4ioWHeT/xEMOT9t55kgc2"
 )
 
 var (
@@ -190,7 +190,7 @@ func (s *Service) Login(username, password string) (string, time.Time, error) {
 	if username != configuredUsername {
 		candidate = []byte(dummyPasswordHash)
 	}
-	if err := bcrypt.CompareHashAndPassword(candidate, []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword(candidate, []byte(password)); err != nil || username != configuredUsername {
 		return "", time.Time{}, ErrInvalidCredentials
 	}
 

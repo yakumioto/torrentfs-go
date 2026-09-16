@@ -105,7 +105,7 @@ func TestLoginAndAuthenticate(t *testing.T) {
 
 func TestLoginRejectsInvalidCredentialsWithoutCreatingToken(t *testing.T) {
 	service := newTestService(t, &fakeClock{now: time.Now()}, nil)
-	for _, credentials := range [][2]string{{"unknown", "password"}, {"alice", "wrong"}, {"", ""}} {
+	for _, credentials := range [][2]string{{"unknown", "password"}, {"unknown", "dummy-password"}, {"alice", "wrong"}, {"", ""}} {
 		if _, _, err := service.Login(credentials[0], credentials[1]); !errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("Login(%q, %q) error = %v, want ErrInvalidCredentials", credentials[0], credentials[1], err)
 		}
