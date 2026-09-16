@@ -3,7 +3,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yakumioto/torrentfs-go/internal/auth"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -31,7 +31,8 @@ type Backend interface {
 // Server is the torrent management HTTP service.
 type Server struct {
 	backend   Backend
-	token     string
+	auth      *auth.Service
+	tokenTTL  time.Duration
 	maxUpload int64
 	handler   http.Handler
 	http      *http.Server
@@ -39,13 +40,22 @@ type Server struct {
 }
 
 // New builds a server for cfg. A listener is created only by Serve.
-func New(cfg config.Config, backend Backend) *Server {
+func New(cfg config.Config, backend Backend) (*Server, error) {
 	s := &Server{
 		backend:   backend,
-		token:     cfg.HTTP.BearerToken,
+		tokenTTL:  time.Duration(cfg.HTTP.Auth.TokenTTL),
 		maxUpload: cfg.HTTP.MaxUploadBytes,
 	}
+	if cfg.HTTP.Auth.Enabled {
+		service, err := auth.New(cfg.HTTP.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("api: initialize authentication: %w", err)
+		}
+		s.auth = service
+	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/torrents", s.handleAdd)
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
@@ -53,7 +63,7 @@ func New(cfg config.Config, backend Backend) *Server {
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.handler = s.authenticate(mux)
-	return s
+	return s, nil
 }
 
 // Handler returns the wrapped handler, for use with httptest.
@@ -101,25 +111,62 @@ func (s *Server) Serve(ctx context.Context, listenAddr string) error {
 
 // Shutdown stops the server gracefully.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.http == nil {
-		return nil
+	var err error
+	if s.http != nil {
+		err = s.http.Shutdown(ctx)
 	}
-	return s.http.Shutdown(ctx)
+	if s.auth != nil {
+		s.auth.Close()
+	}
+	return err
 }
 
-// authenticate enforces the Bearer token when one is configured.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.token != "" {
-			header := r.Header.Get("Authorization")
-			token, ok := strings.CutPrefix(header, "Bearer ")
-			if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
-				writeError(w, http.StatusUnauthorized, "unauthorized")
-				return
-			}
+		if s.auth == nil {
+			next.ServeHTTP(w, r)
+			return
 		}
+		if r.Method == http.MethodPost && r.URL.Path == loginPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token, ok := authorizationToken(r)
+		if !ok {
+			writeUnauthorized(w)
+			return
+		}
+		renew := r.Method != http.MethodPost || r.URL.Path != logoutPath
+		principal, _, err := s.auth.Authenticate(token, renew)
+		if err != nil {
+			writeUnauthorized(w)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func authorizationToken(r *http.Request) (string, bool) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return "", false
+	}
+	token, ok := strings.CutPrefix(values[0], "Bearer ")
+	return token, ok && token != ""
+}
+
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeError(w, http.StatusUnauthorized, "unauthorized")
+}
+
+type principalContextKey struct{}
+
+// PrincipalFromContext returns the authenticated principal attached by the API middleware.
+func PrincipalFromContext(ctx context.Context) (auth.Principal, bool) {
+	principal, ok := ctx.Value(principalContextKey{}).(auth.Principal)
+	return principal, ok
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
