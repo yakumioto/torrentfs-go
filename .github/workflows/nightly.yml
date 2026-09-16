@@ -85,17 +85,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
+    env:
+      GOTOOLCHAIN: local
     outputs:
       nightly_tag: ${{ steps.metadata.outputs.tag }}
-      archive_name: ${{ steps.build.outputs.archive }}
-      checksum_name: ${{ steps.build.outputs.checksum }}
+      archive_name: ${{ steps.metadata.outputs.archive }}
+      checksum_name: ${{ steps.metadata.outputs.checksum }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          check-latest: false
+      - name: Verify Go toolchain from go.mod
+        shell: bash
+        run: |
+          set -euo pipefail
+          module_go="$(go mod edit -json | jq -r '.Go')"
+          runtime_go="$(go env GOVERSION)"
+          test -n "$module_go"
+          test "$runtime_go" = "go${module_go}"
       - name: Derive immutable nightly identity
         id: metadata
         shell: bash
@@ -115,10 +131,110 @@ jobs:
           commit_timestamp="$(git show -s --format=%cI "$COMMIT")"
           date_utc="$(date -u -d "$commit_timestamp" +%Y%m%d)"
           tag="nightly-${date_utc}-${COMMIT:0:7}-${RUN_ID}"
+          archive="torrentfs-${tag}-linux-amd64.tar.gz"
+          checksum="${archive}.sha256"
           printf 'date=%s\n' "$date_utc" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'checksum=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+      - name: Check for existing nightly artifact
+        id: artifact_probe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          ARTIFACT_NAME: torrentfs-nightly-${{ steps.metadata.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+          : "${ARTIFACT_NAME:?ARTIFACT_NAME is required}"
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]; then
+            printf 'Unexpected workflow run ID: %s\n' "$GITHUB_RUN_ID" >&2
+            exit 1
+          fi
+          artifacts_json="$RUNNER_TEMP/nightly-artifacts.json"
+          gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --raw-field "name=${ARTIFACT_NAME}" \
+            --raw-field 'per_page=100' > "$artifacts_json"
+          artifact_count="$(jq -r '.total_count' "$artifacts_json")"
+          case "$artifact_count" in
+            0)
+              printf 'found=false\n' >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              if [[ "$(jq -r '.artifacts[0].expired' "$artifacts_json")" != false ]]; then
+                printf 'Existing nightly artifact is expired: %s\n' "$ARTIFACT_NAME" >&2
+                exit 1
+              fi
+              artifact_id="$(jq -r '.artifacts[0].id' "$artifacts_json")"
+              if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
+                printf 'GitHub returned an invalid artifact ID for %s\n' "$ARTIFACT_NAME" >&2
+                exit 1
+              fi
+              printf 'found=true\n' >> "$GITHUB_OUTPUT"
+              printf 'id=%s\n' "$artifact_id" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              printf 'More than one artifact has the immutable name: %s\n' "$ARTIFACT_NAME" >&2
+              exit 1
+              ;;
+          esac
+      - name: Reuse existing nightly artifact
+        if: ${{ steps.artifact_probe.outputs.found == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.artifact_probe.outputs.id }}
+          path: existing-artifact
+      - name: Verify reusable nightly artifact
+        if: ${{ steps.artifact_probe.outputs.found == 'true' }}
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NIGHTLY_DATE: ${{ steps.metadata.outputs.date }}
+          NIGHTLY_TAG: ${{ steps.metadata.outputs.tag }}
+          ARCHIVE_NAME: ${{ steps.metadata.outputs.archive }}
+          CHECKSUM_NAME: ${{ steps.metadata.outputs.checksum }}
+        run: |
+          set -Eeuo pipefail
+          artifact_dir="$GITHUB_WORKSPACE/existing-artifact"
+          archive_path="$artifact_dir/$ARCHIVE_NAME"
+          checksum_path="$artifact_dir/$CHECKSUM_NAME"
+          test -f "$archive_path"
+          test -f "$checksum_path"
+          (
+            cd -- "$artifact_dir"
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+          extract_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$extract_dir"' EXIT
+          tar --extract --gzip --file="$archive_path" --directory="$extract_dir"
+          test -x "$extract_dir/torrentfs"
+          test -f "$extract_dir/BUILD_INFO"
+          test -f "$extract_dir/LICENSE"
+          build_info_value() {
+            local key="$1"
+            local line
+            line="$(grep -m1 -E "^${key}=" "$extract_dir/BUILD_INFO" || true)"
+            [[ -n "$line" ]] || return 1
+            printf '%s' "${line#*=}"
+          }
+          [[ "$(build_info_value COMMIT)" == "$GITHUB_SHA" ]]
+          [[ "$(build_info_value UTC_DATE)" == "$NIGHTLY_DATE" ]]
+          [[ "$(build_info_value NIGHTLY_TAG)" == "$NIGHTLY_TAG" ]]
+          [[ "$(build_info_value GOOS)" == "linux" ]]
+          [[ "$(build_info_value GOARCH)" == "amd64" ]]
+          [[ "$(build_info_value CGO_ENABLED)" == "0" ]]
+          [[ "$(build_info_value GO_VERSION)" == "$(go version)" ]]
+          [[ "$(build_info_value GITHUB_RUN_ID)" == "$GITHUB_RUN_ID" ]]
+          [[ "$(build_info_value RUN_URL)" == "$GITHUB_RUN_URL" ]]
       - name: Build nightly archive and checksum
         id: build
+        if: ${{ steps.artifact_probe.outputs.found != 'true' }}
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
@@ -128,6 +244,7 @@ jobs:
           NIGHTLY_TAG: ${{ steps.metadata.outputs.tag }}
         run: ./scripts/nightly-build.sh
       - name: Upload nightly artifact
+        if: ${{ steps.artifact_probe.outputs.found != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: torrentfs-nightly-${{ steps.metadata.outputs.tag }}
@@ -322,8 +439,8 @@ jobs:
 
   cleanup:
     name: Remove expired nightly prereleases
-    needs: release
-    if: ${{ needs.release.result == 'success' }}
+    needs: guard
+    if: ${{ needs.guard.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -331,7 +448,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
-      CURRENT_NIGHTLY_TAG: ${{ needs.release.outputs.nightly_tag }}
+      CURRENT_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Delete nightly releases older than 30 days
         shell: bash
@@ -340,9 +457,13 @@ jobs:
           IFS=$'\n\t'
           : "${GH_TOKEN:?GH_TOKEN is required}"
           : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
-          : "${CURRENT_NIGHTLY_TAG:?CURRENT_NIGHTLY_TAG is required}"
+          : "${CURRENT_RUN_ID:?CURRENT_RUN_ID is required}"
           if [[ ! "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
             printf 'Unexpected repository: %s\n' "$GITHUB_REPOSITORY" >&2
+            exit 1
+          fi
+          if [[ ! "$CURRENT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            printf 'Unexpected workflow run ID: %s\n' "$CURRENT_RUN_ID" >&2
             exit 1
           fi
 
@@ -350,11 +471,11 @@ jobs:
           trap 'rm -rf -- "$state_dir"' EXIT
           cutoff="$(date -u -d '30 days ago' +%s)"
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$state_dir/releases.json"
-          jq -r --argjson cutoff "$cutoff" --arg current_tag "$CURRENT_NIGHTLY_TAG" '
+          jq -r --argjson cutoff "$cutoff" --arg current_run_id "$CURRENT_RUN_ID" '
             .[][]
             | select(.prerelease == true)
             | select(.tag_name | test("^nightly-[0-9]{8}-[0-9a-f]{7}-[0-9]+$"))
-            | select(.tag_name != $current_tag)
+            | select((.tag_name | endswith("-" + $current_run_id)) | not)
             | select(((.published_at // .created_at) | fromdateiso8601) < $cutoff)
             | .tag_name
           ' "$state_dir/releases.json" > "$state_dir/expired-tags"
