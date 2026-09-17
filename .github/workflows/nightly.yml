@@ -104,10 +104,12 @@ jobs:
         env:
           COMMIT: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
           : "${COMMIT:?COMMIT is required}"
           : "${RUN_ID:?RUN_ID is required}"
+          : "${RUN_ATTEMPT:?RUN_ATTEMPT is required}"
           if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             printf 'Unexpected event SHA: %s\n' "$COMMIT" >&2
             exit 1
@@ -116,13 +118,18 @@ jobs:
             printf 'Unexpected workflow run ID: %s\n' "$RUN_ID" >&2
             exit 1
           fi
+          if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Unexpected workflow run attempt: %s\n' "$RUN_ATTEMPT" >&2
+            exit 1
+          fi
           [[ "$(git rev-parse HEAD)" == "$COMMIT" ]]
           commit_timestamp="$(git show -s --format=%cI "$COMMIT")"
           date_utc="$(date -u -d "$commit_timestamp" +%Y%m%d)"
           created="$(date -u -d "$commit_timestamp" +%Y-%m-%dT%H:%M:%SZ)"
-          tag="nightly-${date_utc}-${COMMIT:0:7}-${RUN_ID}"
+          tag="nightly-${date_utc}-${COMMIT:0:7}-${RUN_ID}-${RUN_ATTEMPT}"
           printf 'date=%s\n' "$date_utc" >> "$GITHUB_OUTPUT"
           printf 'created=%s\n' "$created" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
           printf 'amd64_tag=torrentfs-nightly-validation:%s-amd64\n' "$tag" >> "$GITHUB_OUTPUT"
           printf 'arm64_tag=torrentfs-nightly-validation:%s-arm64\n' "$tag" >> "$GITHUB_OUTPUT"

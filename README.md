@@ -61,21 +61,21 @@ and pushing the final image. Existing test, lint, and required FUSE checks must
 also pass; a failed check or image validation never reaches the push step.
 
 The only published tag is the immutable
-`nightly-<date>-<short-sha>-<run-id>`. Its UTC date and short SHA come from the
-triggering commit, while the workflow run ID distinguishes reruns. The image
-also records the full commit in `org.opencontainers.image.revision`, along with
-its source, commit timestamp, and nightly tag. No `latest`, stable, or other
-alias is published. Nightly runs do not create GitHub Releases, release assets,
-Actions artifacts, or `.dockerbuild` build records: the workflow sets
-`DOCKER_BUILD_RECORD_UPLOAD=false` and `DOCKER_BUILD_SUMMARY=false`. This
-workflow does not delete registry tags or clean up historical GitHub nightly
-releases.
+`nightly-<date>-<short-sha>-<run-id>-<run-attempt>`. Its UTC date and short SHA
+come from the triggering commit, while the workflow run ID and attempt
+distinguish the initial run from reruns. The image also records the full commit
+in `org.opencontainers.image.revision`, along with its source, commit timestamp,
+and nightly tag. No `latest`, stable, or other alias is published. Nightly runs
+do not create GitHub Releases, release assets, Actions artifacts, or
+`.dockerbuild` build records: the workflow sets `DOCKER_BUILD_RECORD_UPLOAD=false`
+and `DOCKER_BUILD_SUMMARY=false`. This workflow does not delete registry tags or
+clean up historical GitHub nightly releases.
 
 Pull a specific nightly image by its immutable tag:
 
 ```sh
-docker pull ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>
-docker image inspect ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id> \
+docker pull ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt>
+docker image inspect ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt> \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
