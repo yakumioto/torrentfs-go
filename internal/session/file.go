@@ -112,9 +112,16 @@ func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) 
 
 // ReadAtContext reads off bytes at off into p on behalf of requestCtx. Reads
 // are serialized: only one operation ever drives the shared anacrolix reader,
-// and a new read waits for the one in flight instead of cancelling it. Only
-// the operation's own context (requestCtx, the loader's root context, or
-// Close) can end it.
+// and a new read waits for the one in flight instead of cancelling it.
+//
+// requestCtx ends an operation that has already started and nothing else. Once
+// this read is admitted, only its own operation context (requestCtx, the
+// loader's root context, or Close) can end it, and requestCtx never cancels
+// another request's in-flight read. While this read is still queued for
+// admission, cancelling requestCtx does not interrupt that wait: the read
+// returns as soon as it is admitted, because the check after admission
+// observes the cancellation. Returning before admission would need a
+// context-aware admission wait, which this design deliberately does not use.
 func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, readahead int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
@@ -126,6 +133,12 @@ func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, r
 		return 0, err
 	}
 	emitReadProbe(readProbeEvent{Kind: "admission-attempt", Offset: off})
+	// This wait is deliberately not interruptible by requestCtx: a queued read
+	// must never cancel the read in flight just to get ahead of it, which is
+	// the invariant this loader exists to hold. A read cancelled while queued
+	// therefore returns at the recheck below once the in-flight read finishes,
+	// and Close drains the queue by cancelling that read. Making the admission
+	// wait cancellable is a separate, deferred change.
 	l.admissionMu.Lock()
 	defer l.admissionMu.Unlock()
 	if err := requestCtx.Err(); err != nil {
