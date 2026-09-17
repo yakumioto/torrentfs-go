@@ -2,13 +2,13 @@
 
 ## Task
 
-按已批准的 MIO-24 Web UI 计划，在 torrentfs-go 单仓库内交付第一版 React/TypeScript/Vite/Mantine/TanStack Query/React Router 控制台，并先将 `origin/main@e43f720` 与 MIO-25 `origin/agent/implementer/3614d83f20cf@268bbf5` 合并为实现基线；本轮根据 Reviewer 的三项 confirmed findings 完成修复与回归验证。
+按已批准的 MIO-24 Web UI 计划，在 torrentfs-go 单仓库内交付第一版 React/TypeScript/Vite/Mantine/TanStack Query/React Router 控制台，并先将 `origin/main@e43f720` 与 MIO-25 `origin/agent/implementer/3614d83f20cf@268bbf5` 合并为实现基线；先后完成 Reviewer 三项 confirmed finding 修复，以及与最新 `origin/main` 的 PR 冲突解析。
 
 验收范围：Dashboard、登录/登出、Torrent Detail、Files、Pieces、Magnet/`.torrent` 添加、异步删除；同源生产静态资源嵌入 Go binary；开发 Vite `/api` proxy；不扩展 peers、文件字节偏移或 frontend-specific API。
 
 ## Plan
 
-- 实现分支从 `e43f720` 建立，并以 `--no-ff` 合并 `268bbf5`；合并提交为 `a04d638`，保留 origin/main 的 nightly/release/quality 文件及 MIO-25 动态认证。
+- 实现分支从 `e43f720` 建立，并以 `--no-ff` 合并 `268bbf5`；初始合并提交为 `a04d638`，随后以 merge commit `845ac9e` 合并最新 `origin/main@6a5bfa0` 解决 PR 冲突，保留 nightly/release/quality 文件及 MIO-25 动态认证。
 - `web/` 同包提供 `//go:embed dist/*` 与 public static/SPA fallback；`internal/api` 以 `/api` 前缀分派到认证 API，其余请求进入 public static handler。
 - token 仅存内存，首次用 list probe 判断匿名/登录/连接错误；API 401 清 token、清理 query cache 并回登录。
 - query 使用固定 keys、5 秒 list/status 刷新、1.5 秒 deletion operation 轮询；Files 只展示 piece-level coverage，Pieces 使用状态优先级、纹理和文字冗余编码。
@@ -32,6 +32,7 @@
 - 更新 `Dockerfile` 为 Node builder → Go builder → binary-only runtime；`.dockerignore`/`.gitignore` 排除本地依赖和 dist；README/example config 补充同源 UI、auth 分层、Vite/Docker/build 说明。
 - 升级并锁定 React Router 7.18.4、Vite 7.3.6、Vitest 5.0.1、ESLint 10.10.0 及兼容插件；`npm audit`（含生产依赖）为 0 vulnerabilities。
 - 本轮修复 `TorrentDetailPage.tsx` 的 status snapshot 来源、`hooks.ts` 的 operation 404 polling、`format.ts`/`sort.ts` 的 Go 零时间语义；扩展组件与 query-hook 回归测试。
+- 本轮合并冲突仅涉及 `internal/api/server.go` 与 `torrentfs.example.toml`：保留 `dispatchAPIAndStatic(s.authenticate(mux), web.Handler())`、动态 `[http.auth]` 配置和双方默认监听/静态分层说明；无冲突标记残留。
 
 ## Verification
 
@@ -43,6 +44,7 @@
 - `npm audit --package-lock-only --prefix web` 与 `--omit=dev`：均报告 0 vulnerabilities。
 - `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`：全部通过。
 - `golangci-lint run ./...`（v2.12.2）：`0 issues`。
+- 在 `origin/main@6a5bfa0` merge 解析完成后重跑 `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...` 和 `golangci-lint`：全部通过；PR head 为 `845ac9e`，工作树干净。
 - Vite dev server `127.0.0.1:5173`：成功提供入口 HTML；已精确清理启动的进程组。
 - Google Chrome headless：真实渲染匿名 Dashboard 与 Detail deep link，页面显示 torrent queue、`payload.txt`、Files 和 Pieces；已精确清理 daemon/Chrome 临时目录。
 - `scripts/http-smoke.sh`：通过 root/deep-link、asset MIME/cache、未认证 401/WWW-Authenticate、login no-store、带 token list、logout revoke、未知 API 不回退 HTML。
@@ -53,7 +55,7 @@
 
 ## AC Evidence
 
-1. **合并正确基线且保留 CI/release/auth：** 实现分支 first parent 为 `e43f720`，second parent 为 `268bbf5`；`git diff` 与构建验证保留 `.github/actions/go-quality/action.yml`、nightly workflow、`scripts/nightly-build.sh`，MIO-25 auth tests 与 API 代码同时通过。
+1. **合并正确基线且保留 CI/release/auth：** 初始实现 merge 的 first parent 为 `e43f720`、second parent 为 `268bbf5`；随后 `845ac9e` 合并 `origin/main@6a5bfa0` 解决 PR 冲突。`git diff` 与构建验证保留 `.github/actions/go-quality/action.yml`、nightly workflow、`scripts/nightly-build.sh`，MIO-25 auth tests、public static/API dispatcher 与动态配置同时通过。
 2. **动态认证安全契约：** `web/src/api/client.ts` login 不发旧 Bearer、管理请求发标准 header、logout 接受 204、multipart 不手设 boundary；`web/src/app/auth.tsx` 只持有内存 token；`web/src/test/auth.test.tsx` 3 cases 覆盖 probe/401/login/管理请求；Go MIO-25 auth suite 通过。
 3. **Dashboard/Detail/Files/Pieces：** `DashboardPage.tsx` 展示任务状态、进度、大小和 peers unavailable；`TorrentDetailPage.tsx` 共享 status query 并以 `status.data.torrent` 更新 header/metadata/pending；`FilesTable.tsx` 使用半开范围与 piece-level coverage；`PiecesMap.tsx` 采用 checking→complete→partial→known-incomplete→unknown 优先级、wanted ring、available bytes optional tooltip、可访问表格/分批显示；domain 与 detail component tests 覆盖边界。
 4. **Add/Delete/operation：** `AddTorrentDialog.tsx` 走 magnet JSON 或 `FormData(file)`；`DeleteTorrentDialog.tsx` 默认 false、purge 二次确认、409 文案、operation terminal/404 行为；`queries/hooks.ts` 负责 invalidation 与 1.5 秒 terminal-stop polling，真实 hook test 验证 404 后调用次数停止。
