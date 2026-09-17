@@ -21,13 +21,22 @@ readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
 
-# Every Docker call that can hang is bounded: a wedged daemon or an unmount
-# that waits forever must fail the smoke instead of hanging it. The positive
-# scenario's bound is meaningful because the propagation peer this script
-# creates itself (the host observer container) is reclaimed before SIGTERM: a
-# mount namespace still holding a propagated copy would otherwise keep
-# Server.Unmount waiting past any bound.
+# Every Docker call is bounded: a wedged daemon or an unmount that waits forever
+# must fail the smoke instead of hanging it. The positive scenario's bound is
+# meaningful because the propagation peer this script creates itself (the host
+# observer container) is reclaimed before SIGTERM: a mount namespace still
+# holding a propagated copy would otherwise keep Server.Unmount waiting past any
+# bound.
+#
+# DOCKER_OP_TIMEOUT covers operations that may legitimately take a while
+# (starting or stopping a container). PROBE_TIMEOUT covers the short queries —
+# container state, an in-container test, a fixture hash read — including every
+# readiness poll, which must come back as a bounded "not ready yet" instead of
+# hanging. DOCKER_BUILD_TIMEOUT is deliberately generous: it exists to catch a
+# wedged daemon during an image build, not to bound how long a cold build takes.
 readonly DOCKER_OP_TIMEOUT=60
+readonly PROBE_TIMEOUT=10
+readonly DOCKER_BUILD_TIMEOUT=1800
 
 # The anacrolix reader errors that a cancellation storm produces. Playback
 # (before shutdown) must never emit them; teardown cancellations are counted
@@ -64,6 +73,15 @@ bounded() {
 	local seconds="$1" description="$2"
 	shift 2
 	timeout --foreground "$seconds" "$@"
+}
+
+# probe runs one short Docker query under PROBE_TIMEOUT. An unresponsive daemon
+# has to surface here as a bounded failure that the enclosing loop or assertion
+# reports with its own diagnostics; it must never stall the script.
+probe() {
+	local description="$1"
+	shift
+	bounded "$PROBE_TIMEOUT" "$description" "$@"
 }
 
 # container_logs prints a container's logs, bounded so an unresponsive daemon
@@ -172,7 +190,7 @@ for command_name in docker findmnt sha256sum timeout; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
-docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
+probe "docker info" docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 [[ -f "$FIXTURE_TORRENT" ]] || fail "fixture is missing: $FIXTURE_TORRENT"
 [[ -f "$FIXTURE_PAYLOAD" ]] || fail "fixture payload is missing: $FIXTURE_PAYLOAD"
 
@@ -200,12 +218,12 @@ printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
 printf 'docker smoke: building %s\n' "$IMAGE"
 IMAGE_TAGGED=1
-if ! docker build --tag "$IMAGE" "$ROOT_DIR"; then
+if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build --tag "$IMAGE" "$ROOT_DIR"; then
 	fail "docker build failed"
 fi
 
 printf 'docker smoke: starting real FUSE mount\n'
-if ! docker run --detach --name "$CONTAINER" \
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the FUSE container" docker run --detach --name "$CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -216,12 +234,12 @@ if ! docker run --detach --name "$CONTAINER" \
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
 fi
 POSITIVE_STARTED=1
-MNT_PROPAGATION="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+MNT_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
 [[ "$MNT_PROPAGATION" == "rshared" ]] || \
 	fail "container /mnt mount propagation is ${MNT_PROPAGATION:-unknown}, expected rshared"
 printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
 
-if ! docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the host mount observer" docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
 	--entrypoint /bin/sh \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/host-mnt,bind-propagation=rslave" \
 	"$IMAGE" -c 'sleep 300' >/dev/null; then
@@ -231,32 +249,32 @@ HOST_OBSERVER_STARTED=1
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do
-	state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
+	state="$(probe "check FUSE container state" docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
 	if [[ "$state" == "exited" || "$state" == "dead" ]]; then
-		logs="$(docker logs "$CONTAINER" 2>&1 || true)"
+		logs="$(container_logs "$CONTAINER")"
 		fail "FUSE container exited before exposing the fixture (state=$state):$'\n'$logs"
 	fi
 	if [[ "$state" == "running" ]] \
-		&& docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1 \
-		&& docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+		&& probe "expose fixture in the FUSE container" docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1 \
+		&& probe "expose fixture in the propagation peer" docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.2
 done
-if ! docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
-	logs="$(docker logs "$CONTAINER" 2>&1 || true)"
+if ! probe "expose fixture in the FUSE container" docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+	logs="$(container_logs "$CONTAINER")"
 	fail "timed out waiting for $MOUNTED_PAYLOAD:$'\n'$logs"
 fi
-if ! docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+if ! probe "expose fixture in the propagation peer" docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 	fail "timed out waiting for $MOUNT_HOST_DIR/payload.txt"
 fi
 
-ACTUAL_HASH="$(docker exec "$CONTAINER" sha256sum "$MOUNTED_PAYLOAD")" || \
+ACTUAL_HASH="$(probe "read the fixture through the FUSE mount" docker exec "$CONTAINER" sha256sum "$MOUNTED_PAYLOAD")" || \
 	fail "could not read the fixture through the FUSE mount"
 ACTUAL_HASH="${ACTUAL_HASH%% *}"
 [[ "$ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
 	fail "mounted payload hash $ACTUAL_HASH does not match fixture hash $EXPECTED_HASH"
-HOST_ACTUAL_HASH="$(docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+HOST_ACTUAL_HASH="$(probe "read the fixture through the propagated host mount" docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
 	fail "could not read the fixture through the propagated host mount"
 HOST_ACTUAL_HASH="${HOST_ACTUAL_HASH%% *}"
 [[ "$HOST_ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
@@ -266,28 +284,28 @@ printf 'docker smoke: mounted payload verified in container and host (%s)\n' "$A
 # The mount exposes torrent data only: the former control directories must be
 # absent, and the legacy .stats directory must be untouched.
 for control_path in /mnt/metadata /mnt/stats; do
-	if docker exec "$CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
+	if probe "check for $control_path" docker exec "$CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
 		fail "$control_path exists in the mount; the data mount must expose data only"
 	fi
 done
 for control_path in /host-mnt/metadata /host-mnt/stats; do
-	if docker exec "$HOST_OBSERVER_CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
+	if probe "check for $control_path" docker exec "$HOST_OBSERVER_CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
 		fail "$control_path exists in the propagated mount; the data mount must expose data only"
 	fi
 done
-if ! docker exec "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
+if ! probe "check the legacy .stats marker" docker exec "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
 	fail "legacy $LEGACY_STATS_MARKER was removed or rewritten by startup"
 fi
 printf 'docker smoke: control paths absent and legacy .stats preserved\n'
 
 HOST_WRITE_PROBE="/host-mnt/.write-probe"
-if docker exec "$HOST_OBSERVER_CONTAINER" sh -c 'printf "write must fail\\n" > /host-mnt/.write-probe' >/dev/null 2>&1; then
+if probe "reject a host write" docker exec "$HOST_OBSERVER_CONTAINER" sh -c 'printf "write must fail\\n" > /host-mnt/.write-probe' >/dev/null 2>&1; then
 	fail "host write to the FUSE mount unexpectedly succeeded"
 fi
-if docker exec "$HOST_OBSERVER_CONTAINER" test -e "$HOST_WRITE_PROBE" >/dev/null 2>&1; then
+if probe "check the write probe" docker exec "$HOST_OBSERVER_CONTAINER" test -e "$HOST_WRITE_PROBE" >/dev/null 2>&1; then
 	fail "host write probe was created in the read-only FUSE mount"
 fi
-HOST_AFTER_WRITE_HASH="$(docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+HOST_AFTER_WRITE_HASH="$(probe "re-read the host payload" docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
 	fail "could not re-read the host payload after the write probe"
 HOST_AFTER_WRITE_HASH="${HOST_AFTER_WRITE_HASH%% *}"
 [[ "$HOST_AFTER_WRITE_HASH" == "$EXPECTED_HASH" ]] || \
@@ -354,7 +372,7 @@ printf 'docker smoke: starting blocked-read shutdown scenario\n'
 BLOCKED_DATA_DIR="$TMP_DIR/blocked-data"
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
 mkdir -p "$BLOCKED_DATA_DIR" "$BLOCKED_MOUNT_DIR"
-if ! docker run --detach --name "$BLOCKED_READ_CONTAINER" \
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run --detach --name "$BLOCKED_READ_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -364,21 +382,26 @@ if ! docker run --detach --name "$BLOCKED_READ_CONTAINER" \
 	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the blocked-read container"
 fi
-BLOCKED_PROPAGATION="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)"
+BLOCKED_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)"
 [[ "$BLOCKED_PROPAGATION" == "rshared" ]] || \
 	fail "blocked-read /mnt propagation is ${BLOCKED_PROPAGATION:-unknown}, expected rshared"
 
 blocked_deadline=$((SECONDS + 30))
 while ((SECONDS < blocked_deadline)); do
-	if docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+	if probe "expose fixture in the blocked-read container" docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 		break
 	fi
-	if [[ "$(docker inspect --format '{{.State.Status}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)" != "running" ]]; then
+	# Only a terminal state is a failure. A probe that times out reports an
+	# empty state, and that must stay "not ready yet" so the loop's own deadline
+	# reports it instead of this check misdiagnosing an unresponsive daemon as a
+	# container that exited.
+	blocked_state="$(probe "check blocked-read container state" docker inspect --format '{{.State.Status}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)"
+	if [[ "$blocked_state" == "exited" || "$blocked_state" == "dead" ]]; then
 		fail "blocked-read container exited before exposing the fixture path"
 	fi
 	sleep 0.2
 done
-if ! docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+if ! probe "expose fixture in the blocked-read container" docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 	collect_unmount_diagnostics "$BLOCKED_READ_CONTAINER" "$BLOCKED_MOUNT_DIR"
 	fail "blocked-read container never exposed $MOUNTED_PAYLOAD"
 fi
@@ -480,7 +503,7 @@ mkdir -p "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH" "$PEER_MOUNT_DIR"
 # Preload the payload: without it the peer's read would block on a missing
 # piece, which is the outstanding-request cause, not this one.
 cp -- "$FIXTURE_PAYLOAD" "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
-if ! docker run --detach --name "$PEER_DAEMON_CONTAINER" \
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker run --detach --name "$PEER_DAEMON_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -490,11 +513,11 @@ if ! docker run --detach --name "$PEER_DAEMON_CONTAINER" \
 	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the peer-namespace container"
 fi
-PEER_PROPAGATION="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
+PEER_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
 [[ "$PEER_PROPAGATION" == "rshared" ]] || \
 	fail "peer-namespace /mnt propagation is ${PEER_PROPAGATION:-unknown}, expected rshared"
 
-if ! docker run --detach --name "$PEER_HOLDER_CONTAINER" \
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer mount namespace holder" docker run --detach --name "$PEER_HOLDER_CONTAINER" \
 	--entrypoint /bin/sh \
 	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/host-mnt,bind-propagation=rslave" \
 	"$IMAGE" -c 'sleep 300' >/dev/null; then
@@ -503,23 +526,23 @@ fi
 
 peer_mount_deadline=$((SECONDS + 30))
 while ((SECONDS < peer_mount_deadline)); do
-	peer_state="$(docker inspect --format '{{.State.Status}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
+	peer_state="$(probe "check peer-namespace container state" docker inspect --format '{{.State.Status}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
 	if [[ "$peer_state" == "exited" || "$peer_state" == "dead" ]]; then
 		collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
 		fail "peer-namespace container exited before exposing the fixture (state=$peer_state)"
 	fi
-	if docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+	if probe "expose fixture in the peer mount namespace" docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.2
 done
 # Scenario validity: without a real copy in the peer namespace the shutdown
 # below would be exercised against nothing.
-if ! docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+if ! probe "expose fixture in the peer mount namespace" docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
 	fail "the peer mount namespace never received a propagated copy of $PEER_MOUNT_DIR/payload.txt"
 fi
-PEER_HASH="$(bounded 30 "read through the peer mount namespace" \
+PEER_HASH="$(probe "read through the peer mount namespace" \
 	docker exec "$PEER_HOLDER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
 	fail "could not read the fixture through the peer mount namespace"
 PEER_HASH="${PEER_HASH%% *}"
@@ -576,7 +599,7 @@ printf 'docker smoke: checking rejected single-file input\n'
 FILE_INPUT_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
-if NEGATIVE_OUTPUT="$(timeout --foreground 15s docker run --name "$FILE_INPUT_CONTAINER" \
+if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --name "$FILE_INPUT_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -600,7 +623,7 @@ printf 'docker smoke: checking missing torrent directory failure\n'
 MISSING_DIR_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
-if NEGATIVE_OUTPUT="$(timeout --foreground 15s docker run --name "$MISSING_DIR_CONTAINER" \
+if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --name "$MISSING_DIR_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
