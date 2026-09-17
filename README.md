@@ -405,13 +405,17 @@ From the repository root, run:
 
 The script builds the image, bind mounts a writable temporary `torrents`
 directory at `/torrents`, preloads the matching payload under
-`/data/payload/<info-hash>/` (the real storage layout), reads it through the
-FUSE mount, asserts the mount exposes no `metadata/` or `stats/` control path,
-asserts a pre-existing legacy `/torrents/.stats` is left untouched, and
-verifies rejected single-file and missing-directory CLI inputs. It requires a
-working Docker daemon, `/dev/fuse`, `SYS_ADMIN` mount permission, and (on
-AppArmor hosts) permission to use `--security-opt apparmor=unconfined`. The
-fixture is mounted at runtime; it is not copied into the production image.
+`/data/payload/<info-hash>/` (the real storage layout), and mounts `/mnt` with
+recursive shared propagation. It reads the payload through FUSE and checks that
+both the container mount and the host source directory expose the same file and
+hash, that the mount exposes no `metadata/` or `stats/` control path, that host
+writes are rejected, and that a pre-existing legacy `/torrents/.stats` is left
+untouched. It also verifies rejected single-file and missing-directory CLI
+inputs and confirms a normal stop removes the propagated host mount. It
+requires a working Docker daemon, `/dev/fuse`, `findmnt`, `SYS_ADMIN` mount
+permission, and (on AppArmor hosts) permission to use
+`--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
+not copied into the production image.
 
 Mount a host directory at `/torrents` and pass that directory as the sole
 positional argument:
@@ -425,17 +429,42 @@ docker run --rm \
   --security-opt apparmor=unconfined \
   -v /srv/torrentfs-data:/data \
   -v /srv/torrents:/torrents \
-  -v /srv/mnt:/mnt \
+  --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
   torrentfs -mountpoint /mnt -data-dir /data /torrents
 ```
+
+Docker's default bind propagation is `rprivate`, which keeps a FUSE
+submount created inside the container from appearing in the host source
+directory. `rslave` only propagates host mounts into the container and is not
+sufficient here; `/mnt` must use recursive bidirectional `rshared` propagation.
+On Linux, the host mount containing `/srv/mnt` must already be shared. Check
+that prerequisite with:
+
+```sh
+findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
+```
+
+Docker Desktop and other environments without Linux bind-mount propagation do
+not support this setup. Do not add `readonly` or `:ro` to the `/mnt` bind: the
+FUSE daemon needs the writable bind target to create its submount, while the
+FUSE filesystem itself remains read-only and rejects writes with `EROFS`.
+`rshared` is recursive and bidirectional, so container mount and unmount changes
+under this source subtree can affect the host, and host changes can enter the
+container. Together with a rootful container and `SYS_ADMIN`, this expands the
+mount authority boundary; use it only for trusted containers.
+
+The FUSE mount keeps the default owner-only access (`AllowOther=false`), so
+other host users may receive `EACCES` rather than see the mounted data. This is
+intentional and does not grant arbitrary host-user access; enabling `allow_other`
+requires a separate security decision and FUSE configuration.
 
 `/srv/torrents` must be writable because torrentfs creates and updates
 `/torrents/.metadata`; do not mount it read-only. Add and remove direct regular
 lower-case `*.torrent` files in that directory while the container is running,
 or manage torrents through the HTTP API. Use a temporary filename followed by
 an atomic rename for file-based writers. `/srv/torrentfs-data` stores
-downloaded payload data and `/srv/mnt` only needs to be a mountpoint;
-`-data-dir` does not change the torrent source directory.
+downloaded payload data and `/srv/mnt` must be an empty mountpoint on that
+shared host mount; `-data-dir` does not change the torrent source directory.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
 mount capability. The image installs `fuse3` and mount helpers and runs

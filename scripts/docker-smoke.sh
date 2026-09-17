@@ -16,10 +16,12 @@ readonly IMAGE="torrentfs-mio17-smoke:${BASHPID}"
 readonly CONTAINER="torrentfs-mio17-${BASHPID}"
 readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
 readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
+readonly HOST_OBSERVER_CONTAINER="torrentfs-mio17-host-observer-${BASHPID}"
 
 TMP_DIR=""
 IMAGE_TAGGED=0
 POSITIVE_STARTED=0
+HOST_OBSERVER_STARTED=0
 FILE_INPUT_CREATED=0
 MISSING_DIR_CREATED=0
 
@@ -39,6 +41,9 @@ cleanup() {
 	if [[ -n "$CONTAINER" ]]; then
 		docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 	fi
+	if ((HOST_OBSERVER_STARTED)); then
+		docker rm -f "$HOST_OBSERVER_CONTAINER" >/dev/null 2>&1 || true
+	fi
 	if ((FILE_INPUT_CREATED)); then
 		docker rm -f "$FILE_INPUT_CONTAINER" >/dev/null 2>&1 || true
 	fi
@@ -57,7 +62,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for command_name in docker sha256sum timeout; do
+for command_name in docker findmnt sha256sum timeout; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
@@ -73,6 +78,9 @@ NEGATIVE_DATA_DIR="$TMP_DIR/negative-data"
 NEGATIVE_MOUNT_DIR="$TMP_DIR/negative-mnt"
 mkdir -p "$TORRENT_HOST_DIR" "$DATA_HOST_DIR" "$MOUNT_HOST_DIR" \
 	"$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
+HOST_PROPAGATION="$(findmnt -T "$MOUNT_HOST_DIR" -n -o PROPAGATION 2>/dev/null || true)"
+[[ "$HOST_PROPAGATION" == *shared* ]] || \
+	fail "host mount containing $MOUNT_HOST_DIR must use shared propagation (current: ${HOST_PROPAGATION:-unknown})"
 cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/example.torrent"
 mkdir -p "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH"
 cp -- "$FIXTURE_PAYLOAD" "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
@@ -97,11 +105,23 @@ if ! docker run --detach --name "$CONTAINER" \
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$DATA_HOST_DIR,dst=/data" \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
-	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt" \
+	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt,bind-propagation=rshared" \
 	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
 fi
 POSITIVE_STARTED=1
+MNT_PROPAGATION="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+[[ "$MNT_PROPAGATION" == "rshared" ]] || \
+	fail "container /mnt mount propagation is ${MNT_PROPAGATION:-unknown}, expected rshared"
+printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
+
+if ! docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
+	--entrypoint /bin/sh \
+	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/host-mnt,bind-propagation=rslave" \
+	"$IMAGE" -c 'sleep 300' >/dev/null; then
+	fail "could not start the host mount observer"
+fi
+HOST_OBSERVER_STARTED=1
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do
@@ -110,7 +130,9 @@ while ((SECONDS < mount_deadline)); do
 		logs="$(docker logs "$CONTAINER" 2>&1 || true)"
 		fail "FUSE container exited before exposing the fixture (state=$state):$'\n'$logs"
 	fi
-	if [[ "$state" == "running" ]] && docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+	if [[ "$state" == "running" ]] \
+		&& docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1 \
+		&& docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.2
@@ -119,13 +141,21 @@ if ! docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 	logs="$(docker logs "$CONTAINER" 2>&1 || true)"
 	fail "timed out waiting for $MOUNTED_PAYLOAD:$'\n'$logs"
 fi
+if ! docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+	fail "timed out waiting for $MOUNT_HOST_DIR/payload.txt"
+fi
 
 ACTUAL_HASH="$(docker exec "$CONTAINER" sha256sum "$MOUNTED_PAYLOAD")" || \
 	fail "could not read the fixture through the FUSE mount"
 ACTUAL_HASH="${ACTUAL_HASH%% *}"
 [[ "$ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
 	fail "mounted payload hash $ACTUAL_HASH does not match fixture hash $EXPECTED_HASH"
-printf 'docker smoke: mounted payload verified (%s)\n' "$ACTUAL_HASH"
+HOST_ACTUAL_HASH="$(docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+	fail "could not read the fixture through the propagated host mount"
+HOST_ACTUAL_HASH="${HOST_ACTUAL_HASH%% *}"
+[[ "$HOST_ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
+	fail "host mounted payload hash $HOST_ACTUAL_HASH does not match fixture hash $EXPECTED_HASH"
+printf 'docker smoke: mounted payload verified in container and host (%s)\n' "$ACTUAL_HASH"
 
 # The mount exposes torrent data only: the former control directories must be
 # absent, and the legacy .stats directory must be untouched.
@@ -134,10 +164,29 @@ for control_path in /mnt/metadata /mnt/stats; do
 		fail "$control_path exists in the mount; the data mount must expose data only"
 	fi
 done
+for control_path in /host-mnt/metadata /host-mnt/stats; do
+	if docker exec "$HOST_OBSERVER_CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
+		fail "$control_path exists in the propagated mount; the data mount must expose data only"
+	fi
+done
 if ! docker exec "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
 	fail "legacy $LEGACY_STATS_MARKER was removed or rewritten by startup"
 fi
 printf 'docker smoke: control paths absent and legacy .stats preserved\n'
+
+HOST_WRITE_PROBE="/host-mnt/.write-probe"
+if docker exec "$HOST_OBSERVER_CONTAINER" sh -c 'printf "write must fail\\n" > /host-mnt/.write-probe' >/dev/null 2>&1; then
+	fail "host write to the FUSE mount unexpectedly succeeded"
+fi
+if docker exec "$HOST_OBSERVER_CONTAINER" test -e "$HOST_WRITE_PROBE" >/dev/null 2>&1; then
+	fail "host write probe was created in the read-only FUSE mount"
+fi
+HOST_AFTER_WRITE_HASH="$(docker exec "$HOST_OBSERVER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+	fail "could not re-read the host payload after the write probe"
+HOST_AFTER_WRITE_HASH="${HOST_AFTER_WRITE_HASH%% *}"
+[[ "$HOST_AFTER_WRITE_HASH" == "$EXPECTED_HASH" ]] || \
+	fail "host payload changed after rejected write: $HOST_AFTER_WRITE_HASH"
+printf 'docker smoke: propagated host mount is read-only\n'
 
 if ! docker kill --signal TERM "$CONTAINER" >/dev/null; then
 	fail "could not send SIGTERM to the FUSE container"
@@ -146,8 +195,31 @@ if ! STOP_STATUS="$(docker wait "$CONTAINER")"; then
 	fail "could not wait for the FUSE container to stop"
 fi
 [[ "$STOP_STATUS" == "0" ]] || fail "FUSE container stopped with exit code $STOP_STATUS"
+
+unmount_deadline=$((SECONDS + 30))
+while ((SECONDS < unmount_deadline)); do
+	host_mount_type="$(findmnt -T "$MOUNT_HOST_DIR" -n -o FSTYPE 2>/dev/null || true)"
+	host_entry="$(find "$MOUNT_HOST_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+	if [[ "$host_mount_type" != fuse.* && -z "$host_entry" ]]; then
+		break
+	fi
+	sleep 0.2
+done
+host_mount_type="$(findmnt -T "$MOUNT_HOST_DIR" -n -o FSTYPE 2>/dev/null || true)"
+host_entry="$(find "$MOUNT_HOST_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+[[ "$host_mount_type" != fuse.* ]] || \
+	fail "host mount still has a propagated FUSE filesystem ($host_mount_type)"
+[[ -z "$host_entry" ]] || \
+	fail "host mount directory still contains propagated content: $host_entry"
+if docker exec "$HOST_OBSERVER_CONTAINER" test -e /host-mnt/payload.txt >/dev/null 2>&1; then
+	fail "host observer still sees the propagated FUSE payload after shutdown"
+fi
+if ! docker rm -f "$HOST_OBSERVER_CONTAINER" >/dev/null; then
+	fail "could not remove the host mount observer"
+fi
+HOST_OBSERVER_STARTED=0
 POSITIVE_STARTED=0
-printf 'docker smoke: FUSE container stopped cleanly\n'
+printf 'docker smoke: FUSE container stopped and host mount disappeared cleanly\n'
 
 printf 'docker smoke: checking rejected single-file input\n'
 FILE_INPUT_CREATED=1
