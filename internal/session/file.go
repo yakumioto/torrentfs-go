@@ -15,7 +15,7 @@ import (
 
 // readProbeEvent reports one step of a loader read to a test-installed probe.
 // Kind is "admission-attempt" just before the read waits for the admission
-// lock, or "reader-started" once the read is admitted and about to enter the
+// permit, or "reader-started" once the read is admitted and about to enter the
 // underlying reader. Done is the operation context's Done channel, so a test
 // can tell whether the operation was cancelled without inferring it from the
 // read's result.
@@ -52,8 +52,13 @@ const defaultStreamingReadahead int64 = 8 << 20
 // pieceLoader serializes access to one whole-torrent anacrolix reader.
 type pieceLoader struct {
 	mu sync.Mutex
-	// admissionMu serializes operation admission through the full Reader use.
-	admissionMu sync.Mutex
+	// admission is a capacity-1 permit: exactly one operation at a time drives
+	// the shared Reader. A waiter cancelled while queued takes the ctx.Done()
+	// branch and leaves without a permit, so cancellation interrupts the wait
+	// without ever touching another request's read.
+	//
+	// Must be non-nil: build the loader through newPieceLoader (or newAdmission).
+	admission chan struct{}
 
 	operationMu     sync.Mutex
 	rootContext     context.Context
@@ -74,11 +79,38 @@ func newPieceLoader(t *torrent.Torrent) *pieceLoader {
 	r := t.NewReader()
 	r.SetContext(ctx)
 	return &pieceLoader{
+		admission:   newAdmission(),
 		r:           r,
 		rootContext: ctx,
 		rootCancel:  cancel,
 	}
 }
+
+// newAdmission returns the capacity-1 permit channel, already holding its
+// single permit.
+func newAdmission() chan struct{} {
+	admission := make(chan struct{}, 1)
+	admission <- struct{}{}
+	return admission
+}
+
+// acquireAdmission takes the single admission permit. It returns the matching
+// release function, or ctx.Err() if ctx ended first — in which case no permit
+// is held and the caller must not release. The wait is interruptible by ctx
+// only: it never cancels the read in flight.
+func (l *pieceLoader) acquireAdmission(ctx context.Context) (func(), error) {
+	select {
+	case <-l.admission:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return l.releaseAdmission, nil
+}
+
+// releaseAdmission returns the permit. Every acquirer holds it exactly once and
+// returns it through a single deferred call, so the channel is empty whenever
+// the permit is held and this send never blocks.
+func (l *pieceLoader) releaseAdmission() { l.admission <- struct{}{} }
 
 func (l *pieceLoader) cancelActive() {
 	l.operationMu.Lock()
@@ -117,11 +149,10 @@ func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) 
 // requestCtx ends an operation that has already started and nothing else. Once
 // this read is admitted, only its own operation context (requestCtx, the
 // loader's root context, or Close) can end it, and requestCtx never cancels
-// another request's in-flight read. While this read is still queued for
-// admission, cancelling requestCtx does not interrupt that wait: the read
-// returns as soon as it is admitted, because the check after admission
-// observes the cancellation. Returning before admission would need a
-// context-aware admission wait, which this design deliberately does not use.
+// another request's in-flight read. While this read is still queued, cancelling
+// requestCtx ends that wait immediately: the read leaves the queue without the
+// admission permit and returns its context's error. Close still drains the
+// queue by cancelling the read in flight rather than by interrupting waiters.
 func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, readahead int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
@@ -133,14 +164,17 @@ func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, r
 		return 0, err
 	}
 	emitReadProbe(readProbeEvent{Kind: "admission-attempt", Offset: off})
-	// This wait is deliberately not interruptible by requestCtx: a queued read
-	// must never cancel the read in flight just to get ahead of it, which is
-	// the invariant this loader exists to hold. A read cancelled while queued
-	// therefore returns at the recheck below once the in-flight read finishes,
-	// and Close drains the queue by cancelling that read. Making the admission
-	// wait cancellable is a separate, deferred change.
-	l.admissionMu.Lock()
-	defer l.admissionMu.Unlock()
+	// The wait is interruptible by this request's own context only: a waiter
+	// that takes the ctx.Done() branch leaves the queue without a permit and
+	// without touching the shared reader, so a queued read can never cancel the
+	// read in flight. A read cancelled after it is admitted returns at the
+	// recheck below, releasing the permit it just took. Close drains the queue
+	// by cancelling the read in flight, not by interrupting the waiters.
+	release, err := l.acquireAdmission(requestCtx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	if err := requestCtx.Err(); err != nil {
 		return 0, err
 	}
@@ -172,8 +206,12 @@ func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, r
 func (l *pieceLoader) Close() error {
 	l.rootCancel()
 	l.cancelActive()
-	l.admissionMu.Lock()
-	defer l.admissionMu.Unlock()
+	// Close waits for the in-flight read without a context: it is what makes
+	// that read unwind, so it must not be interruptible. Queue drain is
+	// unchanged — Close takes the permit, marks the loader closed, and every
+	// waiter admitted afterwards returns ErrClosed (or its own context error).
+	<-l.admission
+	defer l.releaseAdmission()
 	l.cancelActive()
 	l.mu.Lock()
 	defer l.mu.Unlock()

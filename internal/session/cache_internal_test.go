@@ -294,7 +294,7 @@ func newProbedLoader(t *testing.T) (*pieceLoader, *blockingOperationReader, chan
 	t.Helper()
 	reader := newBlockingOperationReader()
 	rootContext, rootCancel := context.WithCancel(context.Background())
-	loader := &pieceLoader{r: reader, rootContext: rootContext, rootCancel: rootCancel}
+	loader := &pieceLoader{admission: newAdmission(), r: reader, rootContext: rootContext, rootCancel: rootCancel}
 	events := make(chan readProbeEvent, 16)
 	restore := SetReadProbe(events)
 	t.Cleanup(func() {
@@ -438,7 +438,7 @@ func TestPieceLoaderOverlappingReadsQueueWithoutCancelling(t *testing.T) {
 // TestPieceLoaderCloseCancelsBlockedRead checks the lifecycle half of the
 // contract: only closing the loader (not another read) cancels a read blocked
 // on unavailable data, and Close still returns instead of deadlocking on the
-// admission lock the blocked read holds.
+// admission permit the blocked read holds.
 func TestPieceLoaderCloseCancelsBlockedRead(t *testing.T) {
 	loader, reader, events := newProbedLoader(t)
 
@@ -466,6 +466,163 @@ func TestPieceLoaderCloseCancelsBlockedRead(t *testing.T) {
 		}
 	case <-time.After(probeWait):
 		t.Fatal("Close did not return while a read was blocked")
+	}
+}
+
+// TestPieceLoaderQueuedCancellationLeavesWithoutAdmission is the regression
+// test for the admission wait itself: a read whose request context is cancelled
+// while it is still queued must return context.Canceled without ever taking the
+// admission permit. The in-flight read is left blocked for the whole assertion,
+// so a queued read that returns can only have done so without the permit — the
+// result does not depend on scheduling order.
+func TestPieceLoaderQueuedCancellationLeavesWithoutAdmission(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	firstDone := startLoaderRead(loader, context.Background(), 0)
+	firstStarted := waitProbeEvent(t, events, "reader-started", 0)
+	select {
+	case <-reader.started:
+	case <-time.After(probeWait):
+		t.Fatal("first read never blocked in the underlying reader")
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	secondDone := startLoaderRead(loader, requestCtx, 4096)
+	waitProbeEvent(t, events, "admission-attempt", 4096)
+
+	requireNoLoaderResult(t, secondDone, "queued read")
+	if channelClosed(firstStarted.Done) {
+		t.Fatal("the queued read cancelled the in-flight read's operation")
+	}
+
+	cancelRequest()
+
+	// The in-flight read still holds the permit and is still blocked, so this
+	// read can only return by leaving the queue without a permit.
+	secondResult := waitLoaderResult(t, secondDone, "queued read after cancellation")
+	if !errors.Is(secondResult.err, context.Canceled) {
+		t.Fatalf("queued read after cancellation = %v, want context.Canceled", secondResult.err)
+	}
+	seekCalls, maxActive, _, _ := reader.snapshot()
+	if seekCalls != 1 {
+		t.Fatalf("Seek calls after a cancelled queued read = %d, want 1", seekCalls)
+	}
+	if maxActive != 1 {
+		t.Fatalf("maximum concurrent reads = %d, want 1", maxActive)
+	}
+
+	reader.releaseReads()
+
+	firstResult := waitLoaderResult(t, firstDone, "in-flight read")
+	if firstResult.err != nil || firstResult.n != 32 {
+		t.Fatalf("in-flight read = %d bytes, %v; want 32, nil", firstResult.n, firstResult.err)
+	}
+	if want := blockingPattern(0, 32); !bytes.Equal(firstResult.data, want) {
+		t.Fatalf("in-flight read data = %v, want %v", firstResult.data, want)
+	}
+
+	// A read started after a queued waiter left must still be admitted: the
+	// permit was returned exactly once rather than leaked.
+	thirdDone := startLoaderRead(loader, context.Background(), 8192)
+	waitProbeEvent(t, events, "reader-started", 8192)
+	thirdResult := waitLoaderResult(t, thirdDone, "read after a cancelled queued waiter")
+	if thirdResult.err != nil || thirdResult.n != 32 {
+		t.Fatalf("read after a cancelled queued waiter = %d bytes, %v; want 32, nil", thirdResult.n, thirdResult.err)
+	}
+	if want := blockingPattern(8192, 32); !bytes.Equal(thirdResult.data, want) {
+		t.Fatalf("read after a cancelled queued waiter data = %v, want %v", thirdResult.data, want)
+	}
+}
+
+// TestPieceLoaderQueuedDeadlineExceededKeepsItsContextError checks the error
+// contract of an interrupted wait: a deadline that expires while the read is
+// queued surfaces as context.DeadlineExceeded rather than a hard-coded
+// context.Canceled, so callers see the context's own error.
+func TestPieceLoaderQueuedDeadlineExceededKeepsItsContextError(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	firstDone := startLoaderRead(loader, context.Background(), 0)
+	waitProbeEvent(t, events, "reader-started", 0)
+	select {
+	case <-reader.started:
+	case <-time.After(probeWait):
+		t.Fatal("first read never blocked in the underlying reader")
+	}
+
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelRequest()
+	secondDone := startLoaderRead(loader, requestCtx, 4096)
+	waitProbeEvent(t, events, "admission-attempt", 4096)
+
+	secondResult := waitLoaderResult(t, secondDone, "queued read with an expired deadline")
+	if !errors.Is(secondResult.err, context.DeadlineExceeded) {
+		t.Fatalf("queued read error = %v, want context.DeadlineExceeded", secondResult.err)
+	}
+
+	reader.releaseReads()
+	firstResult := waitLoaderResult(t, firstDone, "in-flight read")
+	if firstResult.err != nil || firstResult.n != 32 {
+		t.Fatalf("in-flight read = %d bytes, %v; want 32, nil", firstResult.n, firstResult.err)
+	}
+}
+
+// TestPieceLoaderCloseDrainsQueueWithCancelledWaiter covers Close racing a
+// queue that holds a cancelled waiter: Close cancels the in-flight read, the
+// permit is released exactly once, every queued read leaves, and Close returns
+// instead of deadlocking.
+func TestPieceLoaderCloseDrainsQueueWithCancelledWaiter(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	firstDone := startLoaderRead(loader, context.Background(), 0)
+	firstStarted := waitProbeEvent(t, events, "reader-started", 0)
+	select {
+	case <-reader.started:
+	case <-time.After(probeWait):
+		t.Fatal("first read never blocked in the underlying reader")
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	secondDone := startLoaderRead(loader, requestCtx, 4096)
+	waitProbeEvent(t, events, "admission-attempt", 4096)
+	cancelRequest()
+
+	thirdDone := startLoaderRead(loader, context.Background(), 8192)
+	waitProbeEvent(t, events, "admission-attempt", 8192)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- loader.Close() }()
+
+	waitChannelClosed(t, firstStarted.Done, "in-flight operation context")
+
+	firstResult := waitLoaderResult(t, firstDone, "in-flight read after Close")
+	if !errors.Is(firstResult.err, context.Canceled) {
+		t.Fatalf("in-flight read after Close = %v, want context.Canceled", firstResult.err)
+	}
+	secondResult := waitLoaderResult(t, secondDone, "cancelled queued read after Close")
+	if !errors.Is(secondResult.err, context.Canceled) {
+		t.Fatalf("cancelled queued read after Close = %v, want context.Canceled", secondResult.err)
+	}
+	// The third read queues behind the first two and, because channel waiters
+	// are woken in arrival order, ahead of Close's own wait. It therefore wins
+	// the released permit before Close can mark the loader closed, becomes the
+	// in-flight read, and is cancelled by Close like any in-flight read. Had it
+	// been admitted after the marker was set it would report ErrClosed instead:
+	// both outcomes mean the queue drained without serving it, so neither is
+	// asserted specifically, but it must return an error and no bytes.
+	thirdResult := waitLoaderResult(t, thirdDone, "queued read after Close")
+	if thirdResult.n != 0 || thirdResult.err == nil {
+		t.Fatalf("queued read after Close = %d bytes, %v; want an error and no bytes", thirdResult.n, thirdResult.err)
+	}
+	if !errors.Is(thirdResult.err, filesystem.ErrClosed) && !errors.Is(thirdResult.err, context.Canceled) {
+		t.Fatalf("queued read after Close error = %v, want filesystem.ErrClosed or context.Canceled", thirdResult.err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(probeWait):
+		t.Fatal("Close did not return while the queue drained")
 	}
 }
 
