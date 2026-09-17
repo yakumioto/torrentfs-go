@@ -8,7 +8,8 @@
 
 ## Plan
 
-- 实现分支从 `e43f720` 建立，并以 `--no-ff` 合并 `268bbf5`；初始合并提交为 `a04d638`，随后以 merge commit `845ac9e` 合并最新 `origin/main@6a5bfa0` 解决 PR 冲突，保留 nightly/release/quality 文件及 MIO-25 动态认证。
+- 实现分支从 `e43f720` 建立，并以 `--no-ff` 合并 `268bbf5`；初始合并提交为 `a04d638`，随后以 merge commit `845ac9e` 合并 `origin/main@6a5bfa0` 解决 PR 冲突，保留 nightly/release/quality 文件及 MIO-25 动态认证。
+- 本轮再次 fetch 目标分支确认仍为 `origin/main@6a5bfa0`；`git merge origin/main` 为 no-op，因 `845ac9e` 已包含该 head，未制造重复 merge 或空代码变更。
 - `web/` 同包提供 `//go:embed dist/*` 与 public static/SPA fallback；`internal/api` 以 `/api` 前缀分派到认证 API，其余请求进入 public static handler。
 - token 仅存内存，首次用 list probe 判断匿名/登录/连接错误；API 401 清 token、清理 query cache 并回登录。
 - query 使用固定 keys、5 秒 list/status 刷新、1.5 秒 deletion operation 轮询；Files 只展示 piece-level coverage，Pieces 使用状态优先级、纹理和文字冗余编码。
@@ -32,7 +33,7 @@
 - 更新 `Dockerfile` 为 Node builder → Go builder → binary-only runtime；`.dockerignore`/`.gitignore` 排除本地依赖和 dist；README/example config 补充同源 UI、auth 分层、Vite/Docker/build 说明。
 - 升级并锁定 React Router 7.18.4、Vite 7.3.6、Vitest 5.0.1、ESLint 10.10.0 及兼容插件；`npm audit`（含生产依赖）为 0 vulnerabilities。
 - 本轮修复 `TorrentDetailPage.tsx` 的 status snapshot 来源、`hooks.ts` 的 operation 404 polling、`format.ts`/`sort.ts` 的 Go 零时间语义；扩展组件与 query-hook 回归测试。
-- 本轮合并冲突仅涉及 `internal/api/server.go` 与 `torrentfs.example.toml`：保留 `dispatchAPIAndStatic(s.authenticate(mux), web.Handler())`、动态 `[http.auth]` 配置和双方默认监听/静态分层说明；无冲突标记残留。
+- 首次 PR 冲突仅涉及 `internal/api/server.go` 与 `torrentfs.example.toml`：保留 `dispatchAPIAndStatic(s.authenticate(mux), web.Handler())`、动态 `[http.auth]` 配置和双方默认监听/静态分层说明；`845ac9e` 已完成解析且无冲突标记残留。本轮再次检查目标 head 未发现新的文件冲突。
 
 ## Verification
 
@@ -44,7 +45,7 @@
 - `npm audit --package-lock-only --prefix web` 与 `--omit=dev`：均报告 0 vulnerabilities。
 - `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`：全部通过。
 - `golangci-lint run ./...`（v2.12.2）：`0 issues`。
-- 在 `origin/main@6a5bfa0` merge 解析完成后重跑 `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...` 和 `golangci-lint`：全部通过；PR head 为 `845ac9e`，工作树干净。
+- 在 `origin/main@6a5bfa0` merge 解析完成后重跑 `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...` 和 `golangci-lint`：全部通过；本轮 `git merge origin/main` no-op，PR head 为 `96397b8`，工作树干净。
 - Vite dev server `127.0.0.1:5173`：成功提供入口 HTML；已精确清理启动的进程组。
 - Google Chrome headless：真实渲染匿名 Dashboard 与 Detail deep link，页面显示 torrent queue、`payload.txt`、Files 和 Pieces；已精确清理 daemon/Chrome 临时目录。
 - `scripts/http-smoke.sh`：通过 root/deep-link、asset MIME/cache、未认证 401/WWW-Authenticate、login no-store、带 token list、logout revoke、未知 API 不回退 HTML。
@@ -74,6 +75,7 @@
 - npm 安装仍显示 jsdom 传递依赖 `whatwg-encoding` deprecation warning，但完整及生产 audit 均为 0 vulnerabilities。
 - 未知 `/api` 路由保留 Go `ServeMux` 标准非 HTML 404；测试锁定不发生 SPA fallback。
 - `web/dist` 缺失时 Go embed 会让编译失败，这是有意的单一构建契约，不是静默降级。
+- PR API 当前报告 `mergeable=MERGEABLE`；`mergeStateStatus=UNSTABLE` 来自 Sourcery 检查失败，不是代码冲突，CI build/vet/unit/race/lint/FUSE 与 DCO 均已成功。
 
 ## Critical Files
 
