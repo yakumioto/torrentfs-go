@@ -45,6 +45,7 @@ describe('ApiClient', () => {
     const api = new ApiClient({ getToken: () => 'opaque', onUnauthorized });
     await expect(api.listTorrents()).rejects.toMatchObject({ status: 401, wwwAuthenticate: 'Bearer' });
     expect(onUnauthorized).toHaveBeenCalledOnce();
+    expect(onUnauthorized).toHaveBeenCalledWith('opaque');
     await expect(api.login('alice', 'wrong')).rejects.toBeInstanceOf(ApiError);
     expect(onUnauthorized).toHaveBeenCalledOnce();
   });

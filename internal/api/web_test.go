@@ -28,6 +28,14 @@ func TestStaticAndAPIPathsHaveSeparateBoundaries(t *testing.T) {
 		t.Fatalf("unknown API without token = %d/%q, want 401/Bearer", unknown.Code, unknown.Header().Get("WWW-Authenticate"))
 	}
 	token := loginForTest(t, srv)
+	refreshedRoot := do(t, srv, httptest.NewRequest(http.MethodGet, "/", nil))
+	if refreshedRoot.Code != http.StatusOK || refreshedRoot.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("refreshed root response = %d %q, want public HTML", refreshedRoot.Code, refreshedRoot.Header().Get("Content-Type"))
+	}
+	refreshedDeepLink := do(t, srv, httptest.NewRequest(http.MethodGet, "/torrents/refreshed", nil))
+	if refreshedDeepLink.Code != http.StatusOK || refreshedDeepLink.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("refreshed deep link response = %d %q, want public HTML", refreshedDeepLink.Code, refreshedDeepLink.Header().Get("Content-Type"))
+	}
 	authenticatedUnknown := httptest.NewRequest(http.MethodGet, "/api/v1/not-a-route", nil)
 	authenticatedUnknown.Header.Set("Authorization", "Bearer "+token)
 	rec := do(t, srv, authenticatedUnknown)
