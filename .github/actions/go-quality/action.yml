@@ -28,6 +28,24 @@ runs:
             ;;
         esac
 
+    - name: Set up Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version-file: web/.nvmrc
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+
+    - name: Frontend checks and embedded assets
+      shell: bash
+      run: |
+        set -euo pipefail
+        npm ci --prefix web
+        npm run typecheck --prefix web
+        npm run lint --prefix web
+        npm test --prefix web -- --run
+        npm run build --prefix web
+        rm -rf -- web/node_modules
+
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:

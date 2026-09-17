@@ -15,6 +15,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/auth"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
+	"github.com/yakumioto/torrentfs-go/web"
 )
 
 // Backend is the narrow session surface the API needs. Keeping it small lets
@@ -62,7 +63,7 @@ func New(cfg config.Config, backend Backend) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
-	s.handler = s.authenticate(mux)
+	s.handler = dispatchAPIAndStatic(s.authenticate(mux), web.Handler())
 	return s, nil
 }
 
@@ -119,6 +120,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.auth.Close()
 	}
 	return err
+}
+
+func dispatchAPIAndStatic(apiHandler, staticHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		staticHandler.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) authenticate(next http.Handler) http.Handler {

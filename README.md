@@ -20,15 +20,31 @@ Mount BitTorrent downloads as a FUSE filesystem.
 
 ## Build
 
-Requires Go 1.27+.
+Requires Go 1.27+ and the Node version in `web/.nvmrc`.
+The Web UI is built before Go packages so `web/dist` is available to the Go
+`embed` package; generated `web/dist` and `web/node_modules` are not committed.
 
 ```sh
+npm ci --prefix web
+npm run typecheck --prefix web
+npm run lint --prefix web
+npm test --prefix web
+npm run build --prefix web
+rm -rf -- web/node_modules
 go build ./...
 go test ./...
 go test -race ./...
 go vet ./...
 golangci-lint run ./...
 ```
+
+For a build-only path such as the nightly package, use `./scripts/build-web.sh`;
+it runs the lockfile install, builds `web/dist`, and performs the same cleanup.
+
+`./scripts/build-web.sh` uses the lockfile, produces `web/dist`, and removes
+`web/node_modules` after the build so Go's recursive package commands do not
+inspect example source shipped inside JavaScript dependencies. CI performs the
+frontend checks and the same cleanup before running Go quality checks.
 
 ## Nightly builds
 
@@ -144,11 +160,41 @@ Each file reports a half-open `[piece_start, piece_end)` range into that same
 array, so a piece spanning a file boundary is referenced by both files instead
 of being duplicated. Only partial pieces carry `available_bytes`. A task whose
 metainfo has not arrived yet (an unresolved magnet) returns `200` with
-`metainfo_ready: false` and empty arrays; an unknown id returns `404`. Every
-route keeps the global authentication rule and no anonymous non-loopback
-exception exists.
+`metainfo_ready: false` and empty arrays; an unknown id returns `404`.
+When authentication is enabled, the login route is public and every other
+`/api/` route requires an explicit `Authorization: Bearer <token>` header. The
+embedded Web UI's static `GET`/`HEAD` shell and assets are public so a browser
+can load the document before it has a token; they contain no torrent data. When
+authentication is disabled, the API retains its anonymous loopback behavior.
+There is no anonymous non-loopback API exception.
 
-### On-disk state
+### Web UI
+
+When the HTTP service is enabled, the same listener serves the embedded Web UI
+and `/api/v1`. Open the listener address in a browser; the shell supports the
+Dashboard, torrent detail, Files, Pieces, magnet/file add, and asynchronous
+delete flows. Files and pieces are read from the existing API snapshot, so the
+UI does not expose local data paths, add frontend-specific endpoints, or claim
+byte-level precision that the API cannot provide. Peer counts are intentionally
+shown as unavailable because they are not part of the public torrent DTO.
+
+During development, run Vite from `web`:
+
+```sh
+npm ci --prefix web
+npm run dev --prefix web
+```
+
+Vite serves on `:5173` and proxies `/api` to `http://127.0.0.1:8080`. A
+production build is same-origin and uses relative `/api/v1` requests. The UI
+keeps Bearer tokens in memory only: it does not use cookies, URL parameters,
+`localStorage`, `sessionStorage`, JWT decoding, or a refresh endpoint. A page
+refresh or daemon restart therefore requires a fresh connection probe and,
+when enabled, a new login. Valid API requests slide the server-side inactivity
+window; the browser treats a `401` as the authoritative signal to show the
+login gate.
+
+## On-disk state
 
 ```text
 <torrents-dir>/
@@ -317,6 +363,36 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 
 The swarm test binds loopback only, uses an in-process tracker, and disables
 DHT and UTP, so it never contacts the public network.
+
+## Docker HTTP smoke
+
+The image contains only the Go binary and runtime libraries; Node and `web/dist`
+are build-stage inputs embedded in that binary. Run the HTTP-only check without
+FUSE:
+
+```sh
+./scripts/http-smoke.sh
+```
+
+For a headless container, bind a listener explicitly and enable authentication:
+
+```sh
+docker build -t torrentfs .
+docker run --rm \
+  -p 8080:8080 \
+  -v /srv/torrentfs-data:/data \
+  -v /srv/torrents:/torrents \
+  -v /srv/torrentfs.toml:/config.toml:ro \
+  torrentfs -config /config.toml /torrents
+```
+
+Use `[http].listen_addr = "0.0.0.0:8080"` and a complete `[http.auth]` section
+in that config. `-p` publishes a port but does not change what the daemon
+listens on. The default remains loopback-only; put an exposed deployment behind
+TLS at the edge. The HTTP smoke checks the public root and deep link, asset
+MIME/cache behavior, API `401` plus `WWW-Authenticate`, login `no-store`,
+authenticated list, logout, and the rule that unknown API paths never become
+SPA HTML.
 
 ## Docker (rootful)
 

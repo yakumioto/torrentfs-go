@@ -7,3 +7,5 @@
 *metadata/
 Dockerfile
 .dockerignore
+web/node_modules
+web/dist
