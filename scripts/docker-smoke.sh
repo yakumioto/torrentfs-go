@@ -18,6 +18,8 @@ readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
 readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
 readonly HOST_OBSERVER_CONTAINER="torrentfs-mio17-host-observer-${BASHPID}"
 readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
+readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
+readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
 
 # Every Docker call that can hang is bounded: a wedged daemon or an unmount
 # that waits forever must fail the smoke instead of hanging it. The positive
@@ -32,6 +34,16 @@ readonly DOCKER_OP_TIMEOUT=60
 # separately and are not merged into the runtime figure.
 readonly READER_CANCEL_PATTERN='msg="(initial read failed|read failed after reader reset|read failed after completion resync)" err="context canceled"'
 readonly UNMOUNT_BUSY_PATTERN='failed to unmount .*Device or resource busy'
+
+# The peer-namespace scenario measures the bounded unmount stage against its
+# configured deadline. UNMOUNT_TIMEOUT_SECONDS mirrors defaultUnmountTimeout in
+# cmd/torrentfs/main.go and UNMOUNT_STOP_MARGIN covers the rest of the shutdown
+# sequence; keep their sum below DOCKER_OP_TIMEOUT so "stopped late" and "never
+# stopped" stay distinguishable. UNMOUNT_TIMEOUT_DIAGNOSTIC is the stable
+# fragment of the diagnostic the daemon must print before exiting non-zero.
+readonly UNMOUNT_TIMEOUT_SECONDS=30
+readonly UNMOUNT_STOP_MARGIN=20
+readonly UNMOUNT_TIMEOUT_DIAGNOSTIC='unmount did not return within'
 
 TMP_DIR=""
 IMAGE_TAGGED=0
@@ -123,10 +135,20 @@ cleanup() {
 		done
 	fi
 
+	# Propagation peers go first. A namespace that still holds a copy of a FUSE
+	# mount keeps that daemon's Server.Unmount blocked, so waiting on the daemon
+	# before reclaiming its peers would spend the whole docker-wait bound on a
+	# state that removing the peer resolves at once. Removing the peer first is
+	# what keeps this teardown bounded by reality and not just by the timeout.
+	for container in "$PEER_HOLDER_CONTAINER" "$HOST_OBSERVER_CONTAINER"; do
+		[[ -n "$container" ]] || continue
+		bounded 30 "docker rm -f $container" docker rm -f "$container" >/dev/null 2>&1 || true
+	done
+
 	# Every teardown step is bounded. Forced kill/remove is a last resort for
 	# residue; it never changes the recorded exit status, so a forced cleanup
 	# cannot turn a failed run green.
-	for container in "$CONTAINER" "$BLOCKED_READ_CONTAINER" "$HOST_OBSERVER_CONTAINER" \
+	for container in "$CONTAINER" "$PEER_DAEMON_CONTAINER" "$BLOCKED_READ_CONTAINER" \
 		"$FILE_INPUT_CONTAINER" "$MISSING_DIR_CONTAINER"; do
 		[[ -n "$container" ]] || continue
 		bounded 30 "docker kill $container" docker kill --signal TERM "$container" >/dev/null 2>&1 || true
@@ -442,6 +464,113 @@ if ! bounded 30 "remove the blocked-read container" docker rm -f "$BLOCKED_READ_
 	fail "could not remove the blocked-read container"
 fi
 printf 'docker smoke: blocked-read shutdown completed without a daemon-owned unmount failure\n'
+
+# Peer mount namespace scenario: a second mount namespace holds a propagated
+# copy of the FUSE mount, so the FUSE connection never reaches ENODEV and
+# Server.Unmount parks in its event-loop Wait. This is a different cause from
+# both gaps above and it must not produce an EBUSY line: the unmount of the
+# daemon's own copy succeeds, only the connection outlives it. The daemon has to
+# give up at its own deadline, say why, and exit non-zero instead of hanging
+# until the peer goes away. Needs rootful Docker, /dev/fuse, SYS_ADMIN, and bind
+# propagation, so it runs here and not in the CI gate.
+printf 'docker smoke: starting peer mount namespace shutdown scenario\n'
+PEER_DATA_DIR="$TMP_DIR/peer-data"
+PEER_MOUNT_DIR="$TMP_DIR/peer-mnt"
+mkdir -p "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH" "$PEER_MOUNT_DIR"
+# Preload the payload: without it the peer's read would block on a missing
+# piece, which is the outstanding-request cause, not this one.
+cp -- "$FIXTURE_PAYLOAD" "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
+if ! docker run --detach --name "$PEER_DAEMON_CONTAINER" \
+	--device /dev/fuse \
+	--cap-add SYS_ADMIN \
+	--security-opt apparmor=unconfined \
+	--mount "type=bind,src=$PEER_DATA_DIR,dst=/data" \
+	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
+	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
+	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
+	fail "could not start the peer-namespace container"
+fi
+PEER_PROPAGATION="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
+[[ "$PEER_PROPAGATION" == "rshared" ]] || \
+	fail "peer-namespace /mnt propagation is ${PEER_PROPAGATION:-unknown}, expected rshared"
+
+if ! docker run --detach --name "$PEER_HOLDER_CONTAINER" \
+	--entrypoint /bin/sh \
+	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/host-mnt,bind-propagation=rslave" \
+	"$IMAGE" -c 'sleep 300' >/dev/null; then
+	fail "could not start the peer mount namespace holder"
+fi
+
+peer_mount_deadline=$((SECONDS + 30))
+while ((SECONDS < peer_mount_deadline)); do
+	peer_state="$(docker inspect --format '{{.State.Status}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
+	if [[ "$peer_state" == "exited" || "$peer_state" == "dead" ]]; then
+		collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+		fail "peer-namespace container exited before exposing the fixture (state=$peer_state)"
+	fi
+	if docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+		break
+	fi
+	sleep 0.2
+done
+# Scenario validity: without a real copy in the peer namespace the shutdown
+# below would be exercised against nothing.
+if ! docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+	fail "the peer mount namespace never received a propagated copy of $PEER_MOUNT_DIR/payload.txt"
+fi
+PEER_HASH="$(bounded 30 "read through the peer mount namespace" \
+	docker exec "$PEER_HOLDER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+	fail "could not read the fixture through the peer mount namespace"
+PEER_HASH="${PEER_HASH%% *}"
+[[ "$PEER_HASH" == "$EXPECTED_HASH" ]] || \
+	fail "peer namespace payload hash $PEER_HASH does not match fixture hash $EXPECTED_HASH"
+printf 'docker smoke: peer mount namespace holds a propagated read-only copy of the FUSE mount (%s)\n' "$PEER_HASH"
+
+PEER_SHUTDOWN_START=$SECONDS
+if ! bounded 30 "signal the peer-namespace container" docker kill --signal TERM "$PEER_DAEMON_CONTAINER" >/dev/null; then
+	fail "could not send SIGTERM to the peer-namespace container"
+fi
+if ! PEER_STOP_STATUS="$(bounded "$DOCKER_OP_TIMEOUT" "wait for the peer-namespace container" docker wait "$PEER_DAEMON_CONTAINER")"; then
+	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+	fail "the peer-namespace container did not stop within ${DOCKER_OP_TIMEOUT}s after SIGTERM; the bounded unmount stage did not take effect"
+fi
+PEER_SHUTDOWN_SECONDS=$((SECONDS - PEER_SHUTDOWN_START))
+PEER_STOP_BOUND=$((UNMOUNT_TIMEOUT_SECONDS + UNMOUNT_STOP_MARGIN))
+(( PEER_SHUTDOWN_SECONDS <= PEER_STOP_BOUND )) || \
+	fail "the peer-namespace container stopped after ${PEER_SHUTDOWN_SECONDS}s, want at most ${PEER_STOP_BOUND}s (unmount deadline ${UNMOUNT_TIMEOUT_SECONDS}s plus margin)"
+# The deadline is reported as a runtime failure: exiting 0 would tell an
+# orchestrator the mount was released when the peer still holds a copy.
+[[ "$PEER_STOP_STATUS" == "1" ]] || \
+	fail "the peer-namespace container exited with $PEER_STOP_STATUS, want 1 (the unmount deadline must be reported as a runtime failure)"
+PEER_TEARDOWN_LOGS="$(container_logs "$PEER_DAEMON_CONTAINER")"
+[[ "$PEER_TEARDOWN_LOGS" == *"$UNMOUNT_TIMEOUT_DIAGNOSTIC"* ]] || \
+	fail "the peer-namespace shutdown omitted the unmount timeout diagnostic:$'\n'$PEER_TEARDOWN_LOGS"
+if [[ -n "$(unmount_busy_lines "$PEER_TEARDOWN_LOGS")" ]]; then
+	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+	fail "the peer-namespace shutdown reported a daemon-owned unmount failure; this scenario must reproduce the peer-namespace cause and not the outstanding-request one:$'\n'$PEER_TEARDOWN_LOGS"
+fi
+printf 'docker smoke: peer-namespace shutdown stopped in %ss with exit code %s and a timeout diagnostic\n' \
+	"$PEER_SHUTDOWN_SECONDS" "$PEER_STOP_STATUS"
+
+if ! bounded 30 "remove the peer mount namespace holder" docker rm -f "$PEER_HOLDER_CONTAINER" >/dev/null; then
+	fail "could not remove the peer mount namespace holder"
+fi
+peer_release_deadline=$((SECONDS + 30))
+while ((SECONDS < peer_release_deadline)); do
+	if host_mount_released "$PEER_MOUNT_DIR"; then
+		break
+	fi
+	sleep 0.2
+done
+if ! host_mount_released "$PEER_MOUNT_DIR"; then
+	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+	fail "the propagated host mount under $PEER_MOUNT_DIR outlived the peer namespace and the stopped daemon"
+fi
+if ! bounded 30 "remove the peer-namespace container" docker rm -f "$PEER_DAEMON_CONTAINER" >/dev/null; then
+	fail "could not remove the peer-namespace container"
+fi
+printf 'docker smoke: peer namespace reclamation released the propagated host mount\n'
 
 printf 'docker smoke: checking rejected single-file input\n'
 FILE_INPUT_CREATED=1
