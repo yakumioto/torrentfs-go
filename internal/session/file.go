@@ -13,20 +13,37 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
 
-// readGate, when set, runs at the start of every real read before the read
-// touches the cache or the loader. Production leaves it nil; tests install one
-// through export_test.go so they can hold a read outstanding while racing
-// Unmount and Session.Close against it.
-var readGate atomic.Pointer[func()]
+// readProbeEvent reports one step of a loader read to a test-installed probe.
+// Kind is "admission-attempt" just before the read waits for the admission
+// lock, or "reader-started" once the read is admitted and about to enter the
+// underlying reader. Done is the operation context's Done channel, so a test
+// can tell whether the operation was cancelled without inferring it from the
+// read's result.
+type readProbeEvent struct {
+	Kind      string
+	Offset    int64
+	Operation uint64
+	Done      <-chan struct{}
+}
 
-func enterReadGate() {
-	if gate := readGate.Load(); gate != nil {
-		(*gate)()
+// readProbe, when set, receives loader read events. It is a test-only seam:
+// production never installs one. Sends are non-blocking, so a full or stalled
+// probe channel can never hold up a reader.
+var readProbe atomic.Pointer[chan readProbeEvent]
+
+func emitReadProbe(event readProbeEvent) {
+	probe := readProbe.Load()
+	if probe == nil {
+		return
+	}
+	select {
+	case (*probe) <- event:
+	default:
 	}
 }
 
 type pieceSource interface {
-	ReadAt([]byte, int64, int64) (int, error)
+	ReadAtContext(context.Context, []byte, int64, int64) (int, error)
 	Close() error
 }
 
@@ -93,16 +110,47 @@ func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) 
 	cancel()
 }
 
-func (l *pieceLoader) ReadAt(p []byte, off, readahead int64) (int, error) {
+// ReadAtContext reads off bytes at off into p on behalf of requestCtx. Reads
+// are serialized: only one operation ever drives the shared anacrolix reader,
+// and a new read waits for the one in flight instead of cancelling it.
+//
+// requestCtx ends an operation that has already started and nothing else. Once
+// this read is admitted, only its own operation context (requestCtx, the
+// loader's root context, or Close) can end it, and requestCtx never cancels
+// another request's in-flight read. While this read is still queued for
+// admission, cancelling requestCtx does not interrupt that wait: the read
+// returns as soon as it is admitted, because the check after admission
+// observes the cancellation. Returning before admission would need a
+// context-aware admission wait, which this design deliberately does not use.
+func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, readahead int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
 	}
-	l.cancelActive()
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	if err := requestCtx.Err(); err != nil {
+		return 0, err
+	}
+	emitReadProbe(readProbeEvent{Kind: "admission-attempt", Offset: off})
+	// This wait is deliberately not interruptible by requestCtx: a queued read
+	// must never cancel the read in flight just to get ahead of it, which is
+	// the invariant this loader exists to hold. A read cancelled while queued
+	// therefore returns at the recheck below once the in-flight read finishes,
+	// and Close drains the queue by cancelling that read. Making the admission
+	// wait cancellable is a separate, deferred change.
 	l.admissionMu.Lock()
 	defer l.admissionMu.Unlock()
-	l.cancelActive()
+	if err := requestCtx.Err(); err != nil {
+		return 0, err
+	}
 	ctx, operation, cancel := l.beginOperation()
 	defer l.endOperation(operation, cancel)
+	// Connect this request to its own operation only: the callback cancels the
+	// operation when the request goes away, and is stopped before the
+	// operation ends so the callback cannot outlive it.
+	stopRequestCancel := context.AfterFunc(requestCtx, cancel)
+	defer stopRequestCancel()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
@@ -113,6 +161,7 @@ func (l *pieceLoader) ReadAt(p []byte, off, readahead int64) (int, error) {
 	if _, err := l.r.Seek(off, io.SeekStart); err != nil {
 		return 0, err
 	}
+	emitReadProbe(readProbeEvent{Kind: "reader-started", Offset: off, Operation: operation, Done: ctx.Done()})
 	n, err := io.ReadFull(l.r, p)
 	if err == io.ErrUnexpectedEOF {
 		err = io.EOF
@@ -158,19 +207,28 @@ var _ io.ReaderAt = (*raFile)(nil)
 var _ io.Closer = (*raFile)(nil)
 
 func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.ReadAtContext(context.Background(), p, off)
+}
+
+// ReadAtContext serves one file-local read on behalf of ctx. Cancelling ctx
+// ends this read only: it never cancels another read's operation.
+func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
-	enterReadGate()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	f.mu.RLock()
 	if f.closed {
 		f.mu.RUnlock()
 		return 0, filesystem.ErrClosed
 	}
+	loader := f.loader
 	request := cache.ReadRequest{
 		FileOffset:    off,
 		Length:        int64(len(p)),
@@ -181,6 +239,9 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 	}
 	f.mu.RUnlock()
 
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	plan := cache.Plan(request)
 	if len(plan.Spans) == 0 {
 		return 0, io.EOF
@@ -188,7 +249,10 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 
 	written := 0
 	for _, span := range plan.Spans {
-		data, err := f.span(span)
+		if err := ctx.Err(); err != nil {
+			return written, err
+		}
+		data, err := f.span(ctx, loader, span)
 		if err != nil {
 			return written, err
 		}
@@ -210,7 +274,7 @@ func (f *raFile) readaheadBytes() int64 {
 	return readahead
 }
 
-func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
+func (f *raFile) span(ctx context.Context, loader pieceSource, pieceSpan cache.PieceSpan) ([]byte, error) {
 	end := pieceSpan.Offset + pieceSpan.Length
 	if pieceSpan.Offset < 0 || pieceSpan.Length <= 0 || end < pieceSpan.Offset {
 		return nil, io.ErrUnexpectedEOF
@@ -229,7 +293,7 @@ func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
 			return nil, io.EOF
 		}
 		data := make([]byte, int(pieceSpan.Length))
-		n, err := f.loader.ReadAt(data, start, f.readaheadBytes())
+		n, err := loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
 		if err != nil && !(err == io.EOF && n == len(data)) {
 			return nil, err
 		}
@@ -239,7 +303,7 @@ func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
 		return data, nil
 	}
 
-	data, err := f.piece(pieceSpan.Index)
+	data, err := f.piece(ctx, loader, pieceSpan.Index)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +313,7 @@ func (f *raFile) span(pieceSpan cache.PieceSpan) ([]byte, error) {
 	return data[pieceSpan.Offset:end], nil
 }
 
-func (f *raFile) piece(index int) ([]byte, error) {
+func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]byte, error) {
 	key := cache.Key{Torrent: f.torrentKey, Piece: index}
 	if value, ok := f.cache.Get(key); ok {
 		return value, nil
@@ -264,7 +328,7 @@ func (f *raFile) piece(index int) ([]byte, error) {
 		return nil, io.EOF
 	}
 	data := make([]byte, int(length))
-	n, err := f.loader.ReadAt(data, start, f.readaheadBytes())
+	n, err := loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
 	if err != nil && !(err == io.EOF && n == len(data)) {
 		return nil, err
 	}

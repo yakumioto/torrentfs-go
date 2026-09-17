@@ -170,35 +170,71 @@ func (s *gatedPieceSource) ReadAt(dst []byte, off, _ int64) (int, error) {
 	return n, nil
 }
 
+func (s *gatedPieceSource) ReadAtContext(ctx context.Context, dst []byte, off, readahead int64) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return s.ReadAt(dst, off, readahead)
+}
+
 func (s *gatedPieceSource) Close() error {
 	return nil
 }
 
-type operationReader struct {
+// blockingOperationReader is the torrent.Reader stand-in for loader tests. Its
+// reads block until the test releases them or the operation context is
+// cancelled, and Seek records the position, so the bytes a read returns prove
+// which offset it served.
+type blockingOperationReader struct {
 	mu sync.Mutex
 
-	ctx context.Context
+	ctx         context.Context
+	pos         int64
+	readCalls   int
+	activeReads int
+	maxActive   int
+	seekCalls   int
+	seekOffsets []int64
+	readaheads  []int64
 
 	started     chan struct{}
 	startedOnce sync.Once
-	readCalls   int
-	seekCalls   int
-	activeReads int
-	maxActive   int
-	readaheads  []int64
+	release     chan struct{}
+	releaseOnce sync.Once
 }
 
-func (r *operationReader) SetContext(ctx context.Context) {
+func newBlockingOperationReader() *blockingOperationReader {
+	return &blockingOperationReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+// releaseReads lets every read blocked in Read, now and later, complete.
+func (r *blockingOperationReader) releaseReads() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
+// blockingPattern is the byte pattern a blocked read serves at position off.
+func blockingPattern(off int64, length int) []byte {
+	out := make([]byte, length)
+	for i := range out {
+		out[i] = byte(int64(i) + off)
+	}
+	return out
+}
+
+func (r *blockingOperationReader) SetContext(ctx context.Context) {
 	r.mu.Lock()
 	r.ctx = ctx
 	r.mu.Unlock()
 }
 
-func (r *operationReader) Read(p []byte) (int, error) {
+func (r *blockingOperationReader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	ctx := r.ctx
+	pos := r.pos
 	r.readCalls++
-	call := r.readCalls
 	r.activeReads++
 	if r.activeReads > r.maxActive {
 		r.maxActive = r.activeReads
@@ -210,182 +246,265 @@ func (r *operationReader) Read(p []byte) (int, error) {
 		r.mu.Unlock()
 	}()
 
-	if call == 1 {
-		r.startedOnce.Do(func() { close(r.started) })
-		<-ctx.Done()
+	r.startedOnce.Do(func() { close(r.started) })
+	select {
+	case <-r.release:
+	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	for i := range p {
-		p[i] = byte(i)
-	}
+	copy(p, blockingPattern(pos, len(p)))
 	return len(p), nil
 }
 
-func (r *operationReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+func (r *blockingOperationReader) ReadContext(ctx context.Context, p []byte) (int, error) {
 	r.SetContext(ctx)
 	return r.Read(p)
 }
 
-func (r *operationReader) Seek(off int64, _ int) (int64, error) {
+func (r *blockingOperationReader) Seek(off int64, _ int) (int64, error) {
 	r.mu.Lock()
 	r.seekCalls++
+	r.seekOffsets = append(r.seekOffsets, off)
+	r.pos = off
 	r.mu.Unlock()
 	return off, nil
 }
 
-func (r *operationReader) Close() error {
-	return nil
-}
+func (r *blockingOperationReader) Close() error { return nil }
 
-func (r *operationReader) SetReadahead(readahead int64) {
+func (r *blockingOperationReader) SetReadahead(readahead int64) {
 	r.mu.Lock()
 	r.readaheads = append(r.readaheads, readahead)
 	r.mu.Unlock()
 }
 
-func (r *operationReader) SetReadaheadFunc(torrent.ReadaheadFunc) {}
+func (r *blockingOperationReader) SetReadaheadFunc(torrent.ReadaheadFunc) {}
 
-func (r *operationReader) SetResponsive() {}
+func (r *blockingOperationReader) SetResponsive() {}
 
-func (r *operationReader) snapshot() (seekCalls, maxActive int, readaheads []int64) {
+func (r *blockingOperationReader) snapshot() (seekCalls, maxActive int, seekOffsets, readaheads []int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.seekCalls, r.maxActive, append([]int64(nil), r.readaheads...)
+	return r.seekCalls, r.maxActive, append([]int64(nil), r.seekOffsets...), append([]int64(nil), r.readaheads...)
 }
 
-func TestPieceLoaderAdmissionCancellationBeforeReaderLock(t *testing.T) {
-	reader := &operationReader{started: make(chan struct{})}
+// newProbedLoader builds a loader over a blocking reader with a probe
+// installed, and restores the seam and unblocks any leftover read on cleanup.
+func newProbedLoader(t *testing.T) (*pieceLoader, *blockingOperationReader, chan readProbeEvent) {
+	t.Helper()
+	reader := newBlockingOperationReader()
 	rootContext, rootCancel := context.WithCancel(context.Background())
-	loader := &pieceLoader{
-		r:           reader,
-		rootContext: rootContext,
-		rootCancel:  rootCancel,
-	}
+	loader := &pieceLoader{r: reader, rootContext: rootContext, rootCancel: rootCancel}
+	events := make(chan readProbeEvent, 16)
+	restore := SetReadProbe(events)
+	t.Cleanup(func() {
+		restore()
+		reader.releaseReads()
+		if err := loader.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return loader, reader, events
+}
 
-	loader.mu.Lock()
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { loader.mu.Unlock() }) }
-	defer release()
+type loaderReadResult struct {
+	n    int
+	err  error
+	data []byte
+}
 
-	firstDone := make(chan error, 1)
+func startLoaderRead(loader *pieceLoader, ctx context.Context, off int64) <-chan loaderReadResult {
+	done := make(chan loaderReadResult, 1)
 	go func() {
-		_, err := loader.ReadAt(make([]byte, 32), 0, defaultStreamingReadahead)
-		firstDone <- err
+		buf := make([]byte, 32)
+		n, err := loader.ReadAtContext(ctx, buf, off, defaultStreamingReadahead)
+		done <- loaderReadResult{n: n, err: err, data: append([]byte(nil), buf...)}
 	}()
+	return done
+}
 
-	deadline := time.After(time.Second)
+func waitProbeEvent(t *testing.T, events <-chan readProbeEvent, kind string, offset int64) readProbeEvent {
+	t.Helper()
+	deadline := time.After(probeWait)
 	for {
-		loader.operationMu.Lock()
-		admitted := loader.activeCancel != nil
-		loader.operationMu.Unlock()
-		if admitted {
-			break
-		}
 		select {
+		case event := <-events:
+			if event.Kind == kind && event.Offset == offset {
+				return event
+			}
 		case <-deadline:
-			t.Fatal("ReadAt did not register before waiting for the Reader lock")
-		default:
-			time.Sleep(time.Millisecond)
+			t.Fatalf("no %q probe event for offset %d", kind, offset)
+			return readProbeEvent{}
 		}
-	}
-
-	secondDone := make(chan struct {
-		n   int
-		err error
-	}, 1)
-	go func() {
-		var data [32]byte
-		n, err := loader.ReadAt(data[:], 64, defaultStreamingReadahead)
-		secondDone <- struct {
-			n   int
-			err error
-		}{n: n, err: err}
-	}()
-	release()
-
-	select {
-	case err := <-firstDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("read waiting for Reader lock error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement read did not cancel the admitted read")
-	}
-	select {
-	case result := <-secondDone:
-		if result.err != nil || result.n != 32 {
-			t.Fatalf("replacement read = %d bytes, %v; want 32, nil", result.n, result.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement read did not acquire the loader")
-	}
-	if err := loader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
 	}
 }
 
-func TestPieceLoaderReadCancelsBlockedRead(t *testing.T) {
-	reader := &operationReader{started: make(chan struct{})}
-	rootContext, rootCancel := context.WithCancel(context.Background())
-	loader := &pieceLoader{
-		r:           reader,
-		rootContext: rootContext,
-		rootCancel:  rootCancel,
+func channelClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
+}
 
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := loader.ReadAt(make([]byte, 32), 0, defaultStreamingReadahead)
-		firstDone <- err
-	}()
+func waitChannelClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(probeWait):
+		t.Fatalf("%s was never cancelled", what)
+	}
+}
+
+func waitLoaderResult(t *testing.T, done <-chan loaderReadResult, what string) loaderReadResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(probeWait):
+		t.Fatalf("%s did not return", what)
+		return loaderReadResult{}
+	}
+}
+
+func requireNoLoaderResult(t *testing.T, done <-chan loaderReadResult, what string) {
+	t.Helper()
+	select {
+	case res := <-done:
+		t.Fatalf("%s returned before the blocking read was released: %d bytes, %v", what, res.n, res.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestPieceLoaderOverlappingReadsQueueWithoutCancelling is the regression test
+// for the cancellation storm: a second ordinary read that arrives while the
+// first is blocked on a missing piece must wait for it, not cancel it. The
+// first read's operation context is observed directly, so an implementation
+// that cancels the outstanding read fails here even if a fake swallowed the
+// cancellation.
+func TestPieceLoaderOverlappingReadsQueueWithoutCancelling(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	firstDone := startLoaderRead(loader, context.Background(), 0)
+	first := waitProbeEvent(t, events, "reader-started", 0)
 	select {
 	case <-reader.started:
-	case <-time.After(time.Second):
-		t.Fatal("initial read did not block")
+	case <-time.After(probeWait):
+		t.Fatal("first read never blocked in the underlying reader")
 	}
 
-	secondDone := make(chan struct {
-		n   int
-		err error
-	}, 1)
-	go func() {
-		var data [32]byte
-		n, err := loader.ReadAt(data[:], 128, defaultStreamingReadahead)
-		secondDone <- struct {
-			n   int
-			err error
-		}{n: n, err: err}
-	}()
+	secondDone := startLoaderRead(loader, context.Background(), 4096)
+	waitProbeEvent(t, events, "admission-attempt", 4096)
 
-	select {
-	case err := <-firstDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancelled read error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement read did not cancel the blocked read")
+	if channelClosed(first.Done) {
+		t.Fatal("the second read cancelled the first read's operation")
 	}
-	select {
-	case result := <-secondDone:
-		if result.err != nil || result.n != 32 {
-			t.Fatalf("replacement read = %d bytes, %v; want 32, nil", result.n, result.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement read did not complete")
+	requireNoLoaderResult(t, firstDone, "first read")
+	requireNoLoaderResult(t, secondDone, "second read")
+
+	reader.releaseReads()
+
+	firstResult := waitLoaderResult(t, firstDone, "first read")
+	if firstResult.err != nil || firstResult.n != 32 {
+		t.Fatalf("first read = %d bytes, %v; want 32, nil", firstResult.n, firstResult.err)
+	}
+	if want := blockingPattern(0, 32); !bytes.Equal(firstResult.data, want) {
+		t.Fatalf("first read data = %v, want %v", firstResult.data, want)
+	}
+	secondResult := waitLoaderResult(t, secondDone, "second read")
+	if secondResult.err != nil || secondResult.n != 32 {
+		t.Fatalf("second read = %d bytes, %v; want 32, nil", secondResult.n, secondResult.err)
+	}
+	if want := blockingPattern(4096, 32); !bytes.Equal(secondResult.data, want) {
+		t.Fatalf("second read data = %v, want %v", secondResult.data, want)
 	}
 
-	seekCalls, maxActive, readaheads := reader.snapshot()
+	seekCalls, maxActive, seekOffsets, readaheads := reader.snapshot()
+	if maxActive != 1 {
+		t.Fatalf("maximum concurrent reads = %d, want 1", maxActive)
+	}
 	if seekCalls != 2 {
 		t.Fatalf("Seek calls = %d, want 2", seekCalls)
 	}
-	if maxActive != 1 {
-		t.Fatalf("maximum concurrent reads = %d, want 1", maxActive)
+	if len(seekOffsets) != 2 || seekOffsets[0] != 0 || seekOffsets[1] != 4096 {
+		t.Fatalf("Seek offsets = %v, want [0 4096] in order", seekOffsets)
 	}
 	if len(readaheads) != 2 || readaheads[0] != defaultStreamingReadahead || readaheads[1] != defaultStreamingReadahead {
 		t.Fatalf("readaheads = %v, want two [%d] values", readaheads, defaultStreamingReadahead)
 	}
-	if err := loader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+}
+
+// TestPieceLoaderCloseCancelsBlockedRead checks the lifecycle half of the
+// contract: only closing the loader (not another read) cancels a read blocked
+// on unavailable data, and Close still returns instead of deadlocking on the
+// admission lock the blocked read holds.
+func TestPieceLoaderCloseCancelsBlockedRead(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	readDone := startLoaderRead(loader, context.Background(), 0)
+	started := waitProbeEvent(t, events, "reader-started", 0)
+	select {
+	case <-reader.started:
+	case <-time.After(probeWait):
+		t.Fatal("read never blocked in the underlying reader")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- loader.Close() }()
+
+	waitChannelClosed(t, started.Done, "operation context")
+
+	result := waitLoaderResult(t, readDone, "blocked read")
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("blocked read error = %v, want context.Canceled", result.err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(probeWait):
+		t.Fatal("Close did not return while a read was blocked")
+	}
+}
+
+// TestPieceLoaderRequestCancellationIsScopedToItsOperation checks that
+// cancelling one request's context ends that operation only: a later read with
+// its own context starts uncancelled and completes normally.
+func TestPieceLoaderRequestCancellationIsScopedToItsOperation(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelledDone := startLoaderRead(loader, requestCtx, 0)
+	cancelled := waitProbeEvent(t, events, "reader-started", 0)
+	select {
+	case <-reader.started:
+	case <-time.After(probeWait):
+		t.Fatal("first read never blocked in the underlying reader")
+	}
+
+	cancelRequest()
+	cancelledResult := waitLoaderResult(t, cancelledDone, "cancelled read")
+	if !errors.Is(cancelledResult.err, context.Canceled) {
+		t.Fatalf("cancelled read error = %v, want context.Canceled", cancelledResult.err)
+	}
+	waitChannelClosed(t, cancelled.Done, "cancelled operation context")
+
+	freshDone := startLoaderRead(loader, context.Background(), 8192)
+	fresh := waitProbeEvent(t, events, "reader-started", 8192)
+	if channelClosed(fresh.Done) {
+		t.Fatal("a fresh read inherited the previous request's cancellation")
+	}
+	requireNoLoaderResult(t, freshDone, "fresh read")
+
+	reader.releaseReads()
+	freshResult := waitLoaderResult(t, freshDone, "fresh read")
+	if freshResult.err != nil || freshResult.n != 32 {
+		t.Fatalf("fresh read = %d bytes, %v; want 32, nil", freshResult.n, freshResult.err)
+	}
+	if want := blockingPattern(8192, 32); !bytes.Equal(freshResult.data, want) {
+		t.Fatalf("fresh read data = %v, want %v", freshResult.data, want)
 	}
 }
 
@@ -413,25 +532,30 @@ func (s *recordingPieceSource) Close() error {
 	return nil
 }
 
+func (s *recordingPieceSource) ReadAtContext(ctx context.Context, dst []byte, off, readahead int64) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return s.ReadAt(dst, off, readahead)
+}
+
 func (s *recordingPieceSource) readaheadValues() []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int64(nil), s.readaheads...)
 }
 
-func TestRaFileCacheMissPreemptsBlockedRead(t *testing.T) {
-	reader := &operationReader{started: make(chan struct{})}
-	rootContext, rootCancel := context.WithCancel(context.Background())
-	loader := &pieceLoader{
-		r:           reader,
-		rootContext: rootContext,
-		rootCancel:  rootCancel,
-	}
+// TestRaFileOverlappingCacheMissesDoNotCancel is the raFile-level counterpart
+// of the loader regression: two files sharing one loader and piece cache, both
+// missing, must both return their own bytes instead of the newer read
+// cancelling the older one.
+func TestRaFileOverlappingCacheMissesDoNotCancel(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
 	store := cache.New(128)
 	first := &raFile{
 		loader:      loader,
 		cache:       store,
-		torrentKey:  "seek-preemption",
+		torrentKey:  "overlap",
 		fileSize:    64,
 		pieceLength: 32,
 		torrentSize: 64,
@@ -439,46 +563,137 @@ func TestRaFileCacheMissPreemptsBlockedRead(t *testing.T) {
 	second := &raFile{
 		loader:      loader,
 		cache:       store,
-		torrentKey:  "seek-preemption",
+		torrentKey:  "overlap",
 		fileSize:    64,
 		pieceLength: 32,
 		torrentSize: 64,
 	}
 
-	firstDone := make(chan error, 1)
+	firstDone := make(chan raFileReadResult, 1)
 	go func() {
-		_, err := first.ReadAt(make([]byte, 32), 0)
-		firstDone <- err
+		buf := make([]byte, 32)
+		n, err := first.ReadAt(buf, 0)
+		firstDone <- raFileReadResult{n: n, err: err, data: append([]byte(nil), buf...)}
 	}()
+	started := waitProbeEvent(t, events, "reader-started", 0)
 	select {
 	case <-reader.started:
-	case <-time.After(time.Second):
-		t.Fatal("initial cache-miss read did not block")
+	case <-time.After(probeWait):
+		t.Fatal("first cache-miss read never blocked in the underlying reader")
 	}
 
-	secondDone := make(chan error, 1)
+	// The second file's cache miss must queue behind the first rather than
+	// cancel it. Its whole piece is already being filled, so once the first
+	// read completes the second is served from the cache.
+	secondDone := make(chan raFileReadResult, 1)
 	go func() {
-		_, err := second.ReadAt(make([]byte, 32), 32)
-		secondDone <- err
+		buf := make([]byte, 32)
+		n, err := second.ReadAt(buf, 32)
+		secondDone <- raFileReadResult{n: n, err: err, data: append([]byte(nil), buf...)}
 	}()
+	waitProbeEvent(t, events, "admission-attempt", 32)
+
+	if channelClosed(started.Done) {
+		t.Fatal("the second cache miss cancelled the first read's operation")
+	}
 	select {
-	case err := <-firstDone:
+	case res := <-firstDone:
+		t.Fatalf("first cache miss returned before release: %v", res.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	reader.releaseReads()
+
+	firstResult := waitRaFileResult(t, firstDone, "first cache miss")
+	if firstResult.err != nil {
+		t.Fatalf("first cache miss: %v", firstResult.err)
+	}
+	if want := blockingPattern(0, 32); firstResult.n != len(want) || !bytes.Equal(firstResult.data, want) {
+		t.Fatalf("first cache miss data = %v, want %v", firstResult.data, want)
+	}
+	secondResult := waitRaFileResult(t, secondDone, "second cache miss")
+	if secondResult.err != nil {
+		t.Fatalf("second cache miss: %v", secondResult.err)
+	}
+	// The offsets must be served by their own positions: a loader that skipped
+	// the Seek would hand back the previous position's bytes.
+	if want := blockingPattern(32, 32); secondResult.n != len(want) || !bytes.Equal(secondResult.data, want) {
+		t.Fatalf("second cache miss data = %v, want %v", secondResult.data, want)
+	}
+}
+
+// raFileReadResult is one raFile read outcome captured with its bytes.
+type raFileReadResult struct {
+	n    int
+	err  error
+	data []byte
+}
+
+func waitRaFileResult(t *testing.T, done <-chan raFileReadResult, what string) raFileReadResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(probeWait):
+		t.Fatalf("%s did not return", what)
+		return raFileReadResult{}
+	}
+}
+
+// contextPieceSource blocks until its context is done and reports the
+// cancellation, proving a request context reached the loader.
+type contextPieceSource struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *contextPieceSource) ReadAtContext(ctx context.Context, _ []byte, _, _ int64) (int, error) {
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (s *contextPieceSource) Close() error { return nil }
+
+// TestRaFileReadAtContextReachesLoaderThroughCacheMiss checks that the
+// context-aware read path propagates the request context through the
+// span/piece cache-miss path into the loader, so a cancelled request ends its
+// own read.
+func TestRaFileReadAtContextReachesLoaderThroughCacheMiss(t *testing.T) {
+	source := &contextPieceSource{started: make(chan struct{})}
+	store := cache.New(64)
+	file := &raFile{
+		loader:      source,
+		cache:       store,
+		torrentKey:  "ctx-propagation",
+		fileSize:    64,
+		pieceLength: 64,
+		torrentSize: 64,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := file.ReadAtContext(ctx, make([]byte, 8), 0)
+		done <- err
+	}()
+
+	select {
+	case <-source.started:
+	case <-time.After(probeWait):
+		t.Fatal("cache-miss read never reached the loader")
+	}
+	cancel()
+	select {
+	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("old cache-miss read error = %v, want context.Canceled", err)
+			t.Fatalf("cancelled cache-miss read error = %v, want context.Canceled", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("new cache-miss did not cancel the old read")
+	case <-time.After(probeWait):
+		t.Fatal("cancelled cache-miss read did not return")
 	}
-	select {
-	case err := <-secondDone:
-		if err != nil {
-			t.Fatalf("replacement cache-miss read: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement cache-miss did not complete")
-	}
-	if err := loader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if got := store.Len(); got != 0 {
+		t.Fatalf("cache Len after a cancelled read = %d, want 0", got)
 	}
 }
 

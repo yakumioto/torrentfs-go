@@ -2,12 +2,253 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// shutdownRecorder records the order in which the shutdown stages ran and the
+// errors each stage reports. A blocking Unmount stage records from its own
+// goroutine, so every access is mutex-guarded.
+type shutdownRecorder struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (r *shutdownRecorder) record(stage string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.order = append(r.order, stage)
+}
+
+func (r *shutdownRecorder) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.order...)
+}
+
+type fakeAPIShutdown struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeAPIShutdown) Shutdown(context.Context) error {
+	f.recorder.record("api")
+	return f.err
+}
+
+type fakeSessionCloser struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeSessionCloser) Close(context.Context) error {
+	f.recorder.record("close")
+	return f.err
+}
+
+type fakeMountUnmounter struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeMountUnmounter) Unmount() error {
+	f.recorder.record("unmount")
+	return f.err
+}
+
+// blockingMountUnmounter models a peer mount namespace holding a propagated
+// copy: Unmount is entered, reports the stage, and then never returns until
+// the test releases it.
+type blockingMountUnmounter struct {
+	recorder *shutdownRecorder
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (f blockingMountUnmounter) Unmount() error {
+	f.recorder.record("unmount")
+	close(f.entered)
+	<-f.release
+	return nil
+}
+
+// countingMountUnmounter returns after a short delay and counts its calls.
+type countingMountUnmounter struct {
+	recorder *shutdownRecorder
+	delay    time.Duration
+	calls    atomic.Int32
+}
+
+func (f *countingMountUnmounter) Unmount() error {
+	f.calls.Add(1)
+	f.recorder.record("unmount")
+	time.Sleep(f.delay)
+	return nil
+}
+
+// TestShutdownSequenceClosesSessionBeforeUnmount pins the production order:
+// outstanding FUSE reads must be released by Session.Close before the mount is
+// unmounted, or Unmount can block on them.
+func TestShutdownSequenceClosesSessionBeforeUnmount(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{
+		api:   fakeAPIShutdown{recorder: recorder},
+		sess:  fakeSessionCloser{recorder: recorder},
+		mount: fakeMountUnmounter{recorder: recorder},
+	}
+	result := sequence.run()
+	if got, want := recorder.recorded(), []string{"api", "close", "unmount"}; !equalStrings(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+	if result.api != nil || result.close != nil || result.unmount != nil {
+		t.Fatalf("shutdown errors = %+v, want all nil", result)
+	}
+}
+
+// TestShutdownSequenceRunsEveryStageDespiteErrors checks that a failing stage
+// never skips the stages after it and that every error is preserved.
+func TestShutdownSequenceRunsEveryStageDespiteErrors(t *testing.T) {
+	apiErr := errors.New("api shutdown failed")
+	closeErr := errors.New("session close failed")
+	unmountErr := errors.New("unmount failed")
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{
+		api:   fakeAPIShutdown{recorder: recorder, err: apiErr},
+		sess:  fakeSessionCloser{recorder: recorder, err: closeErr},
+		mount: fakeMountUnmounter{recorder: recorder, err: unmountErr},
+	}
+	result := sequence.run()
+	if got, want := recorder.recorded(), []string{"api", "close", "unmount"}; !equalStrings(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+	if !errors.Is(result.api, apiErr) || !errors.Is(result.close, closeErr) || !errors.Is(result.unmount, unmountErr) {
+		t.Fatalf("shutdown errors = %+v, want api=%v close=%v unmount=%v", result, apiErr, closeErr, unmountErr)
+	}
+}
+
+// TestShutdownSequenceSkipsAbsentStages covers the headless and mount-only
+// configurations: a nil stage is not called and reports no error.
+func TestShutdownSequenceSkipsAbsentStages(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{sess: fakeSessionCloser{recorder: recorder}}
+	result := sequence.run()
+	if got, want := recorder.recorded(), []string{"close"}; !equalStrings(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+	if result.api != nil || result.close != nil || result.unmount != nil {
+		t.Fatalf("shutdown errors = %+v, want all nil", result)
+	}
+}
+
+// TestShutdownSequenceUnmountTimeoutReturnsError pins the bounded wait: an
+// Unmount that never returns (a peer mount namespace holding a propagated copy
+// leaves it parked in the event-loop Wait) must not hang shutdown. The stage
+// reports a timeout error that errors.Is recognises, the earlier stages still
+// ran in order, and the process is expected to exit and reap the goroutine.
+func TestShutdownSequenceUnmountTimeoutReturnsError(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	const timeout = 50 * time.Millisecond
+
+	sequence := shutdownSequence{
+		api:            fakeAPIShutdown{recorder: recorder},
+		sess:           fakeSessionCloser{recorder: recorder},
+		mount:          blockingMountUnmounter{recorder: recorder, entered: entered, release: release},
+		unmountTimeout: timeout,
+	}
+	results := make(chan shutdownResult, 1)
+	go func() { results <- sequence.run() }()
+
+	var result shutdownResult
+	select {
+	case result = <-results:
+	case <-time.After(20 * timeout):
+		t.Fatalf("shutdown did not return within %s although unmountTimeout is %s", 20*timeout, timeout)
+	}
+	if !errors.Is(result.unmount, errUnmountTimeout) {
+		t.Fatalf("unmount error = %v, want %v", result.unmount, errUnmountTimeout)
+	}
+	if result.api != nil || result.close != nil {
+		t.Fatalf("shutdown errors = %+v, want api and close nil", result)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("unmount stage was never entered")
+	}
+	if got, want := recorder.recorded(), []string{"api", "close", "unmount"}; !equalStrings(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+}
+
+// TestShutdownSequenceUnmountCompletesWithinTimeout covers the healthy path:
+// an Unmount that returns before the deadline is not reported as a timeout and
+// is called exactly once.
+func TestShutdownSequenceUnmountCompletesWithinTimeout(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	mount := &countingMountUnmounter{recorder: recorder, delay: 5 * time.Millisecond}
+	sequence := shutdownSequence{
+		api:            fakeAPIShutdown{recorder: recorder},
+		sess:           fakeSessionCloser{recorder: recorder},
+		mount:          mount,
+		unmountTimeout: time.Second,
+	}
+
+	result := sequence.run()
+	if result.api != nil || result.close != nil || result.unmount != nil {
+		t.Fatalf("shutdown errors = %+v, want all nil", result)
+	}
+	if got, want := recorder.recorded(), []string{"api", "close", "unmount"}; !equalStrings(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+	if got := mount.calls.Load(); got != 1 {
+		t.Fatalf("unmount calls = %d, want 1", got)
+	}
+}
+
+// TestShutdownSequenceUnmountTimeoutDefaults checks that the override seam
+// falls back to the package default instead of degrading into an immediate
+// timeout or an unbounded wait.
+func TestShutdownSequenceUnmountTimeoutDefaults(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{name: "zero uses default", timeout: 0, want: defaultUnmountTimeout},
+		{name: "negative uses default", timeout: -time.Second, want: defaultUnmountTimeout},
+		{name: "override wins", timeout: 250 * time.Millisecond, want: 250 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (shutdownSequence{unmountTimeout: tt.timeout}).effectiveUnmountTimeout(); got != tt.want {
+				t.Fatalf("effectiveUnmountTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")

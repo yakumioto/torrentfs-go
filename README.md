@@ -337,6 +337,12 @@ Reads never fabricate data. When the pieces behind a range are unavailable, a
 read either blocks until they arrive or returns an error; it does not return
 zero-filled or partial-success content.
 
+Overlapping reads are serialized over one shared torrent reader: a new read
+waits for the read in flight instead of cancelling it, so ordinary player
+concurrency (readahead, seeks, probes) cannot turn into a cancellation storm. A
+read is cancelled only by its own request going away, by the session closing,
+or by the torrent being removed.
+
 - **No peers / no seeder.** A torrent whose data is not local and whose swarm
   has no peers stays incomplete. Reads of missing ranges wait for pieces that
   never arrive until the session is closed, at which point they fail rather
@@ -429,7 +435,22 @@ both the container mount and the host source directory expose the same file and
 hash, that the mount exposes no `metadata/` or `stats/` control path, that host
 writes are rejected, and that a pre-existing legacy `/torrents/.stats` is left
 untouched. It also verifies rejected single-file and missing-directory CLI
-inputs and confirms a normal stop removes the propagated host mount. It
+inputs and confirms a normal stop removes the propagated host mount. A second,
+offline scenario starts an incomplete torrent with no peer, leaves two readers
+outstanding on the missing piece, and checks that SIGTERM still stops the
+process with exit code 0, without a daemon-owned unmount failure and without
+the anacrolix reader cancellation errors during the running phase. On that
+fixture the file is a single page, so the kernel collapses the two same-page
+reads into one in-flight request; the scenario therefore covers shutdown and
+unmount behaviour, and the cancellation regression itself is covered by the
+FUSE/swarm test in the Go suite. A third scenario reproduces the case where a
+second mount namespace holds a propagated copy of the FUSE mount: the peer is
+left running while the daemon gets SIGTERM, and the script checks that the
+daemon stops within its unmount deadline, exits 1, prints the timeout
+diagnostic, reports no daemon-owned unmount failure, and releases the
+propagated host mount once the peer is gone. Every Docker
+call in the script, including the teardown waits, is bounded; a timeout
+collects diagnostics and fails instead of hanging. It
 requires a working Docker daemon, `/dev/fuse`, `findmnt`, `SYS_ADMIN` mount
 permission, and (on AppArmor hosts) permission to use
 `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
@@ -475,6 +496,72 @@ The FUSE mount keeps the default owner-only access (`AllowOther=false`), so
 other host users may receive `EACCES` rather than see the mounted data. This is
 intentional and does not grant arbitrary host-user access; enabling `allow_other`
 requires a separate security decision and FUSE configuration.
+
+### Shutdown, outstanding reads, and `Device or resource busy`
+
+On SIGINT/SIGTERM the process stops the HTTP API, closes the session, and only
+then unmounts the FUSE filesystem. That order is required: closing the session
+cancels and drains reads that are still waiting for pieces, so the unmount no
+longer has to wait on them. Unmounting first makes `fusermount3` fail with
+`failed to unmount /mnt: Device or resource busy` whenever a request is still
+outstanding, and the mount can then only be released lazily.
+
+A `Device or resource busy` on unmount has three distinct causes, and they need
+different answers:
+
+- **daemon-owned outstanding request.** A read issued through the mount is
+  still waiting on a missing piece. With no host process holding the mount,
+  this reproduces from the container alone. It is what the session-close-first
+  order fixes; after the fix the same scenario unmounts cleanly.
+- **a host holder.** A player, media scanner, open file descriptor, or a
+  process whose working directory is inside the propagated mount keeps the
+  mount busy. Confirm it with the owning PID and command:
+
+  ```sh
+  findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
+  fuser -vm /srv/mnt     # when fuser is installed and permitted
+  lsof /srv/mnt          # when lsof is installed and permitted
+  ```
+
+  Release the holder (stop the player/scan) and retry the unmount. When
+  `fuser`/`lsof` are missing or lack permission, the holder diagnostics are
+  simply incomplete — that is not evidence that no holder exists.
+- **another mount namespace holding a propagated copy.** Where `/mnt` is
+  propagated (`rshared`) into another namespace — another container on the same
+  host, for example — that namespace keeps a copy of the FUSE mount. The copy
+  keeps the FUSE connection alive, so it never reaches `ENODEV` and
+  `Server.Unmount` is left parked in its event-loop `Wait`. Distinguish this
+  cause from the other two by `findmnt -T <mount> -o PROPAGATION,OPTIONS` plus
+  the absence of both an outstanding read and a local fd/cwd holder. It reports
+  **no** `Device or resource busy` line: unmounting the daemon's own copy
+  succeeds, and only the connection outlives it.
+
+  That wait is bounded. The unmount stage gets `defaultUnmountTimeout` (30
+  seconds, `cmd/torrentfs/main.go`) and then gives up instead of hanging until
+  the peer goes away. On expiry torrentfs writes
+  `torrentfs: unmount <mountpoint>: unmount did not return within 30s: another
+  mount namespace may still hold a propagated copy of the FUSE mount; ...` to
+  stderr and **exits 1**. The non-zero code is deliberate: exiting 0 would
+  claim the mount was released when a peer still holds a copy, while a failure
+  tells a supervisor or orchestrator to look. The abandoned unmount cannot be
+  cancelled — only process exit ends it — so a propagating peer that outlives
+  the daemon keeps its copy as an `ENOTCONN` residual mount until its own
+  namespace ends; reclaiming it is the responsibility of whoever started that
+  container. Prefer stopping such containers before, or concurrently with, the
+  daemon: an unmount that completes on its own still exits 0.
+
+  Measured on the smoke fixture: with a peer container started with `sleep 300`
+  still running, the daemon stopped after the full 30 s deadline with exit code
+  1 and the diagnostic above, without a `Device or resource busy` line, and
+  reclaiming the peer released the propagated host mount. This blocking
+  predates the session-close-first order and is not caused by it — it was
+  reproduced on the commit before that change.
+
+`rshared` propagation on the `/mnt` bind is required for a FUSE submount to be
+visible in the host source directory; it is not the cause of a busy unmount and
+should not be relaxed to `rprivate`/`rslave`. Likewise, `fusermount3 -uz` is a
+lazy detach for cleaning up a mount that already failed to release; it must
+never be used as, or mistaken for, a successful graceful unmount.
 
 `/srv/torrents` must be writable because torrentfs creates and updates
 `/torrents/.metadata`; do not mount it read-only. Add and remove direct regular
