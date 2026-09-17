@@ -2,6 +2,7 @@ import type { Torrent } from '../../types/api';
 import type { TorrentLiveSummary as TorrentLiveSummaryData, TorrentStatusMeta } from '../../queries/hooks';
 import { formatBytes, formatDate, percent } from '../../utils/format';
 import { StateBadge } from '../torrents/StateBadge';
+import styles from './TorrentOverview.module.css';
 
 export function TorrentOverview({ torrent, summary, meta }: {
   torrent: Torrent;
@@ -9,7 +10,7 @@ export function TorrentOverview({ torrent, summary, meta }: {
   meta?: TorrentStatusMeta;
 }) {
   return (
-    <section className="panel panel--padding detail-overview" aria-labelledby="overview-title">
+    <section className="panel panel--padding" aria-labelledby="overview-title">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Snapshot</p>
@@ -17,8 +18,8 @@ export function TorrentOverview({ torrent, summary, meta }: {
         </div>
         <span className="section-heading__meta">{meta?.pieceCount.toLocaleString() ?? '—'} pieces</span>
       </div>
-      <dl className="overview-grid">
-        <div><dt>Info hash</dt><dd className="text-mono overview-grid__break">{torrent.info_hash || 'Pending'}</dd></div>
+      <dl className={styles.grid}>
+        <div><dt>Info hash</dt><dd className={`text-mono ${styles.gridBreak}`}>{torrent.info_hash || 'Pending'}</dd></div>
         <div><dt>State</dt><dd><StateBadge state={summary?.state ?? torrent.state} /></dd></div>
         <div><dt>Progress</dt><dd>{percent(summary?.progress ?? torrent.progress).toFixed(1)}%</dd></div>
         <div><dt>Total size</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>

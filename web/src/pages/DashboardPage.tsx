@@ -41,8 +41,8 @@ export function DashboardPage() {
       <section className={styles.heading} aria-labelledby="dashboard-title">
         <div>
           <p className="eyebrow">Library</p>
-          <h1 className="page-title" id="dashboard-title">Torrents</h1>
-          <p className="page-subtitle">Manage downloads and inspect live progress from one focused queue.</p>
+          <h1 className={styles.title} id="dashboard-title">Torrents</h1>
+          <p className={styles.subtitle}>Manage downloads and inspect live progress from one focused queue.</p>
         </div>
         <Button color="mint" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
           Add torrent

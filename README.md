@@ -193,13 +193,24 @@ npm run dev --prefix web
 ```
 
 Vite serves on `:5173` and proxies `/api` to `http://127.0.0.1:8080`. A
-production build is same-origin and uses relative `/api/v1` requests. The UI
-keeps Bearer tokens in memory only: it does not use cookies, URL parameters,
-`localStorage`, `sessionStorage`, JWT decoding, or a refresh endpoint. A page
-refresh or daemon restart therefore requires a fresh connection probe and,
-when enabled, a new login. Valid API requests slide the server-side inactivity
-window; the browser treats a `401` as the authoritative signal to show the
-login gate.
+production build is same-origin and uses relative `/api/v1` requests.
+
+When authentication is enabled, the UI keeps the opaque Bearer token in
+tab-scoped `sessionStorage`. It does not use cookies, URL parameters,
+`localStorage`, JWT decoding, or a refresh endpoint. A refresh inside the same
+tab restores that token and validates it with the existing `/api/v1/torrents`
+probe, so a still-valid token does not ask you to sign in again. Closing the tab
+ends the browser page session and drops the stored token, and a browser that
+denies `sessionStorage` access falls back to an in-memory session for that page
+load. Logout attempts to revoke the token on the server and always clears
+`sessionStorage`, the in-memory token, and the query cache, even when the revoke
+request fails.
+
+Server-side tokens live in daemon memory and expire on inactivity, so a `401`
+stays the authoritative signal to show the login gate: when the token has
+expired, was revoked, or was lost to a daemon restart, the UI drops the local
+session and asks for a new sign-in. Valid API requests slide the server-side
+inactivity window.
 
 ## On-disk state
 

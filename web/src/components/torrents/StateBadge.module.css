@@ -1,0 +1,38 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 0.35rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.adding,
+.deleting {
+  color: var(--warning);
+}
+
+.downloading {
+  color: var(--accent);
+}
+
+.seeding {
+  color: var(--success);
+}
+
+.error,
+.deleteFailed {
+  color: var(--danger);
+}

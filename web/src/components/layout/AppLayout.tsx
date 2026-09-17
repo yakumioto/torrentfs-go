@@ -17,7 +17,7 @@ export function AppLayout() {
 
   return (
     <AppShell header={{ height: 56 }} className={styles.frame}>
-      <AppShell.Header className="app-header">
+      <AppShell.Header className={styles.header}>
         <Header onAdd={() => setAddOpen(true)} />
       </AppShell.Header>
       <AppShell.Main className={styles.main}>

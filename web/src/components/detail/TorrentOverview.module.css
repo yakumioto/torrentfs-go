@@ -1,0 +1,44 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.grid > div {
+  min-width: 0;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.grid > div:nth-child(odd) {
+  margin-right: 1.5rem;
+}
+
+.grid dt {
+  margin-bottom: 0.3rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.grid dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.88rem;
+}
+
+.gridBreak {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .grid > div:nth-child(odd) {
+    margin-right: 0;
+  }
+}

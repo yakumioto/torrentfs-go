@@ -21,6 +21,7 @@ import {
   useTorrentStatusTorrent,
 } from '../queries/hooks';
 import { usePageVisible } from '../utils/visibility';
+import styles from './TorrentDetailPage.module.css';
 
 const EMPTY_FILES: FileStatus[] = [];
 const EMPTY_PIECES: PieceStatus[] = [];
@@ -42,7 +43,7 @@ export function TorrentDetailPage() {
   const statusPieces = useTorrentStatusPieces(auth.api, id, enabled);
 
   if (detail.isPending) {
-    return <div className="panel panel--padding detail-loading" aria-label="Loading torrent detail"><div className="loading-bar" /><div className="loading-bar loading-bar--short" /><div className="loading-block" /></div>;
+    return <div className={`panel panel--padding ${styles.loading}`} aria-label="Loading torrent detail"><div className={styles.loadingBar} /><div className={`${styles.loadingBar} ${styles.loadingBarShort}`} /><div className={styles.loadingBlock} /></div>;
   }
 
   if (detail.error !== null && detail.error !== undefined && detail.data === undefined) {
@@ -67,7 +68,7 @@ export function TorrentDetailPage() {
   const pending = torrent.state === 'adding' || statusMeta.data?.metainfoReady === false;
 
   return (
-    <div className="detail-page">
+    <div className={styles.page}>
       <TorrentDetailHeader
         name={torrent.name}
         infoHash={torrent.info_hash}
@@ -78,8 +79,8 @@ export function TorrentDetailPage() {
       <TorrentLiveSummary summary={liveSummary.data} />
 
       {pending && (
-        <div className="pending-panel" role="status">
-          <IconClock className="pending-panel__icon" size={22} aria-hidden="true" />
+        <div className={styles.pendingPanel} role="status">
+          <IconClock className={styles.pendingIcon} size={22} aria-hidden="true" />
           <div><h2>Waiting for metadata</h2><p>This magnet is accepted and safe to keep open. Files and pieces will appear when the daemon resolves its metainfo.</p></div>
         </div>
       )}
@@ -91,19 +92,19 @@ export function TorrentDetailPage() {
         <Alert color="yellow" icon={<IconAlertTriangle size={16} />} title="Status snapshot unavailable">{errorMessage(status.error)}</Alert>
       )}
 
-      <Tabs defaultValue="overview" className="detail-tabs">
+      <Tabs defaultValue="overview" className={styles.tabs}>
         <Tabs.List aria-label="Torrent detail sections">
           <Tabs.Tab value="overview">Overview</Tabs.Tab>
           <Tabs.Tab value="files">Files <span className="subtle">· {files.length}</span></Tabs.Tab>
           <Tabs.Tab value="pieces">Pieces <span className="subtle">· {pieces.length}</span></Tabs.Tab>
         </Tabs.List>
-        <Tabs.Panel value="overview" className="tab-panel">
+        <Tabs.Panel value="overview" className={styles.tabPanel}>
           <TorrentOverview torrent={torrent} summary={liveSummary.data} meta={statusMeta.data} />
         </Tabs.Panel>
-        <Tabs.Panel value="files" className="tab-panel">
+        <Tabs.Panel value="files" className={styles.tabPanel}>
           <TorrentFilesPanel files={files} pieces={pieces} />
         </Tabs.Panel>
-        <Tabs.Panel value="pieces" className="tab-panel">
+        <Tabs.Panel value="pieces" className={styles.tabPanel}>
           <TorrentPiecesPanel pieces={pieces} pieceLength={statusMeta.data?.pieceLength} />
         </Tabs.Panel>
       </Tabs>

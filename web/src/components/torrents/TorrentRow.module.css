@@ -28,7 +28,7 @@
 }
 
 .name,
-.main :global(.torrent-row__progress) {
+.progress {
   min-width: 0;
 }
 
@@ -88,12 +88,12 @@
     grid-column: 1;
   }
 
-  .main :global(.torrent-row__progress) {
+  .progress {
     grid-column: 1 / -1;
     grid-row: 3;
   }
 
-  .main > :global(.state-badge) {
+  .state {
     grid-column: 2;
     grid-row: 2;
     align-self: center;

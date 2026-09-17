@@ -1,0 +1,79 @@
+.page {
+  display: grid;
+  gap: 1rem;
+}
+
+.pendingPanel {
+  display: flex;
+  align-items: start;
+  gap: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: var(--radius-md);
+  background: rgba(210, 153, 34, 0.08);
+}
+
+.pendingIcon {
+  flex: 0 0 auto;
+  color: var(--warning);
+}
+
+.pendingPanel h2,
+.pendingPanel p {
+  margin: 0;
+}
+
+.pendingPanel h2 {
+  font-size: 0.95rem;
+}
+
+.pendingPanel p {
+  margin-top: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+}
+
+.tabs {
+  min-width: 0;
+}
+
+.tabs :global(.mantine-Tabs-list) {
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs :global(.mantine-Tabs-tab) {
+  color: var(--text-secondary);
+}
+
+.tabs :global(.mantine-Tabs-tab[data-active]) {
+  color: var(--text-primary);
+}
+
+.tabPanel {
+  padding-top: 1rem;
+}
+
+.loading {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.loadingBar,
+.loadingBlock {
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.loadingBar {
+  width: 60%;
+  height: 1.5rem;
+}
+
+.loadingBarShort {
+  width: 35%;
+  height: 0.9rem;
+}
+
+.loadingBlock {
+  height: 9rem;
+}

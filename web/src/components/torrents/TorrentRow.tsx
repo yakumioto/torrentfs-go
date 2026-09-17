@@ -29,8 +29,8 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
           <span className={styles.hash}>{torrent.info_hash || 'Info hash pending'}</span>
         </div>
         <div className={`${styles.size} text-mono`}>{formatBytes(torrent.total_bytes)}</div>
-        <TorrentProgress progress={torrent.progress} completedBytes={torrent.completed_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
-        <StateBadge state={torrent.state} />
+        <TorrentProgress className={styles.progress} progress={torrent.progress} completedBytes={torrent.completed_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
+        <StateBadge className={styles.state} state={torrent.state} />
         <div className={`${styles.added} text-mono`} title={torrent.created_at}>{formatDate(torrent.created_at)}</div>
       </Link>
       <div className={styles.action}>

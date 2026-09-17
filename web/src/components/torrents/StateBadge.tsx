@@ -1,14 +1,24 @@
 import { IconQuestionMark } from '@tabler/icons-react';
 import { stateMeta } from './state';
+import styles from './StateBadge.module.css';
 
-export function StateBadge({ state }: { state: string }) {
-  const meta = stateMeta[state] ?? { label: 'Unknown', className: '', icon: IconQuestionMark };
+const VARIANT_CLASS: Record<string, string> = {
+  adding: styles.adding,
+  downloading: styles.downloading,
+  seeding: styles.seeding,
+  error: styles.error,
+  deleting: styles.deleting,
+  delete_failed: styles.deleteFailed,
+};
+
+export function StateBadge({ state, className }: { state: string; className?: string }) {
+  const meta = stateMeta[state] ?? { label: 'Unknown', icon: IconQuestionMark };
   const Icon = meta.icon;
   return (
-    <span className={`state-badge ${meta.className}`}>
+    <span className={[styles.badge, VARIANT_CLASS[state], className].filter(Boolean).join(' ')}>
       <Icon size={13} aria-hidden="true" />
       <span>{meta.label}</span>
-      <span className="state-badge__dot" aria-hidden="true" />
+      <span className={styles.dot} aria-hidden="true" />
     </span>
   );
 }

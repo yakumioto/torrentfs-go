@@ -42,16 +42,20 @@ export function useTorrentDetail(api: ApiClient, id: string, enabled: boolean) {
   });
 }
 
-export function useTorrentStatus(api: ApiClient, id: string, enabled: boolean) {
-  return useQuery({
+function torrentStatusQueryOptions(api: ApiClient, id: string, enabled: boolean) {
+  return {
     queryKey: queryKeys.torrentStatus(id),
-    queryFn: ({ signal }) => api.getTorrentStatus(id, signal),
+    queryFn: ({ signal }: { signal: AbortSignal }) => api.getTorrentStatus(id, signal),
     enabled: enabled && id !== '',
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
     retry: shouldRetry,
     retryDelay,
-  });
+  };
+}
+
+export function useTorrentStatus(api: ApiClient, id: string, enabled: boolean) {
+  return useQuery(torrentStatusQueryOptions(api, id, enabled));
 }
 
 export function useTorrentStatusSlice<T>(
@@ -60,16 +64,7 @@ export function useTorrentStatusSlice<T>(
   enabled: boolean,
   select: (status: TorrentStatus) => T,
 ) {
-  return useQuery({
-    queryKey: queryKeys.torrentStatus(id),
-    queryFn: ({ signal }) => api.getTorrentStatus(id, signal),
-    enabled: enabled && id !== '',
-    select,
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
-    retry: shouldRetry,
-    retryDelay,
-  });
+  return useQuery({ ...torrentStatusQueryOptions(api, id, enabled), select });
 }
 
 const selectStatusTorrent = (status: TorrentStatus): Torrent => status.torrent;

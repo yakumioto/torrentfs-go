@@ -86,7 +86,7 @@ describe('App authentication flow', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
 
-    expect(screen.getByRole('status')).toHaveTextContent(/page was refreshed|sign in again/i);
+    expect(screen.getByRole('status')).toHaveTextContent('Authentication is required or your session has expired. Sign in to continue.');
     expect(screen.queryByText('The daemon is out of reach')).not.toBeInTheDocument();
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -140,7 +140,7 @@ describe('App authentication flow', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await waitFor(() => expect(queryClient.getQueryData(queryKeys.torrents)).toBeUndefined());
-    expect(screen.getByRole('status')).toHaveTextContent(/page was refreshed|sign in again/i);
+    expect(screen.getByRole('status')).toHaveTextContent('Authentication is required or your session has expired. Sign in to continue.');
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
@@ -167,7 +167,7 @@ describe('App authentication flow', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    expect(screen.queryByText('Your session expired or the page was refreshed. Sign in again to continue.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Authentication is required or your session has expired. Sign in to continue.')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
     expect(authorization(fetchMock.mock.calls[4][1])).toBeNull();

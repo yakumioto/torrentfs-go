@@ -6,7 +6,7 @@ import { queryKeys } from '../queries/keys';
 import { sortTorrents } from '../queries/sort';
 import { AuthContext, type AuthContextValue, type AuthPhase } from './auth-context';
 
-const SESSION_NOTICE = 'Your session expired or the page was refreshed. Sign in again to continue.';
+const SESSION_NOTICE = 'Authentication is required or your session has expired. Sign in to continue.';
 const SESSION_TOKEN_KEY = 'torrentfs.access-token';
 
 type AuthAction = 'idle' | 'logging-in';
