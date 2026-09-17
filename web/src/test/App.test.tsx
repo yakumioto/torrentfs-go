@@ -140,6 +140,38 @@ describe('App authentication flow', () => {
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
   });
 
+  it('does not show a session notice after intentional logout and allows signing in again', async () => {
+    const fetchMock = mockFetch(
+      unauthorizedResponse(),
+      jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
+      jsonResponse([]),
+      new Response(null, { status: 204 }),
+      unauthorizedResponse(),
+      jsonResponse({ token: 'opaque-new', token_type: 'Bearer', expires_in: 60 }),
+      jsonResponse([]),
+    );
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await submitLogin();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByText('Your session expired or the page was refreshed. Sign in again to continue.')).not.toBeInTheDocument();
+    expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[4][1])).toBeNull();
+
+    await submitLogin();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
+    expect(authorization(fetchMock.mock.calls[6][1])).toBe('Bearer opaque-new');
+  });
+
   it('keeps invalid credentials separate from the session notice', async () => {
     const fetchMock = mockFetch(unauthorizedResponse(), unauthorizedResponse());
     renderApp();

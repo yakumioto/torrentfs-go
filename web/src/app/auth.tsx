@@ -16,6 +16,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const probeControllerRef = useRef<AbortController | undefined>(undefined);
   const authRevisionRef = useRef(0);
   const authActionRef = useRef<AuthAction>('idle');
+  const suppressedNoticeRevisionRef = useRef<number | undefined>(undefined);
   const [accessToken, setAccessToken] = useState<string | undefined>(undefined);
   const [phase, setPhase] = useState<AuthPhase>('probing');
   const [loginError, setLoginError] = useState('');
@@ -40,7 +41,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccessToken(undefined);
     setPhase('login');
     setLoginError('');
-    setSessionNotice(SESSION_NOTICE);
+    if (requestRevision !== suppressedNoticeRevisionRef.current) {
+      setSessionNotice(SESSION_NOTICE);
+    }
     setConnectionError('');
     setLoginExpiresIn(undefined);
     void clearServerState(revision);
@@ -71,14 +74,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       setConnectionError(errorMessage(error, 'The daemon is not reachable.'));
       setPhase('error');
+    } finally {
+      if (suppressedNoticeRevisionRef.current === revision) {
+        suppressedNoticeRevisionRef.current = undefined;
+      }
     }
   }, [api, queryClient, tokenStore]);
 
-  const probe = useCallback(() => {
+  const probe = useCallback((options: { suppressSessionNotice?: boolean } = {}) => {
     const revision = ++authRevisionRef.current;
     probeControllerRef.current?.abort();
     const controller = new AbortController();
     probeControllerRef.current = controller;
+    suppressedNoticeRevisionRef.current = options.suppressSessionNotice === true ? revision : undefined;
     setPhase('probing');
     setConnectionError('');
     setLoginError('');
@@ -142,6 +150,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       const revision = ++authRevisionRef.current;
       probeControllerRef.current?.abort();
+      suppressedNoticeRevisionRef.current = revision;
       authActionRef.current = 'idle';
       tokenStore.token = undefined;
       setAccessToken(undefined);
@@ -149,7 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSessionNotice('');
       setConnectionError('');
       await clearServerState(revision);
-      void probe();
+      void probe({ suppressSessionNotice: true });
     }
   }, [api, clearServerState, probe, tokenStore]);
 
