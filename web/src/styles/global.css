@@ -868,6 +868,24 @@ select:focus-visible {
   line-height: 1.5;
 }
 
+.session-callout {
+  display: flex;
+  align-items: start;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(255, 184, 107, 0.35);
+  color: #ffd49f;
+  background: rgba(255, 184, 107, 0.08);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.session-callout svg {
+  flex: 0 0 auto;
+  margin-top: 0.1rem;
+}
+
 .operation-status {
   display: flex;
   align-items: start;

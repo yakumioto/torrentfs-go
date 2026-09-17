@@ -9,6 +9,7 @@ export interface AuthContextValue {
   isReady: boolean;
   isAuthenticated: boolean;
   loginError: string;
+  sessionNotice: string;
   connectionError: string;
   loginExpiresIn?: number;
   login: (username: string, password: string) => Promise<boolean>;

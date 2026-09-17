@@ -4,7 +4,8 @@ import { apiErrorFromResponse } from './errors';
 export interface ApiClientOptions {
   baseUrl?: string;
   getToken?: () => string | undefined;
-  onUnauthorized?: () => void;
+  getAuthRevision?: () => number;
+  onUnauthorized?: (requestToken?: string, requestSignal?: AbortSignal | null, requestRevision?: number) => void;
 }
 
 interface RequestOptions {
@@ -15,11 +16,13 @@ interface RequestOptions {
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly getToken: () => string | undefined;
-  private readonly onUnauthorized?: () => void;
+  private readonly getAuthRevision?: () => number;
+  private readonly onUnauthorized?: (requestToken?: string, requestSignal?: AbortSignal | null, requestRevision?: number) => void;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? '/api/v1';
     this.getToken = options.getToken ?? (() => undefined);
+    this.getAuthRevision = options.getAuthRevision;
     this.onUnauthorized = options.onUnauthorized;
   }
 
@@ -88,10 +91,12 @@ export class ApiClient {
     if (typeof requestInit.body === 'string' && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }
+    let requestToken: string | undefined;
+    const requestRevision = auth ? this.getAuthRevision?.() : undefined;
     if (auth) {
-      const token = this.getToken();
-      if (token !== undefined) {
-        headers.set('Authorization', `Bearer ${token}`);
+      requestToken = this.getToken();
+      if (requestToken !== undefined) {
+        headers.set('Authorization', `Bearer ${requestToken}`);
       }
     }
 
@@ -99,7 +104,11 @@ export class ApiClient {
     if (!response.ok) {
       const error = await apiErrorFromResponse(response);
       if (error.unauthorized && notifyUnauthorized) {
-        this.onUnauthorized?.();
+        if (requestInit.signal !== undefined || requestRevision !== undefined) {
+          this.onUnauthorized?.(requestToken, requestInit.signal, requestRevision);
+        } else {
+          this.onUnauthorized?.(requestToken);
+        }
       }
       throw error;
     }
