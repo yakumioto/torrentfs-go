@@ -6,18 +6,53 @@ import { queryKeys } from '../queries/keys';
 import { sortTorrents } from '../queries/sort';
 import { AuthContext, type AuthContextValue, type AuthPhase } from './auth-context';
 
-const SESSION_NOTICE = 'Your session expired or the page was refreshed. Sign in again to continue.';
+const SESSION_NOTICE = 'Authentication is required or your session has expired. Sign in to continue.';
+const SESSION_TOKEN_KEY = 'torrentfs.access-token';
 
 type AuthAction = 'idle' | 'logging-in';
 
+function readSessionToken(): string | undefined {
+  if (typeof window === 'undefined') {
+    return undefined;
+  }
+  try {
+    const token = window.sessionStorage.getItem(SESSION_TOKEN_KEY);
+    return token === null || token === '' ? undefined : token;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSessionToken(token: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+  } catch {
+    return;
+  }
+}
+
+function clearSessionToken(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    return;
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
-  const tokenStore = useMemo(() => ({ token: undefined as string | undefined }), []);
+  const tokenStore = useMemo(() => ({ token: readSessionToken() }), []);
   const probeControllerRef = useRef<AbortController | undefined>(undefined);
   const authRevisionRef = useRef(0);
   const authActionRef = useRef<AuthAction>('idle');
   const suppressedNoticeRevisionRef = useRef<number | undefined>(undefined);
-  const [accessToken, setAccessToken] = useState<string | undefined>(undefined);
+  const [accessToken, setAccessToken] = useState<string | undefined>(() => tokenStore.token);
   const [phase, setPhase] = useState<AuthPhase>('probing');
   const [loginError, setLoginError] = useState('');
   const [sessionNotice, setSessionNotice] = useState('');
@@ -38,6 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const revision = ++authRevisionRef.current;
     probeControllerRef.current?.abort();
     tokenStore.token = undefined;
+    clearSessionToken();
     setAccessToken(undefined);
     setPhase('login');
     setLoginError('');
@@ -115,6 +151,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
       tokenStore.token = response.token;
+      writeSessionToken(response.token);
       setAccessToken(response.token);
       setLoginExpiresIn(response.expires_in);
       setPhase('authenticated');
@@ -153,6 +190,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       suppressedNoticeRevisionRef.current = revision;
       authActionRef.current = 'idle';
       tokenStore.token = undefined;
+      clearSessionToken();
       setAccessToken(undefined);
       setLoginExpiresIn(undefined);
       setSessionNotice('');

@@ -1,11 +1,12 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconLogout, IconPlus, IconRefresh, IconRadar } from '@tabler/icons-react';
+import { IconBox, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../app/auth-context';
 import { queryKeys } from '../../queries/keys';
 import { ConnectionPill } from './ConnectionPill';
+import styles from './Header.module.css';
 
 export function Header({ onAdd }: { onAdd: () => void }) {
   const auth = useAuth();
@@ -24,16 +25,13 @@ export function Header({ onAdd }: { onAdd: () => void }) {
   };
 
   return (
-    <div className="app-header">
-      <div className="app-header__inner">
-        <Link to="/" className="brand-lockup" aria-label="TorrentFS dashboard">
-          <span className="brand-mark" aria-hidden="true"><IconRadar size={20} /></span>
-          <span>
-            <span className="brand-name">TorrentFS</span>
-            <span className="brand-caption">control room</span>
-          </span>
+    <div className={styles.bar}>
+      <div className={styles.inner}>
+        <Link to="/" className={styles.brand} aria-label="TorrentFS dashboard">
+          <span className={styles.brandMark} aria-hidden="true"><IconBox size={18} /></span>
+          <span className={styles.brandName}>torrentfs</span>
         </Link>
-        <div className="header-actions">
+        <div className={styles.actions}>
           <ConnectionPill />
           <Tooltip label="Refresh data">
             <ActionIcon type="button" variant="subtle" color="gray" onClick={refresh} aria-label="Refresh data">

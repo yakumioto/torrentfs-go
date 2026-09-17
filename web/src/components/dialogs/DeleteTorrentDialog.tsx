@@ -9,7 +9,7 @@ import { queryKeys } from '../../queries/keys';
 import { useQueryClient } from '@tanstack/react-query';
 import { OperationStatus } from './OperationStatus';
 
-export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Torrent; opened: boolean; onClose: () => void }) {
+export function DeleteTorrentDialog({ torrent, opened, initialPurgeData = false, onClose }: { torrent: Torrent; opened: boolean; initialPurgeData?: boolean; onClose: () => void }) {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const deletion = useDeleteTorrent(auth.api);
@@ -18,6 +18,13 @@ export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Tor
   const [operationId, setOperationId] = useState('');
   const notifiedTerminal = useRef('');
   const operation = useOperation(auth.api, operationId, opened && operationId !== '');
+
+  useEffect(() => {
+    if (opened) {
+      setPurgeData(initialPurgeData);
+      setConfirmPurge(false);
+    }
+  }, [initialPurgeData, opened]);
 
   useEffect(() => {
     const state = operation.data?.state;
@@ -51,7 +58,7 @@ export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Tor
   return (
     <Modal opened={opened} onClose={close} title="Delete torrent" centered>
       <Stack gap="md">
-        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>Remove <strong>{torrent.name || 'this torrent'}</strong> from the control room. This action cannot be undone.</p>
+        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>Remove <strong>{torrent.name || 'this torrent'}</strong> from TorrentFS. This action cannot be undone.</p>
         <Checkbox label="Also purge managed payload data" checked={purgeData} onChange={(event) => { setPurgeData(event.currentTarget.checked); setConfirmPurge(false); }} />
         {purgeData && <Checkbox color="coral" label="I understand that only payload data managed by TorrentFS will be removed." checked={confirmPurge} onChange={(event) => setConfirmPurge(event.currentTarget.checked)} />}
         {conflict && <div className="error-callout"><IconAlertTriangle size={15} aria-hidden="true" /> A user-owned .torrent file still references this task. Remove that reference first.</div>}

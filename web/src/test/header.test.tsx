@@ -108,15 +108,15 @@ describe('Header refresh control', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/v1\/torrents$/);
     expect(fetchMock.mock.calls[0]?.[1]?.method ?? 'GET').toBe('GET');
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/status'))).toBe(false);
-    await waitFor(() => expect(screen.getByText('Updating the latest snapshot…')).toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: 'Torrent queue' })).toBeInTheDocument();
+    expect(screen.queryByText(/Updating the latest snapshot/)).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument();
     expect(screen.getByText(torrent.name)).toBeInTheDocument();
     expect(window.location.pathname).toBe('/');
     expect(document.querySelector('form')).toBeNull();
 
     expect(resolveRefresh).toBeDefined();
     resolveRefresh?.(jsonResponse([torrent]));
-    await waitFor(() => expect(screen.queryByText('Updating the latest snapshot…')).not.toBeInTheDocument());
+    expect(screen.queryByText(/Updating the latest snapshot/)).not.toBeInTheDocument();
     expect(navigationError.mock.calls.flat().some((value) => String(value).includes('Not implemented: navigation'))).toBe(false);
   });
 

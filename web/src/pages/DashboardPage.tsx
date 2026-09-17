@@ -1,60 +1,105 @@
-import { Button } from '@mantine/core';
-import { IconActivity, IconPlus } from '@tabler/icons-react';
+import { Button, TextInput } from '@mantine/core';
+import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
+import { useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
-import { TorrentList } from '../components/torrents/TorrentList';
 import type { AppOutletContext } from '../components/layout/AppLayout';
+import { TorrentList } from '../components/torrents/TorrentList';
 import { useTorrentList } from '../queries/hooks';
-import { formatBytes } from '../utils/format';
+import { filterTorrents, summarizeTorrents, type TorrentFilter } from '../queries/filter';
+import { errorMessage } from '../api/errors';
+import styles from './DashboardPage.module.css';
 import { usePageVisible } from '../utils/visibility';
+
+const FILTERS: Array<{ value: TorrentFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'downloading', label: 'Downloading' },
+  { value: 'seeding', label: 'Seeding' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'error', label: 'Error' },
+];
 
 export function DashboardPage() {
   const auth = useAuth();
   const visible = usePageVisible();
   const { openAddTorrent } = useOutletContext<AppOutletContext>();
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<TorrentFilter>('all');
   const query = useTorrentList(auth.api, auth.isReady && visible);
-  const torrents = query.data;
-  const active = torrents?.filter((torrent) => ['adding', 'downloading'].includes(torrent.state)).length ?? 0;
-  const completed = torrents?.filter((torrent) => torrent.state === 'seeding' || torrent.progress >= 1).length ?? 0;
-  const totalBytes = torrents?.reduce((total, torrent) => total + torrent.total_bytes, 0) ?? 0;
+  const sourceTorrents = query.data;
+  const torrents = useMemo(() => filterTorrents(sourceTorrents ?? [], search, filter), [filter, search, sourceTorrents]);
+  const summary = useMemo(() => summarizeTorrents(sourceTorrents ?? []), [sourceTorrents]);
+  const hasFilters = search.trim() !== '' || filter !== 'all';
+
+  const clearFilters = () => {
+    setSearch('');
+    setFilter('all');
+  };
 
   return (
-    <>
-      <section className="dashboard-hero" aria-labelledby="dashboard-title">
-        <div className="dashboard-hero__copy">
-          <p className="eyebrow">Live control room</p>
-          <h1 className="page-title" id="dashboard-title">Downloads in motion.</h1>
-          <p className="page-subtitle">A clear read on every torrent, from the first magnet handshake to the final verified piece.</p>
-          <div className="stats-grid" aria-label="Torrent summary">
-            <div className="stat-tile"><span className="stat-tile__value">{active}</span><span className="stat-tile__label">Active now</span></div>
-            <div className="stat-tile"><span className="stat-tile__value">{completed}</span><span className="stat-tile__label">Complete</span></div>
-            <div className="stat-tile"><span className="stat-tile__value">{formatBytes(totalBytes)}</span><span className="stat-tile__label">On the board</span></div>
-          </div>
+    <div className={styles.page}>
+      <section className={styles.heading} aria-labelledby="dashboard-title">
+        <div>
+          <p className="eyebrow">Library</p>
+          <h1 className={styles.title} id="dashboard-title">Torrents</h1>
+          <p className={styles.subtitle}>Manage downloads and inspect live progress from one focused queue.</p>
         </div>
-        <div className="dashboard-hero__radar" aria-label="Torrent activity field">
-          <div className="radar-disc" aria-hidden="true">
-            <span className="radar-sweep" />
-            <span className="radar-blip radar-blip--one" />
-            <span className="radar-blip radar-blip--two" />
-            <span className="radar-blip radar-blip--three" />
-            <span className="signal-label">{torrents?.length ?? 0} signals · peers unavailable</span>
-          </div>
+        <Button color="mint" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
+          Add torrent
+        </Button>
+      </section>
+
+      <section aria-label="Torrent summary" className={styles.summary}>
+        <span><strong>{summary.total}</strong> total</span>
+        <span><strong>{summary.downloading}</strong> downloading</span>
+        <span><strong>{summary.seeding}</strong> seeding</span>
+        <span><strong>{summary.completed}</strong> completed</span>
+        <span><strong>{summary.error}</strong> error</span>
+      </section>
+
+      <section className={styles.controls} aria-label="Torrent list controls">
+        <TextInput
+          className={styles.search}
+          aria-label="Search torrents"
+          placeholder="Search name or info hash"
+          leftSection={<IconSearch size={16} />}
+          rightSection={search !== '' ? <Button variant="subtle" size="compact-xs" aria-label="Clear search" onClick={() => setSearch('')}><IconX size={14} /></Button> : null}
+          value={search}
+          onChange={(event) => setSearch(event.currentTarget.value)}
+        />
+        <div className={styles.filters} role="group" aria-label="Filter torrents by status">
+          {FILTERS.map((item) => (
+            <Button
+              key={item.value}
+              size="compact-sm"
+              variant={filter === item.value ? 'filled' : 'subtle'}
+              color="mint"
+              aria-pressed={filter === item.value}
+              onClick={() => setFilter(item.value)}
+            >
+              {item.label}
+            </Button>
+          ))}
         </div>
       </section>
 
-      <section aria-labelledby="torrent-list-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">The board</p>
-            <h2 id="torrent-list-title">Torrent queue</h2>
-          </div>
-          <Button variant="subtle" color="mint" leftSection={<IconPlus size={16} />} onClick={openAddTorrent}>
-            Add torrent
-          </Button>
+      {query.error !== null && query.error !== undefined && query.data !== undefined && (
+        <div className="refresh-warning" role="alert">
+          <span aria-hidden="true">!</span>
+          <span>Could not refresh the latest snapshot. Showing the last valid list. {errorMessage(query.error)}</span>
         </div>
-        {query.isFetching && torrents !== undefined && <div className="refresh-warning" role="status"><IconActivity size={16} aria-hidden="true" /> Updating the latest snapshot…</div>}
-        <TorrentList torrents={torrents} loading={query.isPending} error={query.error} onRetry={() => void query.refetch()} onAdd={openAddTorrent} />
-      </section>
-    </>
+      )}
+
+      <TorrentList
+        torrents={query.data === undefined ? undefined : torrents}
+        totalCount={summary.total}
+        loading={query.isPending}
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        onAdd={openAddTorrent}
+        hasFilters={hasFilters}
+        onClearFilters={clearFilters}
+      />
+    </div>
   );
 }
