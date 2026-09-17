@@ -69,9 +69,13 @@ async function submitLogin(username = 'alice', password = 'secret') {
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 }
 
-beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+beforeEach(() => {
+  sessionStorage.clear();
+  vi.stubGlobal('fetch', vi.fn());
+});
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -80,7 +84,7 @@ describe('App authentication flow', () => {
     const fetchMock = mockFetch(unauthorizedResponse());
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
 
     expect(screen.getByRole('status')).toHaveTextContent(/page was refreshed|sign in again/i);
     expect(screen.queryByText('The daemon is out of reach')).not.toBeInTheDocument();
@@ -88,33 +92,34 @@ describe('App authentication flow', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('requires a new sign-in after an authenticated page is remounted', async () => {
+  it('restores a valid session after an authenticated page is remounted', async () => {
     const fetchMock = mockFetch(
       unauthorizedResponse(),
       jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
       jsonResponse([]),
-      unauthorizedResponse(),
+      jsonResponse([]),
+      jsonResponse([]),
     );
     const firstMount = renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();
     expect(authorization(fetchMock.mock.calls[2][1])).toBe('Bearer opaque');
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(sessionStorage.getItem('torrentfs.access-token')).toBe('opaque');
 
     firstMount.unmount();
     firstMount.queryClient.clear();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
-    expect(screen.getByRole('status')).toHaveTextContent(/page was refreshed|sign in again/i);
-    expect(screen.queryByText('The daemon is out of reach')).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(authorization(fetchMock.mock.calls[3][1])).toBeNull();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
+    expect(screen.queryByText(/Sign in again/)).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
   });
 
   it('returns to the login page and clears protected data when a session request expires', async () => {
@@ -126,17 +131,18 @@ describe('App authentication flow', () => {
     );
     const { queryClient } = renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh data' }));
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await waitFor(() => expect(queryClient.getQueryData(queryKeys.torrents)).toBeUndefined());
     expect(screen.getByRole('status')).toHaveTextContent(/page was refreshed|sign in again/i);
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
+    expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
   });
 
@@ -152,21 +158,22 @@ describe('App authentication flow', () => {
     );
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
     fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByText('Your session expired or the page was refreshed. Sign in again to continue.')).not.toBeInTheDocument();
+    expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
     expect(authorization(fetchMock.mock.calls[4][1])).toBeNull();
 
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Downloads in motion.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
     expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
     expect(authorization(fetchMock.mock.calls[6][1])).toBe('Bearer opaque-new');
@@ -176,7 +183,7 @@ describe('App authentication flow', () => {
     const fetchMock = mockFetch(unauthorizedResponse(), unauthorizedResponse());
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to your swarm.' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
     await submitLogin('alice', 'wrong');
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid username or password.'));

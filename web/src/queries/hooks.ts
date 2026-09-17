@@ -1,10 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import type { Operation, Torrent } from '../types/api';
+import type { Operation, Torrent, TorrentStatus } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
 import { sortTorrents } from './sort';
+
+export interface TorrentLiveSummary {
+  state: string;
+  progress: number;
+  completedBytes: number;
+  totalBytes: number;
+}
+
+export interface TorrentStatusMeta {
+  metainfoReady: boolean;
+  pieceLength: number;
+  pieceCount: number;
+}
 
 export function useTorrentList(api: ApiClient, enabled: boolean) {
   return useQuery({
@@ -39,6 +52,59 @@ export function useTorrentStatus(api: ApiClient, id: string, enabled: boolean) {
     retry: shouldRetry,
     retryDelay,
   });
+}
+
+export function useTorrentStatusSlice<T>(
+  api: ApiClient,
+  id: string,
+  enabled: boolean,
+  select: (status: TorrentStatus) => T,
+) {
+  return useQuery({
+    queryKey: queryKeys.torrentStatus(id),
+    queryFn: ({ signal }) => api.getTorrentStatus(id, signal),
+    enabled: enabled && id !== '',
+    select,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+const selectStatusTorrent = (status: TorrentStatus): Torrent => status.torrent;
+const selectLiveSummary = (status: TorrentStatus): TorrentLiveSummary => ({
+  state: status.torrent.state,
+  progress: status.torrent.progress,
+  completedBytes: status.torrent.completed_bytes,
+  totalBytes: status.torrent.total_bytes,
+});
+const selectStatusMeta = (status: TorrentStatus): TorrentStatusMeta => ({
+  metainfoReady: status.metainfo_ready,
+  pieceLength: status.piece_length,
+  pieceCount: status.pieces.length,
+});
+const selectStatusFiles = (status: TorrentStatus) => status.files;
+const selectStatusPieces = (status: TorrentStatus) => status.pieces;
+
+export function useTorrentStatusTorrent(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusTorrent);
+}
+
+export function useTorrentLiveSummary(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectLiveSummary);
+}
+
+export function useTorrentStatusMeta(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusMeta);
+}
+
+export function useTorrentStatusFiles(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusFiles);
+}
+
+export function useTorrentStatusPieces(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusPieces);
 }
 
 export function useAddTorrent(api: ApiClient) {

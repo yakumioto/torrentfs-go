@@ -1,9 +1,9 @@
 import { percent } from '../../utils/format';
 
-export function TorrentProgress({ progress, completedBytes, totalBytes }: { progress: number; completedBytes: number; totalBytes: number }) {
+export function TorrentProgress({ progress, completedBytes, totalBytes, state }: { progress: number; completedBytes: number; totalBytes: number; state?: string }) {
   const value = percent(progress);
   return (
-    <div className="torrent-row__progress">
+    <div className={`torrent-row__progress ${state === undefined ? '' : `torrent-row__progress--${state}`}`}>
       <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value} aria-label={`${value.toFixed(1)} percent complete`}>
         <div className="progress-track__fill" style={{ width: `${value}%` }} />
       </div>

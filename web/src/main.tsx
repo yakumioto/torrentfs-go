@@ -1,5 +1,6 @@
 import '@mantine/core/styles.css';
 import '@mantine/notifications/styles.css';
+import './styles/tokens.css';
 import './styles/global.css';
 
 import { StrictMode } from 'react';

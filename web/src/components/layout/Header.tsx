@@ -1,5 +1,5 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconLogout, IconPlus, IconRefresh, IconRadar } from '@tabler/icons-react';
+import { IconBox, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -27,11 +27,8 @@ export function Header({ onAdd }: { onAdd: () => void }) {
     <div className="app-header">
       <div className="app-header__inner">
         <Link to="/" className="brand-lockup" aria-label="TorrentFS dashboard">
-          <span className="brand-mark" aria-hidden="true"><IconRadar size={20} /></span>
-          <span>
-            <span className="brand-name">TorrentFS</span>
-            <span className="brand-caption">control room</span>
-          </span>
+          <span className="brand-mark" aria-hidden="true"><IconBox size={18} /></span>
+          <span className="brand-name">torrentfs</span>
         </Link>
         <div className="header-actions">
           <ConnectionPill />

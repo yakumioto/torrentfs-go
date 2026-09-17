@@ -1,16 +1,29 @@
-import { Alert, Button, Skeleton, Tabs } from '@mantine/core';
-import { IconAlertTriangle, IconArrowLeft, IconClock, IconRefresh } from '@tabler/icons-react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Alert, Button, Tabs } from '@mantine/core';
+import { IconAlertTriangle, IconClock, IconRefresh } from '@tabler/icons-react';
+import { useCallback, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ApiError, errorMessage } from '../api/errors';
 import { useAuth } from '../app/auth-context';
 import { DeleteTorrentDialog } from '../components/dialogs/DeleteTorrentDialog';
-import { FilesTable } from '../components/detail/FilesTable';
-import { PiecesMap } from '../components/detail/PiecesMap';
-import { TorrentMetadata } from '../components/detail/TorrentMetadata';
-import { StateBadge } from '../components/torrents/StateBadge';
-import { useTorrentDetail, useTorrentStatus } from '../queries/hooks';
-import { ApiError, errorMessage } from '../api/errors';
+import { TorrentDetailHeader } from '../components/detail/TorrentDetailHeader';
+import { TorrentFilesPanel } from '../components/detail/TorrentFilesPanel';
+import { TorrentLiveSummary } from '../components/detail/TorrentLiveSummary';
+import { TorrentOverview } from '../components/detail/TorrentOverview';
+import { TorrentPiecesPanel } from '../components/detail/TorrentPiecesPanel';
+import type { FileStatus, PieceStatus } from '../types/api';
+import {
+  useTorrentDetail,
+  useTorrentLiveSummary,
+  useTorrentStatus,
+  useTorrentStatusFiles,
+  useTorrentStatusMeta,
+  useTorrentStatusPieces,
+  useTorrentStatusTorrent,
+} from '../queries/hooks';
 import { usePageVisible } from '../utils/visibility';
-import { useState } from 'react';
+
+const EMPTY_FILES: FileStatus[] = [];
+const EMPTY_PIECES: PieceStatus[] = [];
 
 export function TorrentDetailPage() {
   const { id = '' } = useParams();
@@ -18,11 +31,18 @@ export function TorrentDetailPage() {
   const navigate = useNavigate();
   const visible = usePageVisible();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const detail = useTorrentDetail(auth.api, id, auth.isReady && visible);
-  const status = useTorrentStatus(auth.api, id, auth.isReady && visible);
+  const openDelete = useCallback(() => setDeleteOpen(true), []);
+  const enabled = auth.isReady && visible;
+  const detail = useTorrentDetail(auth.api, id, enabled);
+  const status = useTorrentStatus(auth.api, id, enabled);
+  const statusTorrent = useTorrentStatusTorrent(auth.api, id, enabled);
+  const liveSummary = useTorrentLiveSummary(auth.api, id, enabled);
+  const statusMeta = useTorrentStatusMeta(auth.api, id, enabled);
+  const statusFiles = useTorrentStatusFiles(auth.api, id, enabled);
+  const statusPieces = useTorrentStatusPieces(auth.api, id, enabled);
 
   if (detail.isPending) {
-    return <div className="panel panel--padding"><Skeleton height={52} width="60%" mb="md" /><Skeleton height={24} width="35%" mb="xl" /><Skeleton height={150} /></div>;
+    return <div className="panel panel--padding detail-loading" aria-label="Loading torrent detail"><div className="loading-bar" /><div className="loading-bar loading-bar--short" /><div className="loading-block" /></div>;
   }
 
   if (detail.error !== null && detail.error !== undefined && detail.data === undefined) {
@@ -41,25 +61,21 @@ export function TorrentDetailPage() {
   if (detailTorrent === undefined) {
     return null;
   }
-  const torrent = status.data?.torrent ?? detailTorrent;
-  const pending = torrent.state === 'adding' || status.data?.metainfo_ready === false;
+  const torrent = statusTorrent.data ?? detailTorrent;
+  const files = statusFiles.data ?? EMPTY_FILES;
+  const pieces = statusPieces.data ?? EMPTY_PIECES;
+  const pending = torrent.state === 'adding' || statusMeta.data?.metainfoReady === false;
 
   return (
-    <>
-      <div className="detail-header">
-        <div className="detail-header__title">
-          <Link to="/" className="subtle" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', marginBottom: '1rem', textDecoration: 'none', fontSize: '0.78rem' }}><IconArrowLeft size={15} /> Dashboard</Link>
-          <p className="eyebrow">Torrent detail</p>
-          <h1>{torrent.name || 'Unnamed torrent'}</h1>
-          <span className="detail-header__hash">{torrent.info_hash || 'Info hash pending'}</span>
-        </div>
-        <div className="detail-header__actions">
-          <StateBadge state={torrent.state} />
-          <Button color="coral" variant="light" onClick={() => setDeleteOpen(true)} disabled={torrent.state === 'deleting'}>Delete torrent</Button>
-        </div>
-      </div>
+    <div className="detail-page">
+      <TorrentDetailHeader
+        name={torrent.name}
+        infoHash={torrent.info_hash}
+        onDelete={openDelete}
+        deleteDisabled={torrent.state === 'deleting'}
+      />
 
-      <TorrentMetadata torrent={torrent} />
+      <TorrentLiveSummary summary={liveSummary.data} />
 
       {pending && (
         <div className="pending-panel" role="status">
@@ -69,24 +85,30 @@ export function TorrentDetailPage() {
       )}
 
       {status.error !== null && status.error !== undefined && status.data !== undefined && (
-        <div className="refresh-warning" role="alert"><IconRefresh size={16} aria-hidden="true" /> The latest piece snapshot failed. Showing the last valid snapshot.</div>
+        <div className="refresh-warning" role="alert"><IconRefresh size={16} aria-hidden="true" /> The latest status snapshot failed. Showing the last valid snapshot.</div>
       )}
       {status.error !== null && status.error !== undefined && status.data === undefined && !pending && (
         <Alert color="yellow" icon={<IconAlertTriangle size={16} />} title="Status snapshot unavailable">{errorMessage(status.error)}</Alert>
       )}
 
-      {!pending && status.data !== undefined && (
-        <Tabs defaultValue="files" variant="outline">
-          <Tabs.List>
-            <Tabs.Tab value="files">Files <span className="subtle">· {status.data.files.length}</span></Tabs.Tab>
-            <Tabs.Tab value="pieces">Pieces <span className="subtle">· {status.data.pieces.length}</span></Tabs.Tab>
-          </Tabs.List>
-          <Tabs.Panel value="files" className="tab-panel"><div className="panel panel--padding"><div className="section-heading"><div><p className="eyebrow">Piece projection</p><h2>Files</h2></div><span className="section-heading__meta">half-open ranges</span></div><FilesTable files={status.data.files} pieces={status.data.pieces} /></div></Tabs.Panel>
-          <Tabs.Panel value="pieces" className="tab-panel"><div className="panel panel--padding"><div className="section-heading"><div><p className="eyebrow">Whole torrent</p><h2>Piece map</h2></div><span className="section-heading__meta">piece length {status.data.piece_length.toLocaleString()} B</span></div><PiecesMap pieces={status.data.pieces} /></div></Tabs.Panel>
-        </Tabs>
-      )}
+      <Tabs defaultValue="overview" className="detail-tabs">
+        <Tabs.List aria-label="Torrent detail sections">
+          <Tabs.Tab value="overview">Overview</Tabs.Tab>
+          <Tabs.Tab value="files">Files <span className="subtle">· {files.length}</span></Tabs.Tab>
+          <Tabs.Tab value="pieces">Pieces <span className="subtle">· {pieces.length}</span></Tabs.Tab>
+        </Tabs.List>
+        <Tabs.Panel value="overview" className="tab-panel">
+          <TorrentOverview torrent={torrent} summary={liveSummary.data} meta={statusMeta.data} />
+        </Tabs.Panel>
+        <Tabs.Panel value="files" className="tab-panel">
+          <TorrentFilesPanel files={files} pieces={pieces} />
+        </Tabs.Panel>
+        <Tabs.Panel value="pieces" className="tab-panel">
+          <TorrentPiecesPanel pieces={pieces} pieceLength={statusMeta.data?.pieceLength} />
+        </Tabs.Panel>
+      </Tabs>
 
       <DeleteTorrentDialog torrent={torrent} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />
-    </>
+    </div>
   );
 }
