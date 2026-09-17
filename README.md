@@ -54,22 +54,29 @@ it. It can also be started from the Actions page with `workflow_dispatch`; selec
 `main` in the branch selector. Pull requests, forks, and other refs are not
 published.
 
-A successful run publishes a Linux/amd64, `CGO_ENABLED=0` tarball and its
-`.sha256` file as an immutable prerelease. The nightly tag's UTC date comes from
-the triggering commit so rerunning the same workflow run keeps the same tag. The
-archive includes `BUILD_INFO`,
-which records the full commit SHA, UTC date, nightly tag, Go version, target,
-and workflow run. Actions artifacts are retained for 14 days; nightly
-prereleases are retained for 30 days before the workflow removes only matching
-`nightly-*` prereleases and tags. Nightly builds are for validation and testing,
-not stable releases, and running the binary requires the Linux FUSE facilities
-described below.
+A successful run publishes a multi-platform OCI image for Linux/amd64 and
+Linux/arm64 at `ghcr.io/yakumioto/torrentfs-go`. The workflow builds and starts
+both platform images on the same GitHub Actions runner before logging in to GHCR
+and pushing the final image. Existing test, lint, and required FUSE checks must
+also pass; a failed check or image validation never reaches the push step.
 
-After downloading both files, verify and unpack them from the same directory:
+The only published tag is the immutable
+`nightly-<date>-<short-sha>-<run-id>-<run-attempt>`. Its UTC date and short SHA
+come from the triggering commit, while the workflow run ID and attempt
+distinguish the initial run from reruns. The image also records the full commit
+in `org.opencontainers.image.revision`, along with its source, commit timestamp,
+and nightly tag. No `latest`, stable, or other alias is published. Nightly runs
+do not create GitHub Releases, release assets, Actions artifacts, or
+`.dockerbuild` build records: the workflow sets `DOCKER_BUILD_RECORD_UPLOAD=false`
+and `DOCKER_BUILD_SUMMARY=false`. This workflow does not delete registry tags or
+clean up historical GitHub nightly releases.
+
+Pull a specific nightly image by its immutable tag:
 
 ```sh
-sha256sum --check torrentfs-nightly-<date>-<short-sha>-<run-id>-linux-amd64.tar.gz.sha256
-tar -xzf torrentfs-nightly-<date>-<short-sha>-<run-id>-linux-amd64.tar.gz
+docker pull ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt>
+docker image inspect ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt> \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
 ## Usage
