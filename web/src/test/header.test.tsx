@@ -47,6 +47,7 @@ function renderApp(path: string, fetchMock: FetchMock) {
     isReady: true,
     isAuthenticated: false,
     loginError: '',
+    sessionNotice: '',
     connectionError: '',
     login: async () => false,
     logout: async () => undefined,
