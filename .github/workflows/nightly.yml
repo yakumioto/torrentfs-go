@@ -89,6 +89,8 @@ jobs:
       packages: write
     env:
       IMAGE_REPOSITORY: ghcr.io/yakumioto/torrentfs-go
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+      DOCKER_BUILD_SUMMARY: "false"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

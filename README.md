@@ -66,8 +66,10 @@ triggering commit, while the workflow run ID distinguishes reruns. The image
 also records the full commit in `org.opencontainers.image.revision`, along with
 its source, commit timestamp, and nightly tag. No `latest`, stable, or other
 alias is published. Nightly runs do not create GitHub Releases, release assets,
-or Actions artifacts, and this workflow does not delete registry tags or clean
-up historical GitHub nightly releases.
+Actions artifacts, or `.dockerbuild` build records: the workflow sets
+`DOCKER_BUILD_RECORD_UPLOAD=false` and `DOCKER_BUILD_SUMMARY=false`. This
+workflow does not delete registry tags or clean up historical GitHub nightly
+releases.
 
 Pull a specific nightly image by its immutable tag:
 

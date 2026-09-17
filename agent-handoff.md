@@ -19,6 +19,7 @@
   - 移除 `package`、`release`、`cleanup` jobs 及其 archive/checksum、Actions artifact、GitHub Release API 和 `contents: write` 权限。
   - 新增 `image` job，权限仅为 `contents: read` 与 `packages: write`。
   - 使用固定 SHA 的 Docker QEMU、Buildx、login 和 build-push actions；使用 `GITHUB_TOKEN` 登录 `ghcr.io`。
+  - 在 image job 级设置 `DOCKER_BUILD_RECORD_UPLOAD=false` 和 `DOCKER_BUILD_SUMMARY=false`，阻止 build-push-action 上传 `.dockerbuild` 构建记录并关闭不需要的构建摘要。
   - 在 push 前分别以 `load: true` 构建 `linux/amd64` 与 `linux/arm64` 临时镜像，执行 `docker image inspect` 标签/架构检查，并用 `torrentfs -h` 做无状态启动验证。
   - 只有质量 jobs 与两套镜像验证都成功后，才以唯一 nightly tag push `linux/amd64,linux/arm64` manifest。
 - `README.md`
@@ -30,7 +31,7 @@
 
 - `go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/nightly.yml`：通过（下载并运行 actionlint v1.7.12；本机未预装 actionlint）。
 - `git diff --check`：通过。
-- Nightly 静态断言：schedule、`workflow_dispatch`、main guard、四项 needs 成功条件、GHCR `packages: write`、双平台配置均存在；archive/Release/artifact/cleanup/写入 contents/id-token 路径均不存在：通过。
+- Nightly 静态断言：schedule、`workflow_dispatch`、main guard、四项 needs 成功条件、GHCR `packages: write`、双平台配置和 `DOCKER_BUILD_RECORD_UPLOAD=false`/`DOCKER_BUILD_SUMMARY=false` 均存在；archive/Release/artifact/cleanup/写入 contents/id-token 路径均不存在：通过。
 - metadata 模拟：commit-derived UTC date、40 位 SHA、数字 run ID 和 `nightly-YYYYMMDD-<short-sha>-<run-id>` 格式：通过。
 - 受保护文件差异检查：CI、共享质量 action、Gitea workflow、Dockerfile 和归档脚本无变更：通过。
 - 未在开发者工作站执行 Docker build/push 或以本地质量结果替代 CI；实际 GHCR 发布、双架构 QEMU 构建和 runner smoke 需由 main 上的定时/手动 workflow 运行验证。
@@ -38,7 +39,7 @@
 ## AC Evidence
 
 - 每日成功运行发布目标 GHCR 中的双架构 nightly OCI image：`image` job 保留 schedule，最终 build-push 使用 `ghcr.io/yakumioto/torrentfs-go:<nightly-tag>` 和 `linux/amd64,linux/arm64`。
-- 每日构建不创建 GitHub Release、不上传 Release assets、Actions artifacts 或其他 packages：相关 jobs/Actions/API 已从 Nightly workflow 删除；唯一发布步骤是目标 GHCR image push。
+- 每日构建不创建 GitHub Release、不上传 Release assets、Actions artifacts 或其他 packages：相关 jobs/Actions/API 已从 Nightly workflow 删除，且 image job 明确设置 `DOCKER_BUILD_RECORD_UPLOAD=false`（同时关闭 `DOCKER_BUILD_SUMMARY`），不会产生 `.dockerbuild` 构建记录；唯一发布步骤是目标 GHCR image push。
 - 标签追溯日期和 commit：tag 使用 checkout 后 commit 的 UTC committer date、SHA 前 7 位和 run ID；OCI `org.opencontainers.image.revision` 写入完整 SHA。
 - 构建/验证失败不发布成功镜像：`image` job 只在四个质量依赖结果均为 `success` 时运行；GHCR login 位于两架构 build/inspect/startup 步骤之后；最终 push 是最后的 build-push 步骤。
 - 正式 release 流程保持可用：未发现 stable release workflow，本次没有新增、删除或改写 stable release/tag 逻辑；现有 CI、质量 action、Gitea workflow 和 Dockerfile 保持不变。
