@@ -28,9 +28,13 @@ function renderAuth() {
   );
 }
 
-beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+beforeEach(() => {
+  sessionStorage.clear();
+  vi.stubGlobal('fetch', vi.fn());
+});
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -42,6 +46,15 @@ describe('AuthProvider', () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
     const request = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
     expect(new Headers(request.headers).get('Authorization')).toBeNull();
+  });
+
+  it('restores a token from sessionStorage before probing', async () => {
+    sessionStorage.setItem('torrentfs.access-token', 'restored-token');
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse([]));
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId('phase')).toHaveTextContent('authenticated'));
+    const probeRequest = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    expect(new Headers(probeRequest.headers).get('Authorization')).toBe('Bearer restored-token');
   });
 
   it('moves to login on an API 401 and keeps login free of bearer headers', async () => {

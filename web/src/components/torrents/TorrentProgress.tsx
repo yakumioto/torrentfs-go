@@ -1,13 +1,29 @@
 import { percent } from '../../utils/format';
+import styles from './TorrentProgress.module.css';
 
-export function TorrentProgress({ progress, completedBytes, totalBytes }: { progress: number; completedBytes: number; totalBytes: number }) {
+const STATE_CLASS: Record<string, string> = {
+  adding: styles.adding,
+  deleting: styles.deleting,
+  seeding: styles.seeding,
+  error: styles.error,
+  delete_failed: styles.deleteFailed,
+};
+
+export function TorrentProgress({ progress, completedBytes, totalBytes, state, className }: {
+  progress: number;
+  completedBytes: number;
+  totalBytes: number;
+  state?: string;
+  className?: string;
+}) {
   const value = percent(progress);
+  const stateClass = state === undefined ? undefined : STATE_CLASS[state];
   return (
-    <div className="torrent-row__progress">
-      <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value} aria-label={`${value.toFixed(1)} percent complete`}>
-        <div className="progress-track__fill" style={{ width: `${value}%` }} />
+    <div className={[styles.root, stateClass, className].filter(Boolean).join(' ')}>
+      <div className={styles.track} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value} aria-label={`${value.toFixed(1)} percent complete`}>
+        <div className={styles.fill} style={{ width: `${value}%` }} />
       </div>
-      <div className="progress-track__label">
+      <div className={styles.label}>
         <span>{value.toFixed(value === 100 ? 0 : 1)}%</span>
         <span>{formatBytePair(completedBytes, totalBytes)}</span>
       </div>

@@ -2,11 +2,18 @@ import { Table } from '@mantine/core';
 import type { FileStatus, PieceStatus } from '../../types/api';
 import { formatBytes } from '../../utils/format';
 import { fileCoverage } from './file-coverage';
+import styles from './FilesTable.module.css';
+
+const COVERAGE_CLASS: Record<string, string> = {
+  complete: styles.coverageComplete,
+  partial: styles.coveragePartial,
+  waiting: styles.coverageWaiting,
+};
 
 export function FilesTable({ files, pieces }: { files: FileStatus[]; pieces: PieceStatus[] }) {
   return (
     <div className="files-table-wrap">
-      <Table className="files-table" highlightOnHover verticalSpacing="md">
+      <Table className={styles.table} highlightOnHover verticalSpacing="md">
         <Table.Thead>
           <Table.Tr>
             <Table.Th>Path</Table.Th>
@@ -20,10 +27,10 @@ export function FilesTable({ files, pieces }: { files: FileStatus[]; pieces: Pie
             const coverage = fileCoverage(file, pieces);
             return (
               <Table.Tr key={`${file.path}:${file.piece_start}:${file.piece_end}`}>
-                <Table.Td><span className="file-path">{file.path}</span></Table.Td>
+                <Table.Td><span className={styles.filePath}>{file.path}</span></Table.Td>
                 <Table.Td><span className="text-mono">{formatBytes(file.size)}</span></Table.Td>
                 <Table.Td><span className="text-mono">[{file.piece_start}, {file.piece_end})</span></Table.Td>
-                <Table.Td><span className={`coverage-copy coverage-copy--${coverage.tone}`}>{coverage.label}</span></Table.Td>
+                <Table.Td><span className={`${styles.coverage} ${COVERAGE_CLASS[coverage.tone]}`}>{coverage.label}</span></Table.Td>
               </Table.Tr>
             );
           })}

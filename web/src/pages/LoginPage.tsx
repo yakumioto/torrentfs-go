@@ -1,7 +1,9 @@
 import { Button, PasswordInput, TextInput } from '@mantine/core';
-import { IconKey, IconRadar, IconRefresh } from '@tabler/icons-react';
-import { FormEvent, useState } from 'react';
+import { IconKey, IconLock, IconRefresh } from '@tabler/icons-react';
+import { type FormEvent, useState } from 'react';
 import { useAuth } from '../app/auth-context';
+import shell from '../styles/auth-shell.module.css';
+import styles from './LoginPage.module.css';
 
 export function LoginPage() {
   const auth = useAuth();
@@ -20,12 +22,12 @@ export function LoginPage() {
   };
 
   return (
-    <main className="auth-page">
-      <section className="auth-card">
-        <div className="auth-card__mark" aria-hidden="true"><IconRadar size={25} /></div>
-        <p className="eyebrow">Protected control room</p>
-        <h1>Sign in to your swarm.</h1>
-        <p className="auth-card__copy">The interface shell is public. Torrent data and every management action stay behind the daemon's Bearer session.</p>
+    <main className={shell.page}>
+      <section className={`${shell.card} ${styles.card}`} aria-labelledby="login-title">
+        <div className={styles.mark} aria-hidden="true"><IconLock size={22} /></div>
+        <p className="eyebrow">TorrentFS</p>
+        <h1 id="login-title">Sign in to TorrentFS</h1>
+        <p className={styles.copy}>Connect to your local torrent daemon to manage downloads and inspect their live state.</p>
         <form onSubmit={submit}>
           <TextInput
             label="Username"
@@ -43,11 +45,11 @@ export function LoginPage() {
             required
             mb="lg"
           />
-          {auth.sessionNotice !== '' && <div className="session-callout" role="status" aria-live="polite"><IconRefresh size={15} aria-hidden="true" /> {auth.sessionNotice}</div>}
+          {auth.sessionNotice !== '' && <div className={styles.sessionCallout} role="status" aria-live="polite"><IconRefresh size={15} aria-hidden="true" /> {auth.sessionNotice}</div>}
           {auth.loginError !== '' && <div className="error-callout" role="alert" aria-live="polite"><IconKey size={15} aria-hidden="true" /> {auth.loginError}</div>}
           <Button type="submit" fullWidth color="mint" loading={submitting} mt="lg">Sign in</Button>
         </form>
-        <p className="auth-card__footer">Tokens live in memory only. Refreshing this page starts a new connection check.</p>
+        <p className={styles.footer}>Your session is kept until this browser tab is closed.</p>
       </section>
     </main>
   );

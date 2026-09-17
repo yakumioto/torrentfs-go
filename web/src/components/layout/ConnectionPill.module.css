@@ -1,0 +1,31 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.pillAuth {
+  border-color: rgba(63, 185, 80, 0.45);
+  color: var(--success);
+}
+
+.pillLive {
+  border-color: var(--border-strong);
+}
+
+@media (max-width: 480px) {
+  .pill {
+    padding-inline: 0.4rem;
+  }
+
+  .label {
+    display: none;
+  }
+}

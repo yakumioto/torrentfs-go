@@ -193,13 +193,24 @@ npm run dev --prefix web
 ```
 
 Vite serves on `:5173` and proxies `/api` to `http://127.0.0.1:8080`. A
-production build is same-origin and uses relative `/api/v1` requests. The UI
-keeps Bearer tokens in memory only: it does not use cookies, URL parameters,
-`localStorage`, `sessionStorage`, JWT decoding, or a refresh endpoint. A page
-refresh or daemon restart therefore requires a fresh connection probe and,
-when enabled, a new login. Valid API requests slide the server-side inactivity
-window; the browser treats a `401` as the authoritative signal to show the
-login gate.
+production build is same-origin and uses relative `/api/v1` requests.
+
+When authentication is enabled, the UI keeps the opaque Bearer token in
+tab-scoped `sessionStorage`. It does not use cookies, URL parameters,
+`localStorage`, JWT decoding, or a refresh endpoint. A refresh inside the same
+tab restores that token and validates it with the existing `/api/v1/torrents`
+probe, so a still-valid token does not ask you to sign in again. Closing the tab
+ends the browser page session and drops the stored token, and a browser that
+denies `sessionStorage` access falls back to an in-memory session for that page
+load. Logout attempts to revoke the token on the server and always clears
+`sessionStorage`, the in-memory token, and the query cache, even when the revoke
+request fails.
+
+Server-side tokens live in daemon memory and expire on inactivity, so a `401`
+stays the authoritative signal to show the login gate: when the token has
+expired, was revoked, or was lost to a daemon restart, the UI drops the local
+session and asks for a new sign-in. Valid API requests slide the server-side
+inactivity window.
 
 ## On-disk state
 
@@ -432,7 +443,12 @@ the anacrolix reader cancellation errors during the running phase. On that
 fixture the file is a single page, so the kernel collapses the two same-page
 reads into one in-flight request; the scenario therefore covers shutdown and
 unmount behaviour, and the cancellation regression itself is covered by the
-FUSE/swarm test in the Go suite. Every Docker
+FUSE/swarm test in the Go suite. A third scenario reproduces the case where a
+second mount namespace holds a propagated copy of the FUSE mount: the peer is
+left running while the daemon gets SIGTERM, and the script checks that the
+daemon stops within its unmount deadline, exits 1, prints the timeout
+diagnostic, reports no daemon-owned unmount failure, and releases the
+propagated host mount once the peer is gone. Every Docker
 call in the script, including the teardown waits, is bounded; a timeout
 collects diagnostics and fails instead of hanging. It
 requires a working Docker daemon, `/dev/fuse`, `findmnt`, `SYS_ADMIN` mount
@@ -512,18 +528,34 @@ different answers:
   simply incomplete — that is not evidence that no holder exists.
 - **another mount namespace holding a propagated copy.** Where `/mnt` is
   propagated (`rshared`) into another namespace — another container on the same
-  host, for example — that namespace keeps a copy of the FUSE mount. If the
-  namespace outlives the daemon's shutdown, `Unmount` waits for it to release
-  the superblock and the process does not exit; once the peer namespace is
-  gone, the same shutdown exits 0 immediately. Measured on the smoke fixture:
-  with a peer container started with `sleep 300` still running, shutdown
-  blocked for the peer's whole lifetime and the process was still running after
-  45 s; removing the peer let it exit at once. This blocking predates the
-  session-close-first order and is not caused by it — it was reproduced on the
-  commit before that change — and it is not fixed here; containers that
-  propagate `/mnt` must be stopped before, or concurrently with, the daemon.
-  Distinguish it from the other two by `findmnt -T <mount> -o PROPAGATION,OPTIONS`
-  plus the absence of both an outstanding read and a local fd/cwd holder.
+  host, for example — that namespace keeps a copy of the FUSE mount. The copy
+  keeps the FUSE connection alive, so it never reaches `ENODEV` and
+  `Server.Unmount` is left parked in its event-loop `Wait`. Distinguish this
+  cause from the other two by `findmnt -T <mount> -o PROPAGATION,OPTIONS` plus
+  the absence of both an outstanding read and a local fd/cwd holder. It reports
+  **no** `Device or resource busy` line: unmounting the daemon's own copy
+  succeeds, and only the connection outlives it.
+
+  That wait is bounded. The unmount stage gets `defaultUnmountTimeout` (30
+  seconds, `cmd/torrentfs/main.go`) and then gives up instead of hanging until
+  the peer goes away. On expiry torrentfs writes
+  `torrentfs: unmount <mountpoint>: unmount did not return within 30s: another
+  mount namespace may still hold a propagated copy of the FUSE mount; ...` to
+  stderr and **exits 1**. The non-zero code is deliberate: exiting 0 would
+  claim the mount was released when a peer still holds a copy, while a failure
+  tells a supervisor or orchestrator to look. The abandoned unmount cannot be
+  cancelled — only process exit ends it — so a propagating peer that outlives
+  the daemon keeps its copy as an `ENOTCONN` residual mount until its own
+  namespace ends; reclaiming it is the responsibility of whoever started that
+  container. Prefer stopping such containers before, or concurrently with, the
+  daemon: an unmount that completes on its own still exits 0.
+
+  Measured on the smoke fixture: with a peer container started with `sleep 300`
+  still running, the daemon stopped after the full 30 s deadline with exit code
+  1 and the diagnostic above, without a `Device or resource busy` line, and
+  reclaiming the peer released the propagated host mount. This blocking
+  predates the session-close-first order and is not caused by it — it was
+  reproduced on the commit before that change.
 
 `rshared` propagation on the `/mnt` bind is required for a FUSE submount to be
 visible in the host source directory; it is not the cause of a busy unmount and

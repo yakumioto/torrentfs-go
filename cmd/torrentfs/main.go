@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -197,6 +198,18 @@ type mountUnmounter interface {
 	Unmount() error
 }
 
+// defaultUnmountTimeout bounds the FUSE unmount stage. Unmount takes no
+// context and no timeout, and it ends only when the FUSE connection reaches
+// ENODEV. A peer mount namespace still holding a propagated copy of the mount
+// keeps that connection alive, so Unmount would otherwise park in its
+// event-loop Wait for as long as the peer lives.
+const defaultUnmountTimeout = 30 * time.Second
+
+// errUnmountTimeout reports that the unmount stage exceeded its deadline and
+// was abandoned. The goroutine running Unmount is still parked in the
+// event-loop Wait and cannot be cancelled; it ends only when the process does.
+var errUnmountTimeout = errors.New("unmount did not complete")
+
 // shutdownSequence stops a running torrentfs instance. The order is fixed and
 // observable: stop the HTTP API, close the session, and only then unmount the
 // FUSE server. Closing the session first cancels and drains outstanding reads,
@@ -205,6 +218,10 @@ type shutdownSequence struct {
 	api   httpShutdowner
 	sess  sessionCloser
 	mount mountUnmounter
+
+	// unmountTimeout overrides defaultUnmountTimeout; zero or negative uses
+	// the default. It is the seam unit tests use to inject a short deadline.
+	unmountTimeout time.Duration
 }
 
 // shutdownResult carries one error per stage so each can be reported
@@ -224,9 +241,35 @@ func (s shutdownSequence) run() shutdownResult {
 		result.close = s.sess.Close(context.Background())
 	}
 	if s.mount != nil {
-		result.unmount = s.mount.Unmount()
+		result.unmount = s.unmount()
 	}
 	return result
+}
+
+// unmount runs the mount stage under a bounded wait. Unmount has no context,
+// so a deadline cannot cancel it: a peer mount namespace holding a propagated
+// copy leaves the FUSE connection alive and the call blocked in its event-loop
+// Wait. On expiry this returns a timeout error instead of hanging the shutdown
+// forever, and the caller must let the process exit to release the goroutine.
+func (s shutdownSequence) unmount() error {
+	timeout := s.effectiveUnmountTimeout()
+	done := make(chan error, 1)
+	go func() { done <- s.mount.Unmount() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("unmount did not return within %s: another mount namespace may still hold a propagated copy of the FUSE mount; check `findmnt -T <mountpoint>` and `fuser -vm <mountpoint>` and see README: %w", timeout, errUnmountTimeout)
+	}
+}
+
+func (s shutdownSequence) effectiveUnmountTimeout() time.Duration {
+	if s.unmountTimeout > 0 {
+		return s.unmountTimeout
+	}
+	return defaultUnmountTimeout
 }
 
 func validateTorrentDir(path string) error {

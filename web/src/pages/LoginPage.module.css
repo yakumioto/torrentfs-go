@@ -1,0 +1,44 @@
+.card h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 7vw, 2.5rem);
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.copy {
+  margin: 0.8rem 0 1.75rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.footer {
+  margin: 1rem 0 0;
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+}
+
+.sessionCallout {
+  display: flex;
+  align-items: start;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: var(--radius-sm);
+  color: #e3b341;
+  background: rgba(210, 153, 34, 0.1);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}

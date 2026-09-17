@@ -1,0 +1,27 @@
+.table {
+  min-width: 42rem;
+}
+
+.filePath {
+  max-width: 30rem;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.coverage {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.coverageComplete {
+  color: var(--success);
+}
+
+.coveragePartial {
+  color: var(--accent);
+}
+
+.coverageWaiting {
+  color: var(--warning);
+}

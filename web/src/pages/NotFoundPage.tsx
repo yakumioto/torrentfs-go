@@ -7,8 +7,8 @@ export function NotFoundPage() {
   return (
     <div className="panel error-state">
       <IconCompassOff size={34} aria-hidden="true" />
-      <h2>That route is not charted</h2>
-      <p>The page does not exist in this control room.</p>
+      <h2>Page not found</h2>
+      <p>The requested TorrentFS route does not exist.</p>
       <Button variant="light" color="mint" onClick={() => navigate('/')}>Back to dashboard</Button>
     </div>
   );
