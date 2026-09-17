@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,14 +322,15 @@ func forceUnmount(t *testing.T, mountpoint string) {
 	t.Errorf("could not force-unmount %s; a FUSE mount may remain", mountpoint)
 }
 
-// TestFuseReadUnmountCloseRace races Unmount and Session.Close against read
-// requests that are provably still outstanding. A test-only read gate holds
-// every backend read inside ReadAt, so when the test observes a read enter the
-// gate and confirms it has not returned, it knows a live FUSE request is
-// pending; only then do Unmount and Session.Close start, from separate
-// goroutines, and both must return within one deadline. A deadlock or data
-// race that needs all three to overlap is exactly what this test catches.
-func TestFuseReadUnmountCloseRace(t *testing.T) {
+// TestFuseCloseFirstShutdownReleasesBlockedReads is the lifecycle regression
+// for the production shutdown order. Two descriptors read two different
+// missing pieces of a peerless torrent through a real FUSE mount, so both
+// reads are provably blocked in the shared loader rather than merely
+// outstanding at the ReadAt entry. The session is then closed and only after
+// that is the mount unmounted, matching main's shutdown sequence; the blocked
+// reads must fail, and Unmount must not block or report the daemon-owned
+// device-busy failure the unmount-first order produced.
+func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 	requireFuse(t)
 	ctx := testTimeout(t)
 
@@ -339,134 +341,145 @@ func TestFuseReadUnmountCloseRace(t *testing.T) {
 		t.Fatalf("make mountpoint: %v", err)
 	}
 
-	content := make([]byte, testPieceLength+777)
+	// No payload is written and no peer ever joins, so every piece stays
+	// missing and reads block until the session is closed.
+	content := make([]byte, 3*testPieceLength+4096)
 	for i := range content {
-		content[i] = byte(i)
+		content[i] = byte(i*13 + i/97)
 	}
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	torrentPath := filepath.Join(work, "payload.bin.torrent")
+	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
+		t.Fatalf("write torrent: %v", err)
+	}
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	sess := newLoopbackSession(t, testConfig(dataDir))
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
-		_ = sess.Close(context.Background())
 		t.Fatalf("AddTorrent: %v", err)
 	}
 	st, ok := sess.Torrent(hash)
 	if !ok {
-		_ = sess.Close(context.Background())
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	select {
+	case <-st.GotInfo():
+	case <-ctx.Done():
+		t.Fatalf("torrent info never arrived: %v", ctx.Err())
+	}
+	if st.BytesCompleted() == st.Length() {
+		t.Fatal("the torrent must stay incomplete for this test")
+	}
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {
-		_ = sess.Close(context.Background())
 		t.Fatalf("Mount: %v", err)
 	}
-	defer unmountServer(t, server, mnt)
+	// Exactly one graceful unmount attempt owns the mount: the test performs
+	// it after Close, and cleanup only force-detaches a leftover.
+	var unmounted atomic.Bool
+	unmountOnce := func(deadline time.Duration) error {
+		if !unmounted.CompareAndSwap(false, true) {
+			return nil
+		}
+		done := make(chan error, 1)
+		go func() { done <- server.Unmount() }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(deadline):
+			return fmt.Errorf("unmount %s did not return within %s", mnt, deadline)
+		}
+	}
+	t.Cleanup(func() {
+		if err := unmountOnce(30 * time.Second); err != nil {
+			t.Errorf("cleanup unmount %s: %v", mnt, err)
+			forceUnmount(t, mnt)
+		}
+	})
 
 	path := filepath.Join(mnt, "payload.bin")
-
-	// Hold every backend read inside ReadAt until released. A reader blocked
-	// here has entered ReadAt and not returned, so its FUSE request is
-	// outstanding by construction rather than by timing.
-	readEntered := make(chan struct{})
-	readRelease := make(chan struct{})
-	var enteredOnce, releaseOnce sync.Once
-	releaseReads := func() { releaseOnce.Do(func() { close(readRelease) }) }
-	restoreGate := session.SetReadGate(func() {
-		enteredOnce.Do(func() { close(readEntered) })
-		<-readRelease
-	})
-	// A failed assertion anywhere below must not leave the hook installed or
-	// the readers blocked on the gate: release them, then clear the gate.
-	defer func() {
-		releaseReads()
-		restoreGate()
-	}()
-
-	const readers = 3
-	readerDone := make(chan error, readers)
-	var readerWG sync.WaitGroup
-	for i := 0; i < readers; i++ {
-		readerWG.Add(1)
-		go func(seed int) {
-			defer readerWG.Done()
-			f, err := os.Open(path)
-			if err != nil {
-				readerDone <- fmt.Errorf("open: %w", err)
-				return
-			}
-			defer func() { _ = f.Close() }()
-			buf := make([]byte, concurrencyReadChunk)
-			off := int64(seed * concurrencyReadChunk % (len(content) - concurrencyReadChunk))
-			if _, err := f.ReadAt(buf, off); err != nil {
-				readerDone <- err
-				return
-			}
-			readerDone <- nil
-		}(i)
+	firstFile, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open first descriptor: %v", err)
 	}
-
-	select {
-	case <-readEntered:
-	case <-ctx.Done():
-		t.Fatal("no read ever entered the gate")
+	// The descriptors are closed before the unmount below: an open file is a
+	// host holder, and any unmount fails on one. The daemon-owned failure this
+	// test targets is the one that happens with no holder at all.
+	defer func() { _ = firstFile.Close() }()
+	secondFile, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open second descriptor: %v", err)
 	}
-	// The gate is closed, so a read is inside ReadAt; confirm none has
-	// returned yet. Together these prove a live, unfinished read exists now.
-	select {
-	case err := <-readerDone:
-		t.Fatalf("a reader finished before Unmount/Close started: %v", err)
-	default:
-	}
+	defer func() { _ = secondFile.Close() }()
 
-	unmountDone := make(chan error, 1)
+	events := make(chan session.ReadProbeEvent, 32)
+	restoreProbe := session.SetReadProbe(events)
+	defer restoreProbe()
+
+	// Each descriptor reads a different missing piece, so the offsets identify
+	// which request reached the loader.
+	firstOffset := int64(testPieceLength)
+	secondOffset := int64(2 * testPieceLength)
+
+	firstDone := readAtAsync(firstFile, firstOffset+512, 64)
+	firstStarted := waitProbeEvent(t, events, "reader-started", firstOffset)
+
+	secondDone := readAtAsync(secondFile, secondOffset+512, 64)
+	waitProbeEvent(t, events, "admission-attempt", secondOffset)
+
+	// The second request must not have cancelled the first, and neither read
+	// may have returned while the pieces are missing.
+	if probeDoneClosed(firstStarted.Done) {
+		t.Fatal("the second read cancelled the first read's operation")
+	}
+	requireNoReadOutcome(t, firstDone, "first blocked read")
+	requireNoReadOutcome(t, secondDone, "second blocked read")
+
+	// Production order: close the session first, from its own goroutine with
+	// the test's own deadline, because Session.Close ignores its context.
 	closeDone := make(chan error, 1)
-	go func() { unmountDone <- server.Unmount() }()
-	go func() { closeDone <- sess.Close(ctx) }()
+	go func() { closeDone <- sess.Close(context.Background()) }()
 
-	// Let both calls overlap the outstanding reads, then release them so the
-	// kernel can drain the requests and drop the mount.
-	time.Sleep(50 * time.Millisecond)
-	releaseReads()
+	waitProbeDoneClosed(t, firstStarted.Done, "blocked operation context")
 
-	var unmountErr, closeErr error
-	deadline := time.After(30 * time.Second)
-	for pending := 2; pending > 0; {
-		select {
-		case unmountErr = <-unmountDone:
-			pending--
-		case closeErr = <-closeDone:
-			pending--
-		case <-deadline:
-			t.Fatal("Unmount and Session.Close did not both return: deadlock")
+	firstOutcome := waitReadOutcome(t, firstDone, "first blocked read after Close")
+	if firstOutcome.err == nil {
+		t.Fatalf("first blocked read returned %d bytes after Close; want an error", len(firstOutcome.data))
+	}
+	secondOutcome := waitReadOutcome(t, secondDone, "second blocked read after Close")
+	if secondOutcome.err == nil {
+		t.Fatalf("second blocked read returned %d bytes after Close; want an error", len(secondOutcome.data))
+	}
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Errorf("Session.Close: %v", err)
 		}
-	}
-	if closeErr != nil {
-		t.Errorf("Session.Close: %v", closeErr)
-	}
-	if unmountErr != nil {
-		t.Errorf("Unmount while reads were outstanding: %v", unmountErr)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Session.Close did not return while reads were blocked")
 	}
 
-	waitGroupWithin(t, ctx, &readerWG, "outstanding readers")
-	for i := 0; i < readers; i++ {
-		// The reads were released only after Unmount and Close had started, so
-		// each must fail. The exact errno varies with which of the two tore the
-		// mount down first (EIO from the FUSE layer, EBADF from the closed
-		// session); what matters is that none reports success.
-		if err := <-readerDone; err == nil {
-			t.Error("a read completed successfully after Unmount and Session.Close; want an error")
-		}
+	// Reclaim every descriptor before releasing the mount, so the unmount
+	// result cannot be blamed on a holder this test created itself.
+	if err := firstFile.Close(); err != nil {
+		t.Errorf("close first descriptor: %v", err)
+	}
+	if err := secondFile.Close(); err != nil {
+		t.Errorf("close second descriptor: %v", err)
 	}
 
-	// The mount is gone, so a fresh open must fail.
+	// Only after Close returned and the descriptors are gone may the mount be
+	// released; it must succeed with no device-busy failure.
+	if err := unmountOnce(30 * time.Second); err != nil {
+		t.Fatalf("Unmount after Session.Close: %v", err)
+	}
+
+	// The mount is gone, so a fresh open must fail and no descriptor or read
+	// goroutine may still be live.
 	if f, err := os.Open(path); err == nil {
 		_ = f.Close()
-		t.Error("open after Unmount and Close succeeded; want an error")
+		t.Error("open after Session.Close and Unmount succeeded; want an error")
 	}
 }
 

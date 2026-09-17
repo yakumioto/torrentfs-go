@@ -66,19 +66,32 @@ func PieceStateRunsForTest(st *Torrent) torrent.PieceStateRuns {
 	return st.tor.PieceStateRuns()
 }
 
-// SetReadGate installs hook as the session read gate and returns a function
-// that restores the previous gate. hook runs at the start of every real read
-// and may block, which lets a test hold a read outstanding (its ReadAt has
-// entered and not returned) while it races Unmount and Session.Close. A nil
-// hook clears the gate. Restoring always writes the saved value back, so an
-// install that saw no previous gate still clears it rather than leaving the
-// hook installed for later tests. This is a test-only seam; production never
-// sets it.
-func SetReadGate(hook func()) (restore func()) {
-	var next *func()
-	if hook != nil {
-		next = &hook
+// ReadProbeEvent is one loader read event reported to a test-installed probe.
+type ReadProbeEvent = readProbeEvent
+
+// SetReadProbe installs ch as the loader read probe and returns a function that
+// restores the previous probe. Events are sent non-blocking to ch, so a test
+// must give it enough capacity for every event it expects. A nil channel clears
+// the probe. This is a test-only seam; production never installs one.
+func SetReadProbe(ch chan ReadProbeEvent) (restore func()) {
+	var next *chan readProbeEvent
+	if ch != nil {
+		next = &ch
 	}
-	previous := readGate.Swap(next)
-	return func() { readGate.Store(previous) }
+	previous := readProbe.Swap(next)
+	return func() { readProbe.Store(previous) }
+}
+
+// SameRAFile reports whether two reader handles are the same session raFile,
+// and whether they share one pieceLoader. Test-only.
+func SameRAFile(a, b io.ReaderAt) (sameFile, sameLoader bool) {
+	first, ok := a.(*raFile)
+	if !ok {
+		return false, false
+	}
+	second, ok := b.(*raFile)
+	if !ok {
+		return false, false
+	}
+	return first == second, first.loader == second.loader
 }

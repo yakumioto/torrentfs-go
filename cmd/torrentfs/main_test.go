@@ -2,12 +2,116 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// shutdownRecorder records the order in which the shutdown stages ran and the
+// errors each stage reports.
+type shutdownRecorder struct {
+	order []string
+}
+
+type fakeAPIShutdown struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeAPIShutdown) Shutdown(context.Context) error {
+	f.recorder.order = append(f.recorder.order, "api")
+	return f.err
+}
+
+type fakeSessionCloser struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeSessionCloser) Close(context.Context) error {
+	f.recorder.order = append(f.recorder.order, "close")
+	return f.err
+}
+
+type fakeMountUnmounter struct {
+	recorder *shutdownRecorder
+	err      error
+}
+
+func (f fakeMountUnmounter) Unmount() error {
+	f.recorder.order = append(f.recorder.order, "unmount")
+	return f.err
+}
+
+// TestShutdownSequenceClosesSessionBeforeUnmount pins the production order:
+// outstanding FUSE reads must be released by Session.Close before the mount is
+// unmounted, or Unmount can block on them.
+func TestShutdownSequenceClosesSessionBeforeUnmount(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{
+		api:   fakeAPIShutdown{recorder: recorder},
+		sess:  fakeSessionCloser{recorder: recorder},
+		mount: fakeMountUnmounter{recorder: recorder},
+	}
+	result := sequence.run()
+	if want := []string{"api", "close", "unmount"}; !equalStrings(recorder.order, want) {
+		t.Fatalf("shutdown order = %v, want %v", recorder.order, want)
+	}
+	if result.api != nil || result.close != nil || result.unmount != nil {
+		t.Fatalf("shutdown errors = %+v, want all nil", result)
+	}
+}
+
+// TestShutdownSequenceRunsEveryStageDespiteErrors checks that a failing stage
+// never skips the stages after it and that every error is preserved.
+func TestShutdownSequenceRunsEveryStageDespiteErrors(t *testing.T) {
+	apiErr := errors.New("api shutdown failed")
+	closeErr := errors.New("session close failed")
+	unmountErr := errors.New("unmount failed")
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{
+		api:   fakeAPIShutdown{recorder: recorder, err: apiErr},
+		sess:  fakeSessionCloser{recorder: recorder, err: closeErr},
+		mount: fakeMountUnmounter{recorder: recorder, err: unmountErr},
+	}
+	result := sequence.run()
+	if want := []string{"api", "close", "unmount"}; !equalStrings(recorder.order, want) {
+		t.Fatalf("shutdown order = %v, want %v", recorder.order, want)
+	}
+	if !errors.Is(result.api, apiErr) || !errors.Is(result.close, closeErr) || !errors.Is(result.unmount, unmountErr) {
+		t.Fatalf("shutdown errors = %+v, want api=%v close=%v unmount=%v", result, apiErr, closeErr, unmountErr)
+	}
+}
+
+// TestShutdownSequenceSkipsAbsentStages covers the headless and mount-only
+// configurations: a nil stage is not called and reports no error.
+func TestShutdownSequenceSkipsAbsentStages(t *testing.T) {
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{sess: fakeSessionCloser{recorder: recorder}}
+	result := sequence.run()
+	if want := []string{"close"}; !equalStrings(recorder.order, want) {
+		t.Fatalf("shutdown order = %v, want %v", recorder.order, want)
+	}
+	if result.api != nil || result.close != nil || result.unmount != nil {
+		t.Fatalf("shutdown errors = %+v, want all nil", result)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")

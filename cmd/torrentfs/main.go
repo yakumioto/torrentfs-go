@@ -151,30 +151,82 @@ func run(args []string, stderr io.Writer) int {
 	case serveFailure = <-serveErr:
 	}
 
-	var unmountErr error
-	if server != nil {
-		unmountErr = server.Unmount()
-	}
+	sequence := shutdownSequence{}
 	if apiServer != nil {
-		if err := apiServer.Shutdown(context.Background()); err != nil && serveFailure == nil {
-			serveFailure = err
-		}
+		sequence.api = apiServer
 	}
-	closeErr := sess.Close(rootCtx)
+	if sess != nil {
+		sequence.sess = sess
+	}
+	if server != nil {
+		sequence.mount = server
+	}
+	shutdown := sequence.run()
 	cancel()
-	if unmountErr != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: unmount %s: %v\n", *mountpoint, unmountErr)
+
+	if shutdown.unmount != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: unmount %s: %v\n", *mountpoint, shutdown.unmount)
+	}
+	if shutdown.api != nil && serveFailure == nil {
+		serveFailure = shutdown.api
 	}
 	if serveFailure != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: http server: %v\n", serveFailure)
 	}
-	if closeErr != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", closeErr)
+	if shutdown.close != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", shutdown.close)
 	}
-	if unmountErr != nil || serveFailure != nil || closeErr != nil {
+	if shutdown.unmount != nil || serveFailure != nil || shutdown.close != nil {
 		return 1
 	}
 	return 0
+}
+
+// httpShutdowner is the narrow API surface the shutdown sequence stops.
+type httpShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+// sessionCloser is the narrow session surface the shutdown sequence closes.
+type sessionCloser interface {
+	Close(context.Context) error
+}
+
+// mountUnmounter is the narrow FUSE surface the shutdown sequence unmounts.
+type mountUnmounter interface {
+	Unmount() error
+}
+
+// shutdownSequence stops a running torrentfs instance. The order is fixed and
+// observable: stop the HTTP API, close the session, and only then unmount the
+// FUSE server. Closing the session first cancels and drains outstanding reads,
+// so Unmount does not block on FUSE requests still waiting for data.
+type shutdownSequence struct {
+	api   httpShutdowner
+	sess  sessionCloser
+	mount mountUnmounter
+}
+
+// shutdownResult carries one error per stage so each can be reported
+// separately; a failed stage never skips the stages after it.
+type shutdownResult struct {
+	api     error
+	close   error
+	unmount error
+}
+
+func (s shutdownSequence) run() shutdownResult {
+	var result shutdownResult
+	if s.api != nil {
+		result.api = s.api.Shutdown(context.Background())
+	}
+	if s.sess != nil {
+		result.close = s.sess.Close(context.Background())
+	}
+	if s.mount != nil {
+		result.unmount = s.mount.Unmount()
+	}
+	return result
 }
 
 func validateTorrentDir(path string) error {

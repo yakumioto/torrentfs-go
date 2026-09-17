@@ -326,6 +326,12 @@ Reads never fabricate data. When the pieces behind a range are unavailable, a
 read either blocks until they arrive or returns an error; it does not return
 zero-filled or partial-success content.
 
+Overlapping reads are serialized over one shared torrent reader: a new read
+waits for the read in flight instead of cancelling it, so ordinary player
+concurrency (readahead, seeks, probes) cannot turn into a cancellation storm. A
+read is cancelled only by its own request going away, by the session closing,
+or by the torrent being removed.
+
 - **No peers / no seeder.** A torrent whose data is not local and whose swarm
   has no peers stays incomplete. Reads of missing ranges wait for pieces that
   never arrive until the session is closed, at which point they fail rather
@@ -418,7 +424,13 @@ both the container mount and the host source directory expose the same file and
 hash, that the mount exposes no `metadata/` or `stats/` control path, that host
 writes are rejected, and that a pre-existing legacy `/torrents/.stats` is left
 untouched. It also verifies rejected single-file and missing-directory CLI
-inputs and confirms a normal stop removes the propagated host mount. It
+inputs and confirms a normal stop removes the propagated host mount. A second,
+offline scenario starts an incomplete torrent with no peer, issues a read that
+blocks on the missing piece, and checks that SIGTERM still stops the process
+with exit code 0, without a daemon-owned unmount failure and without the
+anacrolix reader cancellation errors during the running phase. Every Docker
+call in the script, including the teardown waits, is bounded; a timeout
+collects diagnostics and fails instead of hanging. It
 requires a working Docker daemon, `/dev/fuse`, `findmnt`, `SYS_ADMIN` mount
 permission, and (on AppArmor hosts) permission to use
 `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
@@ -464,6 +476,42 @@ The FUSE mount keeps the default owner-only access (`AllowOther=false`), so
 other host users may receive `EACCES` rather than see the mounted data. This is
 intentional and does not grant arbitrary host-user access; enabling `allow_other`
 requires a separate security decision and FUSE configuration.
+
+### Shutdown, outstanding reads, and `Device or resource busy`
+
+On SIGINT/SIGTERM the process stops the HTTP API, closes the session, and only
+then unmounts the FUSE filesystem. That order is required: closing the session
+cancels and drains reads that are still waiting for pieces, so the unmount no
+longer has to wait on them. Unmounting first makes `fusermount3` fail with
+`failed to unmount /mnt: Device or resource busy` whenever a request is still
+outstanding, and the mount can then only be released lazily.
+
+A `Device or resource busy` on unmount has two distinct causes, and they need
+different answers:
+
+- **daemon-owned outstanding request.** A read issued through the mount is
+  still waiting on a missing piece. With no host process holding the mount,
+  this reproduces from the container alone. It is what the session-close-first
+  order fixes; after the fix the same scenario unmounts cleanly.
+- **a host holder.** A player, media scanner, open file descriptor, or a
+  process whose working directory is inside the propagated mount keeps the
+  mount busy. Confirm it with the owning PID and command:
+
+  ```sh
+  findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
+  fuser -vm /srv/mnt     # when fuser is installed and permitted
+  lsof /srv/mnt          # when lsof is installed and permitted
+  ```
+
+  Release the holder (stop the player/scan) and retry the unmount. When
+  `fuser`/`lsof` are missing or lack permission, the holder diagnostics are
+  simply incomplete — that is not evidence that no holder exists.
+
+`rshared` propagation on the `/mnt` bind is required for a FUSE submount to be
+visible in the host source directory; it is not the cause of a busy unmount and
+should not be relaxed to `rprivate`/`rslave`. Likewise, `fusermount3 -uz` is a
+lazy detach for cleaning up a mount that already failed to release; it must
+never be used as, or mistaken for, a successful graceful unmount.
 
 `/srv/torrents` must be writable because torrentfs creates and updates
 `/torrents/.metadata`; do not mount it read-only. Add and remove direct regular

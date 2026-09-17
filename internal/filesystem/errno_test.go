@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,10 @@ func TestErrnoForWrappedErrors(t *testing.T) {
 		{name: "invalid", err: fmt.Errorf("outer: %w", ErrInvalidName), want: syscall.EINVAL},
 		{name: "cross dir", err: fmt.Errorf("outer: %w", ErrCrossDir), want: syscall.EXDEV},
 		{name: "closed", err: fmt.Errorf("outer: %w", ErrClosed), want: syscall.EBADF},
+		// A cancelled or expired FUSE request is an interrupted system call, not
+		// a closed handle: the mapping must stay distinct from ErrClosed/EBADF.
+		{name: "context canceled", err: fmt.Errorf("outer: %w", context.Canceled), want: syscall.EINTR},
+		{name: "context deadline exceeded", err: fmt.Errorf("outer: %w", context.DeadlineExceeded), want: syscall.EINTR},
 		{name: "path error", err: &os.PathError{Op: "open", Path: "x", Err: fs.ErrNotExist}, want: syscall.ENOENT},
 		// A wrapped syscall errno is preserved rather than flattened to EIO,
 		// so healthy warnings like ENODATA reach the caller intact.

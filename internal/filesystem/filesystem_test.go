@@ -7,8 +7,10 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -118,6 +120,95 @@ func TestRootContainsOnlyTorrentDataAndIsReadOnly(t *testing.T) {
 	}
 	if _, errno := root.Mkdir(context.Background(), "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
 		t.Fatalf("root Mkdir errno = %v, want EROFS", errno)
+	}
+}
+
+// contextualFakeReader implements both io.ReaderAt and the optional
+// contextualReaderAt extension: its contextual read blocks until the request
+// context is cancelled, and its plain ReadAt records that it was reached, so a
+// test can prove which path the handle took.
+type contextualFakeReader struct {
+	started     chan struct{}
+	startedOnce sync.Once
+	plainCalls  int
+	mu          sync.Mutex
+}
+
+func (r *contextualFakeReader) ReadAt([]byte, int64) (int, error) {
+	r.mu.Lock()
+	r.plainCalls++
+	r.mu.Unlock()
+	return 0, nil
+}
+
+func (r *contextualFakeReader) ReadAtContext(ctx context.Context, _ []byte, _ int64) (int, error) {
+	r.startedOnce.Do(func() { close(r.started) })
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (r *contextualFakeReader) plainCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.plainCalls
+}
+
+// TestReadHandleForwardsRequestContext checks the FUSE bridge hands the
+// request context to a context-aware reader: cancelling the request fails the
+// read with EINTR instead of leaving it blocked, and the plain io.ReaderAt
+// path is never used for such a reader.
+func TestReadHandleForwardsRequestContext(t *testing.T) {
+	reader := &contextualFakeReader{started: make(chan struct{})}
+	handle := &readHandle{ra: reader, size: 4096}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		errno syscall.Errno
+		data  []byte
+	}
+	done := make(chan result, 1)
+	go func() {
+		read, errno := handle.Read(ctx, make([]byte, 64), 0)
+		var data []byte
+		if read != nil {
+			data, _ = read.Bytes(make([]byte, 64))
+		}
+		done <- result{errno: errno, data: data}
+	}()
+
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("contextual read never started")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got.errno != syscall.EINTR {
+			t.Fatalf("cancelled read errno = %v, want EINTR", got.errno)
+		}
+		if len(got.data) != 0 {
+			t.Fatalf("cancelled read returned %d bytes of data, want none", len(got.data))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled read did not return")
+	}
+	if got := reader.plainCallCount(); got != 0 {
+		t.Fatalf("plain ReadAt calls = %d, want 0 for a context-aware reader", got)
+	}
+}
+
+// TestReadHandleFallsBackToPlainReaderAt pins the compatibility path: a
+// backend that only implements io.ReaderAt still serves reads normally.
+func TestReadHandleFallsBackToPlainReaderAt(t *testing.T) {
+	handle := &readHandle{ra: bytes.NewReader([]byte("content")), size: 7}
+	read, errno := handle.Read(context.Background(), make([]byte, 7), 0)
+	if errno != 0 {
+		t.Fatalf("plain read errno = %v, want 0", errno)
+	}
+	out, status := read.Bytes(make([]byte, 7))
+	if status != fuse.OK || string(out) != "content" {
+		t.Fatalf("plain read = %q status=%v, want content/OK", out, status)
 	}
 }
 

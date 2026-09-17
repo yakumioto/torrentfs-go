@@ -51,6 +51,13 @@ type readHandle struct {
 var _ fs.FileReader = (*readHandle)(nil)
 var _ fs.FileReleaser = (*readHandle)(nil)
 
+// contextualReaderAt is the optional backend extension that lets a FUSE read
+// pass its request context down to the reader. Backends that only implement
+// io.ReaderAt keep working through the fallback below.
+type contextualReaderAt interface {
+	ReadAtContext(context.Context, []byte, int64) (int, error)
+}
+
 func (h *readHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if off < 0 {
 		return nil, errnoFor(ErrInvalidName)
@@ -58,7 +65,15 @@ func (h *readHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	if off >= h.size {
 		return fuse.ReadResultData(nil), 0
 	}
-	n, err := h.ra.ReadAt(dest, off)
+	var (
+		n   int
+		err error
+	)
+	if ra, ok := h.ra.(contextualReaderAt); ok {
+		n, err = ra.ReadAtContext(ctx, dest, off)
+	} else {
+		n, err = h.ra.ReadAt(dest, off)
+	}
 	if err != nil && err != io.EOF {
 		return nil, errnoFor(err)
 	}
