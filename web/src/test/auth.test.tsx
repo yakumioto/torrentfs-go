@@ -71,4 +71,33 @@ describe('AuthProvider', () => {
     const managementRequest = vi.mocked(fetch).mock.calls[2][1] as RequestInit;
     expect(new Headers(managementRequest.headers).get('Authorization')).toBe('Bearer opaque');
   });
+
+  it('ignores a stale unauthorized response after a new login', async () => {
+    let resolveStale!: (response: Response) => void;
+    const staleRequest = new Promise<Response>((resolve) => {
+      resolveStale = resolve;
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ error: 'unauthorized' }, { status: 401, headers: { 'WWW-Authenticate': 'Bearer' } }))
+      .mockResolvedValueOnce(jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }))
+      .mockImplementationOnce(() => staleRequest)
+      .mockResolvedValueOnce(jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }))
+      .mockResolvedValueOnce(jsonResponse([]));
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('phase')).toHaveTextContent('login'));
+    fireEvent.click(screen.getByRole('button', { name: 'login' }));
+    await waitFor(() => expect(screen.getByTestId('phase')).toHaveTextContent('authenticated'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'request' }));
+    fireEvent.click(screen.getByRole('button', { name: 'login' }));
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4));
+    resolveStale(jsonResponse({ error: 'unauthorized' }, { status: 401, headers: { 'WWW-Authenticate': 'Bearer' } }));
+    await waitFor(() => expect(screen.getByTestId('phase')).toHaveTextContent('authenticated'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'request' }));
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(5));
+    const latestRequest = vi.mocked(fetch).mock.calls[4][1] as RequestInit;
+    expect(new Headers(latestRequest.headers).get('Authorization')).toBe('Bearer opaque');
+  });
 });

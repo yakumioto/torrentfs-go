@@ -63,6 +63,7 @@ describe('TorrentDetailPage', () => {
       isReady: true,
       isAuthenticated: false,
       loginError: '',
+      sessionNotice: '',
       connectionError: '',
       login: async () => false,
       logout: async () => undefined,

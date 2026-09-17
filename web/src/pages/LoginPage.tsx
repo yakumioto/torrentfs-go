@@ -1,5 +1,5 @@
 import { Button, PasswordInput, TextInput } from '@mantine/core';
-import { IconKey, IconRadar } from '@tabler/icons-react';
+import { IconKey, IconRadar, IconRefresh } from '@tabler/icons-react';
 import { FormEvent, useState } from 'react';
 import { useAuth } from '../app/auth-context';
 
@@ -43,6 +43,7 @@ export function LoginPage() {
             required
             mb="lg"
           />
+          {auth.sessionNotice !== '' && <div className="session-callout" role="status" aria-live="polite"><IconRefresh size={15} aria-hidden="true" /> {auth.sessionNotice}</div>}
           {auth.loginError !== '' && <div className="error-callout" role="alert" aria-live="polite"><IconKey size={15} aria-hidden="true" /> {auth.loginError}</div>}
           <Button type="submit" fullWidth color="mint" loading={submitting} mt="lg">Sign in</Button>
         </form>

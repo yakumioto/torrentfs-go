@@ -80,6 +80,14 @@ auth_status="$(curl --silent --show-error --output "$work_dir/auth.json" --write
 logout_status="$(curl --silent --show-error --output "$work_dir/logout.body" --write-out '%{http_code}' --request POST --header "Authorization: Bearer $token" "$base_url/api/v1/auth/logout")"
 [[ "$logout_status" == 204 ]]
 
+refreshed_root_status="$(curl --silent --show-error --output "$work_dir/refreshed-root.html" --write-out '%{http_code}' "$base_url/")"
+[[ "$refreshed_root_status" == 200 ]]
+cmp -- "$work_dir/root.html" "$work_dir/refreshed-root.html"
+
+refreshed_deep_status="$(curl --silent --show-error --output "$work_dir/refreshed-deep.html" --write-out '%{http_code}' "$base_url/torrents/refreshed")"
+[[ "$refreshed_deep_status" == 200 ]]
+cmp -- "$work_dir/root.html" "$work_dir/refreshed-deep.html"
+
 unknown_status="$(curl --silent --show-error --dump-header "$work_dir/unknown.headers" --output "$work_dir/unknown.body" --write-out '%{http_code}' --header "Authorization: Bearer $token" "$base_url/api/v1/unknown")"
 [[ "$unknown_status" == 401 ]]
 ! grep -q '<html' "$work_dir/unknown.body"
