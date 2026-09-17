@@ -20,7 +20,11 @@ readonly HOST_OBSERVER_CONTAINER="torrentfs-mio17-host-observer-${BASHPID}"
 readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 
 # Every Docker call that can hang is bounded: a wedged daemon or an unmount
-# that waits forever must fail the smoke instead of hanging it.
+# that waits forever must fail the smoke instead of hanging it. The positive
+# scenario's bound is meaningful because the propagation peer this script
+# creates itself (the host observer container) is reclaimed before SIGTERM: a
+# mount namespace still holding a propagated copy would otherwise keep
+# Server.Unmount waiting past any bound.
 readonly DOCKER_OP_TIMEOUT=60
 
 # The anacrolix reader errors that a cancellation storm produces. Playback
@@ -35,6 +39,8 @@ POSITIVE_STARTED=0
 HOST_OBSERVER_STARTED=0
 FILE_INPUT_CREATED=0
 MISSING_DIR_CREATED=0
+# Background readers of the blocked-read scenario, reclaimed on every path.
+BLOCKED_READ_PIDS=()
 
 fail() {
 	printf 'docker smoke: %s\n' "$*" >&2
@@ -109,6 +115,13 @@ host_mount_released() {
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM
+
+	# Reclaim any outstanding blocked-read reader, success or failure path.
+	if (( ${#BLOCKED_READ_PIDS[@]} )); then
+		for blocked_pid in "${BLOCKED_READ_PIDS[@]}"; do
+			kill "$blocked_pid" 2>/dev/null || true
+		done
+	fi
 
 	# Every teardown step is bounded. Forced kill/remove is a last resort for
 	# residue; it never changes the recorded exit status, so a forced cleanup
@@ -259,12 +272,24 @@ HOST_AFTER_WRITE_HASH="${HOST_AFTER_WRITE_HASH%% *}"
 	fail "host payload changed after rejected write: $HOST_AFTER_WRITE_HASH"
 printf 'docker smoke: propagated host mount is read-only\n'
 
+# Reclaim the observer before SIGTERM. It is a propagation peer this script
+# created itself, and while its mount namespace holds a copy of the FUSE mount
+# the daemon's Server.Unmount waits for that namespace to release it. Every
+# cross-namespace check it exists for has already run above; the authoritative
+# "the host propagated mount is gone" assertion below is host-side and does not
+# go through the observer.
+if ! bounded 30 "remove the host mount observer" docker rm -f "$HOST_OBSERVER_CONTAINER" >/dev/null; then
+	fail "could not remove the host mount observer before shutdown"
+fi
+HOST_OBSERVER_STARTED=0
+printf 'docker smoke: observer reclaimed before shutdown so it cannot act as a propagation peer\n'
+
 if ! bounded 30 "signal the FUSE container" docker kill --signal TERM "$CONTAINER" >/dev/null; then
 	fail "could not send SIGTERM to the FUSE container"
 fi
 if ! STOP_STATUS="$(bounded "$DOCKER_OP_TIMEOUT" "wait for the FUSE container" docker wait "$CONTAINER")"; then
 	collect_unmount_diagnostics "$CONTAINER" "$MOUNT_HOST_DIR"
-	fail "FUSE container did not stop within ${DOCKER_OP_TIMEOUT}s after SIGTERM"
+	fail "FUSE container did not stop within ${DOCKER_OP_TIMEOUT}s after SIGTERM; another mount namespace may still hold a propagated copy of $MOUNT_HOST_DIR"
 fi
 [[ "$STOP_STATUS" == "0" ]] || fail "FUSE container stopped with exit code $STOP_STATUS"
 
@@ -285,20 +310,24 @@ if ! host_mount_released "$MOUNT_HOST_DIR"; then
 	collect_unmount_diagnostics "$CONTAINER" "$MOUNT_HOST_DIR"
 	fail "propagated host mount did not disappear after the container stopped"
 fi
-if docker exec "$HOST_OBSERVER_CONTAINER" test -e /host-mnt/payload.txt >/dev/null 2>&1; then
-	fail "host observer still sees the propagated FUSE payload after shutdown"
-fi
-if ! bounded 30 "remove the host mount observer" docker rm -f "$HOST_OBSERVER_CONTAINER" >/dev/null; then
-	fail "could not remove the host mount observer"
-fi
-HOST_OBSERVER_STARTED=0
 POSITIVE_STARTED=0
 printf 'docker smoke: FUSE container stopped and host mount disappeared cleanly\n'
 
 # Blocked-read shutdown scenario: no payload is preloaded and no peer exists,
-# so a read through the container's own mount blocks on a missing piece. A
-# SIGTERM must then still stop the process cleanly, without the daemon-owned
-# unmount failure the unmount-first order produced.
+# so reads through the container's own mount block on a missing piece. Two
+# overlapping logical readers are left outstanding and a SIGTERM must then
+# still stop the process cleanly, without the daemon-owned unmount failure the
+# unmount-first order produced, releasing both readers.
+#
+# Scope note (measured, not assumed): the fixture is a single 31-byte file, so
+# the whole file lives in one page and the kernel collapses the two same-page
+# reads into one in-flight FUSE request before the daemon sees them. An
+# instrumented pre-fix build logged exactly one loader entry and zero
+# cancellations for two overlapping readers, so this layer cannot discriminate
+# the cancellation fix. Runtime cancellation evidence therefore comes from the
+# Go/FUSE suite (TestFuseIncompleteOverlapReadsShareOneLoader, which reads two
+# pieces in different pages and asserts a zero playback-phase cancellation
+# count); this scenario covers the shutdown and EBUSY half.
 printf 'docker smoke: starting blocked-read shutdown scenario\n'
 BLOCKED_DATA_DIR="$TMP_DIR/blocked-data"
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
@@ -332,19 +361,37 @@ if ! docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null
 	fail "blocked-read container never exposed $MOUNTED_PAYLOAD"
 fi
 
-# Issue the read that must block on the missing piece. It is bounded and
-# reclaimable, so a failure path cannot leave it running forever.
-bounded 60 "blocked read" docker exec "$BLOCKED_READ_CONTAINER" \
-	dd if="$MOUNTED_PAYLOAD" of=/dev/null bs=4096 count=1 >/dev/null 2>&1 &
-BLOCKED_READ_PID=$!
+# Issue two overlapping reads that must both block on the same missing piece.
+# They read different, non-overlapping offsets of the 31-byte fixture, so both
+# stay inside the file and inside one piece; a read past EOF would return
+# immediately and prove nothing. Both are bounded and reclaimable.
+BLOCKED_READ_PIDS=()
+bounded 60 "first blocked read" docker exec "$BLOCKED_READ_CONTAINER" \
+	dd if="$MOUNTED_PAYLOAD" of=/dev/null bs=8 skip=0 count=1 >/dev/null 2>&1 &
+BLOCKED_READ_PIDS+=("$!")
+# Let the first request reach the loader before the overlapping one arrives.
+sleep 1
+bounded 60 "second blocked read" docker exec "$BLOCKED_READ_CONTAINER" \
+	dd if="$MOUNTED_PAYLOAD" of=/dev/null bs=8 skip=1 count=1 >/dev/null 2>&1 &
+BLOCKED_READ_PIDS+=("$!")
 sleep 2
-if ! kill -0 "$BLOCKED_READ_PID" 2>/dev/null; then
-	fail "the read returned instead of waiting on the missing piece; the scenario needs an outstanding read"
-fi
-printf 'docker smoke: a read is outstanding on the missing piece\n'
 
-# Playback snapshot: while the read is outstanding, the reader must not be
-# producing cancellation errors. This is the runtime half of the regression.
+# Scenario validity: the readers must still be waiting on the missing piece,
+# otherwise the shutdown below would be exercised with nothing outstanding.
+# This is not the cancellation discriminator (see the scope note above).
+for index in "${!BLOCKED_READ_PIDS[@]}"; do
+	read_pid="${BLOCKED_READ_PIDS[$index]}"
+	if ! kill -0 "$read_pid" 2>/dev/null; then
+		wait "$read_pid" 2>/dev/null || true
+		fail "reader $((index + 1)) returned before SIGTERM instead of waiting on the missing piece; the scenario needs an outstanding read"
+	fi
+done
+printf 'docker smoke: %d readers are outstanding on the missing piece\n' "${#BLOCKED_READ_PIDS[@]}"
+
+# The running phase must be free of reader cancellation errors. On this fixture
+# the pre-fix build also reports zero here, so this is a health check on the
+# running phase, not proof of the fix; the pre-fix failure this scenario
+# produces is the shutdown half asserted below.
 BLOCKED_PLAYBACK_LOGS="$(container_logs "$BLOCKED_READ_CONTAINER")"
 PLAYBACK_CANCELS="$(reader_cancel_count "$BLOCKED_PLAYBACK_LOGS")"
 [[ "$PLAYBACK_CANCELS" == "0" ]] || \
@@ -383,11 +430,14 @@ if ! host_mount_released "$BLOCKED_MOUNT_DIR"; then
 	fail "blocked-read propagated host mount did not disappear after shutdown"
 fi
 
-# Reclaim the outstanding reader and the container.
-if kill -0 "$BLOCKED_READ_PID" 2>/dev/null; then
-	kill "$BLOCKED_READ_PID" 2>/dev/null || true
-fi
-wait "$BLOCKED_READ_PID" 2>/dev/null || true
+# Reclaim both outstanding readers and the container.
+for read_pid in "${BLOCKED_READ_PIDS[@]}"; do
+	if kill -0 "$read_pid" 2>/dev/null; then
+		kill "$read_pid" 2>/dev/null || true
+	fi
+	wait "$read_pid" 2>/dev/null || true
+done
+BLOCKED_READ_PIDS=()
 if ! bounded 30 "remove the blocked-read container" docker rm -f "$BLOCKED_READ_CONTAINER" >/dev/null; then
 	fail "could not remove the blocked-read container"
 fi

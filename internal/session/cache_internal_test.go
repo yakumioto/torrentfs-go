@@ -569,10 +569,11 @@ func TestRaFileOverlappingCacheMissesDoNotCancel(t *testing.T) {
 		torrentSize: 64,
 	}
 
-	firstDone := make(chan error, 1)
+	firstDone := make(chan raFileReadResult, 1)
 	go func() {
-		_, err := first.ReadAt(make([]byte, 32), 0)
-		firstDone <- err
+		buf := make([]byte, 32)
+		n, err := first.ReadAt(buf, 0)
+		firstDone <- raFileReadResult{n: n, err: err, data: append([]byte(nil), buf...)}
 	}()
 	started := waitProbeEvent(t, events, "reader-started", 0)
 	select {
@@ -584,10 +585,11 @@ func TestRaFileOverlappingCacheMissesDoNotCancel(t *testing.T) {
 	// The second file's cache miss must queue behind the first rather than
 	// cancel it. Its whole piece is already being filled, so once the first
 	// read completes the second is served from the cache.
-	secondDone := make(chan error, 1)
+	secondDone := make(chan raFileReadResult, 1)
 	go func() {
-		_, err := second.ReadAt(make([]byte, 32), 32)
-		secondDone <- err
+		buf := make([]byte, 32)
+		n, err := second.ReadAt(buf, 32)
+		secondDone <- raFileReadResult{n: n, err: err, data: append([]byte(nil), buf...)}
 	}()
 	waitProbeEvent(t, events, "admission-attempt", 32)
 
@@ -595,28 +597,46 @@ func TestRaFileOverlappingCacheMissesDoNotCancel(t *testing.T) {
 		t.Fatal("the second cache miss cancelled the first read's operation")
 	}
 	select {
-	case err := <-firstDone:
-		t.Fatalf("first cache miss returned before release: %v", err)
+	case res := <-firstDone:
+		t.Fatalf("first cache miss returned before release: %v", res.err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	reader.releaseReads()
 
-	select {
-	case err := <-firstDone:
-		if err != nil {
-			t.Fatalf("first cache miss: %v", err)
-		}
-	case <-time.After(probeWait):
-		t.Fatal("first cache miss did not complete")
+	firstResult := waitRaFileResult(t, firstDone, "first cache miss")
+	if firstResult.err != nil {
+		t.Fatalf("first cache miss: %v", firstResult.err)
 	}
+	if want := blockingPattern(0, 32); firstResult.n != len(want) || !bytes.Equal(firstResult.data, want) {
+		t.Fatalf("first cache miss data = %v, want %v", firstResult.data, want)
+	}
+	secondResult := waitRaFileResult(t, secondDone, "second cache miss")
+	if secondResult.err != nil {
+		t.Fatalf("second cache miss: %v", secondResult.err)
+	}
+	// The offsets must be served by their own positions: a loader that skipped
+	// the Seek would hand back the previous position's bytes.
+	if want := blockingPattern(32, 32); secondResult.n != len(want) || !bytes.Equal(secondResult.data, want) {
+		t.Fatalf("second cache miss data = %v, want %v", secondResult.data, want)
+	}
+}
+
+// raFileReadResult is one raFile read outcome captured with its bytes.
+type raFileReadResult struct {
+	n    int
+	err  error
+	data []byte
+}
+
+func waitRaFileResult(t *testing.T, done <-chan raFileReadResult, what string) raFileReadResult {
+	t.Helper()
 	select {
-	case err := <-secondDone:
-		if err != nil {
-			t.Fatalf("second cache miss: %v", err)
-		}
+	case res := <-done:
+		return res
 	case <-time.After(probeWait):
-		t.Fatal("second cache miss did not complete")
+		t.Fatalf("%s did not return", what)
+		return raFileReadResult{}
 	}
 }
 

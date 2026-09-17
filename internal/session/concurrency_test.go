@@ -374,23 +374,33 @@ func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	// Exactly one graceful unmount attempt owns the mount: the test performs
-	// it after Close, and cleanup only force-detaches a leftover.
-	var unmounted atomic.Bool
+	// A graceful unmount short-circuits only once one has succeeded, so a failed
+	// or timed-out attempt is retried rather than leaving a live mount behind.
+	// cleanup force-detaches a mount that still cannot be released, and every
+	// attempt is bounded with a buffered result channel so a timed-out goroutine
+	// cannot block on its send.
+	var unmountSucceeded atomic.Bool
 	unmountOnce := func(deadline time.Duration) error {
-		if !unmounted.CompareAndSwap(false, true) {
+		if unmountSucceeded.Load() {
 			return nil
 		}
 		done := make(chan error, 1)
 		go func() { done <- server.Unmount() }()
 		select {
 		case err := <-done:
-			return err
+			if err != nil {
+				return err
+			}
+			unmountSucceeded.Store(true)
+			return nil
 		case <-time.After(deadline):
 			return fmt.Errorf("unmount %s did not return within %s", mnt, deadline)
 		}
 	}
 	t.Cleanup(func() {
+		if unmountSucceeded.Load() {
+			return
+		}
 		if err := unmountOnce(30 * time.Second); err != nil {
 			t.Errorf("cleanup unmount %s: %v", mnt, err)
 			forceUnmount(t, mnt)
