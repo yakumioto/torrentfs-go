@@ -628,9 +628,9 @@ func TestValidateAcceptsExposedAddressWithAuth(t *testing.T) {
 	}
 }
 
-func TestValidatePreservesProxyParseError(t *testing.T) {
+func TestValidatePreservesSanitizedProxyParseError(t *testing.T) {
 	cfg := config.Default()
-	cfg.Proxy.Socks5URL = "socks5://proxy.example/%zz"
+	cfg.Proxy.Socks5URL = "socks5://alice:secret@proxy.example/%zz"
 
 	err := cfg.Validate()
 	if err == nil {
@@ -643,6 +643,26 @@ func TestValidatePreservesProxyParseError(t *testing.T) {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) {
 		t.Fatalf("Validate error = %T %v, want wrapped *url.Error", err, err)
+	}
+	for _, secret := range []string{"alice", "secret", "socks5://alice:secret@proxy.example/%zz"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Validate error = %q, must not contain proxy credential or URL %q", err, secret)
+		}
+	}
+}
+
+func TestValidateRejectsProxyCredentialsWithInvalidPort(t *testing.T) {
+	cfg := config.Default()
+	cfg.Proxy.Socks5URL = "socks5://alice:secret@proxy.example:bad"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate succeeded")
+	}
+	for _, secret := range []string{"alice", "secret", "socks5://alice:secret@proxy.example:bad"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Validate error = %q, must not contain proxy credential or URL %q", err, secret)
+		}
 	}
 }
 

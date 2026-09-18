@@ -222,6 +222,30 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 	}
 }
 
+func TestLoadEnvironmentRejectsProxyCredentialsWithoutLeakingThem(t *testing.T) {
+	for _, raw := range []string{
+		"socks5://alice:secret@proxy.example/%zz",
+		"socks5://alice:secret@proxy.example:bad",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{
+				"TORRENTFS_PROXY_SOCKS5_URL": raw,
+			}))
+			if err == nil {
+				t.Fatal("load succeeded")
+			}
+			if !strings.Contains(err.Error(), "proxy.socks5_url") {
+				t.Fatalf("load error = %q, want proxy field", err)
+			}
+			for _, secret := range []string{"alice", "secret", raw} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("load error = %q, must not contain proxy credential or URL %q", err, secret)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadEnvironmentAuthenticationSourceSwitch(t *testing.T) {
 	path := writeConfigFile(t, `[http.auth]
 enabled = true
@@ -248,6 +272,21 @@ password_hash = "file-hash"
 	}
 	if got.HTTP.Auth.PasswordHash != "" || got.HTTP.Auth.PasswordHashFile != "/run/secrets/hash" {
 		t.Fatalf("auth sources = %+v", got.HTTP.Auth)
+	}
+}
+
+func TestLoadWithDataDirOverridePrecedesValidation(t *testing.T) {
+	path := writeConfigFile(t, "[paths]\ndata_dir = \"\"\n")
+	dataDir := filepath.Join(t.TempDir(), "cli-data")
+
+	got, err := loadWithDataDir(path, lookupEnvironment(map[string]string{
+		"TORRENTFS_PATHS_DATA_DIR": "",
+	}), dataDir, true)
+	if err != nil {
+		t.Fatalf("loadWithDataDir: %v", err)
+	}
+	if got.Paths.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want CLI override %q", got.Paths.DataDir, dataDir)
 	}
 }
 

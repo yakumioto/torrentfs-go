@@ -351,18 +351,12 @@ func validateTorrentDir(path string) error {
 }
 
 func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {
-	cfg, err := config.Load(path)
+	cfg, err := config.LoadWithDataDir(path, dataDir, dataDirSet)
 	if err != nil {
 		if path == "" {
 			return config.Config{}, fmt.Errorf("load config: %w", err)
 		}
 		return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
-	}
-	if dataDirSet {
-		cfg.Paths.DataDir = dataDir
-	}
-	if err := cfg.Validate(); err != nil {
-		return config.Config{}, fmt.Errorf("validate config: %w", err)
 	}
 	return cfg, nil
 }

@@ -492,6 +492,24 @@ func TestLoadConfigExplicitDataDirRemainsFinalOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigExplicitDataDirOverridesEmptySources(t *testing.T) {
+	unsetConfigEnvironment(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = \"\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_PATHS_DATA_DIR", "")
+	dataDir := filepath.Join(t.TempDir(), "cli-data")
+
+	cfg, err := loadConfig(path, dataDir, true)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Paths.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want CLI value %q", cfg.Paths.DataDir, dataDir)
+	}
+}
+
 func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	unsetConfigEnvironment(t)
 	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
