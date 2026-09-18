@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +72,7 @@ func (s *Session) watchTorrentDir(ctx context.Context, done chan struct{}) {
 			return
 		case <-ticker.C:
 			if err := s.scanTorrentDir(ctx, false); err != nil {
-				log.Printf("session: torrent directory sync: %v", err)
+				s.logger.WarnContext(ctx, "torrent directory sync failed", "dir", s.torrentsDir, "err", err)
 			}
 		}
 	}

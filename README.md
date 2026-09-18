@@ -281,7 +281,18 @@ capacity_bytes = 67108864
 tracker_user_agent = "qBittorrent/4.4.0"
 peer_id_prefix = "-qB4400-"
 extended_handshake_client_version = "qBittorrent/4.4.0"
+
+[log]
+level = "info"
+format = "text"
+add_source = false
 ```
+
+`log.level` accepts `debug`, `info`, `warn`, or `error`; the default is `info`,
+so debug records are disabled unless explicitly enabled. `log.format` accepts
+`text` or `json`, and `add_source` includes the source file and line in each
+record. Logs never include authentication tokens, password hashes, or proxy
+credentials.
 
 `payload_dir` is the managed root for per-torrent payload directories; each
 torrent owns `<payload_dir>/<info_hash>`, and that is the only directory ever

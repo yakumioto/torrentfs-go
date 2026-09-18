@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/auth"
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 	"github.com/yakumioto/torrentfs-go/web"
 )
@@ -30,27 +32,55 @@ type Backend interface {
 }
 
 // Server is the torrent management HTTP service.
+// Option configures an API Server.
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	logger *slog.Logger
+}
+
+// WithLogger routes API lifecycle and authentication logs to l.
+func WithLogger(l *slog.Logger) Option {
+	return func(options *serverOptions) {
+		options.logger = l
+	}
+}
+
 type Server struct {
 	backend   Backend
 	auth      *auth.Service
 	tokenTTL  time.Duration
 	maxUpload int64
+	logger    *slog.Logger
 	handler   http.Handler
 	http      *http.Server
 	listener  net.Listener
 }
 
 // New builds a server for cfg. A listener is created only by Serve.
-func New(cfg config.Config, backend Backend) (*Server, error) {
+func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
+	options := serverOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	logger := options.logger
+	if logger == nil {
+		logger = logging.Discard()
+	}
 	s := &Server{
 		backend:   backend,
 		tokenTTL:  time.Duration(cfg.HTTP.Auth.TokenTTL),
 		maxUpload: cfg.HTTP.MaxUploadBytes,
+		logger:    logger,
 	}
 	if cfg.HTTP.Auth.Enabled {
 		service, err := auth.New(cfg.HTTP.Auth)
 		if err != nil {
-			return nil, fmt.Errorf("api: initialize authentication: %w", err)
+			err = fmt.Errorf("api: initialize authentication: %w", err)
+			s.logger.Error("http auth initialization failed", "stage", "authentication", "err", err)
+			return nil, err
 		}
 		s.auth = service
 	}
@@ -83,9 +113,11 @@ func (s *Server) Addr() string {
 func (s *Server) Serve(ctx context.Context, listenAddr string) error {
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
+		s.logger.Error("http api listen failed", "addr", listenAddr, "err", err)
 		return fmt.Errorf("api: listen %s: %w", listenAddr, err)
 	}
 	s.listener = listener
+	s.logger.Info("http api listening", "addr", listener.Addr().String())
 	s.http = &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -105,13 +137,16 @@ func (s *Server) Serve(ctx context.Context, listenAddr string) error {
 	err = s.http.Serve(listener)
 	close(done)
 	if errors.Is(err, http.ErrServerClosed) {
+		s.logger.Info("http api stopped", "addr", listener.Addr().String())
 		return nil
 	}
+	s.logger.Error("http api stopped", "addr", listener.Addr().String(), "err", err)
 	return err
 }
 
 // Shutdown stops the server gracefully.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.logger.Info("http api shutting down")
 	var err error
 	if s.http != nil {
 		err = s.http.Shutdown(ctx)
@@ -119,7 +154,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.auth != nil {
 		s.auth.Close()
 	}
-	return err
+	if err != nil {
+		s.logger.Warn("http api shutdown failed", "stage", "http-api", "err", err)
+		return err
+	}
+	s.logger.Info("http api shut down")
+	return nil
 }
 
 func dispatchAPIAndStatic(apiHandler, staticHandler http.Handler) http.Handler {
@@ -144,18 +184,29 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		token, ok := authorizationToken(r)
 		if !ok {
+			s.logAuthRejected(r, errors.New("missing or malformed bearer token"))
 			writeUnauthorized(w)
 			return
 		}
 		renew := r.Method != http.MethodPost || r.URL.Path != logoutPath
 		principal, _, err := s.auth.Authenticate(token, renew)
 		if err != nil {
+			s.logAuthRejected(r, err)
 			writeUnauthorized(w)
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) logAuthRejected(r *http.Request, err error) {
+	s.logger.Warn("http auth rejected",
+		"remote", r.RemoteAddr,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"err", err,
+	)
 }
 
 func authorizationToken(r *http.Request) (string, bool) {

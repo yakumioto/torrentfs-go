@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -34,12 +35,16 @@ var (
 	errAuthCredentialsSet   = errors.New("authentication credentials must be empty when authentication is disabled")
 	errAuthTokenTTLMax      = errors.New("must not exceed 24 hours")
 	errExposedNoAuth        = errors.New("exposing a non-loopback address requires enabled http.auth")
+	errLogLevel             = errors.New("must be one of debug, info, warn, error")
+	errLogFormat            = errors.New("must be one of text, json")
 )
 
 const (
 	defaultCacheCapacityBytes int64 = 64 << 20
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
 	defaultMaxUploadBytes     int64 = 10 << 20
+	defaultLogLevel                 = "info"
+	defaultLogFormat                = "text"
 )
 
 // ValidationError identifies the configuration field that failed validation.
@@ -72,6 +77,7 @@ type Config struct {
 	Cache       Cache       `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
 	HTTP        HTTP        `toml:"http"`
+	Log         Log         `toml:"log"`
 }
 
 // Paths groups the filesystem paths torrentfs manages at runtime.
@@ -93,6 +99,13 @@ type HTTP struct {
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps an uploaded .torrent request body.
 	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+}
+
+// Log groups the process log settings.
+type Log struct {
+	Level     string `toml:"level"`
+	Format    string `toml:"format"`
+	AddSource bool   `toml:"add_source"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -186,6 +199,10 @@ func Default() Config {
 			PeerIDPrefix:                   "-qB4400-",
 			ExtendedHandshakeClientVersion: "qBittorrent/4.4.0",
 		},
+		Log: Log{
+			Level:  defaultLogLevel,
+			Format: defaultLogFormat,
+		},
 	}
 }
 
@@ -223,6 +240,19 @@ func (c Config) Validate() error {
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
 		return invalid("http.max_upload_bytes", errPositive)
+	}
+	if rawLevel := strings.TrimSpace(c.Log.Level); rawLevel != "" {
+		var level slog.Level
+		if err := level.UnmarshalText([]byte(strings.ToLower(rawLevel))); err != nil {
+			return invalid("log.level", errLogLevel)
+		}
+	}
+	if rawFormat := strings.TrimSpace(c.Log.Format); rawFormat != "" {
+		switch strings.ToLower(rawFormat) {
+		case "text", "json":
+		default:
+			return invalid("log.format", errLogFormat)
+		}
 	}
 	return nil
 }

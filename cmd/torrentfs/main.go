@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -100,13 +102,38 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
+	logger, _, err := logging.New(cfg.Log, stderr)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize logging: %v\n", err)
+		return 2
+	}
+	logLevel := cfg.Log.Level
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	logFormat := cfg.Log.Format
+	if logFormat == "" {
+		logFormat = "text"
+	}
+	logger.Info("torrentfs starting",
+		"version", "dev",
+		"torrents_dir", torrentsDir,
+		"data_dir", cfg.Paths.DataDir,
+		"payload_dir", cfg.Paths.PayloadDir,
+		"mountpoint", *mountpoint,
+		"http_listen_addr", cfg.HTTP.ListenAddr,
+		"listen_port", cfg.Connections.ListenPort,
+		"log_level", logLevel,
+		"log_format", logFormat,
+	)
+
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	sess, err := session.New(cfg, torrentsDir)
+	sess, err := session.New(cfg, torrentsDir, session.WithLogger(logger))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {
@@ -117,7 +144,7 @@ func run(args []string, stderr io.Writer) int {
 
 	var apiServer *api.Server
 	if httpEnabled {
-		apiServer, err = api.New(cfg, sess)
+		apiServer, err = api.New(cfg, sess, api.WithLogger(logger))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
 			_ = sess.Close(context.Background())
@@ -132,6 +159,7 @@ func run(args []string, stderr io.Writer) int {
 	if *mountpoint != "" {
 		server, err = filesystem.Mount(*mountpoint, sess, nil)
 		if err != nil {
+			logger.Error("fuse mount failed", "mountpoint", *mountpoint, "err", err)
 			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
 			if apiServer != nil {
 				_ = apiServer.Shutdown(context.Background())
@@ -152,7 +180,7 @@ func run(args []string, stderr io.Writer) int {
 	case serveFailure = <-serveErr:
 	}
 
-	sequence := shutdownSequence{}
+	sequence := shutdownSequence{logger: logger}
 	if apiServer != nil {
 		sequence.api = apiServer
 	}
@@ -215,9 +243,10 @@ var errUnmountTimeout = errors.New("unmount did not complete")
 // FUSE server. Closing the session first cancels and drains outstanding reads,
 // so Unmount does not block on FUSE requests still waiting for data.
 type shutdownSequence struct {
-	api   httpShutdowner
-	sess  sessionCloser
-	mount mountUnmounter
+	logger *slog.Logger
+	api    httpShutdowner
+	sess   sessionCloser
+	mount  mountUnmounter
 
 	// unmountTimeout overrides defaultUnmountTimeout; zero or negative uses
 	// the default. It is the seam unit tests use to inject a short deadline.
@@ -233,16 +262,31 @@ type shutdownResult struct {
 }
 
 func (s shutdownSequence) run() shutdownResult {
+	logger := s.logger
+	if logger == nil {
+		logger = logging.Discard()
+	}
+	logger.Info("shutting down")
 	var result shutdownResult
 	if s.api != nil {
 		result.api = s.api.Shutdown(context.Background())
+		if result.api != nil {
+			logger.Warn("shutdown stage failed", "stage", "http-api", "err", result.api)
+		}
 	}
 	if s.sess != nil {
 		result.close = s.sess.Close(context.Background())
+		if result.close != nil {
+			logger.Error("shutdown stage failed", "stage", "session", "err", result.close)
+		}
 	}
 	if s.mount != nil {
 		result.unmount = s.unmount()
+		if result.unmount != nil {
+			logger.Error("shutdown stage failed", "stage", "fuse-unmount", "err", result.unmount)
+		}
 	}
+	logger.Info("stopped")
 	return result
 }
 

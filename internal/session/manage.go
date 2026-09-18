@@ -59,14 +59,25 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	logFailure := func(err error) {
+		attrs := []any{"source", sourceKind(src), "err", err}
+		if src.MetainfoPath != "" {
+			attrs = append(attrs, "path", src.MetainfoPath)
+		}
+		s.logger.Error("managed torrent add failed", attrs...)
+	}
 	spec, err := specFromSource(src)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidSource, err)
+		err = fmt.Errorf("%w: %v", ErrInvalidSource, err)
+		logFailure(err)
+		return nil, err
 	}
 	hash := spec.InfoHash
 	var zero metainfo.Hash
 	if hash == zero {
-		return nil, fmt.Errorf("%w: missing info hash", ErrInvalidSource)
+		err := fmt.Errorf("%w: missing info hash", ErrInvalidSource)
+		logFailure(err)
+		return nil, err
 	}
 
 	unlock := s.lockHash(hash)
@@ -74,6 +85,7 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 
 	if src.MagnetURI != "" {
 		if err := s.persistMagnetIntent(ctx, hash, src.MagnetURI); err != nil {
+			logFailure(err)
 			return nil, err
 		}
 	}
@@ -81,15 +93,19 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 	s.mu.Lock()
 	if err := s.ensureActiveLocked(); err != nil {
 		s.mu.Unlock()
+		logFailure(err)
 		return nil, err
 	}
 	if s.deletionPendingLocked(hash) {
+		err := ErrDeleting
 		s.mu.Unlock()
-		return nil, ErrDeleting
+		logFailure(err)
+		return nil, err
 	}
 	st, added, err := s.addTorrentSpecLocked(ctx, spec)
 	if err != nil {
 		s.mu.Unlock()
+		logFailure(err)
 		return nil, err
 	}
 	stateCreated := false
@@ -112,11 +128,13 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 				s.rollbackAddedTorrentLocked(hash, st, stateCreated)
 				s.mu.Unlock()
 			}
+			logFailure(err)
 			return nil, err
 		}
 	} else {
 		s.startMetadataFetch(hash, st)
 	}
+	s.logger.Info("managed torrent added", "hash", hash.HexString(), "source", sourceKind(src))
 	return s.viewFor(hash, st), nil
 }
 
@@ -221,6 +239,7 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 }
 
 func (s *Session) recordMetadataFetchFailure(hash metainfo.Hash, err error) {
+	s.logger.Warn("metadata fetch failed", "hash", hash.HexString(), "err", err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deletionPendingLocked(hash) {
@@ -346,7 +365,11 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	}
 	hash, err := parseInfoHash(id)
 	if err != nil {
+		s.logger.Error("torrent delete failed", "op", "parse-id", "err", ErrUnknownTorrent)
 		return nil, ErrUnknownTorrent
+	}
+	logFailure := func(err error) {
+		s.logger.Error("torrent delete failed", "hash", hash.HexString(), "op", "delete", "err", err)
 	}
 
 	unlock := s.lockHash(hash)
@@ -355,6 +378,7 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	s.mu.Lock()
 	if err := s.ensureActiveLocked(); err != nil {
 		s.mu.Unlock()
+		logFailure(err)
 		return nil, err
 	}
 	if opID, ok := s.activeOps[hash]; ok {
@@ -375,15 +399,19 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	st, ok := s.torrents[hash]
 	entry, hasEntry := s.states[hash]
 	if !ok && !hasEntry {
+		err := ErrUnknownTorrent
 		s.mu.Unlock()
-		return nil, ErrUnknownTorrent
+		logFailure(err)
+		return nil, err
 	}
 	if s.directoryRefs[hash] > 0 {
 		// The user's own .torrent file still references this hash. Removing
 		// the task would hide data they expect to keep, and purging would
 		// delete data still in use, so the deletion is refused outright.
+		err := fmt.Errorf("%w: %s", ErrExternalReference, hash)
 		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrExternalReference, hash)
+		logFailure(err)
+		return nil, err
 	}
 	opID := ""
 	if last, ok := s.lastOps[hash]; ok {
@@ -396,6 +424,7 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 		id, err := newOperationID()
 		if err != nil {
 			s.mu.Unlock()
+			logFailure(err)
 			return nil, err
 		}
 		opID = id
@@ -415,6 +444,7 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	entry.OperationID = opID
 	if err := s.writeRegistryEntryLocked(entry); err != nil {
 		s.mu.Unlock()
+		logFailure(err)
 		return nil, err
 	}
 	s.states[hash] = entry
@@ -436,6 +466,7 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	s.releaseManagedSourcesLocked(hash)
 	out := op.clone()
 	s.mu.Unlock()
+	s.logger.Info("torrent deletion started", "hash", hash.HexString(), "purge_data", purgeData, "operation_id", opID)
 
 	s.bgWg.Add(1)
 	go func() {
@@ -464,6 +495,11 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID st
 		<-fetch.done
 	}
 	err := s.performDelete(hash, st, purge, sources)
+	if err != nil {
+		s.logger.Error("torrent deletion failed", "hash", hash.HexString(), "operation_id", opID, "err", err)
+	} else {
+		s.logger.Info("torrent deletion completed", "hash", hash.HexString(), "operation_id", opID, "purge_data", purge)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
