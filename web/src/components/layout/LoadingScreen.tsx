@@ -1,10 +1,10 @@
-import { Center, Loader } from '@mantine/core';
+import { Loader } from '@mantine/core';
 import shell from '../../styles/auth-shell.module.css';
 
 export function LoadingScreen() {
   return (
-    <Center className={shell.page} role="status" aria-label="Connecting to TorrentFS">
-      <Loader color="mint" size="md" />
-    </Center>
+    <main className={`${shell.page} ${shell.authPage}`} role="status" aria-label="正在连接 TorrentFS 服务">
+      <Loader color="torrent" size="md" />
+    </main>
   );
 }

@@ -64,7 +64,7 @@ function renderApp(path: string, fetchMock: FetchMock) {
   vi.stubGlobal('fetch', fetchMock);
   render(
     <QueryClientProvider client={queryClient}>
-      <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={auth}>
           <MemoryRouter initialEntries={[path]}>
             <App />
@@ -99,10 +99,10 @@ describe('background refresh resilience', () => {
       void queryClient.refetchQueries({ queryKey: queryKeys.torrents });
     });
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Showing the last valid list'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('当前显示上一次有效快照'));
     expect(screen.getByText('Ubuntu Desktop ISO')).toBeInTheDocument();
-    expect(screen.queryByText('Task list unavailable')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Loading torrents')).not.toBeInTheDocument();
+    expect(screen.queryByText('任务列表暂不可用')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('正在加载任务列表')).not.toBeInTheDocument();
     expect(queryClient.getQueryData(queryKeys.torrents)).toHaveLength(1);
   });
 
@@ -120,18 +120,18 @@ describe('background refresh resilience', () => {
 
     const { queryClient } = renderApp('/torrents/torrent-1', fetchMock);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Detail torrent' })).toBeInTheDocument());
-    expect(screen.getByRole('tab', { name: /Files/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /文件/ })).toBeInTheDocument();
 
     await act(async () => {
       void queryClient.refetchQueries({ queryKey: queryKeys.torrentStatus('torrent-1') });
     });
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Showing the last valid snapshot'));
-    expect(screen.queryByText('Status snapshot unavailable')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('当前显示上一次有效快照'));
+    expect(screen.queryByText('状态快照暂不可用')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('tab', { name: /Files/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /文件/ }));
     expect(screen.getByText('file.txt')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: /Pieces/ }));
-    expect(screen.getByRole('list', { name: 'Piece map' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /数据块/ }));
+    expect(screen.getByRole('list', { name: '数据块地图' })).toBeInTheDocument();
   });
 });

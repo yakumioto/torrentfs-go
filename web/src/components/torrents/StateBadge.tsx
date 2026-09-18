@@ -11,7 +11,7 @@ const VARIANT_CLASS: Record<string, string> = {
 };
 
 export function StateBadge({ state, className }: { state: string; className?: string }) {
-  const meta = stateMeta[state] ?? { label: 'Unknown', icon: IconQuestionMark };
+  const meta = stateMeta[state] ?? { label: '未知状态', icon: IconQuestionMark };
   const Icon = meta.icon;
   return (
     <span className={[styles.badge, VARIANT_CLASS[state], className].filter(Boolean).join(' ')}>

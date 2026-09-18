@@ -30,7 +30,7 @@ export function formatDate(value: string): string {
   if (!Number.isFinite(timestamp)) {
     return '—';
   }
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat('zh-CN', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(timestamp);

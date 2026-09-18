@@ -2,8 +2,9 @@ import { Button, FileInput, Modal, Stack, Tabs, TextInput } from '@mantine/core'
 import { useState } from 'react';
 import { IconMagnet, IconUpload } from '@tabler/icons-react';
 import type { ApiClient } from '../../api/client';
-import { ApiError, errorMessage } from '../../api/errors';
+import { ApiError } from '../../api/errors';
 import { useAddTorrent } from '../../queries/hooks';
+import { userFacingError } from '../../utils/user-facing-error';
 
 export function AddTorrentDialog({ opened, onClose, api, onAdded }: { opened: boolean; onClose: () => void; api: ApiClient; onAdded: (id: string) => void }) {
   const [mode, setMode] = useState<'magnet' | 'file'>('magnet');
@@ -47,32 +48,32 @@ export function AddTorrentDialog({ opened, onClose, api, onAdded }: { opened: bo
 
   const error = mutation.error;
   const errorCopy = error instanceof ApiError && error.status === 413
-    ? 'That .torrent file is larger than the daemon upload limit.'
+    ? '上传的 .torrent 文件超过后台服务的大小限制。'
     : error instanceof ApiError && error.status === 415
-      ? 'The daemon only accepts a .torrent multipart upload or a magnet JSON request.'
-      : errorMessage(error, 'The daemon rejected this torrent.');
+      ? '后台服务仅接受 .torrent 文件上传或磁力链接请求。'
+      : userFacingError(error, '后台服务拒绝了这个任务，请检查输入后重试。');
 
   return (
-    <Modal opened={opened} onClose={close} title="Add torrent" centered>
+    <Modal opened={opened} onClose={close} title="添加任务" centered closeButtonProps={{ 'aria-label': '关闭弹窗' }}>
       <Tabs value={mode} onChange={(value) => { if (value === 'magnet' || value === 'file') { setMode(value); mutation.reset(); } }}>
         <Tabs.List grow>
-          <Tabs.Tab value="magnet" leftSection={<IconMagnet size={16} />}>Magnet URI</Tabs.Tab>
-          <Tabs.Tab value="file" leftSection={<IconUpload size={16} />}>.torrent file</Tabs.Tab>
+          <Tabs.Tab value="magnet" leftSection={<IconMagnet size={16} />}>磁力链接</Tabs.Tab>
+          <Tabs.Tab value="file" leftSection={<IconUpload size={16} />}>种子文件</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="magnet" pt="lg">
           <Stack gap="md">
-            <TextInput label="Magnet URI" placeholder="magnet:?xt=urn:btih:…" value={magnetUri} onChange={(event) => setMagnetUri(event.currentTarget.value)} description="The daemon will resolve metadata in the background." />
-            <Button color="mint" onClick={submit} loading={mutation.isPending} disabled={magnetUri.trim() === ''}>Add magnet</Button>
+            <TextInput label="磁力链接" placeholder="magnet:?xt=urn:btih:…" value={magnetUri} onChange={(event) => setMagnetUri(event.currentTarget.value)} description="后台服务会在后台解析任务元数据。" />
+            <Button color="torrent" onClick={submit} loading={mutation.isPending} disabled={magnetUri.trim() === ''}>添加磁力链接</Button>
           </Stack>
         </Tabs.Panel>
         <Tabs.Panel value="file" pt="lg">
           <Stack gap="md">
-            <FileInput label="Torrent file" placeholder="Choose a .torrent file" accept=".torrent,application/x-bittorrent" value={file} onChange={setFile} clearable description="The upload uses the browser's multipart boundary." />
-            <Button color="mint" onClick={submit} loading={mutation.isPending} disabled={file === null}>Upload torrent</Button>
+            <FileInput label="种子文件" placeholder="选择 .torrent 文件" accept=".torrent,application/x-bittorrent" value={file} onChange={setFile} clearable clearButtonProps={{ 'aria-label': '清除已选文件' }} description="浏览器会自动处理 multipart 边界。" />
+            <Button color="torrent" onClick={submit} loading={mutation.isPending} disabled={file === null}>上传种子文件</Button>
           </Stack>
         </Tabs.Panel>
       </Tabs>
-      {error !== null && error !== undefined && <div className="error-callout" role="alert" style={{ marginTop: '1rem' }}>{errorCopy}</div>}
+      {error !== null && error !== undefined && <div className="error-callout" role="alert" aria-live="polite" style={{ marginTop: '1rem' }}>{errorCopy}</div>}
     </Modal>
   );
 }

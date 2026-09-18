@@ -7,7 +7,7 @@ import styles from './TorrentLiveSummary.module.css';
 export function TorrentLiveSummary({ summary }: { summary?: TorrentLiveSummaryData }) {
   if (summary === undefined) {
     return (
-      <section className={`${styles.summary} panel panel--padding`} aria-label="Live torrent status" aria-busy="true">
+      <section className={`${styles.summary} panel panel--padding`} aria-label="实时缓存状态" aria-busy="true">
         <Skeleton height={22} width="7rem" mb="md" />
         <Skeleton height={8} mb="sm" />
         <Skeleton height={16} width="12rem" />
@@ -16,11 +16,11 @@ export function TorrentLiveSummary({ summary }: { summary?: TorrentLiveSummaryDa
   }
 
   return (
-    <section className={`${styles.summary} panel panel--padding`} aria-label="Live torrent status">
+    <section className={`${styles.summary} panel panel--padding`} aria-label="实时缓存状态">
       <div className={styles.heading}>
         <div>
-          <p className="eyebrow">Live status</p>
-          <h2>Cache usage</h2>
+          <p className="eyebrow">实时状态</p>
+          <h2>缓存占用</h2>
         </div>
         <StateBadge state={summary.state} />
       </div>

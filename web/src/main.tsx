@@ -20,7 +20,7 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <MantineProvider theme={theme} defaultColorScheme="dark">
+    <MantineProvider theme={theme} defaultColorScheme="light">
       <Notifications position="top-right" />
       <AppProviders>
         <BrowserRouter>

@@ -16,7 +16,7 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
 }) {
   if (loading && torrents === undefined) {
     return (
-      <div className={`panel ${styles.list}`} aria-label="Loading torrents">
+      <div className={`panel ${styles.list}`} role="status" aria-busy="true" aria-label="正在加载任务列表">
         {[0, 1, 2].map((item) => <Skeleton key={item} height={88} radius={0} />)}
       </div>
     );
@@ -26,9 +26,9 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
     return (
       <div className="panel error-state" role="alert">
         <IconRefresh size={30} aria-hidden="true" />
-        <h2>Task list unavailable</h2>
-        <p>The daemon did not return a task list. Your existing tasks are unchanged.</p>
-        <Button variant="light" color="mint" onClick={onRetry}>Try again</Button>
+        <h2>任务列表暂不可用</h2>
+        <p>后台服务没有返回任务列表，已有任务不会受到影响。</p>
+        <Button variant="light" color="torrent" onClick={onRetry}>重新加载</Button>
       </div>
     );
   }
@@ -38,31 +38,31 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
       return (
         <div className="panel empty-state" role="status">
           <span className="empty-state__mark" aria-hidden="true"><IconSearch size={25} /></span>
-          <h2>No torrents match</h2>
-          <p>Try a different name, info hash, or status filter.</p>
-          <Button variant="light" color="mint" onClick={onClearFilters}>Clear search and filters</Button>
+          <h2>没有匹配的任务</h2>
+          <p>请尝试其他任务名称、信息哈希或状态筛选。</p>
+          <Button variant="light" color="torrent" onClick={onClearFilters}>清除搜索和筛选</Button>
         </div>
       );
     }
     return (
       <div className="panel empty-state">
         <span className="empty-state__mark" aria-hidden="true"><IconInbox size={25} /></span>
-        <h2>No torrents on the board</h2>
-        <p>Add a magnet URI or upload a .torrent file to put the first download in motion.</p>
-        <Button color="mint" onClick={onAdd}>Add your first torrent</Button>
+        <h2>还没有任务</h2>
+        <p>添加磁力链接或上传 .torrent 文件，开始管理第一个任务。</p>
+        <Button color="torrent" onClick={onAdd}>添加第一个任务</Button>
       </div>
     );
   }
 
   return (
-    <div className={`panel ${styles.list}`} role="list" aria-label={`Torrents${totalCount > 0 ? `, ${totalCount} total` : ''}`}>
+    <div className={`panel ${styles.list}`} role="list" aria-label={`任务列表${totalCount > 0 ? `，共 ${totalCount} 个任务` : ''}`}>
       <div className={styles.header} aria-hidden="true">
-        <span>Torrent</span>
-        <span>Size</span>
-        <span>Cache</span>
-        <span>State</span>
-        <span>Added</span>
-        <span>Actions</span>
+        <span>任务</span>
+        <span>大小</span>
+        <span>缓存占用</span>
+        <span>状态</span>
+        <span>添加时间</span>
+        <span>操作</span>
       </div>
       {torrents?.map((torrent) => <TorrentRow key={torrent.id} torrent={torrent} />)}
     </div>

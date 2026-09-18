@@ -7,10 +7,10 @@ export const TorrentPiecesPanel = memo(function TorrentPiecesPanel({ pieces, pie
     <section className="panel panel--padding" aria-labelledby="pieces-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Whole torrent</p>
-          <h2 id="pieces-title">Pieces</h2>
+          <p className="eyebrow">整个任务</p>
+          <h2 id="pieces-title">数据块</h2>
         </div>
-        <span className="section-heading__meta">{pieceLength === undefined ? 'Piece size pending' : `${pieceLength.toLocaleString()} B each`}</span>
+        <span className="section-heading__meta">{pieceLength === undefined ? '数据块大小等待中' : `每块 ${pieceLength.toLocaleString()} B`}</span>
       </div>
       <PiecesMap pieces={pieces} />
     </section>

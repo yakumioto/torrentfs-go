@@ -8,9 +8,9 @@
   align-items: start;
   gap: 1rem;
   padding: 1rem 1.15rem;
-  border: 1px solid rgba(210, 153, 34, 0.45);
+  border: 1px solid #e6c58c;
   border-radius: var(--radius-md);
-  background: rgba(210, 153, 34, 0.08);
+  background: var(--warning-soft);
 }
 
 .pendingIcon {

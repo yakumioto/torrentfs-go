@@ -12,12 +12,14 @@
 }
 
 .pillAuth {
-  border-color: rgba(63, 185, 80, 0.45);
+  border-color: #8ccfc5;
   color: var(--success);
+  background: var(--success-soft);
 }
 
 .pillLive {
   border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 
 @media (max-width: 480px) {

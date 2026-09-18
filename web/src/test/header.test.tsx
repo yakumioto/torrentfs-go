@@ -58,7 +58,7 @@ function renderApp(path: string, fetchMock: FetchMock) {
   vi.stubGlobal('fetch', fetchMock);
   render(
     <QueryClientProvider client={queryClient}>
-      <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={auth}>
           <MemoryRouter initialEntries={[path]}>
             <App />
@@ -99,7 +99,7 @@ describe('Header refresh control', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fetchMock.mockClear();
 
-    const refreshButton = screen.getByRole('button', { name: 'Refresh data' });
+    const refreshButton = screen.getByRole('button', { name: '刷新数据' });
     expect(refreshButton).toHaveAttribute('type', 'button');
     fireEvent.click(refreshButton);
 
@@ -108,7 +108,7 @@ describe('Header refresh control', () => {
     expect(fetchMock.mock.calls[0]?.[1]?.method ?? 'GET').toBe('GET');
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/status'))).toBe(false);
     expect(screen.queryByText(/Updating the latest snapshot/)).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument();
     expect(screen.getByText(torrent.name)).toBeInTheDocument();
     expect(window.location.pathname).toBe('/');
     expect(document.querySelector('form')).toBeNull();
@@ -140,15 +140,15 @@ describe('Header refresh control', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/torrents'))).toBe(false);
     fetchMock.mockClear();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh data' }));
+    fireEvent.click(screen.getByRole('button', { name: '刷新数据' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/v1\/torrents\/torrent-1\/status$/);
     expect(fetchMock.mock.calls[0]?.[1]?.method ?? 'GET').toBe('GET');
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/torrents'))).toBe(false);
     expect(screen.getByRole('heading', { name: torrent.name })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /Files/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /Pieces/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /文件/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /数据块/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/torrents/torrent-1');
   });
 });

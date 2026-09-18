@@ -1,9 +1,14 @@
 .page {
-  display: grid;
   min-height: 100vh;
+  padding: clamp(1rem, 4vw, 3rem);
+  background:
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 34rem),
+    var(--bg);
+}
+
+.authPage {
+  display: grid;
   place-items: center;
-  padding: 1.5rem;
-  background: var(--bg);
 }
 
 .card {
@@ -12,4 +17,56 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-1);
+  box-shadow: 0 16px 40px rgba(23, 32, 51, 0.08);
+}
+
+.brandPanel {
+  display: grid;
+  align-content: center;
+  gap: 1rem;
+  width: min(100%, 30rem);
+  padding: clamp(1rem, 4vw, 2rem);
+}
+
+.brandPanel h1,
+.brandPanel p {
+  margin: 0;
+}
+
+.brandPanel h1 {
+  max-width: 18rem;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  letter-spacing: -0.06em;
+  line-height: 1.05;
+}
+
+.brandPanel p {
+  max-width: 27rem;
+  color: var(--text-secondary);
+}
+
+.brandMark {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  border: 1px solid #b9cdf6;
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (min-width: 760px) {
+  .authPage {
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 27rem);
+    gap: clamp(2rem, 8vw, 7rem);
+    width: min(100%, 74rem);
+    margin: 0 auto;
+  }
+}
+
+@media (max-width: 759px) {
+  .brandPanel {
+    display: none;
+  }
 }

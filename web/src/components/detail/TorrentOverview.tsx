@@ -13,19 +13,19 @@ export function TorrentOverview({ torrent, summary, meta }: {
     <section className="panel panel--padding" aria-labelledby="overview-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Snapshot</p>
-          <h2 id="overview-title">Overview</h2>
+          <p className="eyebrow">任务快照</p>
+          <h2 id="overview-title">概览</h2>
         </div>
-        <span className="section-heading__meta">{meta?.pieceCount.toLocaleString() ?? '—'} pieces</span>
+        <span className="section-heading__meta">{meta?.pieceCount.toLocaleString() ?? '—'} 个数据块</span>
       </div>
       <dl className={styles.grid}>
-        <div><dt>Info hash</dt><dd className={`text-mono ${styles.gridBreak}`}>{torrent.info_hash || 'Pending'}</dd></div>
-        <div><dt>State</dt><dd><StateBadge state={summary?.state ?? torrent.state} /></dd></div>
-        <div><dt>Total size</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>
-        <div><dt>Cached</dt><dd>{formatBytes(summary?.cachedBytes ?? torrent.cached_bytes)}</dd></div>
-        <div><dt>Added</dt><dd>{formatDate(torrent.created_at)}</dd></div>
-        <div><dt>Piece size</dt><dd>{meta === undefined ? '—' : `${formatBytes(meta.pieceLength)}`}</dd></div>
-        <div><dt>Pieces</dt><dd>{meta?.pieceCount.toLocaleString() ?? '—'}</dd></div>
+        <div><dt>信息哈希</dt><dd className={`text-mono ${styles.gridBreak}`}>{torrent.info_hash || '等待生成'}</dd></div>
+        <div><dt>状态</dt><dd><StateBadge state={summary?.state ?? torrent.state} /></dd></div>
+        <div><dt>总大小</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>
+        <div><dt>缓存占用</dt><dd>{formatBytes(summary?.cachedBytes ?? torrent.cached_bytes)}</dd></div>
+        <div><dt>添加时间</dt><dd>{formatDate(torrent.created_at)}</dd></div>
+        <div><dt>数据块大小</dt><dd>{meta === undefined ? '—' : `${formatBytes(meta.pieceLength)}`}</dd></div>
+        <div><dt>数据块数量</dt><dd>{meta?.pieceCount.toLocaleString() ?? '—'}</dd></div>
       </dl>
     </section>
   );

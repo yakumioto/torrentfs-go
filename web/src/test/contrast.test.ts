@@ -24,7 +24,7 @@ const TEXT_TOKENS = ['text-primary', 'text-secondary', 'text-subtle'];
 // --surface-3 backs the cache-occupancy track and piece cells and carries no text, so it is not a text background.
 const TEXT_BACKGROUNDS = ['bg', 'surface-1', 'surface-2'];
 
-describe('dark theme text contrast', () => {
+describe('light theme text contrast', () => {
   it.each(TEXT_TOKENS)('keeps %s at or above the 4.5:1 small-text threshold on every text surface', (name) => {
     for (const background of TEXT_BACKGROUNDS) {
       expect(contrast(token(name), token(background)), `${name} on ${background}`).toBeGreaterThanOrEqual(4.5);

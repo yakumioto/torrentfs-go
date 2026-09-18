@@ -6,10 +6,10 @@ interface StateMeta {
 }
 
 export const stateMeta: Record<string, StateMeta> = {
-  adding: { label: 'Adding', icon: IconLoader },
-  ready: { label: 'Ready', icon: IconCircleCheck },
-  error: { label: 'Error', icon: IconAlertTriangle },
-  deleting: { label: 'Deleting', icon: IconLoader },
-  delete_failed: { label: 'Delete failed', icon: IconAlertTriangle },
-  unknown: { label: 'Unknown', icon: IconQuestionMark },
+  adding: { label: '添加中', icon: IconLoader },
+  ready: { label: '就绪', icon: IconCircleCheck },
+  error: { label: '错误', icon: IconAlertTriangle },
+  deleting: { label: '删除中', icon: IconLoader },
+  delete_failed: { label: '删除失败', icon: IconAlertTriangle },
+  unknown: { label: '未知状态', icon: IconQuestionMark },
 };

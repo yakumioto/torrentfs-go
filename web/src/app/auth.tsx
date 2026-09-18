@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ApiClient } from '../api/client';
-import { ApiError, errorMessage } from '../api/errors';
+import { ApiError } from '../api/errors';
+import { userFacingError } from '../utils/user-facing-error';
 import { queryKeys } from '../queries/keys';
 import { sortTorrents } from '../queries/sort';
 import { AuthContext, type AuthContextValue, type AuthPhase } from './auth-context';
 
-const SESSION_NOTICE = 'Authentication is required or your session has expired. Sign in to continue.';
+const SESSION_NOTICE = '需要登录或当前会话已过期，请重新登录后继续。';
 const SESSION_TOKEN_KEY = 'torrentfs.access-token';
 
 type AuthAction = 'idle' | 'logging-in';
@@ -108,7 +109,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (error instanceof ApiError && error.status === 401) {
         return;
       }
-      setConnectionError(errorMessage(error, 'The daemon is not reachable.'));
+      setConnectionError(userFacingError(error, '无法连接 TorrentFS 服务，请检查服务是否正在运行。'));
       setPhase('error');
     } finally {
       if (suppressedNoticeRevisionRef.current === revision) {
@@ -164,9 +165,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
       if (error instanceof ApiError && error.status === 401) {
-        setLoginError('Invalid username or password.');
+        setLoginError('用户名或密码错误。');
       } else {
-        setLoginError(errorMessage(error));
+        setLoginError(userFacingError(error, '登录失败，请检查账号和密码后重试。'));
       }
       return false;
     } finally {

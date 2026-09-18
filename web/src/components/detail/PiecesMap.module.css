@@ -47,14 +47,14 @@
 
 .cellCached,
 .swatchCached {
-  border-color: #7ee787;
+  border-color: #74b9b0;
   background: var(--success);
 }
 
 .cellPinned,
 .swatchPinned {
-  border-color: #79c0ff;
-  background: repeating-linear-gradient(135deg, var(--accent) 0 3px, rgba(47, 129, 247, 0.2) 3px 6px);
+  border-color: #7fa8ed;
+  background: repeating-linear-gradient(135deg, var(--accent) 0 3px, #c9dafe 3px 6px);
 }
 
 .cellUncached,
@@ -72,7 +72,7 @@
   padding: 1.25rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg);
+  background: var(--surface-2);
 }
 
 .mapEmpty {
@@ -88,6 +88,16 @@
   margin-top: 1rem;
 }
 
+.details {
+  margin-top: 1rem;
+}
+
+.details summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
 .table {
   min-width: 42rem;
 }
@@ -96,5 +106,16 @@
   .toolbar {
     align-items: start;
     flex-direction: column;
+  }
+
+  .map {
+    grid-template-columns: repeat(auto-fill, minmax(0.72rem, 1fr));
+    gap: 0.3rem;
+    padding: 0.85rem;
+  }
+
+  .cell {
+    width: 0.72rem;
+    height: 0.72rem;
   }
 }

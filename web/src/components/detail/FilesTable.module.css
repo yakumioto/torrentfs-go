@@ -3,6 +3,7 @@
 }
 
 .filePath {
+  display: block;
   max-width: 30rem;
   overflow-wrap: anywhere;
   color: var(--text-primary);
@@ -24,4 +25,51 @@
 
 .coverageUncached {
   color: var(--warning);
+}
+
+@media (max-width: 760px) {
+  .table {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .table :global(thead) {
+    display: none;
+  }
+
+  .table :global(tbody),
+  .table :global(tbody tr),
+  .table :global(tbody td) {
+    display: block;
+  }
+
+  .table :global(tbody tr) {
+    padding: 0.8rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table :global(tbody tr:last-child) {
+    border-bottom: 0;
+  }
+
+  .table :global(tbody td) {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.35rem 0;
+    border: 0;
+  }
+
+  .table :global(tbody td)::before {
+    flex: 0 0 5.5rem;
+    color: var(--text-secondary);
+    content: attr(data-label);
+    font-size: 0.72rem;
+  }
+
+  .table :global(tbody td > *) {
+    min-width: 0;
+    text-align: right;
+  }
 }
