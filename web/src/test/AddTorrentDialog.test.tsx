@@ -93,12 +93,27 @@ describe('AddTorrentDialog', () => {
     expect(new Headers(request.headers).get('Content-Type')).toBeNull();
   });
 
-  it('maps upload limit errors to Chinese copy', async () => {
+  it('maps magnet request size errors without implying a file upload', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ error: 'payload too large' }, { status: 413 })));
     renderDialog(fetchMock);
 
     fireEvent.change(screen.getByRole('textbox', { name: '磁力链接' }), { target: { value: 'magnet:?xt=urn:btih:abc' } });
     fireEvent.click(screen.getByRole('button', { name: '添加磁力链接' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('磁力链接请求超过后台服务允许的大小限制。'));
+    expect(screen.getByRole('alert')).not.toHaveTextContent('.torrent');
+  });
+
+  it('keeps the file-specific size error for torrent uploads', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ error: 'payload too large' }, { status: 413 })));
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('tab', { name: '种子文件' }));
+    const file = new File(['payload'], 'sample.torrent', { type: 'application/x-bittorrent' });
+    const input = document.querySelector('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: '上传种子文件' }));
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('上传的 .torrent 文件超过后台服务的大小限制。'));
   });

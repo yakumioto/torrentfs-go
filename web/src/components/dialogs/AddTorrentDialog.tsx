@@ -48,7 +48,9 @@ export function AddTorrentDialog({ opened, onClose, api, onAdded }: { opened: bo
 
   const error = mutation.error;
   const errorCopy = error instanceof ApiError && error.status === 413
-    ? '上传的 .torrent 文件超过后台服务的大小限制。'
+    ? mode === 'file'
+      ? '上传的 .torrent 文件超过后台服务的大小限制。'
+      : '磁力链接请求超过后台服务允许的大小限制。'
     : error instanceof ApiError && error.status === 415
       ? '后台服务仅接受 .torrent 文件上传或磁力链接请求。'
       : userFacingError(error, '后台服务拒绝了这个任务，请检查输入后重试。');

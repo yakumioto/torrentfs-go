@@ -16,6 +16,7 @@
 - 重构认证壳层、登录页、连接失败/加载页和 Header；桌面端采用品牌区与表单区，移动端收敛为单列，并为所有操作补充中文 accessible name。
 - 将 Dashboard、任务行、状态 badge、缓存占用轨道和空/错误/旧快照状态中文化并重新分层；保留搜索、筛选、排序和查询数据流。
 - 中文化添加、删除和 operation 弹窗；上传继续使用浏览器 multipart boundary，删除继续使用现有异步 operation 轮询和无自动跳转行为。
+- 按 Reviewer 反馈修复添加弹窗的 413 展示：磁力模式显示请求大小提示，文件模式保留 `.torrent` 文件大小提示，并为两种模式补充组件回归覆盖。
 - 重构详情、概览、文件表格和数据块地图；文件表格在移动端使用单一 DOM 转为字段卡片，Piece map 继续每批最多渲染 1200 项、保留纹理和可访问明细表。
 - 新增 `web/src/utils/user-facing-error.ts`，在展示层按已知 HTTP 状态映射中文错误，避免未知服务端英文字符串直接泄漏到 UI；transport 层仍保留原始 `ApiError`。
 - 新增 Dashboard、添加弹窗和展示层错误测试，并同步现有测试的中文 accessible name 与浅色 provider。
@@ -25,7 +26,7 @@
 - `npm ci --prefix web`：通过，依赖审计无漏洞。
 - `npm run typecheck --prefix web`：通过。
 - `npm run lint --prefix web`：通过。
-- `npm test --prefix web -- --run`：通过，14 个测试文件、44 个测试全部通过。
+- `npm test --prefix web -- --run`：通过，14 个测试文件、45 个测试全部通过；添加弹窗 5 个测试覆盖磁力/文件两种 413 文案。
 - `npm run build --prefix web`：通过；Vite 仅报告现有单 bundle 超过 500 kB 的非阻断提示。
 - `go test ./...`：通过，所有 Go 包通过。
 - `git diff --check`：通过。
@@ -37,7 +38,7 @@
 - 用户可见文案中文化：页面标题、按钮、状态、Tabs、菜单、tooltip、ARIA、文件覆盖率和 operation 文案均已更新；品牌名、文件名、hash、技术单位和 `.torrent` 保留为领域数据。
 - 状态与缓存占用清晰：`StateBadge` 使用中文状态与 soft background，`TorrentProgress` 明确标注“缓存占用”，未将其解释为下载完成度；`ready` 显示“就绪”。
 - 文件结构与数据块移动可读：`FilesTable` 使用 `data-label` 的 responsive table-to-card；`PiecesMap` 保留真实状态、纹理、legend、可访问表格与 1200 分页。
-- 搜索、筛选、添加磁力、上传文件、删除任务保持可用：API/query/hook 未改；新增 `DashboardPage.test.tsx`、`AddTorrentDialog.test.tsx`，既有删除与 query 回归测试全部通过。
+- 搜索、筛选、添加磁力、上传文件、删除任务保持可用：API/query/hook 未改；新增 `DashboardPage.test.tsx`、`AddTorrentDialog.test.tsx`，其中添加弹窗覆盖磁力 413 不显示文件错误、文件 413 保留准确提示，既有删除与 query 回归测试全部通过。
 - 未引入无 API 支撑指标：未新增速度、Peer、Tracker、ETA、设置或虚构下载完成度；详情仅展示已有 Torrent、status、文件和 Piece 字段。
 - 加载、空、错误和后台刷新失败状态保留：现有 `refresh-resilience`、详情、认证测试通过，新增 Dashboard 空态/筛选覆盖通过。
 - 前端构建、类型检查、lint、Vitest 和 Go 测试均通过。
