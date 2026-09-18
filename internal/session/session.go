@@ -182,12 +182,18 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	configureSeeding(cc)
 	// Every torrent owns payloadRoot/<info_hash>, so a purge target is always
 	// the torrent's exclusive directory and never a name shared with another.
+	pieceCompletion, completionErr := storage.NewDefaultPieceCompletionForDir(payloadRoot)
+	if completionErr != nil {
+		logger.Warn("piece completion persistence unavailable", "dir", payloadRoot, "err", completionErr)
+		pieceCompletion = storage.NewMapPieceCompletion()
+	}
 	storageCloser := storage.NewFileOpts(storage.NewFileClientOpts{
 		ClientBaseDir: payloadRoot,
 		TorrentDirMaker: func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
 			return filepath.Join(baseDir, hash.HexString())
 		},
-		Logger: logger,
+		PieceCompletion: pieceCompletion,
+		Logger:          logger,
 	})
 	cc.DefaultStorage = storageCloser
 	if forwardLogger {
