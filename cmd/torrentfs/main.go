@@ -147,7 +147,9 @@ func run(args []string, stderr io.Writer) int {
 		apiServer, err = api.New(cfg, sess, api.WithLogger(logger))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
-			_ = sess.Close(context.Background())
+			if closeErr := sess.Close(context.Background()); closeErr != nil {
+				logger.Error("startup cleanup failed", "stage", "session", "err", closeErr)
+			}
 			if errors.Is(err, config.ErrInvalid) {
 				return 2
 			}
@@ -162,9 +164,13 @@ func run(args []string, stderr io.Writer) int {
 			logger.Error("fuse mount failed", "mountpoint", *mountpoint, "err", err)
 			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
 			if apiServer != nil {
-				_ = apiServer.Shutdown(context.Background())
+				if shutdownErr := apiServer.Shutdown(context.Background()); shutdownErr != nil {
+					logger.Error("startup cleanup failed", "stage", "http-api", "err", shutdownErr)
+				}
 			}
-			_ = sess.Close(context.Background())
+			if closeErr := sess.Close(context.Background()); closeErr != nil {
+				logger.Error("startup cleanup failed", "stage", "session", "err", closeErr)
+			}
 			return 1
 		}
 	}
@@ -270,23 +276,33 @@ func (s shutdownSequence) run() shutdownResult {
 	var result shutdownResult
 	if s.api != nil {
 		result.api = s.api.Shutdown(context.Background())
-		if result.api != nil {
-			logger.Warn("shutdown stage failed", "stage", "http-api", "err", result.api)
-		}
 	}
 	if s.sess != nil {
 		result.close = s.sess.Close(context.Background())
-		if result.close != nil {
-			logger.Error("shutdown stage failed", "stage", "session", "err", result.close)
-		}
 	}
 	if s.mount != nil {
 		result.unmount = s.unmount()
-		if result.unmount != nil {
-			logger.Error("shutdown stage failed", "stage", "fuse-unmount", "err", result.unmount)
-		}
 	}
-	logger.Info("stopped")
+
+	var failures []error
+	var failedStages []string
+	if result.api != nil {
+		failedStages = append(failedStages, "http-api")
+		failures = append(failures, fmt.Errorf("http api: %w", result.api))
+	}
+	if result.close != nil {
+		failedStages = append(failedStages, "session")
+		failures = append(failures, fmt.Errorf("session: %w", result.close))
+	}
+	if result.unmount != nil {
+		failedStages = append(failedStages, "fuse-unmount")
+		failures = append(failures, fmt.Errorf("fuse unmount: %w", result.unmount))
+	}
+	if len(failures) == 0 {
+		logger.Info("stopped")
+	} else {
+		logger.Error("shutdown incomplete", slog.Any("stages", failedStages), "err", errors.Join(failures...))
+	}
 	return result
 }
 

@@ -69,6 +69,22 @@ func invalid(field string, cause error) error {
 	return &ValidationError{Field: field, Cause: cause}
 }
 
+// ParseLogLevel parses one of the documented process log levels.
+func ParseLogLevel(raw string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, errLogLevel
+	}
+}
+
 // Config holds torrentfs runtime settings.
 type Config struct {
 	Paths       Paths       `toml:"paths"`
@@ -241,11 +257,8 @@ func (c Config) Validate() error {
 	if c.HTTP.MaxUploadBytes <= 0 {
 		return invalid("http.max_upload_bytes", errPositive)
 	}
-	if rawLevel := strings.TrimSpace(c.Log.Level); rawLevel != "" {
-		var level slog.Level
-		if err := level.UnmarshalText([]byte(strings.ToLower(rawLevel))); err != nil {
-			return invalid("log.level", errLogLevel)
-		}
+	if _, err := ParseLogLevel(c.Log.Level); err != nil {
+		return invalid("log.level", errLogLevel)
 	}
 	if rawFormat := strings.TrimSpace(c.Log.Format); rawFormat != "" {
 		switch strings.ToLower(rawFormat) {

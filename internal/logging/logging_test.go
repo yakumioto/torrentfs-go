@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -63,6 +64,9 @@ func TestNewJSONFormat(t *testing.T) {
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	for _, cfg := range []config.Log{
 		{Level: "verbose", Format: "text"},
+		{Level: "info+2", Format: "text"},
+		{Level: "debug+100", Format: "text"},
+		{Level: "Error-8", Format: "text"},
 		{Level: "info", Format: "console"},
 	} {
 		if _, _, err := logging.New(cfg, &bytes.Buffer{}); err == nil {
@@ -87,5 +91,32 @@ func TestNewRedactsCredentialsAndTokens(t *testing.T) {
 		if strings.Contains(output, secret) {
 			t.Fatalf("log output contains %q: %q", secret, output)
 		}
+	}
+}
+
+func TestNewRedactsURLAnyValuesIncludingNestedGroups(t *testing.T) {
+	value, err := url.Parse("https://web-user:web-secret@example.com/file?token=query-secret")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	var buf bytes.Buffer
+	logger, _, err := logging.New(config.Log{Level: "debug", Format: "json"}, &buf)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("webseed request",
+		"url", value,
+		"value", *value,
+		slog.Group("request", slog.Any("url", value)),
+	)
+
+	output := buf.String()
+	for _, secret := range []string{"web-user", "web-secret", "query-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("JSON log output contains %q: %q", secret, output)
+		}
+	}
+	if !strings.Contains(output, "example.com") {
+		t.Fatalf("JSON log output lost URL host: %q", output)
 	}
 }

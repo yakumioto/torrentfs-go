@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -25,12 +26,8 @@ func New(cfg config.Log, w io.Writer) (*slog.Logger, *slog.LevelVar, error) {
 		w = os.Stderr
 	}
 
-	rawLevel := strings.TrimSpace(cfg.Level)
-	if rawLevel == "" {
-		rawLevel = "info"
-	}
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(strings.ToLower(rawLevel))); err != nil {
+	level, err := config.ParseLogLevel(cfg.Level)
+	if err != nil {
 		return nil, nil, fmt.Errorf("logging: invalid level %q: %w", cfg.Level, err)
 	}
 
@@ -78,11 +75,26 @@ func redactAttr(_ []string, attr slog.Attr) slog.Attr {
 	case slog.KindString:
 		return slog.String(attr.Key, redactString(value.String()))
 	case slog.KindAny:
-		if err, ok := value.Any().(error); ok {
-			return slog.String(attr.Key, redactString(err.Error()))
+		anyValue := value.Any()
+		switch typed := anyValue.(type) {
+		case *url.URL:
+			if typed == nil {
+				return attr
+			}
+			return slog.String(attr.Key, redactString(redactURL(typed)))
+		case url.URL:
+			return slog.String(attr.Key, redactString(redactURL(&typed)))
+		case error:
+			return slog.String(attr.Key, redactString(typed.Error()))
 		}
 	}
 	return attr
+}
+
+func redactURL(value *url.URL) string {
+	copy := *value
+	copy.User = nil
+	return copy.String()
 }
 
 func redactString(value string) string {

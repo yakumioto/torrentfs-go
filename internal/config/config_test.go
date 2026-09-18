@@ -502,6 +502,13 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 			field: "log.level",
 		},
 		{
+			name: "invalid log level offset",
+			setup: func(cfg *config.Config) {
+				cfg.Log.Level = "info+2"
+			},
+			field: "log.level",
+		},
+		{
 			name: "invalid log format",
 			setup: func(cfg *config.Config) {
 				cfg.Log.Format = "console"

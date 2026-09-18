@@ -154,12 +154,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.auth != nil {
 		s.auth.Close()
 	}
-	if err != nil {
-		s.logger.Warn("http api shutdown failed", "stage", "http-api", "err", err)
-		return err
+	if err == nil {
+		s.logger.Info("http api shut down")
 	}
-	s.logger.Info("http api shut down")
-	return nil
+	return err
 }
 
 func dispatchAPIAndStatic(apiHandler, staticHandler http.Handler) http.Handler {

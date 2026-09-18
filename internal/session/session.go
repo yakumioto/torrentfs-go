@@ -182,10 +182,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	configureSeeding(cc)
 	// Every torrent owns payloadRoot/<info_hash>, so a purge target is always
 	// the torrent's exclusive directory and never a name shared with another.
-	storageCloser := storage.NewFileWithCustomPathMaker(payloadRoot,
-		func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
+	storageCloser := storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir: payloadRoot,
+		TorrentDirMaker: func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
 			return filepath.Join(baseDir, hash.HexString())
-		})
+		},
+		Logger: logger,
+	})
 	cc.DefaultStorage = storageCloser
 	if forwardLogger {
 		cc.Slogger = logger
@@ -339,29 +342,23 @@ func (s *Session) Close(ctx context.Context) error {
 	var errs []error
 	for _, t := range torrents {
 		if err := t.close(); err != nil {
-			s.logger.Warn("session close stage failed", "stage", "torrent", "hash", t.InfoHash().HexString(), "err", err)
 			errs = append(errs, err)
 		}
 		t.tor.Drop()
 	}
 	for _, err := range s.cl.Close() {
 		if err != nil {
-			s.logger.Warn("session close stage failed", "stage", "client", "err", err)
 			errs = append(errs, err)
 		}
 	}
 	if storageCloser != nil {
 		if err := storageCloser.Close(); err != nil {
-			wrappedErr := fmt.Errorf("close default storage: %w", err)
-			s.logger.Warn("session close stage failed", "stage", "storage", "err", wrappedErr)
-			errs = append(errs, wrappedErr)
+			errs = append(errs, fmt.Errorf("close default storage: %w", err))
 		}
 	}
 
 	err := errors.Join(errs...)
-	if err != nil {
-		s.logger.Error("session close failed", "stage", "session", "err", err)
-	} else {
+	if err == nil {
 		s.logger.Info("session closed")
 	}
 	s.mu.Lock()
