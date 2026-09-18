@@ -257,7 +257,7 @@ func TestSessionKeepsDuplicateDirectoryAndMetadataReferences(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), directorySyncTimeout)
 	defer cancel()
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("DeleteTorrent: %v", err)
 	}

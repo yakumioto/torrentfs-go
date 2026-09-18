@@ -6,9 +6,13 @@ readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly FIXTURE_DIR="$ROOT_DIR/examples/docker"
 readonly FIXTURE_TORRENT="$FIXTURE_DIR/example.torrent"
 readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
-# Info hash of examples/docker/example.torrent. The session storage reads
-# payload data from <payload_dir>/<info-hash>/<name>, so the fixture payload
-# must be preloaded at that path for the mount to serve real bytes.
+# Info hash of examples/docker/example.torrent. Pieces live only in the
+# in-memory cache now, so the fixture cannot be preloaded on disk. Instead the
+# data scenarios are fed by a BEP 19 web seed: the fixture payload is served
+# over plain HTTP and the torrent handed to those scenarios carries a url-list
+# pointing at it. anacrolix downloads the piece over HTTP and writes it into the
+# cache through the same storage path a BitTorrent peer would. Adding url-list
+# is a top-level key, so the info dict and therefore this hash are unchanged.
 readonly FIXTURE_INFO_HASH="dd45d0108ac27c3c0fb1d7b28fd2b313c753bc9b"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt"
 readonly LEGACY_STATS_MARKER="/torrents/.stats/leftover.txt"
@@ -55,6 +59,7 @@ readonly UNMOUNT_STOP_MARGIN=20
 readonly UNMOUNT_TIMEOUT_DIAGNOSTIC='unmount did not return within'
 
 TMP_DIR=""
+WEBSEED_PID=""
 IMAGE_TAGGED=0
 POSITIVE_STARTED=0
 HOST_OBSERVER_STARTED=0
@@ -133,6 +138,23 @@ collect_unmount_diagnostics() {
 	fi
 }
 
+# build_seeded_torrent writes a copy of src with a top-level url-list, so the
+# torrent keeps its info hash but gains a web seed. bencode keys are sorted, and
+# "info" sorts before "url-list", so appending before the closing "e" keeps the
+# dictionary canonical.
+build_seeded_torrent() {
+	local src="$1" dst="$2" url="$3"
+	{ head -c -1 -- "$src"; printf '8:url-list%d:%se' "${#url}" "$url"; } > "$dst"
+}
+
+# webseed_fetch fetches a path under the running web seed and prints it, so
+# readiness and the served bytes are checked through the same HTTP path
+# anacrolix will use.
+webseed_fetch() {
+	local path="$1"
+	python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "http://127.0.0.1:${WEBSEED_PORT}/${path}"
+}
+
 # host_mount_released reports whether the propagated FUSE mount under mount is
 # gone and its directory is empty again.
 host_mount_released() {
@@ -174,6 +196,11 @@ cleanup() {
 		bounded 30 "docker kill -9 $container" docker kill --signal KILL "$container" >/dev/null 2>&1 || true
 		bounded 30 "docker rm -f $container" docker rm -f "$container" >/dev/null 2>&1 || true
 	done
+	if [[ -n "$WEBSEED_PID" ]]; then
+		kill "$WEBSEED_PID" 2>/dev/null || true
+		wait "$WEBSEED_PID" 2>/dev/null || true
+		WEBSEED_PID=""
+	fi
 	if ((IMAGE_TAGGED)); then
 		bounded 30 "docker image rm" docker image rm "$IMAGE" >/dev/null 2>&1 || true
 	fi
@@ -186,7 +213,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for command_name in docker findmnt sha256sum timeout; do
+for command_name in docker findmnt sha256sum timeout python3; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
@@ -202,14 +229,40 @@ NEGATIVE_DATA_DIR="$TMP_DIR/negative-data"
 NEGATIVE_MOUNT_DIR="$TMP_DIR/negative-mnt"
 mkdir -p "$TORRENT_HOST_DIR" "$DATA_HOST_DIR" "$MOUNT_HOST_DIR" \
 	"$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
+SEEDED_TORRENT_HOST_DIR="$TMP_DIR/seeded-torrents"
+WEBSEED_DIR="$TMP_DIR/webseed"
+mkdir -p "$SEEDED_TORRENT_HOST_DIR" "$WEBSEED_DIR"
 HOST_PROPAGATION="$(findmnt -T "$MOUNT_HOST_DIR" -n -o PROPAGATION 2>/dev/null || true)"
 [[ "$HOST_PROPAGATION" == *shared* ]] || \
 	fail "host mount containing $MOUNT_HOST_DIR must use shared propagation (current: ${HOST_PROPAGATION:-unknown})"
+# The plain fixture (no web seed) feeds the scenarios that need a torrent with
+# no reachable data source: blocked-read and the single-file input check.
 cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/example.torrent"
-mkdir -p "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH"
-cp -- "$FIXTURE_PAYLOAD" "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
-EXPECTED_HASH="$(sha256sum "$DATA_HOST_DIR/payload/$FIXTURE_INFO_HASH/payload.txt")"
+EXPECTED_HASH="$(sha256sum "$FIXTURE_PAYLOAD")"
 EXPECTED_HASH="${EXPECTED_HASH%% *}"
+
+# Serve the fixture payload and hand the data scenarios a web-seeded torrent.
+cp -- "$FIXTURE_PAYLOAD" "$WEBSEED_DIR/payload.txt"
+# The positive scenario mounts the seeded torrents directory, so the legacy
+# .stats marker it asserts on must exist there too.
+mkdir -p "$SEEDED_TORRENT_HOST_DIR/.stats"
+printf 'legacy\n' > "$SEEDED_TORRENT_HOST_DIR/.stats/leftover.txt"
+WEBSEED_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+[[ -n "$WEBSEED_PORT" ]] || fail "could not allocate a web seed port"
+python3 -m http.server "$WEBSEED_PORT" --bind 127.0.0.1 --directory "$WEBSEED_DIR" \
+	>"$TMP_DIR/webseed.log" 2>&1 &
+WEBSEED_PID=$!
+webseed_deadline=$((SECONDS + 15))
+while ((SECONDS < webseed_deadline)); do
+	if [[ "$(webseed_fetch payload.txt 2>/dev/null || true)" == "$(cat "$WEBSEED_DIR/payload.txt")" ]]; then
+		break
+	fi
+	sleep 0.1
+done
+[[ "$(webseed_fetch payload.txt 2>/dev/null || true)" == "$(cat "$WEBSEED_DIR/payload.txt")" ]] || \
+	fail "web seed never served $WEBSEED_DIR/payload.txt (see $TMP_DIR/webseed.log)"
+build_seeded_torrent "$FIXTURE_TORRENT" "$SEEDED_TORRENT_HOST_DIR/example.torrent" "http://127.0.0.1:$WEBSEED_PORT/"
+printf 'docker smoke: web seed serving the fixture on 127.0.0.1:%s\n' "$WEBSEED_PORT"
 
 # A legacy empty .stats directory must survive startup untouched: the new
 # layout neither creates nor removes it.
@@ -227,8 +280,10 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the FUSE container" docker run --detach
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
+	--network host \
+	--env TORRENTFS_HTTP_LISTEN_ADDR= \
 	--mount "type=bind,src=$DATA_HOST_DIR,dst=/data" \
-	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
+	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt,bind-propagation=rshared" \
 	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
@@ -499,16 +554,18 @@ printf 'docker smoke: blocked-read shutdown completed without a daemon-owned unm
 printf 'docker smoke: starting peer mount namespace shutdown scenario\n'
 PEER_DATA_DIR="$TMP_DIR/peer-data"
 PEER_MOUNT_DIR="$TMP_DIR/peer-mnt"
-mkdir -p "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH" "$PEER_MOUNT_DIR"
-# Preload the payload: without it the peer's read would block on a missing
-# piece, which is the outstanding-request cause, not this one.
-cp -- "$FIXTURE_PAYLOAD" "$PEER_DATA_DIR/payload/$FIXTURE_INFO_HASH/payload.txt"
+mkdir -p "$PEER_DATA_DIR" "$PEER_MOUNT_DIR"
+# The peer daemon is fed by the web seed so a read cannot block on a missing
+# piece; the outstanding-request cause belongs to the blocked-read scenario,
+# not this one.
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker run --detach --name "$PEER_DAEMON_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
+	--network host \
+	--env TORRENTFS_HTTP_LISTEN_ADDR= \
 	--mount "type=bind,src=$PEER_DATA_DIR,dst=/data" \
-	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
+	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
 	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
 	fail "could not start the peer-namespace container"

@@ -3,14 +3,11 @@ package session_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/anacrolix/torrent/metainfo"
-	"github.com/anacrolix/torrent/storage"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
@@ -48,85 +45,90 @@ func TestAddTorrentFailureIncludesStructuredContext(t *testing.T) {
 	}
 }
 
-func TestPieceCompletionPersistsAcrossSessionRestart(t *testing.T) {
+// TestPieceCacheIsNotRestoredAcrossRestart pins the core promise of the
+// memory-only cache: a restart starts from an empty cache, nothing is read from
+// disk, and no completion database is written.
+func TestPieceCacheIsNotRestoredAcrossRestart(t *testing.T) {
+	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentsDir := testTorrentDir(t, dataDir)
+	content := []byte(strings.Repeat("memory only", 500))
+	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
 
 	first, err := session.New(testConfig(dataDir), torrentsDir)
 	if err != nil {
 		t.Fatalf("first session.New: %v", err)
 	}
+	if err := first.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("first AddTorrent: %v", err)
+	}
+	st, ok := first.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	seedPieces(t, first, hash, content)
+	waitCached(t, ctx, st)
+	if got := st.CachedBytes(); got != int64(len(content)) {
+		t.Fatalf("cached bytes before restart = %d, want %d", got, len(content))
+	}
 	if err := first.Close(context.Background()); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
 
-	payloadRoot := filepath.Join(dataDir, "payload")
-	var completionPath string
-	for _, name := range []string{".torrent.db", ".torrent.bolt.db"} {
-		path := filepath.Join(payloadRoot, name)
-		if _, err := os.Stat(path); err == nil {
-			completionPath = path
-			break
+	// Nothing may have been written to disk: no payload tree and no piece
+	// completion database.
+	if _, err := os.Stat(filepath.Join(dataDir, "payload")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("payload dir exists after shutdown: %v", err)
+	}
+	var leftovers []string
+	walkErr := filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
+		switch entry.Name() {
+		case ".torrent.db", ".torrent.bolt.db":
+			leftovers = append(leftovers, path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk data dir: %v", walkErr)
 	}
-	if completionPath == "" {
-		t.Fatalf("piece completion database was not created in %s", payloadRoot)
-	}
-
-	completion, err := storage.NewDefaultPieceCompletionForDir(payloadRoot)
-	if err != nil {
-		t.Fatalf("open piece completion: %v", err)
-	}
-	key := metainfo.PieceKey{InfoHash: metainfo.Hash{1}, Index: 0}
-	if err := completion.Set(key, true); err != nil {
-		_ = completion.Close()
-		t.Fatalf("set piece completion: %v", err)
-	}
-	if err := completion.Close(); err != nil {
-		t.Fatalf("close piece completion: %v", err)
+	if len(leftovers) != 0 {
+		t.Fatalf("piece completion database files found after shutdown: %v", leftovers)
 	}
 
 	second, err := session.New(testConfig(dataDir), torrentsDir)
 	if err != nil {
 		t.Fatalf("second session.New: %v", err)
 	}
-	if err := second.Close(context.Background()); err != nil {
-		t.Fatalf("second Close: %v", err)
+	defer func() {
+		if err := second.Close(context.Background()); err != nil {
+			t.Errorf("second Close: %v", err)
+		}
+	}()
+	if err := second.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("second AddTorrent: %v", err)
 	}
-
-	reopened, err := storage.NewDefaultPieceCompletionForDir(payloadRoot)
-	if err != nil {
-		t.Fatalf("reopen piece completion: %v", err)
+	restored, ok := second.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered after restart")
 	}
-	defer func() { _ = reopened.Close() }()
-	got, err := reopened.Get(key)
-	if err != nil {
-		t.Fatalf("get piece completion: %v", err)
+	if got := restored.CachedBytes(); got != 0 {
+		t.Fatalf("cached bytes after restart = %d, want 0", got)
 	}
-	if !got.Ok || !got.Complete {
-		t.Fatalf("piece completion after restart = %+v, want complete", got)
-	}
-
-	_ = completionPath
 }
 
 func TestStorageUsesInjectedLogger(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentsDir := testTorrentDir(t, dataDir)
-	content := []byte("storage payload")
-	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	content := []byte("storage logger payload")
+	torrentBytes, _ := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
 	torrentPath := filepath.Join(work, "payload.torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
-	}
-	payload := payloadDir(dataDir, hash)
-	if err := os.MkdirAll(payload, 0o755); err != nil {
-		t.Fatalf("make payload: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(payload, "payload.bin"), []byte("short"), 0o644); err != nil {
-		t.Fatalf("write partial payload: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -134,31 +136,27 @@ func TestStorageUsesInjectedLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
-	sess, err := session.New(testConfig(dataDir), torrentsDir, session.WithLogger(logger))
+	// A cache whose low-water mark is below the piece length makes the store
+	// warn on open, which is the observable signal that the injected logger
+	// reaches the piece store.
+	cfg := testConfig(dataDir)
+	cfg.Cache.CapacityBytes = testPieceLength + testPieceLength/8
+	sess, err := session.New(cfg, torrentsDir, session.WithLogger(logger))
 	if err != nil {
 		t.Fatalf("session.New: %v", err)
 	}
 	if err := sess.AddTorrent(context.Background(), session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
-	st, ok := sess.Torrent(hash)
-	if !ok {
-		t.Fatal("torrent not registered")
-	}
-	select {
-	case <-st.GotInfo():
-	case <-time.After(5 * time.Second):
-		t.Fatal("torrent info did not become available")
-	}
 	if err := sess.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, `"level":"WARN"`) || !strings.Contains(output, `"msg":"file has unexpected size"`) {
-		t.Fatalf("storage warning did not use injected JSON logger: %q", output)
+	if !strings.Contains(output, `"level":"WARN"`) || !strings.Contains(output, `"msg":"piece length exceeds cache low-water mark"`) {
+		t.Fatalf("piece store warning did not use injected JSON logger: %q", output)
 	}
 	if strings.Contains(output, "level=WARN") {
-		t.Fatalf("storage warning used text logger: %q", output)
+		t.Fatalf("piece store warning used text logger: %q", output)
 	}
 }

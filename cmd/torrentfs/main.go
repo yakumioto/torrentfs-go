@@ -123,7 +123,7 @@ func run(args []string, stderr io.Writer) int {
 		"version", "dev",
 		"torrents_dir", torrentsDir,
 		"data_dir", cfg.Paths.DataDir,
-		"payload_dir", cfg.Paths.PayloadDir,
+		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"mountpoint", *mountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,

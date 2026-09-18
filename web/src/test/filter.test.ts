@@ -7,10 +7,9 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
     id: 'id',
     info_hash: 'ABC123',
     name: 'Ubuntu image',
-    state: 'downloading',
+    state: 'ready',
     total_bytes: 100,
-    completed_bytes: 25,
-    progress: 0.25,
+    cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
     ...overrides,
   };
@@ -23,19 +22,23 @@ describe('torrent dashboard filters', () => {
     expect(filterTorrents(torrents, 'DEF456', 'all')[0]?.name).toBe('Movie');
   });
 
-  it('uses the existing torrent states for status filters', () => {
-    expect(matchesTorrentFilter(torrent({ state: 'adding' }), 'downloading')).toBe(true);
-    expect(matchesTorrentFilter(torrent({ state: 'seeding', progress: 1 }), 'completed')).toBe(true);
+  it('matches on state alone and never on cache occupancy', () => {
+    expect(matchesTorrentFilter(torrent({ state: 'adding' }), 'all')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ state: 'ready' }), 'ready')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ state: 'error' }), 'error')).toBe(true);
     expect(matchesTorrentFilter(torrent({ state: 'delete_failed' }), 'error')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ state: 'adding' }), 'ready')).toBe(false);
+    expect(matchesTorrentFilter(torrent({ state: 'ready', cached_bytes: 0 }), 'ready')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ state: 'adding', cached_bytes: 100 }), 'ready')).toBe(false);
   });
 
   it('keeps summary counts aligned with the filter predicates', () => {
     const torrents = [
-      torrent({ id: 'downloading' }),
-      torrent({ id: 'seeding', state: 'seeding', progress: 1 }),
-      torrent({ id: 'complete', state: 'downloading', progress: 1 }),
+      torrent({ id: 'ready-1' }),
+      torrent({ id: 'ready-2', state: 'ready', cached_bytes: 100 }),
+      torrent({ id: 'adding', state: 'adding' }),
       torrent({ id: 'error', state: 'error' }),
     ];
-    expect(summarizeTorrents(torrents)).toEqual({ total: 4, downloading: 2, seeding: 1, completed: 2, error: 1 });
+    expect(summarizeTorrents(torrents)).toEqual({ total: 4, ready: 2, error: 1 });
   });
 });

@@ -1,6 +1,6 @@
 import type { Torrent } from '../../types/api';
 import type { TorrentLiveSummary as TorrentLiveSummaryData, TorrentStatusMeta } from '../../queries/hooks';
-import { formatBytes, formatDate, percent } from '../../utils/format';
+import { formatBytes, formatDate } from '../../utils/format';
 import { StateBadge } from '../torrents/StateBadge';
 import styles from './TorrentOverview.module.css';
 
@@ -21,9 +21,8 @@ export function TorrentOverview({ torrent, summary, meta }: {
       <dl className={styles.grid}>
         <div><dt>Info hash</dt><dd className={`text-mono ${styles.gridBreak}`}>{torrent.info_hash || 'Pending'}</dd></div>
         <div><dt>State</dt><dd><StateBadge state={summary?.state ?? torrent.state} /></dd></div>
-        <div><dt>Progress</dt><dd>{percent(summary?.progress ?? torrent.progress).toFixed(1)}%</dd></div>
         <div><dt>Total size</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>
-        <div><dt>Completed</dt><dd>{formatBytes(summary?.completedBytes ?? torrent.completed_bytes)}</dd></div>
+        <div><dt>Cached</dt><dd>{formatBytes(summary?.cachedBytes ?? torrent.cached_bytes)}</dd></div>
         <div><dt>Added</dt><dd>{formatDate(torrent.created_at)}</dd></div>
         <div><dt>Piece size</dt><dd>{meta === undefined ? '—' : `${formatBytes(meta.pieceLength)}`}</dd></div>
         <div><dt>Pieces</dt><dd>{meta?.pieceCount.toLocaleString() ?? '—'}</dd></div>

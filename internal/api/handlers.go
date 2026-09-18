@@ -5,7 +5,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,33 +13,28 @@ import (
 )
 
 type torrentResponse struct {
-	ID             string    `json:"id"`
-	InfoHash       string    `json:"info_hash"`
-	Name           string    `json:"name"`
-	State          string    `json:"state"`
-	TotalBytes     int64     `json:"total_bytes"`
-	CompletedBytes int64     `json:"completed_bytes"`
-	Progress       float64   `json:"progress"`
-	CreatedAt      time.Time `json:"created_at"`
-	Error          string    `json:"error,omitempty"`
+	ID          string    `json:"id"`
+	InfoHash    string    `json:"info_hash"`
+	Name        string    `json:"name"`
+	State       string    `json:"state"`
+	TotalBytes  int64     `json:"total_bytes"`
+	CachedBytes int64     `json:"cached_bytes"`
+	CreatedAt   time.Time `json:"created_at"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type operationResponse struct {
 	OperationID string `json:"operation_id"`
 	TorrentID   string `json:"torrent_id"`
 	State       string `json:"state"`
-	PurgeData   bool   `json:"purge_data"`
 	Error       string `json:"error,omitempty"`
 }
 
 type pieceStatusResponse struct {
-	Index          int    `json:"index"`
-	Known          bool   `json:"known"`
-	Complete       bool   `json:"complete"`
-	Partial        bool   `json:"partial"`
-	Wanted         bool   `json:"wanted"`
-	Checking       bool   `json:"checking"`
-	AvailableBytes *int64 `json:"available_bytes,omitempty"`
+	Index       int   `json:"index"`
+	Cached      bool  `json:"cached"`
+	CachedBytes int64 `json:"cached_bytes"`
+	Pinned      bool  `json:"pinned"`
 }
 
 type fileStatusResponse struct {
@@ -60,15 +54,14 @@ type torrentStatusResponse struct {
 
 func newTorrentResponse(view session.TorrentView) torrentResponse {
 	return torrentResponse{
-		ID:             view.ID,
-		InfoHash:       view.InfoHash,
-		Name:           view.Name,
-		State:          string(view.State),
-		TotalBytes:     view.TotalBytes,
-		CompletedBytes: view.CompletedBytes,
-		Progress:       view.Progress,
-		CreatedAt:      view.CreatedAt,
-		Error:          view.Error,
+		ID:          view.ID,
+		InfoHash:    view.InfoHash,
+		Name:        view.Name,
+		State:       string(view.State),
+		TotalBytes:  view.TotalBytes,
+		CachedBytes: view.CachedBytes,
+		CreatedAt:   view.CreatedAt,
+		Error:       view.Error,
 	}
 }
 
@@ -82,13 +75,10 @@ func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusRespo
 	}
 	for i, piece := range view.Pieces {
 		out.Pieces[i] = pieceStatusResponse{
-			Index:          piece.Index,
-			Known:          piece.Known,
-			Complete:       piece.Complete,
-			Partial:        piece.Partial,
-			Wanted:         piece.Wanted,
-			Checking:       piece.Checking,
-			AvailableBytes: piece.AvailableBytes,
+			Index:       piece.Index,
+			Cached:      piece.Cached,
+			CachedBytes: piece.CachedBytes,
+			Pinned:      piece.Pinned,
 		}
 	}
 	for i, file := range view.Files {
@@ -190,16 +180,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	purge := false
-	if raw := r.URL.Query().Get("purge_data"); raw != "" {
-		value, err := strconv.ParseBool(raw)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "purge_data must be a boolean")
-			return
-		}
-		purge = value
-	}
-	op, err := s.backend.DeleteTorrent(r.Context(), r.PathValue("id"), purge)
+	op, err := s.backend.DeleteTorrent(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeSessionError(w, "delete", err)
 		return
@@ -208,7 +189,6 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		OperationID: op.ID,
 		TorrentID:   op.TorrentID,
 		State:       string(op.State),
-		PurgeData:   op.PurgeData,
 		Error:       op.Error,
 	})
 }
@@ -223,7 +203,6 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		OperationID: op.ID,
 		TorrentID:   op.TorrentID,
 		State:       string(op.State),
-		PurgeData:   op.PurgeData,
 		Error:       op.Error,
 	})
 }

@@ -239,6 +239,10 @@ type raFile struct {
 	torrentSize int64
 	readahead   int64
 	closed      bool
+	// window holds the pieces pinned by the most recent read: the requested
+	// range plus its readahead. Replacing it lets the previous region fall back
+	// to the LRU tail, so a seek keeps the new region and lets the old one go.
+	window []cache.Key
 }
 
 var _ io.ReaderAt = (*raFile)(nil)
@@ -284,6 +288,7 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 	if len(plan.Spans) == 0 {
 		return 0, io.EOF
 	}
+	f.protectWindow(f.windowKeys(request, int64(len(p))+f.readaheadBytes()))
 
 	written := 0
 	for _, span := range plan.Spans {
@@ -323,22 +328,6 @@ func (f *raFile) span(ctx context.Context, loader pieceSource, pieceSpan cache.P
 			return nil, io.ErrUnexpectedEOF
 		}
 		return value[pieceSpan.Offset:end], nil
-	}
-
-	if f.pieceLength > f.cache.Capacity() {
-		start := int64(pieceSpan.Index)*f.pieceLength + pieceSpan.Offset
-		if start < 0 || start+pieceSpan.Length > f.torrentSize {
-			return nil, io.EOF
-		}
-		data := make([]byte, int(pieceSpan.Length))
-		n, err := loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
-		if err != nil && !(err == io.EOF && n == len(data)) {
-			return nil, err
-		}
-		if n != len(data) {
-			return nil, io.ErrUnexpectedEOF
-		}
-		return data, nil
 	}
 
 	data, err := f.piece(ctx, loader, pieceSpan.Index)
@@ -385,7 +374,49 @@ func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]by
 
 func (f *raFile) Close() error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closed = true
-	f.mu.Unlock()
+	for _, key := range f.window {
+		f.cache.Unpin(key)
+	}
+	f.window = nil
 	return nil
+}
+
+// windowKeys lists the pieces a read wants kept: the requested range extended
+// by readahead.
+func (f *raFile) windowKeys(request cache.ReadRequest, length int64) []cache.Key {
+	request.Length = length
+	plan := cache.Plan(request)
+	keys := make([]cache.Key, 0, len(plan.Wanted))
+	for _, index := range plan.Wanted {
+		keys = append(keys, cache.Key{Torrent: f.torrentKey, Piece: index})
+	}
+	return keys
+}
+
+// protectWindow replaces the pinned read window. The previous window is
+// unpinned first, so a seek makes the old region immediately reclaimable while
+// the new one is held. A pin that exceeds the cache's pin budget is simply not
+// granted: the read then relies on recency instead.
+//
+// Window replacement and its unpin/pin pair run under one lock. Releasing the
+// lock between them lets two concurrent reads interleave as replace(A),
+// replace(B), unpin(prev of A), unpin(A), pin(A), pin(B): the stale window A is
+// pinned after B became active and stays pinned until some later read or Close
+// happens to release it, permanently shrinking what eviction may reclaim.
+func (f *raFile) protectWindow(window []cache.Key) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return
+	}
+	previous := f.window
+	f.window = window
+	for _, key := range previous {
+		f.cache.Unpin(key)
+	}
+	for _, key := range window {
+		f.cache.Pin(key)
+	}
 }

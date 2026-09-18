@@ -13,9 +13,7 @@ import { usePageVisible } from '../utils/visibility';
 
 const FILTERS: Array<{ value: TorrentFilter; label: string }> = [
   { value: 'all', label: 'All' },
-  { value: 'downloading', label: 'Downloading' },
-  { value: 'seeding', label: 'Seeding' },
-  { value: 'completed', label: 'Completed' },
+  { value: 'ready', label: 'Ready' },
   { value: 'error', label: 'Error' },
 ];
 
@@ -42,7 +40,7 @@ export function DashboardPage() {
         <div>
           <p className="eyebrow">Library</p>
           <h1 className={styles.title} id="dashboard-title">Torrents</h1>
-          <p className={styles.subtitle}>Manage downloads and inspect live progress from one focused queue.</p>
+          <p className={styles.subtitle}>Manage torrents and inspect live cache usage from one focused queue.</p>
         </div>
         <Button color="mint" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
           Add torrent
@@ -51,9 +49,7 @@ export function DashboardPage() {
 
       <section aria-label="Torrent summary" className={styles.summary}>
         <span><strong>{summary.total}</strong> total</span>
-        <span><strong>{summary.downloading}</strong> downloading</span>
-        <span><strong>{summary.seeding}</strong> seeding</span>
-        <span><strong>{summary.completed}</strong> completed</span>
+        <span><strong>{summary.ready}</strong> ready</span>
         <span><strong>{summary.error}</strong> error</span>
       </section>
 

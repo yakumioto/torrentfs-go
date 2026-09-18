@@ -20,13 +20,12 @@ export function TorrentLiveSummary({ summary }: { summary?: TorrentLiveSummaryDa
       <div className={styles.heading}>
         <div>
           <p className="eyebrow">Live status</p>
-          <h2>Current progress</h2>
+          <h2>Cache usage</h2>
         </div>
         <StateBadge state={summary.state} />
       </div>
       <TorrentProgress
-        progress={summary.progress}
-        completedBytes={summary.completedBytes}
+        cachedBytes={summary.cachedBytes}
         totalBytes={summary.totalBytes}
         state={summary.state}
       />

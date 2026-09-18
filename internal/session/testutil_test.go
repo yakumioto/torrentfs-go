@@ -1,17 +1,20 @@
 package session_test
 
 import (
+	"context"
 	"crypto/sha1"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
 const testPieceLength = 256 << 10
@@ -31,27 +34,44 @@ func testTorrentDir(t *testing.T, dataDir string) string {
 	return dir
 }
 
-// payloadDir is the per-torrent payload directory the session's storage uses
-// for one info hash: <data_dir>/payload/<info_hash>.
-func payloadDir(dataDir string, hash metainfo.Hash) string {
-	return filepath.Join(dataDir, "payload", hash.HexString())
+// seedPieces fills a session's in-memory piece cache from content so an offline
+// torrent has data to read. It replaces the on-disk payload fixture the old
+// file-backed storage used.
+func seedPieces(t *testing.T, sess *session.Session, hash metainfo.Hash, content []byte) {
+	t.Helper()
+	if err := sess.SeedPiecesForTest(hash, content); err != nil {
+		t.Fatalf("seed pieces: %v", err)
+	}
 }
 
-// buildSingleFileTorrent writes data into the torrent's own payload directory
-// (the session storage layout payload/<info_hash>/<name>) and produces a
-// .torrent file that describes it. The torrent has no trackers, so nothing in
-// the test touches the network.
+// waitCached blocks until the torrent's whole length is resident in the piece
+// cache, which is what "the data is available" means now that pieces are not
+// persisted.
+func waitCached(t *testing.T, ctx context.Context, st *session.Torrent) {
+	t.Helper()
+	select {
+	case <-st.GotInfo():
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for torrent info")
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if st.CachedBytes() == st.Length() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("torrent cache never filled: %d/%d bytes", st.CachedBytes(), st.Length())
+}
+
+// buildSingleFileTorrent produces a .torrent file that describes data. It writes
+// no data anywhere: a test feeds the pieces through seedPieces once the torrent
+// is registered.
 func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data []byte) (torrentPath string, hash metainfo.Hash) {
 	t.Helper()
-	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
-	dir := payloadDir(dataDir, hash)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("make data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
-		t.Fatalf("write data file: %v", err)
-	}
+	_ = dataDir
 
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
@@ -135,16 +155,7 @@ func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files
 		t.Fatalf("encode multi-file metainfo: %v", err)
 	}
 	hash = mi.HashInfoBytes()
-	root := filepath.Join(payloadDir(dataDir, hash), name)
-	for _, path := range paths {
-		fullPath := filepath.Join(root, filepath.FromSlash(path))
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-			t.Fatalf("make parent for %q: %v", path, err)
-		}
-		if err := os.WriteFile(fullPath, files[path], 0o644); err != nil {
-			t.Fatalf("write %q: %v", path, err)
-		}
-	}
+	_ = dataDir
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write multi-file torrent: %v", err)

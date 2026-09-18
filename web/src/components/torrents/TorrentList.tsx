@@ -59,7 +59,7 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
       <div className={styles.header} aria-hidden="true">
         <span>Torrent</span>
         <span>Size</span>
-        <span>Progress</span>
+        <span>Cache</span>
         <span>State</span>
         <span>Added</span>
         <span>Actions</span>

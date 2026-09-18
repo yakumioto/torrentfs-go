@@ -5,9 +5,9 @@ import { fileCoverage } from './file-coverage';
 import styles from './FilesTable.module.css';
 
 const COVERAGE_CLASS: Record<string, string> = {
-  complete: styles.coverageComplete,
+  cached: styles.coverageCached,
   partial: styles.coveragePartial,
-  waiting: styles.coverageWaiting,
+  uncached: styles.coverageUncached,
 };
 
 export function FilesTable({ files, pieces }: { files: FileStatus[]; pieces: PieceStatus[] }) {
@@ -37,7 +37,7 @@ export function FilesTable({ files, pieces }: { files: FileStatus[]; pieces: Pie
         </Table.Tbody>
       </Table>
       {files.length === 0 && <div className="empty-state"><p>No files are available in this snapshot.</p></div>}
-      <p className="subtle" style={{ margin: '1rem 0 0', fontSize: '0.78rem' }}>Coverage is piece-level. A file is marked Complete only when every referenced piece is complete.</p>
+      <p className="subtle" style={{ margin: '1rem 0 0', fontSize: '0.78rem' }}>Coverage reflects the in-memory cache. A file is fully Cached only when every referenced piece is currently cached. Cached bytes can be evicted, so coverage may drop over time.</p>
     </div>
   );
 }

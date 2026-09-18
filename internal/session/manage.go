@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,9 +20,6 @@ var (
 	ErrUnknownTorrent = errors.New("session: unknown torrent")
 	// ErrInvalidSource reports malformed add input.
 	ErrInvalidSource = errors.New("session: invalid torrent source")
-	// ErrUnsafePurge reports a purge target that fails the data safety
-	// boundary. The payload is left untouched when it is returned.
-	ErrUnsafePurge = errors.New("session: refusing to purge unmanaged data")
 	// ErrExternalReference reports a deletion refused because a .torrent file
 	// the user placed in the torrents directory still references the hash. The
 	// service never deletes such a torrent or its data behind the user's back.
@@ -43,12 +38,6 @@ func (s *Session) lockHash(hash metainfo.Hash) func() {
 	s.opMu.Unlock()
 	lock.Lock()
 	return lock.Unlock
-}
-
-// PayloadRoot is the managed root under which every torrent owns an exclusive
-// payloadRoot/<info_hash> directory.
-func (s *Session) PayloadRoot() string {
-	return s.payloadRoot
 }
 
 // AddTorrentAndPersist registers a torrent and durably records both its
@@ -286,7 +275,7 @@ func (s *Session) ListTorrents() []TorrentView {
 	views := make([]TorrentView, 0, len(s.torrents))
 	seen := make(map[metainfo.Hash]struct{}, len(s.torrents))
 	for hash, st := range s.torrents {
-		views = append(views, buildView(hash, st, s.states[hash]))
+		views = append(views, s.buildView(hash, st, s.states[hash]))
 		seen[hash] = struct{}{}
 	}
 	for hash, entry := range s.states {
@@ -294,7 +283,7 @@ func (s *Session) ListTorrents() []TorrentView {
 			continue
 		}
 		if entry.State == StateDeleting || entry.State == StateDeleteFailed {
-			views = append(views, buildView(hash, nil, entry))
+			views = append(views, s.buildView(hash, nil, entry))
 		}
 	}
 	return views
@@ -313,18 +302,32 @@ func (s *Session) TorrentViewFor(id string) (TorrentView, error) {
 	if !ok && entry == nil {
 		return TorrentView{}, ErrUnknownTorrent
 	}
-	return buildView(hash, st, entry), nil
+	return s.buildView(hash, st, entry), nil
 }
 
 func (s *Session) viewFor(hash metainfo.Hash, st *Torrent) *TorrentView {
 	s.mu.RLock()
 	entry := s.states[hash]
 	s.mu.RUnlock()
-	view := buildView(hash, st, entry)
+	view := s.buildView(hash, st, entry)
 	return &view
 }
 
-func buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentView {
+// buildView snapshots one torrent for the management API. Its state is a
+// lifecycle stage, never a completion percentage: a torrent whose metainfo is
+// loaded is ready, and how much of it is available is reported separately as
+// cached bytes.
+func (s *Session) buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentView {
+	return s.buildViewWithCached(hash, st, entry, s.pieceCache.SizeOf(hash.HexString()))
+}
+
+// buildViewWithCached builds a torrent view from a cache occupancy the caller
+// already measured. A status response carries the same number twice -- once for
+// the torrent and once summed over its pieces -- so its caller takes one cache
+// snapshot and passes the matching total here; measuring it separately would
+// let an eviction between the two lock acquisitions produce a response whose
+// aggregate disagreed with its own per-piece values.
+func (s *Session) buildViewWithCached(hash metainfo.Hash, st *Torrent, entry *registryEntry, cachedBytes int64) TorrentView {
 	view := TorrentView{ID: hash.HexString(), InfoHash: hash.HexString(), State: StateAdding}
 	if entry != nil {
 		view.Name = entry.Name
@@ -337,20 +340,15 @@ func buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentVie
 	}
 	view.Name = st.Name()
 	view.TotalBytes = st.Length()
-	view.CompletedBytes = st.BytesCompleted()
-	if view.TotalBytes > 0 {
-		view.Progress = float64(view.CompletedBytes) / float64(view.TotalBytes)
-	}
+	view.CachedBytes = cachedBytes
 	if view.State == StateDeleting || view.State == StateDeleteFailed || view.State == StateError {
 		return view
 	}
 	switch {
 	case st.Info() == nil:
 		view.State = StateAdding
-	case view.TotalBytes > 0 && view.CompletedBytes >= view.TotalBytes:
-		view.State = StateSeeding
 	default:
-		view.State = StateDownloading
+		view.State = StateReady
 	}
 	return view
 }
@@ -359,7 +357,7 @@ func buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentVie
 // runs in the background; the returned operation observes it through
 // Operation. Repeated calls for the same hash return the same operation while
 // it runs.
-func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) (*Operation, error) {
+func (s *Session) DeleteTorrent(ctx context.Context, id string) (*Operation, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -440,7 +438,6 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	}
 	entry.State = StateDeleting
 	entry.Error = ""
-	entry.PurgeRequested = purgeData
 	entry.OperationID = opID
 	if err := s.writeRegistryEntryLocked(entry); err != nil {
 		s.mu.Unlock()
@@ -452,7 +449,6 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 		ID:        opID,
 		TorrentID: hash.HexString(),
 		State:     StateDeleting,
-		PurgeData: purgeData,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -466,12 +462,12 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string, purgeData bool) 
 	s.releaseManagedSourcesLocked(hash)
 	out := op.clone()
 	s.mu.Unlock()
-	s.logger.Info("torrent deletion started", "hash", hash.HexString(), "purge_data", purgeData, "operation_id", opID)
+	s.logger.Info("torrent deletion started", "hash", hash.HexString(), "operation_id", opID)
 
 	s.bgWg.Add(1)
 	go func() {
 		defer s.bgWg.Done()
-		s.runDelete(hash, st, purgeData, opID, sources)
+		s.runDelete(hash, st, opID, sources)
 	}()
 	return &out, nil
 }
@@ -488,17 +484,17 @@ func (s *Session) Operation(id string) (Operation, bool) {
 }
 
 // runDelete performs the cleanup outside s.mu and records the outcome.
-func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID string, sources managedSources) {
+func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, opID string, sources managedSources) {
 	// Stop the hash's metadata worker and wait for it to exit, so no late
 	// write can recreate a managed source after this deletion finalizes.
 	if fetch := s.stopMetadataFetch(hash); fetch != nil {
 		<-fetch.done
 	}
-	err := s.performDelete(hash, st, purge, sources)
+	err := s.performDelete(hash, st, sources)
 	if err != nil {
 		s.logger.Error("torrent deletion failed", "hash", hash.HexString(), "operation_id", opID, "err", err)
 	} else {
-		s.logger.Info("torrent deletion completed", "hash", hash.HexString(), "operation_id", opID, "purge_data", purge)
+		s.logger.Info("torrent deletion completed", "hash", hash.HexString(), "operation_id", opID)
 	}
 
 	s.mu.Lock()
@@ -531,10 +527,9 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, purge bool, opID st
 	delete(s.activeOps, hash)
 }
 
-// performDelete stops the task, releases its resources, removes every internal
-// source for the hash, and applies the payload policy. It runs without s.mu
-// held.
-func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, purge bool, sources managedSources) error {
+// performDelete stops the task, releases its resources, and removes every
+// internal source for the hash. It runs without s.mu held.
+func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, sources managedSources) error {
 	var errs []error
 	if st != nil {
 		if err := st.close(); err != nil {
@@ -552,60 +547,7 @@ func (s *Session) performDelete(hash metainfo.Hash, st *Torrent, purge bool, sou
 			errs = append(errs, fmt.Errorf("session: remove pending magnet %s: %w", source.name, err))
 		}
 	}
-	if purge {
-		if err := s.purgePayload(hash); err != nil {
-			errs = append(errs, err)
-		}
-	}
 	return errors.Join(errs...)
-}
-
-// purgePayload removes payloadRoot/<hash> after checking that the target is
-// the torrent's own directory and that no component is a symlink. A missing
-// target is success: removal is idempotent.
-func (s *Session) purgePayload(hash metainfo.Hash) error {
-	root := s.payloadRoot
-	target := filepath.Join(root, hash.HexString())
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel != hash.HexString() || strings.ContainsRune(rel, os.PathSeparator) {
-		return fmt.Errorf("%w: %q is not a direct child of %q", ErrUnsafePurge, target, root)
-	}
-	for _, path := range []string{root, target} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return fmt.Errorf("%w: %q: %v", ErrUnsafePurge, path, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: %q is a symlink", ErrUnsafePurge, path)
-		}
-	}
-	info, err := os.Lstat(target)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%w: %q is not a directory", ErrUnsafePurge, target)
-	}
-	// Quarantine the directory first so removal is a single rename from the
-	// perspective of concurrent filesystem readers.
-	trash, err := newOperationID()
-	if err != nil {
-		return err
-	}
-	quarantine := filepath.Join(root, ".trash-"+hash.HexString()+"-"+trash)
-	if err := os.Rename(target, quarantine); err != nil {
-		return fmt.Errorf("session: quarantine payload %s: %w", hash, err)
-	}
-	if err := os.RemoveAll(quarantine); err != nil {
-		return fmt.Errorf("session: remove payload %s: %w", hash, err)
-	}
-	return nil
 }
 
 // resumeDeletions completes deletions interrupted by a crash. It runs before
@@ -614,7 +556,6 @@ func (s *Session) resumeDeletions() error {
 	type pendingDelete struct {
 		hash    metainfo.Hash
 		opID    string
-		purge   bool
 		sources managedSources
 	}
 	s.mu.Lock()
@@ -645,7 +586,6 @@ func (s *Session) resumeDeletions() error {
 			ID:        opID,
 			TorrentID: hash.HexString(),
 			State:     StateDeleting,
-			PurgeData: entry.PurgeRequested,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -654,7 +594,7 @@ func (s *Session) resumeDeletions() error {
 		sources := s.managedSourcesForHashLocked(hash)
 		delete(s.manualRefs, hash)
 		s.releaseManagedSourcesLocked(hash)
-		pending = append(pending, pendingDelete{hash: hash, opID: opID, purge: entry.PurgeRequested, sources: sources})
+		pending = append(pending, pendingDelete{hash: hash, opID: opID, sources: sources})
 	}
 	for _, hash := range stale {
 		_ = s.removeRegistryEntryLocked(hash)
@@ -665,7 +605,7 @@ func (s *Session) resumeDeletions() error {
 		s.mu.RLock()
 		st := s.torrents[item.hash]
 		s.mu.RUnlock()
-		s.runDelete(item.hash, st, item.purge, item.opID, item.sources)
+		s.runDelete(item.hash, st, item.opID, item.sources)
 	}
 	return nil
 }

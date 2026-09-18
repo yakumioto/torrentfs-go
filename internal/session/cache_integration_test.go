@@ -14,7 +14,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Hash) *session.Session {
+func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Hash, content []byte) *session.Session {
 	t.Helper()
 	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
@@ -30,11 +30,12 @@ func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Ha
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
+	seedPieces(t, sess, hash, content)
 	st, ok := sess.Torrent(hash)
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	waitCached(t, ctx, st)
 	return sess
 }
 
@@ -64,7 +65,7 @@ func TestSessionPieceCacheServesReads(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("piececache", (testPieceLength/10)+1))
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
-	sess := openWarmSession(t, dataDir, torrentPath, hash)
+	sess := openWarmSession(t, dataDir, torrentPath, hash, content)
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
 	if err != nil {
@@ -93,8 +94,8 @@ func TestSessionPieceCacheReadsAcrossFileBoundary(t *testing.T) {
 		"second.bin": []byte(strings.Repeat("B", 200<<10)),
 		"third.bin":  []byte("tail"),
 	}
-	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
-	sess := openWarmSession(t, dataDir, torrentPath, hash)
+	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	sess := openWarmSession(t, dataDir, torrentPath, hash, all)
 
 	ra, err := sess.OpenFile(hash, "second.bin")
 	if err != nil {
@@ -114,7 +115,7 @@ func TestTorrentStatusCompleteSnapshot(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("state ", (testPieceLength/5)+1))
 	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
-	sess := openWarmSession(t, dataDir, torrentPath, hash)
+	sess := openWarmSession(t, dataDir, torrentPath, hash, content)
 
 	status, err := sess.TorrentStatusFor(hash.HexString())
 	if err != nil {
@@ -128,8 +129,8 @@ func TestTorrentStatusCompleteSnapshot(t *testing.T) {
 		t.Fatalf("pieces = %d, want %d", len(status.Pieces), wantPieces)
 	}
 	for index, piece := range status.Pieces {
-		if piece.Index != index || !piece.Known || !piece.Complete {
-			t.Fatalf("piece %d = %+v, want complete absolute piece", index, piece)
+		if piece.Index != index || !piece.Cached || piece.CachedBytes <= 0 {
+			t.Fatalf("piece %d = %+v, want cached piece", index, piece)
 		}
 	}
 	if len(status.Files) != 1 || status.Files[0].Path != "payload.bin" || status.Files[0].PieceStart != 0 || status.Files[0].PieceEnd != wantPieces {
@@ -145,8 +146,8 @@ func TestTorrentStatusSharesBoundaryPieces(t *testing.T) {
 		"second.bin": []byte(strings.Repeat("B", 200<<10)),
 		"third.bin":  []byte("tail"),
 	}
-	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
-	sess := openWarmSession(t, dataDir, torrentPath, hash)
+	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	sess := openWarmSession(t, dataDir, torrentPath, hash, all)
 
 	status, err := sess.TorrentStatusFor(hash.HexString())
 	if err != nil {

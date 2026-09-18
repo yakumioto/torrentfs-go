@@ -16,7 +16,6 @@ trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true; rm -rf -- "$work_d
 cat >"$work_dir/torrentfs.toml" <<'EOF'
 [paths]
 data_dir = "/data"
-payload_dir = "/data/payload"
 
 [http]
 listen_addr = "0.0.0.0:8080"

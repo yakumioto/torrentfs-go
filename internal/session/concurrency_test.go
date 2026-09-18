@@ -92,7 +92,8 @@ func TestFuseConcurrentReads(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {
@@ -180,7 +181,8 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {
@@ -250,7 +252,7 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 				errs <- fmt.Errorf("add churn torrent %d: %w", i, err)
 				return
 			}
-			op, err := sess.DeleteTorrent(ctx, view.ID, false)
+			op, err := sess.DeleteTorrent(ctx, view.ID)
 			if err != nil {
 				errs <- fmt.Errorf("delete churn torrent %d: %w", i, err)
 				return
@@ -366,8 +368,8 @@ func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("torrent info never arrived: %v", ctx.Err())
 	}
-	if st.BytesCompleted() == st.Length() {
-		t.Fatal("the torrent must stay incomplete for this test")
+	if st.CachedBytes() != 0 {
+		t.Fatal("the torrent must stay uncached for this test")
 	}
 
 	server, err := filesystem.Mount(mnt, sess, nil)
@@ -518,7 +520,8 @@ func TestSessionOpenFileReadsStopAfterClose(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
 	if err != nil {

@@ -68,15 +68,9 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 	hashHex := hash.HexString()
 
-	// Seeder: the data already sits in its own data directory.
+	// Seeder: its in-memory cache is filled directly, standing in for data that
+	// would otherwise have to be downloaded first.
 	seederDir := filepath.Join(work, "seeder-data")
-	seederPayload := payloadDir(seederDir, hash)
-	if err := os.MkdirAll(seederPayload, 0o755); err != nil {
-		t.Fatalf("make seeder data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(seederPayload, "payload.bin"), content, 0o644); err != nil {
-		t.Fatalf("write seeder data: %v", err)
-	}
 	seederTorrent := filepath.Join(work, "seeder.torrent")
 	if err := os.WriteFile(seederTorrent, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write seeder torrent: %v", err)
@@ -90,10 +84,8 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	if !ok {
 		t.Fatal("seeder did not register the torrent")
 	}
-	waitComplete(t, ctx, seederHandle)
-	if !seederHandle.Seeding() {
-		t.Fatal("seeder is not seeding a complete torrent")
-	}
+	seedPieces(t, seeder, hash, content)
+	waitCached(t, ctx, seederHandle)
 
 	// Leecher: an empty data directory that must fetch everything.
 	leecherDir := filepath.Join(work, "leecher-data")
@@ -109,8 +101,8 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	if !ok {
 		t.Fatal("leecher did not register the torrent")
 	}
-	if got := leecherHandle.BytesCompleted(); got != 0 {
-		t.Fatalf("leecher starts with %d bytes; the swarm test must transfer everything", got)
+	if got := leecherHandle.CachedBytes(); got != 0 {
+		t.Fatalf("leecher starts with %d cached bytes; the swarm test must transfer everything", got)
 	}
 
 	// Both peers must reach the tracker before the mount can expect content.
@@ -151,9 +143,9 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 		t.Fatal("seeked read window differs from source")
 	}
 
-	waitComplete(t, ctx, leecherHandle)
-	if got := leecherHandle.BytesCompleted(); got != leecherHandle.Length() {
-		t.Fatalf("leecher completed %d/%d bytes after the mount", got, leecherHandle.Length())
+	waitCached(t, ctx, leecherHandle)
+	if got := leecherHandle.CachedBytes(); got != leecherHandle.Length() {
+		t.Fatalf("leecher cached %d/%d bytes after the mount", got, leecherHandle.Length())
 	}
 }
 

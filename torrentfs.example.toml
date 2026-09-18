@@ -13,16 +13,18 @@
 # The FUSE mount exposes torrent data only, read-only. Torrent management
 # (add, delete, status) happens over the HTTP API below; there is no
 # metadata/ or stats/ control directory in the mount.
+#
+# Piece data is cached in memory only and is never written to disk. Restarting
+# torrentfs starts from an empty cache: no piece completion is persisted and no
+# piece is recovered from disk.
 
 [paths]
-# Writable directory for downloaded payload data.
+# Writable directory for the state torrentfs still persists: the metadata cache
+# and the per-torrent deletion sidecars. Piece data is never written here; it
+# lives only in the in-memory cache below.
 # The required positional torrents directory stores .metadata separately.
 # Omitting this key uses <user cache dir>/torrentfs.
 data_dir = "./torrentfs-data"
-# Managed root for per-torrent payload directories. Each torrent owns
-# <payload_dir>/<info_hash>, which is the only directory ever purged when a
-# deletion requests purge_data=true. Empty uses <data_dir>/payload.
-payload_dir = ""
 
 [http]
 # The listener serves both the embedded Web UI and the management API. Empty
@@ -53,8 +55,13 @@ listen_port = 0
 socks5_url = ""
 
 [cache]
-# Maximum in-memory piece cache size, in bytes (64 MiB by default).
-capacity_bytes = 67108864
+# Hard upper bound on the in-memory piece cache, in bytes. The default is
+# 2147483648 (2 GiB), which suits a host with about 4 GB of RAM; size it at
+# roughly 50-60% of a container's memory limit. This is a cap, not a
+# reservation: the cache fills lazily, so a small workload never reaches it.
+# Eviction starts at 7/8 of this value and reclaims down to 3/4, so a read
+# window always has headroom. Zero or negative is rejected at startup.
+capacity_bytes = 2147483648
 
 [identity]
 # User-Agent for HTTP tracker announces. Explicit empty values use the anacrolix default.

@@ -17,7 +17,55 @@ type entry struct {
 	value []byte
 }
 
-// Cache is a byte-capacity, least-recently-used cache.
+// Eviction watermarks as fractions of the cache capacity. A high-water mark
+// triggers eviction and a low-water mark ends it, so a burst of inserts is
+// reclaimed in one batch instead of churning at the capacity boundary. The
+// headroom between the high-water mark and the hard capacity absorbs a read
+// window without blocking on eviction.
+const (
+	highWaterNumerator   int64 = 7
+	highWaterDenominator int64 = 8
+	lowWaterNumerator    int64 = 3
+	lowWaterDenominator  int64 = 4
+)
+
+// HighWater returns the byte size that triggers eviction for a capacity. For a
+// positive capacity it is never zero: a capacity of 1 or 2 bytes would otherwise
+// round both marks down to zero and evict every insertion immediately, so the
+// cache would accept a piece that fits and then refuse to keep it.
+func HighWater(capacity int64) int64 {
+	if capacity <= 0 {
+		return 0
+	}
+	if mark := capacity * highWaterNumerator / highWaterDenominator; mark > 0 {
+		return mark
+	}
+	return 1
+}
+
+// LowWater returns the byte size that ends an eviction pass for a capacity. Like
+// HighWater it is clamped to at least one byte, and clamped marks keep the
+// ordering low <= high <= capacity for every positive capacity because
+// max(1, cap*3/4) <= max(1, cap*7/8).
+func LowWater(capacity int64) int64 {
+	if capacity <= 0 {
+		return 0
+	}
+	if mark := capacity * lowWaterNumerator / lowWaterDenominator; mark > 0 {
+		return mark
+	}
+	return 1
+}
+
+// pinBytesCap returns how many bytes may be pinned at once. It leaves the
+// low-water mark evictable at all times, so an eviction always has a victim and
+// a pinned read window can never deadlock against the cache.
+func (c *Cache) pinBytesCap() int64 {
+	return c.capacity - LowWater(c.capacity)
+}
+
+// Cache is a byte-capacity, least-recently-used cache. Insertion is bounded by
+// the capacity; eviction starts at the high-water mark and stops at the low.
 type Cache struct {
 	mu       sync.Mutex
 	capacity int64
@@ -25,14 +73,25 @@ type Cache struct {
 	hits     uint64
 	items    map[Key]*list.Element
 	lru      *list.List
+
+	// pinned holds the keys that eviction must skip. A key may be pinned
+	// before it is resident, so that data arriving later is protected.
+	pinned      map[Key]struct{}
+	pinnedBytes int64
+
+	// usedByTorrent tracks resident bytes per torrent so the management API can
+	// report the cache's actual occupancy without walking the LRU.
+	usedByTorrent map[string]int64
 }
 
 // New returns an empty cache with the given byte capacity.
 func New(capacity int64) *Cache {
 	return &Cache{
-		capacity: capacity,
-		items:    make(map[Key]*list.Element),
-		lru:      list.New(),
+		capacity:      capacity,
+		items:         make(map[Key]*list.Element),
+		lru:           list.New(),
+		pinned:        make(map[Key]struct{}),
+		usedByTorrent: make(map[string]int64),
 	}
 }
 
@@ -59,8 +118,10 @@ func (c *Cache) Get(key Key) ([]byte, bool) {
 	return append([]byte(nil), value...), true
 }
 
-// Put stores a copy of value, evicting least-recently-used entries as needed.
-// A value larger than the cache capacity is not retained.
+// Put stores a copy of value. Inserting may push the cache past the high-water
+// mark, which triggers an eviction pass down to the low-water mark. A value
+// larger than the capacity is never retained, and an insertion that cannot be
+// made to fit under the hard capacity is rolled back.
 func (c *Cache) Put(key Key, value []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -68,7 +129,7 @@ func (c *Cache) Put(key Key, value []byte) {
 	if elem, ok := c.items[key]; ok {
 		c.remove(elem)
 	}
-	if int64(len(value)) > c.capacity || c.capacity <= 0 {
+	if c.capacity <= 0 || int64(len(value)) > c.capacity {
 		return
 	}
 
@@ -76,9 +137,113 @@ func (c *Cache) Put(key Key, value []byte) {
 	elem := c.lru.PushFront(&entry{key: key, value: stored})
 	c.items[key] = elem
 	c.used += int64(len(stored))
-	for c.used > c.capacity {
-		c.remove(c.lru.Back())
+	c.usedByTorrent[key.Torrent] += int64(len(stored))
+	if _, ok := c.pinned[key]; ok {
+		c.pinnedBytes += int64(len(stored))
 	}
+	c.evictLocked(elem)
+	if c.used > c.capacity {
+		// Reclaiming everything evictable was not enough (pinned entries
+		// remain), so the insert cannot be honoured. Roll it back so the hard
+		// cap holds; the caller's next read falls back to the network. The
+		// element may already be gone if the eviction pass reached it, so look
+		// it up rather than reusing the pointer.
+		if current, ok := c.items[key]; ok {
+			c.remove(current)
+		}
+	}
+}
+
+// Remove drops key from the cache if it is present, without touching pins.
+func (c *Cache) Remove(key Key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.items[key]; ok {
+		c.remove(elem)
+	}
+}
+
+// Pin protects key from eviction. Pinning a key that is not resident yet is
+// allowed: the protection applies if the piece arrives later. Pin fails when it
+// would push the pinned total past the pin budget, in which case the caller
+// must proceed without protection.
+func (c *Cache) Pin(key Key) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.pinned[key]; ok {
+		return true
+	}
+	size := c.sizeOfLocked(key)
+	if c.pinnedBytes+size > c.pinBytesCap() {
+		return false
+	}
+	c.pinned[key] = struct{}{}
+	c.pinnedBytes += size
+	return true
+}
+
+// Unpin releases one pinned key.
+func (c *Cache) Unpin(key Key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unpinLocked(key)
+	if c.used > HighWater(c.capacity) {
+		c.evictLocked(nil)
+	}
+}
+
+// UnpinTorrent releases every pinned key belonging to torrent.
+func (c *Cache) UnpinTorrent(torrent string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key := range c.pinned {
+		if key.Torrent == torrent {
+			c.unpinLocked(key)
+		}
+	}
+}
+
+// IsPinned reports whether key is protected from eviction.
+func (c *Cache) IsPinned(key Key) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.pinned[key]
+	return ok
+}
+
+// PinnedBytes returns the number of resident bytes currently pinned.
+func (c *Cache) PinnedBytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pinnedBytes
+}
+
+// SizeOf returns the number of cached bytes belonging to torrent.
+func (c *Cache) SizeOf(torrent string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.usedByTorrent[torrent]
+}
+
+// Snapshot returns the resident byte size and the pinned flag of every piece of
+// torrent that the cache knows about, in one lock acquisition. Pieces absent
+// from the maps are neither cached nor pinned.
+func (c *Cache) Snapshot(torrent string) (cached map[int]int64, pinned map[int]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cached = make(map[int]int64)
+	pinned = make(map[int]bool)
+	for key, elem := range c.items {
+		if key.Torrent == torrent {
+			cached[key.Piece] = int64(len(elem.Value.(*entry).value))
+		}
+	}
+	for key := range c.pinned {
+		if key.Torrent == torrent {
+			pinned[key.Piece] = true
+		}
+	}
+	return cached, pinned
 }
 
 // HitCount returns the number of successful Get calls.
@@ -88,7 +253,7 @@ func (c *Cache) HitCount() uint64 {
 	return c.hits
 }
 
-// InvalidateTorrent removes every entry belonging to torrent.
+// InvalidateTorrent removes every entry and pin belonging to torrent.
 func (c *Cache) InvalidateTorrent(torrent string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -100,6 +265,12 @@ func (c *Cache) InvalidateTorrent(torrent string) {
 		}
 		elem = previous
 	}
+	for key := range c.pinned {
+		if key.Torrent == torrent {
+			delete(c.pinned, key)
+		}
+	}
+	c.pinnedBytes = c.recountPinnedLocked()
 }
 
 // Capacity returns the cache's byte capacity.
@@ -123,6 +294,63 @@ func (c *Cache) Size() int64 {
 	return c.used
 }
 
+// evictLocked reclaims from the least-recently-used end until the cache is back
+// under the low-water mark, skipping pinned entries. It gives up when no
+// unpinned victim is left.
+//
+// keep, when non-nil, is the entry an insertion is trying to place: the pass
+// must never evict it. A piece that fits the capacity has to stay resident, and
+// when it is the only entry the low-water target is below its size, so without
+// this the cache would evict the very piece it just accepted.
+func (c *Cache) evictLocked(keep *list.Element) {
+	if c.used <= HighWater(c.capacity) {
+		return
+	}
+	for c.used > LowWater(c.capacity) {
+		victim := c.victimLocked(keep)
+		if victim == nil {
+			return
+		}
+		c.remove(victim)
+	}
+}
+
+// victimLocked returns the least-recently-used unpinned entry, never keep.
+func (c *Cache) victimLocked(keep *list.Element) *list.Element {
+	for elem := c.lru.Back(); elem != nil; elem = elem.Prev() {
+		if elem == keep {
+			continue
+		}
+		if _, ok := c.pinned[elem.Value.(*entry).key]; !ok {
+			return elem
+		}
+	}
+	return nil
+}
+
+func (c *Cache) sizeOfLocked(key Key) int64 {
+	if elem, ok := c.items[key]; ok {
+		return int64(len(elem.Value.(*entry).value))
+	}
+	return 0
+}
+
+func (c *Cache) unpinLocked(key Key) {
+	if _, ok := c.pinned[key]; !ok {
+		return
+	}
+	delete(c.pinned, key)
+	c.pinnedBytes -= c.sizeOfLocked(key)
+}
+
+func (c *Cache) recountPinnedLocked() int64 {
+	var total int64
+	for key := range c.pinned {
+		total += c.sizeOfLocked(key)
+	}
+	return total
+}
+
 func (c *Cache) remove(elem *list.Element) {
 	if elem == nil {
 		return
@@ -130,5 +358,12 @@ func (c *Cache) remove(elem *list.Element) {
 	item := elem.Value.(*entry)
 	delete(c.items, item.key)
 	c.lru.Remove(elem)
-	c.used -= int64(len(item.value))
+	n := int64(len(item.value))
+	c.used -= n
+	if c.usedByTorrent[item.key.Torrent] -= n; c.usedByTorrent[item.key.Torrent] <= 0 {
+		delete(c.usedByTorrent, item.key.Torrent)
+	}
+	if _, ok := c.pinned[item.key]; ok {
+		c.pinnedBytes -= n
+	}
 }

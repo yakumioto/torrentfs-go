@@ -19,8 +19,8 @@ func TestDefault(t *testing.T) {
 	if cfg.Paths.DataDir == "" {
 		t.Fatal("Default DataDir is empty")
 	}
-	if cfg.Cache.CapacityBytes != 64<<20 {
-		t.Fatalf("Default cache capacity = %d, want %d", cfg.Cache.CapacityBytes, 64<<20)
+	if cfg.Cache.CapacityBytes != 2<<30 {
+		t.Fatalf("Default cache capacity = %d, want %d", cfg.Cache.CapacityBytes, 2<<30)
 	}
 	if cfg.Log != (config.Log{Level: "info", Format: "text"}) {
 		t.Fatalf("Default log = %+v, want info/text", cfg.Log)
@@ -111,11 +111,9 @@ add_source = true
 
 func TestLoadHTTPSection(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
-	payloadDir := filepath.Join(t.TempDir(), "payload")
 	path := writeConfig(t, `
 [paths]
 data_dir = `+quote(dataDir)+`
-payload_dir = `+quote(payloadDir)+`
 
 [http]
 listen_addr = "127.0.0.1:9000"
@@ -131,9 +129,6 @@ token_ttl = "45m"
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Paths.PayloadDir != payloadDir {
-		t.Fatalf("PayloadDir = %q, want %q", cfg.Paths.PayloadDir, payloadDir)
 	}
 	if cfg.HTTP.ListenAddr != "127.0.0.1:9000" {
 		t.Fatalf("ListenAddr = %q", cfg.HTTP.ListenAddr)
@@ -442,6 +437,13 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 			name: "negative cache",
 			setup: func(cfg *config.Config) {
 				cfg.Cache.CapacityBytes = -1
+			},
+			field: "cache.capacity_bytes",
+		},
+		{
+			name: "zero cache",
+			setup: func(cfg *config.Config) {
+				cfg.Cache.CapacityBytes = 0
 			},
 			field: "cache.capacity_bytes",
 		},

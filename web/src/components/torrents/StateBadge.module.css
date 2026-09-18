@@ -24,11 +24,7 @@
   color: var(--warning);
 }
 
-.downloading {
-  color: var(--accent);
-}
-
-.seeding {
+.ready {
   color: var(--success);
 }
 

@@ -71,7 +71,7 @@ func (f *fakeBackend) TorrentStatusFor(string) (session.TorrentStatusView, error
 	return f.statusView, f.statusErr
 }
 
-func (f *fakeBackend) DeleteTorrent(_ context.Context, _ string, _ bool) (*session.Operation, error) {
+func (f *fakeBackend) DeleteTorrent(_ context.Context, _ string) (*session.Operation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
@@ -139,7 +139,7 @@ func TestAddMagnetJSON(t *testing.T) {
 }
 
 func TestAddTorrentMultipart(t *testing.T) {
-	view := session.TorrentView{ID: "abc", InfoHash: "abc", State: session.StateDownloading}
+	view := session.TorrentView{ID: "abc", InfoHash: "abc", State: session.StateReady}
 	backend := &fakeBackend{addView: &view}
 	srv := newTestServer(t, backend, nil)
 
@@ -215,15 +215,14 @@ func TestAddRejectsOversizedUpload(t *testing.T) {
 
 func TestListTorrentsReturnsFields(t *testing.T) {
 	backend := &fakeBackend{views: []session.TorrentView{{
-		ID:             "abc",
-		InfoHash:       "abc",
-		Name:           "task",
-		State:          session.StateSeeding,
-		TotalBytes:     100,
-		CompletedBytes: 100,
-		Progress:       1,
-		CreatedAt:      time.Now().UTC(),
-		Error:          "",
+		ID:          "abc",
+		InfoHash:    "abc",
+		Name:        "task",
+		State:       session.StateReady,
+		TotalBytes:  100,
+		CachedBytes: 100,
+		CreatedAt:   time.Now().UTC(),
+		Error:       "",
 	}}}
 	srv := newTestServer(t, backend, nil)
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil))
@@ -237,24 +236,29 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("list length = %d, want 1", len(got))
 	}
-	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "completed_bytes", "progress", "created_at"} {
+	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "cached_bytes", "created_at"} {
 		if _, ok := got[0][key]; !ok {
 			t.Fatalf("list entry missing %q: %v", key, got[0])
+		}
+	}
+	// The removed completion fields must not reappear: they reported anacrolix's
+	// lagging completion view, which a memory-only cache cannot honour.
+	for _, key := range []string{"completed_bytes", "progress"} {
+		if _, ok := got[0][key]; ok {
+			t.Fatalf("list entry still exposes removed field %q: %v", key, got[0])
 		}
 	}
 }
 
 func TestTorrentDetailAndStatus(t *testing.T) {
-	available := int64(42)
 	view := session.TorrentView{
-		ID:             strings.Repeat("a", 40),
-		InfoHash:       strings.Repeat("a", 40),
-		Name:           "payload",
-		State:          session.StateDownloading,
-		TotalBytes:     100,
-		CompletedBytes: 42,
-		Progress:       0.42,
-		CreatedAt:      time.Now().UTC(),
+		ID:          strings.Repeat("a", 40),
+		InfoHash:    strings.Repeat("a", 40),
+		Name:        "payload",
+		State:       session.StateReady,
+		TotalBytes:  100,
+		CachedBytes: 42,
+		CreatedAt:   time.Now().UTC(),
 	}
 	backend := &fakeBackend{
 		detailView: view,
@@ -263,11 +267,10 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 			MetainfoReady: true,
 			PieceLength:   64,
 			Pieces: []session.PieceStatus{{
-				Index:          0,
-				Known:          true,
-				Partial:        true,
-				Wanted:         true,
-				AvailableBytes: &available,
+				Index:       0,
+				Cached:      true,
+				CachedBytes: 64,
+				Pinned:      true,
 			}},
 			Files: []session.FileStatus{{Path: "payload", Size: 100, PieceStart: 0, PieceEnd: 2}},
 		},
@@ -282,8 +285,11 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("decode detail: %v", err)
 	}
-	if detail["id"] != view.ID || detail["state"] != string(session.StateDownloading) {
+	if detail["id"] != view.ID || detail["state"] != string(session.StateReady) {
 		t.Fatalf("detail = %v, want torrent response", detail)
+	}
+	if detail["cached_bytes"] != float64(42) {
+		t.Fatalf("detail cached_bytes = %v, want 42", detail["cached_bytes"])
 	}
 
 	rec = do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+view.ID+"/status", nil))
@@ -294,8 +300,10 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 		MetainfoReady bool  `json:"metainfo_ready"`
 		PieceLength   int64 `json:"piece_length"`
 		Pieces        []struct {
-			Index          int    `json:"index"`
-			AvailableBytes *int64 `json:"available_bytes"`
+			Index       int   `json:"index"`
+			Cached      bool  `json:"cached"`
+			CachedBytes int64 `json:"cached_bytes"`
+			Pinned      bool  `json:"pinned"`
 		} `json:"pieces"`
 		Files []struct {
 			Path       string `json:"path"`
@@ -306,8 +314,9 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if !got.MetainfoReady || got.PieceLength != 64 || len(got.Pieces) != 1 || got.Pieces[0].Index != 0 || got.Pieces[0].AvailableBytes == nil || *got.Pieces[0].AvailableBytes != available {
-		t.Fatalf("status pieces = %+v, want one partial piece", got.Pieces)
+	if !got.MetainfoReady || got.PieceLength != 64 || len(got.Pieces) != 1 ||
+		got.Pieces[0].Index != 0 || !got.Pieces[0].Cached || got.Pieces[0].CachedBytes != 64 || !got.Pieces[0].Pinned {
+		t.Fatalf("status pieces = %+v, want one cached pinned piece", got.Pieces)
 	}
 	if len(got.Files) != 1 || got.Files[0].Path != "payload" || got.Files[0].PieceStart != 0 || got.Files[0].PieceEnd != 2 {
 		t.Fatalf("status files = %+v, want one piece range", got.Files)
@@ -352,7 +361,7 @@ func TestDeleteReturnsAcceptedOperation(t *testing.T) {
 		State:     session.StateDeleting,
 	}}
 	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc?purge_data=true", nil))
+	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc", nil))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body %s", rec.Code, rec.Body.String())
 	}
@@ -362,14 +371,6 @@ func TestDeleteReturnsAcceptedOperation(t *testing.T) {
 	}
 	if got["operation_id"] != "op-1" || got["state"] != "deleting" {
 		t.Fatalf("response = %v, want operation_id op-1 and state deleting", got)
-	}
-}
-
-func TestDeleteRejectsInvalidPurgeFlag(t *testing.T) {
-	srv := newTestServer(t, &fakeBackend{}, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc?purge_data=maybe", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 

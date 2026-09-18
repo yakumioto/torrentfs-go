@@ -3,7 +3,6 @@
 
 [paths]
 data_dir = "/data"
-payload_dir = ""
 
 [http]
 listen_addr = "127.0.0.1:8080"
@@ -24,7 +23,9 @@ listen_port = 0
 socks5_url = ""
 
 [cache]
-capacity_bytes = 67108864
+# 2 GiB suits a host with about 4 GB of RAM. Override for smaller containers:
+# set this to roughly 50-60% of the container memory limit.
+capacity_bytes = 2147483648
 
 [identity]
 tracker_user_agent = "qBittorrent/4.4.0"

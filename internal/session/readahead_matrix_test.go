@@ -3,7 +3,6 @@ package session_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -43,13 +42,6 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 	hashHex := hash.HexString()
 
 	seederDir := filepath.Join(t.TempDir(), "seeder-data")
-	seederPayload := payloadDir(seederDir, hash)
-	if err := ensureDir(seederPayload); err != nil {
-		t.Fatalf("make seeder payload dir: %v", err)
-	}
-	if err := writeFile(filepath.Join(seederPayload, "payload.bin"), content); err != nil {
-		t.Fatalf("write seeder payload: %v", err)
-	}
 	seeder := newLoopbackSession(t, testConfig(seederDir))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -60,10 +52,8 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 	if !ok {
 		t.Fatal("seeder did not register torrent")
 	}
-	waitComplete(t, ctx, seederHandle)
-	if !seederHandle.Seeding() {
-		t.Fatal("seeder is not seeding")
-	}
+	seedPieces(t, seeder, hash, content)
+	waitCached(t, ctx, seederHandle)
 
 	pieceLength := int64(testPieceLength)
 	candidates := []readaheadCandidate{
@@ -104,8 +94,8 @@ func runColdSeekCandidate(t *testing.T, tracker *loopbackTracker, hashHex string
 	if !ok {
 		t.Fatal("leecher did not register torrent")
 	}
-	if got := leecherHandle.BytesCompleted(); got != 0 {
-		t.Fatalf("leecher starts with %d completed bytes; want cold storage", got)
+	if got := leecherHandle.CachedBytes(); got != 0 {
+		t.Fatalf("leecher starts with %d cached bytes; want cold storage", got)
 	}
 	if err := waitFor(ctx, func() bool { return tracker.peerCount(hashHex) >= 2 }); err != nil {
 		t.Fatalf("leecher did not connect to seeder: %v", err)
@@ -161,7 +151,7 @@ func runColdSeekCandidate(t *testing.T, tracker *loopbackTracker, hashHex string
 	readPosition := targetOffset + int64(result.n)
 	windowEnd := int((readPosition + candidate.bytes + pieceLength - 1) / pieceLength)
 	forwardCompleted := completedPiecesInRange(session.PieceStateRunsForTest(leecherHandle), matrixTargetPiece+1, windowEnd)
-	completedAtFirst := leecherHandle.BytesCompleted()
+	completedAtFirst := leecherHandle.CachedBytes()
 	t.Logf("case=%d priority=%s first_data=%s priority_to_first=%s completed_at_first=%d forward_completed=%d forward_bytes=%d", caseNumber, priorityAt.Sub(seekStarted), firstDataAt.Sub(seekStarted), firstDataAt.Sub(priorityAt), completedAtFirst, forwardCompleted, int64(forwardCompleted)*pieceLength)
 
 	const playbackPieces = 6
@@ -235,12 +225,4 @@ func completedPiecesInRange(runs torrent.PieceStateRuns, begin, end int) int {
 		}
 	}
 	return completed
-}
-
-func ensureDir(path string) error {
-	return os.MkdirAll(path, 0o755)
-}
-
-func writeFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0o644)
 }

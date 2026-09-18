@@ -4,20 +4,16 @@ export interface Torrent {
   name: string;
   state: string;
   total_bytes: number;
-  completed_bytes: number;
-  progress: number;
+  cached_bytes: number;
   created_at: string;
   error?: string;
 }
 
 export interface PieceStatus {
   index: number;
-  known: boolean;
-  complete: boolean;
-  partial: boolean;
-  wanted: boolean;
-  checking: boolean;
-  available_bytes?: number;
+  cached: boolean;
+  cached_bytes: number;
+  pinned: boolean;
 }
 
 export interface FileStatus {
@@ -39,7 +35,6 @@ export interface Operation {
   operation_id: string;
   torrent_id: string;
   state: string;
-  purge_data: boolean;
   error?: string;
 }
 

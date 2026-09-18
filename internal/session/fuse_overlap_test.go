@@ -49,15 +49,8 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 	hashHex := hash.HexString()
 
-	// Seeder: the complete data already sits in its own payload directory.
+	// Seeder: its in-memory cache is filled directly.
 	seederDir := filepath.Join(work, "seeder-data")
-	seederPayload := payloadDir(seederDir, hash)
-	if err := os.MkdirAll(seederPayload, 0o755); err != nil {
-		t.Fatalf("make seeder data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(seederPayload, "payload.bin"), content, 0o644); err != nil {
-		t.Fatalf("write seeder data: %v", err)
-	}
 	seeder := newLoopbackSession(t, testConfig(seederDir))
 	if err := seeder.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("seeder AddTorrent: %v", err)
@@ -66,7 +59,8 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	if !ok {
 		t.Fatal("seeder did not register the torrent")
 	}
-	waitComplete(t, ctx, seederHandle)
+	seedPieces(t, seeder, hash, content)
+	waitCached(t, ctx, seederHandle)
 
 	// Leecher: empty storage, a download limiter that keeps the first read
 	// outstanding through the millisecond-scale assertion window, and a
@@ -87,8 +81,8 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	if !ok {
 		t.Fatal("leecher did not register the torrent")
 	}
-	if got := leecherHandle.BytesCompleted(); got != 0 {
-		t.Fatalf("leecher starts with %d bytes; this test must transfer everything", got)
+	if got := leecherHandle.CachedBytes(); got != 0 {
+		t.Fatalf("leecher starts with %d cached bytes; this test must transfer everything", got)
 	}
 
 	// Both peers must be connected before the reads start, so lifting the
@@ -144,8 +138,8 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 		t.Fatalf("torrent has %d pieces, need at least %d", len(status.Pieces), secondPiece+1)
 	}
 	for _, piece := range []int{firstPiece, secondPiece} {
-		if status.Pieces[piece].Complete {
-			t.Fatalf("piece %d is already complete; the read would not block", piece)
+		if status.Pieces[piece].Cached {
+			t.Fatalf("piece %d is already cached; the read would not block", piece)
 		}
 	}
 

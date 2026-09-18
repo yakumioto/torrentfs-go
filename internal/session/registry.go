@@ -18,9 +18,12 @@ import (
 type TorrentState string
 
 const (
-	StateAdding       TorrentState = "adding"
-	StateDownloading  TorrentState = "downloading"
-	StateSeeding      TorrentState = "seeding"
+	StateAdding TorrentState = "adding"
+	// StateReady means the metainfo is available and the torrent can be read
+	// and seeded from whatever the cache currently holds. There is no
+	// downloading/seeding distinction: neither is a property of a memory-only
+	// piece cache.
+	StateReady        TorrentState = "ready"
 	StateError        TorrentState = "error"
 	StateDeleting     TorrentState = "deleting"
 	StateDeleteFailed TorrentState = "delete_failed"
@@ -31,15 +34,17 @@ const (
 
 // TorrentView is the management API's per-torrent snapshot.
 type TorrentView struct {
-	ID             string
-	InfoHash       string
-	Name           string
-	State          TorrentState
-	TotalBytes     int64
-	CompletedBytes int64
-	Progress       float64
-	CreatedAt      time.Time
-	Error          string
+	ID         string
+	InfoHash   string
+	Name       string
+	State      TorrentState
+	TotalBytes int64
+	// CachedBytes is how many of the torrent's bytes are resident in the piece
+	// cache right now. It falls as pieces are evicted; it is not a download
+	// counter.
+	CachedBytes int64
+	CreatedAt   time.Time
+	Error       string
 }
 
 // Operation tracks one deletion request. It is returned by DeleteTorrent and
@@ -48,7 +53,6 @@ type Operation struct {
 	ID        string
 	TorrentID string
 	State     TorrentState
-	PurgeData bool
 	Error     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -61,15 +65,14 @@ func (o *Operation) clone() Operation {
 // registryEntry is the durable per-torrent sidecar written to
 // <data_dir>/state/<info_hash>.json.
 type registryEntry struct {
-	ID             string       `json:"id"`
-	InfoHash       string       `json:"info_hash"`
-	Name           string       `json:"name"`
-	State          TorrentState `json:"state"`
-	Error          string       `json:"error,omitempty"`
-	PurgeRequested bool         `json:"purge_requested"`
-	OperationID    string       `json:"operation_id,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
+	ID          string       `json:"id"`
+	InfoHash    string       `json:"info_hash"`
+	Name        string       `json:"name"`
+	State       TorrentState `json:"state"`
+	Error       string       `json:"error,omitempty"`
+	OperationID string       `json:"operation_id,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 func (s *Session) registryPath(hash metainfo.Hash) string {

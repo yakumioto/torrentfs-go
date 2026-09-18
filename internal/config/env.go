@@ -24,14 +24,6 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_PATHS_PAYLOAD_DIR",
-		field: "paths.payload_dir",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Paths.PayloadDir = raw
-			return nil
-		},
-	},
-	{
 		name:  "TORRENTFS_CONNECTIONS_LISTEN_HOST",
 		field: "connections.listen_host",
 		apply: func(cfg *Config, raw string) error {

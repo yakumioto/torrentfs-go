@@ -227,15 +227,14 @@ func (t *Torrent) Length() int64 {
 	return t.tor.Length()
 }
 
-// BytesCompleted returns how many bytes are verified and available locally.
-func (t *Torrent) BytesCompleted() int64 {
-	return t.tor.BytesCompleted()
-}
-
-// Seeding reports whether the client is willing to upload this complete
-// torrent without requiring anything in return.
-func (t *Torrent) Seeding() bool {
-	return t.tor.Seeding()
+// CachedBytes returns how many of this torrent's bytes are resident in the
+// piece cache. It is a point-in-time occupancy, not a download count: it falls
+// as pieces are evicted.
+func (t *Torrent) CachedBytes() int64 {
+	if t.cache == nil {
+		return 0
+	}
+	return t.cache.SizeOf(t.InfoHash().HexString())
 }
 
 // readerFor returns the shared reader handle for the file with the given

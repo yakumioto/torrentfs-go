@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,6 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/anacrolix/torrent/storage"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -58,6 +58,7 @@ func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
+	seedInternalPieces(t, sess, hash, content)
 	waitInternalTorrentComplete(t, ctx, st)
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
@@ -876,77 +877,33 @@ func TestRaFileUsesFixedStreamingReadahead(t *testing.T) {
 	}
 }
 
-type unstablePieceStateSource struct {
-	calls int
-}
-
-func (s *unstablePieceStateSource) PieceStateRuns() torrent.PieceStateRuns {
-	return torrent.PieceStateRuns{{
-		PieceState: torrent.PieceState{
-			Completion: storage.Completion{Ok: true},
-			Partial:    true,
-		},
-		Length: 1,
-	}}
-}
-
-func (s *unstablePieceStateSource) PieceBytesMissing(int) int64 {
-	s.calls++
-	return int64(s.calls * 10)
-}
-
-func (s *unstablePieceStateSource) Length() int64 {
-	return 100
-}
-
-func TestPieceSnapshotRejectsUnstableSource(t *testing.T) {
-	source := &unstablePieceStateSource{}
-	states, err := pieceStatesSnapshot(source, &metainfo.Info{PieceLength: 100})
-	if !errors.Is(err, errPieceStateSnapshotUnstable) {
-		t.Fatalf("pieceStatesSnapshot error = %v, want unstable snapshot error", err)
-	}
-	if states != nil {
-		t.Fatalf("pieceStatesSnapshot states = %+v, want nil", states)
-	}
-}
-
-func TestSessionLargePieceReadBypassesCache(t *testing.T) {
+// TestSessionRejectsPieceLargerThanCache pins the store's capacity guard: a
+// torrent whose piece length cannot fit the cache can never serve a read, so
+// adding it fails outright instead of looping between download and eviction.
+func TestSessionRejectsPieceLargerThanCache(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte("small request from a large piece")
-	torrentPath, hash := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, config.Default().Cache.CapacityBytes+1)
+	pieceLength := int64(1024)
+	cfg := internalTestConfig(dataDir)
+	cfg.Cache.CapacityBytes = pieceLength - 1
+	torrentPath, _ := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, pieceLength)
 
-	sess, err := New(internalTestConfig(dataDir), internalTestTorrentDir(t, dataDir))
+	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := sess.AddTorrent(ctx, Source{MetainfoPath: torrentPath}); err != nil {
-		t.Fatalf("AddTorrent: %v", err)
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	err = sess.AddTorrent(context.Background(), Source{MetainfoPath: torrentPath})
+	if err == nil {
+		t.Fatal("AddTorrent succeeded for a piece larger than the cache")
 	}
-	st, ok := sess.Torrent(hash)
-	if !ok {
-		t.Fatal("torrent not registered")
-	}
-	waitInternalTorrentComplete(t, ctx, st)
-
-	ra, err := sess.OpenFile(hash, "payload.bin")
-	if err != nil {
-		t.Fatalf("OpenFile: %v", err)
-	}
-	got := make([]byte, len(content))
-	if n, err := ra.ReadAt(got, 0); err != nil || n != len(content) {
-		t.Fatalf("large-piece read = %d bytes, %v; want %d, nil", n, err, len(content))
-	}
-	if string(got) != string(content) {
-		t.Fatalf("large-piece content = %q, want %q", got, content)
-	}
-	if got := sess.pieceCache.Len(); got != 0 {
-		t.Fatalf("cache Len after oversized piece read = %d, want 0", got)
-	}
-	if err := sess.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+	if !strings.Contains(err.Error(), "exceeds cache capacity") {
+		t.Fatalf("AddTorrent error = %v, want cache capacity error", err)
 	}
 }
 
@@ -982,18 +939,36 @@ func buildInternalTestTorrentWithPieceLength(t *testing.T, dataDir, torrentDir s
 		t.Fatalf("encode metainfo: %v", err)
 	}
 	hash := mi.HashInfoBytes()
-	dir := filepath.Join(dataDir, "payload", hash.HexString())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("make data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "payload.bin"), content, 0o644); err != nil {
-		t.Fatalf("write data: %v", err)
-	}
+	_ = dataDir
 	path := filepath.Join(torrentDir, "payload.bin.torrent")
 	if err := os.WriteFile(path, encoded, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
 	}
 	return path, hash
+}
+
+// seedInternalPieces loads content into the session's own piece cache so an
+// internal test has data to read without a peer.
+func seedInternalPieces(t *testing.T, sess *Session, hash metainfo.Hash, content []byte) {
+	t.Helper()
+	info := sess.torrents[hash].tor.Info()
+	if info == nil {
+		t.Fatal("seed: torrent has no info")
+	}
+	for index := 0; index < info.NumPieces(); index++ {
+		start := int64(index) * info.PieceLength
+		end := start + info.PieceLength
+		if end > int64(len(content)) {
+			end = int64(len(content))
+		}
+		if start >= end {
+			break
+		}
+		sess.pieceCache.Put(cache.Key{Torrent: hash.HexString(), Piece: index}, content[start:end])
+	}
+	for index := 0; index < info.NumPieces(); index++ {
+		sess.torrents[hash].tor.Piece(index).UpdateCompletion()
+	}
 }
 
 func waitInternalTorrentComplete(t *testing.T, ctx context.Context, st *Torrent) {
@@ -1005,10 +980,171 @@ func waitInternalTorrentComplete(t *testing.T, ctx context.Context, st *Torrent)
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if st.BytesCompleted() == st.Length() {
+		if st.CachedBytes() == st.Length() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("torrent never became complete: %d/%d", st.BytesCompleted(), st.Length())
+	t.Fatalf("torrent cache never filled: %d/%d", st.CachedBytes(), st.Length())
+}
+
+// TestProtectWindowLeavesOnlyTheActiveWindowPinned replaces the read window
+// from several goroutines at once and then checks the cache's pin set against
+// the window that won. Replacement and its unpin/pin pair run under one lock;
+// when they did not, two racers could interleave as replace(A), replace(B),
+// unpin, unpin, pin(A), pin(B), leaving the stale window A pinned until some
+// unrelated read or Close happened to release it.
+func TestProtectWindowLeavesOnlyTheActiveWindowPinned(t *testing.T) {
+	store := cache.New(1 << 20)
+	file := &raFile{cache: store}
+
+	// Disjoint, multi-key windows so the unpin/pin loops are long enough for
+	// concurrent replacements to interleave.
+	const windows, keysPerWindow = 8, 64
+	windowKeys := make([][]cache.Key, windows)
+	for i := range windowKeys {
+		keys := make([]cache.Key, 0, keysPerWindow)
+		for j := 0; j < keysPerWindow; j++ {
+			keys = append(keys, cache.Key{Torrent: "window", Piece: i*keysPerWindow + j})
+		}
+		windowKeys[i] = keys
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < windows; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				file.protectWindow(windowKeys[i])
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	file.mu.RLock()
+	active := make(map[cache.Key]bool, len(file.window))
+	for _, key := range file.window {
+		active[key] = true
+	}
+	file.mu.RUnlock()
+
+	for _, keys := range windowKeys {
+		for _, key := range keys {
+			if active[key] {
+				if !store.IsPinned(key) {
+					t.Fatalf("active window key %v is not pinned", key)
+				}
+				continue
+			}
+			if store.IsPinned(key) {
+				t.Fatalf("stale window key %v is still pinned after concurrent replacement", key)
+			}
+		}
+	}
+
+	// Close releases the active window and leaves nothing behind.
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, keys := range windowKeys {
+		for _, key := range keys {
+			if store.IsPinned(key) {
+				t.Fatalf("Close left %v pinned", key)
+			}
+		}
+	}
+}
+
+// TestTorrentStatusCachedBytesMatchesItsPieces runs cache churn against a
+// concurrent status poll and checks that the aggregate cached_bytes always
+// equals the sum of the per-piece values in the same response. Both numbers now
+// come from one cache snapshot, so they cannot disagree; measuring them in
+// separate lock acquisitions let a change between the two produce a response
+// that contradicted itself.
+//
+// The churn alternates inserting a piece and dropping another so the resident
+// total actually moves. A churn that only ever replaced pieces of one size left
+// the total constant, and then the two measurements agreed by coincidence no
+// matter how they were ordered.
+func TestTorrentStatusCachedBytesMatchesItsPieces(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	const pieces = 4
+	content := make([]byte, pieces*internalTestPieceLength)
+	for i := range content {
+		content[i] = byte(i*17 + i/251)
+	}
+	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
+
+	cfg := internalTestConfig(dataDir)
+	// Three pieces of capacity: the writer below keeps two or three resident,
+	// so evictions fire and the resident total oscillates.
+	cfg.Cache.CapacityBytes = 3 * internalTestPieceLength
+	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := sess.AddTorrent(ctx, Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	seedInternalPieces(t, sess, hash, content)
+
+	done := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			index := i % pieces
+			if i%2 == 0 {
+				start := int64(index) * internalTestPieceLength
+				sess.pieceCache.Put(
+					cache.Key{Torrent: hash.HexString(), Piece: index},
+					content[start:start+internalTestPieceLength],
+				)
+				continue
+			}
+			sess.pieceCache.Remove(cache.Key{Torrent: hash.HexString(), Piece: (index + 1) % pieces})
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	polls := 0
+	for time.Now().Before(deadline) {
+		view, err := sess.TorrentStatusFor(hash.HexString())
+		if err != nil {
+			close(done)
+			writer.Wait()
+			t.Fatalf("TorrentStatusFor: %v", err)
+		}
+		var sum int64
+		for _, piece := range view.Pieces {
+			sum += piece.CachedBytes
+		}
+		if sum != view.Torrent.CachedBytes {
+			close(done)
+			writer.Wait()
+			t.Fatalf("aggregate cached_bytes %d disagrees with the sum of its pieces %d",
+				view.Torrent.CachedBytes, sum)
+		}
+		polls++
+	}
+	close(done)
+	writer.Wait()
+	if polls == 0 {
+		t.Fatal("no status poll completed")
+	}
 }

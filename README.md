@@ -14,9 +14,10 @@ Mount BitTorrent downloads as a FUSE filesystem.
 > piece status — lives in the HTTP API, not in the mount. Durable managed
 > metainfo and pending magnet intents are stored under
 > `<torrents-dir>/.metadata`, an implementation detail that is never mounted.
-> Piece state is not persisted anywhere: it is read from the running torrent
-> client on demand, and completion after a restart comes from verifying the
-> downloaded payload.
+> Pieces live only in memory: they are never written to disk and a restart
+> starts from an empty cache. The cache is bounded and evicts least-recently-used
+> pieces, so the API reports how much of a torrent is *cached* rather than how
+> much was ever downloaded.
 
 ## Build
 
@@ -93,8 +94,9 @@ and writable directory. A file path such as
 not supported. Configuration is merged as explicit `-data-dir` (when set) >
 environment variables > TOML file > built-in defaults. Without `-config`, the
 loader uses the built-in defaults and environment variables; a TOML file loads
-the sections shown in `torrentfs.example.toml`. `-data-dir` stores downloaded
-torrent data only; it is distinct from `<torrents-dir>`.
+the sections shown in `torrentfs.example.toml`. `-data-dir` holds the state
+torrentfs still persists (metadata and deletion sidecars); piece data never
+goes there. It is distinct from `<torrents-dir>`.
 
 At startup, torrentfs restores managed metadata and scans only direct regular,
 non-symlink files in `<torrents-dir>` whose names end in lower-case `.torrent`.
@@ -151,17 +153,17 @@ All management happens over the authenticated HTTP API (`/api/v1`):
 | `GET /api/v1/torrents` | List every task |
 | `GET /api/v1/torrents/{id}` | One task's aggregate state |
 | `GET /api/v1/torrents/{id}/status` | Per-piece and per-file status snapshot |
-| `DELETE /api/v1/torrents/{id}?purge_data=<bool>` | Delete a task, optionally purging its payload |
+| `DELETE /api/v1/torrents/{id}` | Delete a task; its cached pieces are dropped with it |
 | `GET /api/v1/operations/{id}` | Poll a deletion operation |
 
 `GET /api/v1/torrents/{id}/status` returns one fresh, consistent snapshot:
 
 ```json
 {
-  "torrent": {"id": "40-lowercase-hex", "info_hash": "40-lowercase-hex", "state": "downloading"},
+  "torrent": {"id": "40-lowercase-hex", "info_hash": "40-lowercase-hex", "state": "ready", "total_bytes": 1234, "cached_bytes": 262144},
   "metainfo_ready": true,
   "piece_length": 262144,
-  "pieces": [{"index": 0, "known": true, "complete": true, "partial": false, "wanted": true, "checking": false}],
+  "pieces": [{"index": 0, "cached": true, "cached_bytes": 262144, "pinned": false}],
   "files": [{"path": "sub/file.bin", "size": 1234, "piece_start": 0, "piece_end": 1}]
 }
 ```
@@ -169,9 +171,35 @@ All management happens over the authenticated HTTP API (`/api/v1`):
 `pieces` is the whole torrent in absolute, zero-based, ascending piece order.
 Each file reports a half-open `[piece_start, piece_end)` range into that same
 array, so a piece spanning a file boundary is referenced by both files instead
-of being duplicated. Only partial pieces carry `available_bytes`. A task whose
-metainfo has not arrived yet (an unresolved magnet) returns `200` with
-`metainfo_ready: false` and empty arrays; an unknown id returns `404`.
+of being duplicated. Each piece reports whether it is resident in the cache
+right now (`cached`), how many of its bytes are resident (`cached_bytes`), and
+whether it is currently protected from eviction by an active read (`pinned`).
+A task whose metainfo has not arrived yet (an unresolved magnet) returns `200`
+with `metainfo_ready: false` and empty arrays; an unknown id returns `404`.
+
+### External state model
+
+`state` is a lifecycle stage, never a completion percentage:
+
+| Value | Meaning |
+| --- | --- |
+| `adding` | Metainfo not available yet (a magnet still resolving) |
+| `ready` | Metainfo available; the torrent is readable and seeds whatever the cache currently holds |
+| `error` | Metainfo could not be obtained |
+| `deleting` | A deletion is in progress |
+| `delete_failed` | A deletion failed and can be retried |
+| `deleted` | Terminal state of a deletion operation (never written to disk) |
+
+`cached_bytes` on the torrent and on each piece is the only cache metric:
+it is how many bytes of the torrent are resident in memory *right now*. It
+falls when pieces are evicted, so a cache-usage bar can move backwards. That is
+intended — it describes the cache, not how much was ever downloaded.
+
+The API deliberately does not expose download or seeding progress. anacrolix's
+completion view lags behind a memory-only cache (an evicted piece still counts
+as complete until it is read again), so reporting it would show a number that is
+wrong by design. Every `ready` task seeds from its current cache contents, which
+is exactly the acceptance rule that seeding never changes what may be evicted.
 When authentication is enabled, the login route is public and every other
 `/api/` route requires an explicit `Authorization: Bearer <token>` header. The
 embedded Web UI's static `GET`/`HEAD` shell and assets are public so a browser
@@ -227,18 +255,22 @@ inactivity window.
   .stats/                            # legacy empty directory: ignored, never created, never removed
 
 <data-dir>/
-  payload/<info-hash>/...            # or paths.payload_dir; the real download data
   state/<info-hash>.json             # interrupted-deletion sidecars only, no piece state
 ```
 
 `.metadata` is an implementation detail of the torrents directory: it is
 persisted, restored on startup, and never mounted. A legacy `.stats` directory
 from an older version is ignored — the current release neither creates it nor
-deletes it, and it holds no piece state. Piece completion is not stored
-anywhere: it is derived from the torrent client and from verifying the
-downloaded payload. Downloaded data is rechecked after a restart, but the
-in-memory piece cache, cache hit count, and transient read priorities are not
-retained.
+deletes it, and it holds no piece state. **No piece data and no piece
+completion is stored anywhere**: the cache exists only in memory, a restart
+starts empty, and neither the cache contents, the cache hit count, nor transient
+read priorities survive a restart. There is no initial rehash and no attempt to
+recover a piece from disk.
+
+An older release kept pieces under `<data-dir>/payload/`. That directory is no
+longer read or written; if it exists and is not empty, startup logs a warning
+naming it so it can be reclaimed by hand. Removing it changes nothing about the
+running service.
 
 A magnet URI is accepted immediately: its intent is published as
 `.metadata/<info-hash>.magnet` before registration, so a restart before the
@@ -246,9 +278,9 @@ metainfo arrives retries the fetch. Once the metainfo resolves it is published
 as the canonical `.torrent` and the pending `.magnet` is removed; if both ever
 exist, the `.torrent` wins. `DELETE /api/v1/torrents/{id}` removes every
 internal metadata source for that hash — canonical and legacy names, plus a
-pending magnet — so a deleted task cannot reappear after a restart. A torrent
-still referenced by a user-owned top-level `.torrent` file is refused with
-`409`, and its payload is never purged.
+pending magnet — so a deleted task cannot reappear after a restart. Deleting a
+torrent also drops its cached pieces. A torrent still referenced by a
+user-owned top-level `.torrent` file is refused with `409`.
 
 ## Configuration
 
@@ -257,7 +289,6 @@ The supported TOML keys are:
 ```toml
 [paths]
 data_dir = "./torrentfs-data"
-payload_dir = ""
 
 [http]
 listen_addr = "127.0.0.1:8080"
@@ -279,7 +310,7 @@ listen_port = 0
 socks5_url = ""
 
 [cache]
-capacity_bytes = 67108864
+capacity_bytes = 2147483648
 
 [identity]
 tracker_user_agent = "qBittorrent/4.4.0"
@@ -298,7 +329,6 @@ below are read; unrelated `TORRENTFS_*` variables are ignored.
 | TOML key | Environment variable | Value format |
 | --- | --- | --- |
 | `paths.data_dir` | `TORRENTFS_PATHS_DATA_DIR` | string |
-| `paths.payload_dir` | `TORRENTFS_PATHS_PAYLOAD_DIR` | string |
 | `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | string |
 | `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | decimal integer |
 | `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | string |
@@ -333,9 +363,19 @@ so debug records are disabled unless explicitly enabled. `log.format` accepts
 record. Logs never include authentication tokens, password hashes, or proxy
 credentials.
 
-`payload_dir` is the managed root for per-torrent payload directories; each
-torrent owns `<payload_dir>/<info_hash>`, and that is the only directory ever
-purged by `purge_data=true`. An empty value uses `<data_dir>/payload`.
+`cache.capacity_bytes` is the hard upper bound on the in-memory piece cache. The
+default, 2147483648 (2 GiB), targets a host with about 4 GB of RAM; size it at
+roughly 50-60% of a container's memory limit, because the cap applies to the
+process and exceeding the container limit gets it OOM-killed. The default is a
+cap, not a reservation: the cache fills lazily, so a small workload's resident
+memory stays small. A value of zero or less is rejected at startup. Eviction
+starts at 7/8 of this value and reclaims down to 3/4, so a read window always
+has headroom without waiting for the cache to fill completely; the high- and
+low-water marks are derived, not configurable, and each is clamped to at least
+one byte so that a very small capacity still retains the one piece that fits
+it. A torrent whose piece length exceeds the capacity cannot be added: it could
+never be read, so it is refused at add time instead of looping between download
+and eviction.
 
 An empty `[http].listen_addr` disables the API. The default binds loopback
 only. Binding a non-loopback address requires a complete enabled
@@ -377,7 +417,7 @@ When authentication is disabled, loopback HTTP retains the anonymous development
 behavior. Authentication is not optional for non-loopback listeners.
 `max_upload_bytes` caps an uploaded `.torrent` body.
 
-`capacity_bytes` is a byte limit. An empty `socks5_url` disables the proxy;
+An empty `socks5_url` disables the proxy;
 otherwise use `socks5://` or `socks5h://`, optionally with username/password.
 The proxy applies to TCP peer connections and HTTP(S) tracker, metainfo, and
 webseed requests. UTP, DHT, and UDP tracker traffic are disabled or rejected in
@@ -413,8 +453,10 @@ or by the torrent being removed.
   never arrive until the session is closed, at which point they fail rather
   than hang. The session and mount stay healthy: the status API reports the
   incomplete state instead of the process crashing.
-- **Partial pieces.** A partial piece reports `partial: true` with an
-  `available_bytes` count in `GET /api/v1/torrents/{id}/status`.
+- **Partially cached pieces.** A piece that is only partly resident reports
+  `cached: false` with the resident byte count in `cached_bytes` in
+  `GET /api/v1/torrents/{id}/status`. The read path still fetches the piece as
+  a whole.
 - **Missing paths.** A torrent or file that does not exist maps to `ENOENT`; a
   path below a single-file torrent root maps to `ENOTDIR`; the whole mount is
   read-only, so writes into it return `EROFS`.
@@ -422,6 +464,26 @@ or by the torrent being removed.
   `ENODATA` reaches the caller unchanged; only unclassified failures flatten to
   `EIO`. A missing peer swarm is a health warning surfaced through the status
   API and read errors, not a crash.
+
+## Breaking changes
+
+Upgrading from a release that persisted pieces on disk:
+
+| Change | Detail |
+| --- | --- |
+| `paths.payload_dir` / `TORRENTFS_PATHS_PAYLOAD_DIR` removed | Pieces are memory-only, so there is no payload root to configure. Drop the key; an old value is ignored. |
+| `cache.capacity_bytes` default 64 MiB → 2 GiB | The default now targets a ~4 GB host. Set it explicitly for smaller containers. |
+| `cache.capacity_bytes = 0` is now invalid | `0` meant "cache nothing", which would make every read fail. Startup rejects it. |
+| `<data-dir>/payload/` is no longer used | Old piece files are neither read nor deleted. Startup warns when the directory is non-empty so it can be removed by hand. |
+| `purge_data` removed | `DELETE /api/v1/torrents/{id}?purge_data=...` loses the parameter and the operation response loses the `purge_data` field. Deleting a task now always drops its cached pieces. An old client that still sends the parameter gets a normal `202`: Go's HTTP server ignores unknown query parameters. |
+| `completed_bytes` and `progress` removed | There is no download-progress concept. Read `cached_bytes` instead. |
+| Per-piece `known`/`complete`/`partial`/`checking`/`wanted`/`available_bytes` removed | Replaced by `cached` / `cached_bytes` / `pinned`, which describe cache residency. |
+| `state` values `downloading` and `seeding` removed; `ready` added | `state` is now a lifecycle stage. A `ready` task serves whatever the cache holds. |
+| `seeding` no longer exists | Every `ready` task seeds from its current cache contents; seeding never keeps a piece from being evicted. |
+
+No compatibility layer is provided: the memory-only cache and the external
+state model ship together, and field aliases would contradict the removal of
+the old persistence path.
 
 ## Testing
 
@@ -521,9 +583,12 @@ From the repository root, run:
 ```
 
 The script builds the image, bind mounts a writable temporary `torrents`
-directory at `/torrents`, preloads the matching payload under
-`/data/payload/<info-hash>/` (the real storage layout), and mounts `/mnt` with
-recursive shared propagation. It reads the payload through FUSE and checks that
+directory at `/torrents`, and mounts `/mnt` with recursive shared propagation.
+Pieces are never read from disk now, so instead of preloading a payload the
+script serves the fixture over plain HTTP and hands the data scenarios a
+web-seeded (BEP 19) copy of the fixture torrent; anacrolix fetches the piece
+over HTTP and writes it into the in-memory cache through the same storage path
+a BitTorrent peer would. It reads the payload through FUSE and checks that
 both the container mount and the host source directory expose the same file and
 hash, that the mount exposes no `metadata/` or `stats/` control path, that host
 writes are rejected, and that a pre-existing legacy `/torrents/.stats` is left
@@ -544,9 +609,9 @@ diagnostic, reports no daemon-owned unmount failure, and releases the
 propagated host mount once the peer is gone. Every Docker
 call in the script, including the teardown waits, is bounded; a timeout
 collects diagnostics and fails instead of hanging. It
-requires a working Docker daemon, `/dev/fuse`, `findmnt`, `SYS_ADMIN` mount
-permission, and (on AppArmor hosts) permission to use
-`--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
+requires a working Docker daemon, `/dev/fuse`, `findmnt`, `python3` (for the
+web seed file server), `SYS_ADMIN` mount permission, and (on AppArmor hosts)
+permission to use `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
 not copied into the production image.
 
 Mount a host directory at `/torrents` and pass that directory as the sole
@@ -661,8 +726,9 @@ never be used as, or mistaken for, a successful graceful unmount.
 lower-case `*.torrent` files in that directory while the container is running,
 or manage torrents through the HTTP API. Use a temporary filename followed by
 an atomic rename for file-based writers. `/srv/torrentfs-data` stores
-downloaded payload data and `/srv/mnt` must be an empty mountpoint on that
-shared host mount; `-data-dir` does not change the torrent source directory.
+the metadata cache and deletion sidecars, and `/srv/mnt` must be an empty
+mountpoint on that shared host mount; `-data-dir` does not change the torrent
+source directory.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
 mount capability. The image installs `fuse3` and mount helpers and runs

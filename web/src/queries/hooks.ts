@@ -8,8 +8,7 @@ import { sortTorrents } from './sort';
 
 export interface TorrentLiveSummary {
   state: string;
-  progress: number;
-  completedBytes: number;
+  cachedBytes: number;
   totalBytes: number;
 }
 
@@ -70,8 +69,7 @@ export function useTorrentStatusSlice<T>(
 const selectStatusTorrent = (status: TorrentStatus): Torrent => status.torrent;
 const selectLiveSummary = (status: TorrentStatus): TorrentLiveSummary => ({
   state: status.torrent.state,
-  progress: status.torrent.progress,
-  completedBytes: status.torrent.completed_bytes,
+  cachedBytes: status.torrent.cached_bytes,
   totalBytes: status.torrent.total_bytes,
 });
 const selectStatusMeta = (status: TorrentStatus): TorrentStatusMeta => ({
@@ -124,8 +122,8 @@ export function useAddTorrent(api: ApiClient) {
 export function useDeleteTorrent(api: ApiClient) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, purgeData, signal }: { id: string; purgeData: boolean; signal?: AbortSignal }) =>
-      api.deleteTorrent(id, purgeData, signal),
+    mutationFn: ({ id, signal }: { id: string; signal?: AbortSignal }) =>
+      api.deleteTorrent(id, signal),
     onSuccess: (operation: Operation) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
       queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);

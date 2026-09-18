@@ -45,45 +45,22 @@
   border-radius: 2px;
 }
 
-.cell::after {
-  position: absolute;
-  inset: -3px;
-  border: 1px solid transparent;
-  content: "";
-}
-
-.cellComplete,
-.swatchComplete {
+.cellCached,
+.swatchCached {
   border-color: #7ee787;
   background: var(--success);
 }
 
-.cellPartial,
-.swatchPartial {
+.cellPinned,
+.swatchPinned {
   border-color: #79c0ff;
   background: repeating-linear-gradient(135deg, var(--accent) 0 3px, rgba(47, 129, 247, 0.2) 3px 6px);
 }
 
-.cellIncomplete,
-.swatchIncomplete {
-  border-color: var(--warning);
-  background: rgba(210, 153, 34, 0.2);
-}
-
-.cellUnknown,
-.swatchUnknown {
+.cellUncached,
+.swatchUncached {
   border-color: var(--border-strong);
   background: var(--surface-3);
-}
-
-.cellChecking,
-.swatchChecking {
-  border-color: var(--danger);
-  background: repeating-linear-gradient(135deg, var(--danger) 0 2px, rgba(248, 81, 73, 0.2) 2px 5px);
-}
-
-.cellWanted::after {
-  border-color: var(--text-primary);
 }
 
 .map {
