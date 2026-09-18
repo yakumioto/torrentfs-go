@@ -59,3 +59,11 @@ tracker_user_agent = "qBittorrent/4.4.0"
 peer_id_prefix = "-qB4400-"
 # BEP 10 extended handshake v value.
 extended_handshake_client_version = "qBittorrent/4.4.0"
+
+[log]
+# Minimum level: debug, info, warn, or error. Debug is disabled by default.
+level = "info"
+# Output format: text for humans or json for log collectors.
+format = "text"
+# Include the source file and line for each record.
+add_source = false

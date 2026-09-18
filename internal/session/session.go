@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
 
 type lifecycle uint8
@@ -29,10 +31,25 @@ const (
 	stateClosed
 )
 
+// Option configures a Session.
+type Option func(*sessionOptions)
+
+type sessionOptions struct {
+	logger *slog.Logger
+}
+
+// WithLogger routes session and anacrolix client logs to l.
+func WithLogger(l *slog.Logger) Option {
+	return func(options *sessionOptions) {
+		options.logger = l
+	}
+}
+
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
-	cl  *torrent.Client
-	cfg config.Config
+	cl     *torrent.Client
+	cfg    config.Config
+	logger *slog.Logger
 
 	pieceCache      *cache.Cache
 	mu              sync.RWMutex
@@ -91,25 +108,46 @@ type metadataFetch struct {
 // already exist; the session creates only its .metadata directory. The client
 // is configured to seed, existing metadata is restored, and the torrents
 // directory is watched before the session is returned.
-func New(cfg config.Config, torrentsDir string) (*Session, error) {
-	return newWithClientConfig(cfg, torrentsDir, nil)
+func New(cfg config.Config, torrentsDir string, opts ...Option) (*Session, error) {
+	return newWithClientConfig(cfg, torrentsDir, nil, opts...)
 }
 
-func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*torrent.ClientConfig)) (*Session, error) {
+func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*torrent.ClientConfig), opts ...Option) (*Session, error) {
+	options := sessionOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	logger := options.logger
+	forwardLogger := logger != nil
+	if logger == nil {
+		logger = logging.Discard()
+	}
+	logInitFailure := func(stage string, err error) {
+		logger.Error("session init failed", "stage", stage, "err", err)
+	}
+
 	if err := cfg.Validate(); err != nil {
+		logInitFailure("validate-config", err)
 		return nil, fmt.Errorf("session: validate config: %w", err)
 	}
 	var err error
 	torrentsDir, err = validateTorrentDir(torrentsDir)
 	if err != nil {
+		logInitFailure("validate-torrents-dir", err)
 		return nil, err
 	}
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("session: create data dir: %w", err)
+		err = fmt.Errorf("session: create data dir: %w", err)
+		logInitFailure("create-data-dir", err)
+		return nil, err
 	}
 	metadataDir := metadataRoot(torrentsDir)
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("session: create metadata dir: %w", err)
+		err = fmt.Errorf("session: create metadata dir: %w", err)
+		logInitFailure("create-metadata-dir", err)
+		return nil, err
 	}
 	payloadRoot := cfg.Paths.PayloadDir
 	if payloadRoot == "" {
@@ -117,11 +155,15 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	payloadRoot = filepath.Clean(payloadRoot)
 	if err := os.MkdirAll(payloadRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("session: create payload dir: %w", err)
+		err = fmt.Errorf("session: create payload dir: %w", err)
+		logInitFailure("create-payload-dir", err)
+		return nil, err
 	}
 	stateDir := filepath.Join(cfg.Paths.DataDir, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("session: create state dir: %w", err)
+		err = fmt.Errorf("session: create state dir: %w", err)
+		logInitFailure("create-state-dir", err)
+		return nil, err
 	}
 
 	cc := torrent.NewDefaultClientConfig()
@@ -140,13 +182,26 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	configureSeeding(cc)
 	// Every torrent owns payloadRoot/<info_hash>, so a purge target is always
 	// the torrent's exclusive directory and never a name shared with another.
-	storageCloser := storage.NewFileWithCustomPathMaker(payloadRoot,
-		func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
+	pieceCompletion, completionErr := storage.NewDefaultPieceCompletionForDir(payloadRoot)
+	if completionErr != nil {
+		logger.Warn("piece completion persistence unavailable", "dir", payloadRoot, "err", completionErr)
+		pieceCompletion = storage.NewMapPieceCompletion()
+	}
+	storageCloser := storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir: payloadRoot,
+		TorrentDirMaker: func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
 			return filepath.Join(baseDir, hash.HexString())
-		})
+		},
+		PieceCompletion: pieceCompletion,
+		Logger:          logger,
+	})
 	cc.DefaultStorage = storageCloser
+	if forwardLogger {
+		cc.Slogger = logger
+	}
 	peerDialer, err := configureProxy(cc, cfg.Proxy.Socks5URL)
 	if err != nil {
+		logInitFailure("configure-proxy", err)
 		return nil, err
 	}
 	if customize != nil {
@@ -154,7 +209,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
-		return nil, fmt.Errorf("session: new client: %w", err)
+		err = fmt.Errorf("session: new client: %w", err)
+		logInitFailure("new-client", err)
+		return nil, err
 	}
 	if peerDialer != nil {
 		cl.AddDialer(peerDialer)
@@ -162,6 +219,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	s := &Session{
 		cl:              cl,
 		cfg:             cfg,
+		logger:          logger,
 		pieceCache:      cache.New(cfg.Cache.CapacityBytes),
 		closeDone:       make(chan struct{}),
 		torrents:        make(map[metainfo.Hash]*Torrent),
@@ -185,39 +243,55 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
 	if err := s.rescanMetadata(); err != nil {
+		initErr := err
 		if closeErr := s.Close(context.Background()); closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("session: close client after metadata restore: %w", closeErr))
+			initErr = errors.Join(err, fmt.Errorf("session: close client after metadata restore: %w", closeErr))
 		}
-		return nil, err
+		logInitFailure("metadata-restore", initErr)
+		return nil, initErr
 	}
 	if err := s.scanTorrentDir(context.Background(), true); err != nil {
+		initErr := err
 		if closeErr := s.Close(context.Background()); closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("session: close client after torrent scan: %w", closeErr))
+			initErr = errors.Join(err, fmt.Errorf("session: close client after torrent scan: %w", closeErr))
 		}
-		return nil, err
+		logInitFailure("torrent-scan", initErr)
+		return nil, initErr
 	}
 	if err := s.loadRegistry(); err != nil {
+		initErr := err
 		if closeErr := s.Close(context.Background()); closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("session: close client after state restore: %w", closeErr))
+			initErr = errors.Join(err, fmt.Errorf("session: close client after state restore: %w", closeErr))
 		}
-		return nil, err
+		logInitFailure("state-restore", initErr)
+		return nil, initErr
 	}
 	if err := s.resumeDeletions(); err != nil {
+		initErr := err
 		if closeErr := s.Close(context.Background()); closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("session: close client after delete resume: %w", closeErr))
+			initErr = errors.Join(err, fmt.Errorf("session: close client after delete resume: %w", closeErr))
 		}
-		return nil, err
+		logInitFailure("delete-resume", initErr)
+		return nil, initErr
 	}
 	if err := s.restorePendingMagnets(context.Background()); err != nil {
+		initErr := err
 		if closeErr := s.Close(context.Background()); closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("session: close client after pending magnet restore: %w", closeErr))
+			initErr = errors.Join(err, fmt.Errorf("session: close client after pending magnet restore: %w", closeErr))
 		}
-		return nil, err
+		logInitFailure("magnet-restore", initErr)
+		return nil, initErr
 	}
 	scanCtx, scanCancel := context.WithCancel(context.Background())
 	s.scanCancel = scanCancel
 	s.scanDone = make(chan struct{})
 	go s.watchTorrentDir(scanCtx, s.scanDone)
+	s.logger.Info("session ready",
+		"torrents_dir", s.torrentsDir,
+		"data_dir", cfg.Paths.DataDir,
+		"payload_dir", s.payloadRoot,
+		"listen_port", cfg.Connections.ListenPort,
+	)
 	return s, nil
 }
 
@@ -249,6 +323,7 @@ func (s *Session) Close(ctx context.Context) error {
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
 	s.mu.Unlock()
+	s.logger.Info("session closing")
 
 	if scanCancel != nil {
 		scanCancel()
@@ -289,6 +364,9 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 
 	err := errors.Join(errs...)
+	if err == nil {
+		s.logger.Info("session closed")
+	}
 	s.mu.Lock()
 	s.torrents = make(map[metainfo.Hash]*Torrent)
 	s.metadata = make(map[string]metainfo.Hash)

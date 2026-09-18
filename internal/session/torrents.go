@@ -48,10 +48,35 @@ func (s *Session) AddTorrent(ctx context.Context, src Source) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, _, err := s.addTorrentLockedResult(ctx, src)
-	if err == nil {
-		s.manualRefs[st.InfoHash()] = struct{}{}
+	if err != nil {
+		attrs := []any{"source", sourceKind(src), "err", err}
+		if src.MetainfoPath != "" {
+			attrs = append(attrs, "path", src.MetainfoPath)
+		}
+		s.logger.Error("torrent add failed", attrs...)
+		return err
 	}
-	return err
+	hash := st.InfoHash()
+	s.manualRefs[hash] = struct{}{}
+	attrs := []any{"hash", hash.HexString(), "source", sourceKind(src)}
+	if src.MetainfoPath != "" {
+		attrs = append(attrs, "path", src.MetainfoPath)
+	}
+	s.logger.Info("torrent added", attrs...)
+	return nil
+}
+
+func sourceKind(src Source) string {
+	switch {
+	case src.MetainfoPath != "":
+		return "metainfo"
+	case src.MagnetURI != "":
+		return "magnet"
+	case len(src.Metainfo) > 0:
+		return "metainfo-bytes"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Session) addTorrentLocked(ctx context.Context, src Source) error {

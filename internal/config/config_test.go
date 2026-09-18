@@ -22,6 +22,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Cache.CapacityBytes != 64<<20 {
 		t.Fatalf("Default cache capacity = %d, want %d", cfg.Cache.CapacityBytes, 64<<20)
 	}
+	if cfg.Log != (config.Log{Level: "info", Format: "text"}) {
+		t.Fatalf("Default log = %+v, want info/text", cfg.Log)
+	}
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
@@ -70,6 +73,11 @@ capacity_bytes = 8192
 tracker_user_agent = "torrentfs-test/1.0"
 peer_id_prefix = "-TS1000-"
 extended_handshake_client_version = "torrentfs-test/1.0"
+
+[log]
+level = "debug"
+format = "json"
+add_source = true
 `)
 
 	cfg, err := config.Load(path)
@@ -84,6 +92,9 @@ extended_handshake_client_version = "torrentfs-test/1.0"
 	}
 	if cfg.Proxy.Socks5URL != "socks5h://user:password@proxy.example:1080" {
 		t.Fatalf("Socks5URL = %q", cfg.Proxy.Socks5URL)
+	}
+	if cfg.Log != (config.Log{Level: "debug", Format: "json", AddSource: true}) {
+		t.Fatalf("Log = %+v, want debug/json/source", cfg.Log)
 	}
 	if cfg.Cache.CapacityBytes != 8192 {
 		t.Fatalf("CapacityBytes = %d, want 8192", cfg.Cache.CapacityBytes)
@@ -207,6 +218,9 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	}
 	if cfg.HTTP.Auth != defaults.HTTP.Auth {
 		t.Fatalf("Auth = %+v, want defaults %+v", cfg.HTTP.Auth, defaults.HTTP.Auth)
+	}
+	if cfg.Log != defaults.Log {
+		t.Fatalf("Log = %+v, want defaults %+v", cfg.Log, defaults.Log)
 	}
 }
 
@@ -479,6 +493,27 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				cfg.HTTP.ListenAddr = ":8080"
 			},
 			field: "http.listen_addr",
+		},
+		{
+			name: "invalid log level",
+			setup: func(cfg *config.Config) {
+				cfg.Log.Level = "verbose"
+			},
+			field: "log.level",
+		},
+		{
+			name: "invalid log level offset",
+			setup: func(cfg *config.Config) {
+				cfg.Log.Level = "info+2"
+			},
+			field: "log.level",
+		},
+		{
+			name: "invalid log format",
+			setup: func(cfg *config.Config) {
+				cfg.Log.Format = "console"
+			},
+			field: "log.format",
 		},
 	}
 	for _, tt := range tests {

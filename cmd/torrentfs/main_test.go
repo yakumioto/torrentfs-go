@@ -12,6 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
 
 // shutdownRecorder records the order in which the shutdown stages ran and the
@@ -136,6 +139,34 @@ func TestShutdownSequenceRunsEveryStageDespiteErrors(t *testing.T) {
 
 // TestShutdownSequenceSkipsAbsentStages covers the headless and mount-only
 // configurations: a nil stage is not called and reports no error.
+func TestShutdownSequenceReportsIncompleteWithoutStopped(t *testing.T) {
+	var buf bytes.Buffer
+	logger, _, err := logging.New(config.Log{Level: "info", Format: "text"}, &buf)
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	recorder := &shutdownRecorder{}
+	sequence := shutdownSequence{
+		logger: logger,
+		api:    fakeAPIShutdown{recorder: recorder, err: errors.New("api shutdown failed")},
+		sess:   fakeSessionCloser{recorder: recorder},
+	}
+	result := sequence.run()
+	if result.api == nil {
+		t.Fatal("shutdown result lost API failure")
+	}
+	output := buf.String()
+	if strings.Contains(output, "msg=stopped") {
+		t.Fatalf("failed shutdown reported stopped: %q", output)
+	}
+	if got := strings.Count(output, "shutdown incomplete"); got != 1 {
+		t.Fatalf("shutdown incomplete records = %d, want 1: %q", got, output)
+	}
+	if !strings.Contains(output, "stage") || !strings.Contains(output, "http-api") {
+		t.Fatalf("shutdown summary lacks failed stage: %q", output)
+	}
+}
+
 func TestShutdownSequenceSkipsAbsentStages(t *testing.T) {
 	recorder := &shutdownRecorder{}
 	sequence := shutdownSequence{sess: fakeSessionCloser{recorder: recorder}}
