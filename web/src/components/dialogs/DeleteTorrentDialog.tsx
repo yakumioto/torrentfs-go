@@ -2,11 +2,12 @@ import { Button, Group, Modal, Stack } from '@mantine/core';
 import { useEffect, useRef, useState } from 'react';
 import { IconAlertTriangle } from '@tabler/icons-react';
 import type { Torrent } from '../../types/api';
-import { ApiError, errorMessage } from '../../api/errors';
+import { ApiError } from '../../api/errors';
 import { useAuth } from '../../app/auth-context';
 import { useDeleteTorrent, useOperation } from '../../queries/hooks';
 import { queryKeys } from '../../queries/keys';
 import { useQueryClient } from '@tanstack/react-query';
+import { userFacingError } from '../../utils/user-facing-error';
 import { OperationStatus } from './OperationStatus';
 
 export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Torrent; opened: boolean; onClose: () => void }) {
@@ -45,15 +46,15 @@ export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Tor
   const mutationError = deletion.error;
   const conflict = mutationError instanceof ApiError && mutationError.status === 409;
   return (
-    <Modal opened={opened} onClose={close} title="Delete torrent" centered>
+    <Modal opened={opened} onClose={close} title="删除任务" centered closeButtonProps={{ 'aria-label': '关闭弹窗' }}>
       <Stack gap="md">
-        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>Remove <strong>{torrent.name || 'this torrent'}</strong> from TorrentFS. This drops the in-memory task; the cache contents are released with it. This action cannot be undone.</p>
-        {conflict && <div className="error-callout"><IconAlertTriangle size={15} aria-hidden="true" /> A user-owned .torrent file still references this task. Remove that reference first.</div>}
-        {mutationError !== null && mutationError !== undefined && !conflict && <div className="error-callout" role="alert">{errorMessage(mutationError)}</div>}
+        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>从 TorrentFS 中移除 <strong>{torrent.name || '这个任务'}</strong>。任务会从内存中移除，相关缓存也会随之释放；此操作无法撤销。</p>
+        {conflict && <div className="error-callout" role="alert"><IconAlertTriangle size={15} aria-hidden="true" /> 当前任务仍被用户拥有的 .torrent 文件引用，请先解除该引用。</div>}
+        {mutationError !== null && mutationError !== undefined && !conflict && <div className="error-callout" role="alert">{userFacingError(mutationError, '删除任务请求失败，请稍后重试。')}</div>}
         {operationId !== '' && <OperationStatus operation={operation.data} error={operation.error} />}
         <Group justify="flex-end">
-          <Button variant="subtle" color="gray" onClick={close}>Close</Button>
-          <Button color="coral" onClick={submit} loading={deletion.isPending} disabled={operation.data?.state === 'deleting' || operation.data?.state === 'deleted'}>Delete torrent</Button>
+          <Button variant="subtle" color="gray" onClick={close}>关闭</Button>
+          <Button color="danger" onClick={submit} loading={deletion.isPending} disabled={operation.data?.state === 'deleting' || operation.data?.state === 'deleted'}>删除任务</Button>
         </Group>
       </Stack>
     </Modal>

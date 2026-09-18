@@ -72,7 +72,7 @@ describe('TorrentDetailPage', () => {
 
     render(
       <QueryClientProvider client={queryClient}>
-        <MantineProvider theme={theme} defaultColorScheme="dark">
+        <MantineProvider theme={theme} defaultColorScheme="light">
           <AuthContext.Provider value={auth}>
             <MemoryRouter initialEntries={['/torrents/torrent-1']}>
               <Routes><Route path="/torrents/:id" element={<TorrentDetailPage />} /></Routes>
@@ -83,12 +83,12 @@ describe('TorrentDetailPage', () => {
     );
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Resolved detail title' })).toBeInTheDocument());
-    expect(screen.queryByText('Waiting for metadata')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Ready')).toHaveLength(2);
+    expect(screen.queryByText('正在等待元数据')).not.toBeInTheDocument();
+    expect(screen.getAllByText('就绪')).toHaveLength(2);
 
     await queryClient.refetchQueries({ queryKey: queryKeys.torrentStatus('torrent-1') });
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Updated detail title' })).toBeInTheDocument());
-    expect(screen.getAllByText('Error')).toHaveLength(2);
+    expect(screen.getAllByText('错误')).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

@@ -3,18 +3,18 @@ import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
+import { userFacingError } from '../utils/user-facing-error';
 import type { AppOutletContext } from '../components/layout/AppLayout';
 import { TorrentList } from '../components/torrents/TorrentList';
 import { useTorrentList } from '../queries/hooks';
 import { filterTorrents, summarizeTorrents, type TorrentFilter } from '../queries/filter';
-import { errorMessage } from '../api/errors';
 import styles from './DashboardPage.module.css';
 import { usePageVisible } from '../utils/visibility';
 
 const FILTERS: Array<{ value: TorrentFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'ready', label: 'Ready' },
-  { value: 'error', label: 'Error' },
+  { value: 'all', label: '全部' },
+  { value: 'ready', label: '就绪' },
+  { value: 'error', label: '错误' },
 ];
 
 export function DashboardPage() {
@@ -38,38 +38,47 @@ export function DashboardPage() {
     <div className={styles.page}>
       <section className={styles.heading} aria-labelledby="dashboard-title">
         <div>
-          <p className="eyebrow">Library</p>
-          <h1 className={styles.title} id="dashboard-title">Torrents</h1>
-          <p className={styles.subtitle}>Manage torrents and inspect live cache usage from one focused queue.</p>
+          <p className="eyebrow">任务库</p>
+          <h1 className={styles.title} id="dashboard-title">任务列表</h1>
+          <p className={styles.subtitle}>集中管理任务，并查看真实的缓存占用状态。</p>
         </div>
-        <Button color="mint" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
-          Add torrent
+        <Button color="torrent" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
+          添加任务
         </Button>
       </section>
 
-      <section aria-label="Torrent summary" className={styles.summary}>
-        <span><strong>{summary.total}</strong> total</span>
-        <span><strong>{summary.ready}</strong> ready</span>
-        <span><strong>{summary.error}</strong> error</span>
+      <section aria-label="任务摘要" className={styles.summary}>
+        <div className={styles.summaryCard}>
+          <span>全部任务</span>
+          <strong>{summary.total}</strong>
+        </div>
+        <div className={`${styles.summaryCard} ${styles.summaryReady}`}>
+          <span>已就绪</span>
+          <strong>{summary.ready}</strong>
+        </div>
+        <div className={`${styles.summaryCard} ${styles.summaryError}`}>
+          <span>需要关注</span>
+          <strong>{summary.error}</strong>
+        </div>
       </section>
 
-      <section className={styles.controls} aria-label="Torrent list controls">
+      <section className={styles.controls} aria-label="任务列表筛选">
         <TextInput
           className={styles.search}
-          aria-label="Search torrents"
-          placeholder="Search name or info hash"
+          aria-label="搜索任务"
+          placeholder="搜索任务名称或信息哈希"
           leftSection={<IconSearch size={16} />}
-          rightSection={search !== '' ? <Button variant="subtle" size="compact-xs" aria-label="Clear search" onClick={() => setSearch('')}><IconX size={14} /></Button> : null}
+          rightSection={search !== '' ? <Button variant="subtle" size="compact-xs" aria-label="清除搜索" onClick={() => setSearch('')}><IconX size={14} /></Button> : null}
           value={search}
           onChange={(event) => setSearch(event.currentTarget.value)}
         />
-        <div className={styles.filters} role="group" aria-label="Filter torrents by status">
+        <div className={styles.filters} role="group" aria-label="按状态筛选任务">
           {FILTERS.map((item) => (
             <Button
               key={item.value}
               size="compact-sm"
               variant={filter === item.value ? 'filled' : 'subtle'}
-              color="mint"
+              color="torrent"
               aria-pressed={filter === item.value}
               onClick={() => setFilter(item.value)}
             >
@@ -82,7 +91,7 @@ export function DashboardPage() {
       {query.error !== null && query.error !== undefined && query.data !== undefined && (
         <div className="refresh-warning" role="alert">
           <span aria-hidden="true">!</span>
-          <span>Could not refresh the latest snapshot. Showing the last valid list. {errorMessage(query.error)}</span>
+          <span>最新任务列表刷新失败，当前显示上一次有效快照。{userFacingError(query.error, '请稍后重试。')}</span>
         </div>
       )}
 

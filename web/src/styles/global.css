@@ -45,8 +45,6 @@ select:focus-visible,
   min-height: 100vh;
 }
 
-/* Shared primitives used across more than one feature. */
-
 .eyebrow {
   margin: 0 0 0.45rem;
   color: var(--text-secondary);
@@ -61,6 +59,7 @@ select:focus-visible,
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-1);
+  box-shadow: 0 2px 8px rgba(23, 32, 51, 0.04);
 }
 
 .panel--padding {
@@ -116,7 +115,7 @@ select:focus-visible,
   place-items: center;
   width: 3.5rem;
   height: 3.5rem;
-  border: 1px solid var(--border-strong);
+  border: 1px solid #b9cdf6;
   border-radius: 50%;
   color: var(--accent);
   background: var(--accent-soft);
@@ -141,10 +140,10 @@ select:focus-visible,
   gap: 0.55rem;
   margin-bottom: 1rem;
   padding: 0.7rem 0.85rem;
-  border: 1px solid rgba(210, 153, 34, 0.45);
+  border: 1px solid #e6c58c;
   border-radius: var(--radius-sm);
   color: var(--warning);
-  background: rgba(210, 153, 34, 0.08);
+  background: var(--warning-soft);
   font-size: 0.82rem;
 }
 
@@ -153,10 +152,10 @@ select:focus-visible,
   align-items: start;
   gap: 0.45rem;
   padding: 0.75rem 0.85rem;
-  border: 1px solid rgba(248, 81, 73, 0.45);
+  border: 1px solid #e8aaa3;
   border-radius: var(--radius-sm);
-  color: #ffaaa5;
-  background: rgba(248, 81, 73, 0.1);
+  color: var(--danger);
+  background: var(--danger-soft);
   font-size: 0.82rem;
   line-height: 1.45;
 }

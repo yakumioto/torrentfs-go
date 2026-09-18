@@ -13,12 +13,11 @@
   font-family: var(--font-mono);
   font-size: 0.68rem;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 @media (max-width: 1100px) {
   .header {
-    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(10rem, 1.25fr) minmax(7rem, 0.8fr) minmax(7rem, 0.8fr);
+    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(10rem, 1.25fr) minmax(7rem, 0.8fr) auto;
   }
 
   .header span:nth-child(5) {

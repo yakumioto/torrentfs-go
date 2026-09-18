@@ -1,16 +1,16 @@
-import { Button, Center } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { IconPlugOff } from '@tabler/icons-react';
 import shell from '../../styles/auth-shell.module.css';
 
 export function ConnectionFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <Center className={shell.page}>
+    <main className={`${shell.page} ${shell.authPage}`}>
       <div className={`${shell.card} error-state`} role="alert">
         <IconPlugOff size={34} aria-hidden="true" />
-        <h2>The daemon is out of reach</h2>
-        <p>{message || 'The HTTP service did not answer. Check the listener and try again.'}</p>
-        <Button color="mint" onClick={onRetry}>Retry connection</Button>
+        <h2>无法连接 TorrentFS 服务</h2>
+        <p>{message || '后台服务没有响应，请检查服务是否正在运行。'}</p>
+        <Button color="torrent" onClick={onRetry}>重试连接</Button>
       </div>
-    </Center>
+    </main>
   );
 }

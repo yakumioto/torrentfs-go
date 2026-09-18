@@ -27,27 +27,29 @@ export function Header({ onAdd }: { onAdd: () => void }) {
   return (
     <div className={styles.bar}>
       <div className={styles.inner}>
-        <Link to="/" className={styles.brand} aria-label="TorrentFS dashboard">
+        <Link to="/" className={styles.brand} aria-label="返回 TorrentFS 任务列表">
           <span className={styles.brandMark} aria-hidden="true"><IconBox size={18} /></span>
           <span className={styles.brandName}>torrentfs</span>
         </Link>
         <div className={styles.actions}>
           <ConnectionPill />
-          <Tooltip label="Refresh data">
-            <ActionIcon type="button" variant="subtle" color="gray" onClick={refresh} aria-label="Refresh data">
+          <Tooltip label="刷新数据">
+            <ActionIcon type="button" variant="subtle" color="gray" onClick={refresh} aria-label="刷新数据">
               <IconRefresh size={18} />
             </ActionIcon>
           </Tooltip>
-          <Button color="mint" leftSection={<IconPlus size={17} />} onClick={onAdd} size="sm">
-            Add torrent
-          </Button>
+          <Tooltip label="添加任务">
+            <Button className={styles.addButton} color="torrent" leftSection={<IconPlus size={17} />} onClick={onAdd} size="sm" aria-label="添加任务">
+              <span className={styles.addLabel}>添加任务</span>
+            </Button>
+          </Tooltip>
           {auth.isAuthenticated && (
-            <Tooltip label="Log out">
+            <Tooltip label="退出登录">
               <ActionIcon
                 type="button"
                 variant="subtle"
                 color="gray"
-                aria-label="Log out"
+                aria-label="退出登录"
                 onClick={() => void auth.logout().then(() => navigate('/'))}
               >
                 <IconLogout size={18} />

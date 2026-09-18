@@ -30,7 +30,7 @@ function renderApp() {
     },
   });
   const view = render(
-    <MantineProvider theme={theme} defaultColorScheme="dark">
+    <MantineProvider theme={theme} defaultColorScheme="light">
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <MemoryRouter>
@@ -60,13 +60,13 @@ function authorization(request: RequestInit | undefined): string | null {
 }
 
 async function submitLogin(username = 'alice', password = 'secret') {
-  fireEvent.change(screen.getByRole('textbox', { name: 'Username' }), { target: { value: username } });
+  fireEvent.change(screen.getByRole('textbox', { name: '用户名' }), { target: { value: username } });
   const passwordInput = document.querySelector<HTMLInputElement>('input[type="password"]');
   if (passwordInput === null) {
     throw new Error('Password input is missing.');
   }
   fireEvent.change(passwordInput, { target: { value: password } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: '登录' }));
 }
 
 beforeEach(() => {
@@ -84,10 +84,10 @@ describe('App authentication flow', () => {
     const fetchMock = mockFetch(unauthorizedResponse());
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
 
-    expect(screen.getByRole('status')).toHaveTextContent('Authentication is required or your session has expired. Sign in to continue.');
-    expect(screen.queryByText('The daemon is out of reach')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('需要登录或当前会话已过期，请重新登录后继续。');
+    expect(screen.queryByText('无法连接 TorrentFS 服务')).not.toBeInTheDocument();
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -102,9 +102,9 @@ describe('App authentication flow', () => {
     );
     const firstMount = renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();
@@ -115,8 +115,8 @@ describe('App authentication flow', () => {
     firstMount.queryClient.clear();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
-    expect(screen.queryByText(/Sign in again/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
+    expect(screen.queryByText(/重新登录/)).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
     expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
@@ -131,16 +131,16 @@ describe('App authentication flow', () => {
     );
     const { queryClient } = renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh data' }));
+    fireEvent.click(screen.getByRole('button', { name: '刷新数据' }));
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await waitFor(() => expect(queryClient.getQueryData(queryKeys.torrents)).toBeUndefined());
-    expect(screen.getByRole('status')).toHaveTextContent('Authentication is required or your session has expired. Sign in to continue.');
+    expect(screen.getByRole('status')).toHaveTextContent('需要登录或当前会话已过期，请重新登录后继续。');
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
@@ -158,22 +158,22 @@ describe('App authentication flow', () => {
     );
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }));
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    expect(screen.queryByText('Authentication is required or your session has expired. Sign in to continue.')).not.toBeInTheDocument();
+    expect(screen.queryByText('需要登录或当前会话已过期，请重新登录后继续。')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
     expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
     expect(authorization(fetchMock.mock.calls[4][1])).toBeNull();
 
     await submitLogin();
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Torrents' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
     expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
     expect(authorization(fetchMock.mock.calls[6][1])).toBe('Bearer opaque-new');
@@ -183,10 +183,10 @@ describe('App authentication flow', () => {
     const fetchMock = mockFetch(unauthorizedResponse(), unauthorizedResponse());
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in to TorrentFS' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin('alice', 'wrong');
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid username or password.'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误。'));
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();

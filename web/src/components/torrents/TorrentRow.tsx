@@ -13,30 +13,36 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
   const navigate = useNavigate();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const disabled = torrent.state === 'deleting';
-  const name = torrent.name || 'Unnamed torrent';
+  const name = torrent.name || '未命名任务';
 
   const openDelete = () => setDeleteOpen(true);
 
   return (
     <div className={styles.row} role="listitem">
-      <Link className={styles.main} to={`/torrents/${encodeURIComponent(torrent.id)}`} aria-label={`Open details for ${name}`}>
+      <Link className={styles.main} to={`/torrents/${encodeURIComponent(torrent.id)}`} aria-label={`打开任务详情：${name}`}>
         <div className={styles.name}>
           <span className={styles.title}>{name}</span>
-          <span className={styles.hash}>{torrent.info_hash || 'Info hash pending'}</span>
+          <span className={styles.hash}>{torrent.info_hash || '信息哈希等待生成'}</span>
         </div>
-        <div className={`${styles.size} text-mono`}>{formatBytes(torrent.total_bytes)}</div>
+        <div className={`${styles.size} text-mono`}>
+          <span className={styles.mobileLabel}>大小</span>
+          <span>{formatBytes(torrent.total_bytes)}</span>
+        </div>
         <TorrentProgress className={styles.cache} cachedBytes={torrent.cached_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
-        <StateBadge className={styles.state} state={torrent.state} />
+        <div className={styles.state}>
+          <span className={styles.mobileLabel}>状态</span>
+          <StateBadge state={torrent.state} />
+        </div>
         <div className={`${styles.added} text-mono`} title={torrent.created_at}>{formatDate(torrent.created_at)}</div>
       </Link>
       <div className={styles.action}>
         <Menu shadow="md" width={220} position="bottom-end" withinPortal>
           <Menu.Target>
-            <Tooltip label="More actions">
+            <Tooltip label="更多操作">
               <ActionIcon
                 variant="subtle"
-                color={torrent.state === 'delete_failed' ? 'coral' : 'gray'}
-                aria-label={`More actions for ${name}`}
+                color={torrent.state === 'delete_failed' ? 'danger' : 'gray'}
+                aria-label={`打开 ${name} 的更多操作`}
                 disabled={disabled}
               >
                 <IconDots size={18} />
@@ -44,13 +50,13 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
             </Tooltip>
           </Menu.Target>
           <Menu.Dropdown>
-            <Menu.Label>Torrent</Menu.Label>
+            <Menu.Label>任务操作</Menu.Label>
             <Menu.Item leftSection={<IconExternalLink size={15} />} onClick={() => navigate(`/torrents/${encodeURIComponent(torrent.id)}`)}>
-              Open details
+              查看详情
             </Menu.Item>
             <Menu.Divider />
             <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={openDelete}>
-              Remove torrent
+              删除任务
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>

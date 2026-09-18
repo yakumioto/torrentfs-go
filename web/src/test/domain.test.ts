@@ -21,10 +21,10 @@ describe('piece cache state encoding', () => {
 describe('file coverage', () => {
   it('counts cached pieces and handles zero-size ranges', () => {
     const zero: FileStatus = { path: 'empty', size: 0, piece_start: 2, piece_end: 2 };
-    expect(fileCoverage(zero, [])).toEqual({ label: 'Zero bytes', tone: 'cached' });
-    expect(fileCoverage({ path: 'x', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1 })])).toEqual({ label: 'Cached 1 / 2 pieces', tone: 'partial' });
-    expect(fileCoverage({ path: 'y', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1, cached: true })])).toEqual({ label: 'Cached', tone: 'cached' });
-    expect(fileCoverage({ path: 'z', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0 }), piece({ index: 1 })])).toEqual({ label: 'Cached 0 / 2 pieces', tone: 'uncached' });
+    expect(fileCoverage(zero, [])).toEqual({ label: '零字节文件', tone: 'cached' });
+    expect(fileCoverage({ path: 'x', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1 })])).toEqual({ label: '已缓存 1 / 2 个数据块', tone: 'partial' });
+    expect(fileCoverage({ path: 'y', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1, cached: true })])).toEqual({ label: '已缓存', tone: 'cached' });
+    expect(fileCoverage({ path: 'z', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0 }), piece({ index: 1 })])).toEqual({ label: '已缓存 0 / 2 个数据块', tone: 'uncached' });
   });
 });
 

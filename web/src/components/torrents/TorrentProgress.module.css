@@ -27,6 +27,12 @@
   font-size: 0.7rem;
 }
 
+.labelTitle {
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
+
 .ready .fill {
   background: var(--success);
 }

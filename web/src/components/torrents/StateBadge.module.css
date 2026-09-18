@@ -21,14 +21,20 @@
 
 .adding,
 .deleting {
+  border-color: #e6c58c;
   color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .ready {
+  border-color: #8ccfc5;
   color: var(--success);
+  background: var(--success-soft);
 }
 
 .error,
 .deleteFailed {
+  border-color: #e8aaa3;
   color: var(--danger);
+  background: var(--danger-soft);
 }

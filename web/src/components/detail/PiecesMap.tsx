@@ -27,16 +27,16 @@ export function PiecesMap({ pieces }: { pieces: PieceStatus[] }) {
   return (
     <div>
       <div className={styles.toolbar}>
-        <p className={styles.toolbarCopy}>Each cell is one absolute piece. Pinned pieces are held in the cache and resist eviction; texture keeps states readable without color.</p>
-        <span className="text-mono">{pieces.length.toLocaleString()} pieces</span>
+        <p className={styles.toolbarCopy}>每个方块代表一个绝对数据块。已固定的数据块会留在缓存中并避免被淘汰；纹理让状态不依赖颜色也能区分。</p>
+        <span className="text-mono">{pieces.length.toLocaleString()} 个数据块</span>
       </div>
-      <div className={styles.legend} aria-label="Piece state legend">
-        <LegendItem state="cached" label="Cached" />
-        <LegendItem state="pinned" label="Pinned" />
-        <LegendItem state="uncached" label="Uncached" />
+      <div className={styles.legend} aria-label="数据块状态图例">
+        <LegendItem state="cached" label="已缓存" />
+        <LegendItem state="pinned" label="已固定" />
+        <LegendItem state="uncached" label="未缓存" />
       </div>
-      <div className={styles.map} role="list" aria-label="Piece map">
-        {visiblePieces.length === 0 && <div className={styles.mapEmpty}>No piece metadata is available yet.</div>}
+      <div className={styles.map} role="list" aria-label="数据块地图">
+        {visiblePieces.length === 0 && <div className={styles.mapEmpty}>当前还没有可用的数据块元数据。</div>}
         {visiblePieces.map((piece) => {
           const state = pieceVisualState(piece);
           return (
@@ -51,15 +51,15 @@ export function PiecesMap({ pieces }: { pieces: PieceStatus[] }) {
         })}
       </div>
       {visibleCount < pieces.length && (
-        <div className={styles.mapMore}><Button variant="subtle" color="mint" onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}>Show next {Math.min(PAGE_SIZE, pieces.length - visibleCount).toLocaleString()} pieces</Button></div>
+        <div className={styles.mapMore}><Button variant="subtle" color="torrent" onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}>继续查看后面 {Math.min(PAGE_SIZE, pieces.length - visibleCount).toLocaleString()} 个数据块</Button></div>
       )}
-      <details style={{ marginTop: '1rem' }}>
-        <summary className="subtle">Open accessible piece table</summary>
+      <details className={styles.details}>
+        <summary>打开可访问的数据块明细表</summary>
         <div className="files-table-wrap" style={{ marginTop: '0.75rem', maxHeight: '20rem', overflow: 'auto' }}>
           <Table striped withTableBorder className={styles.table}>
-            <Table.Thead><Table.Tr><Table.Th>Index</Table.Th><Table.Th>State</Table.Th><Table.Th>Cached size</Table.Th><Table.Th>Pinned</Table.Th></Table.Tr></Table.Thead>
+            <Table.Thead><Table.Tr><Table.Th>索引</Table.Th><Table.Th>状态</Table.Th><Table.Th>缓存大小</Table.Th><Table.Th>是否固定</Table.Th></Table.Tr></Table.Thead>
             <Table.Tbody>
-              {visiblePieces.map((piece) => <Table.Tr key={`table-${piece.index}`}><Table.Td><span className="text-mono">{piece.index}</span></Table.Td><Table.Td>{pieceVisualState(piece)}</Table.Td><Table.Td>{formatBytes(piece.cached_bytes)}</Table.Td><Table.Td>{piece.pinned ? 'Yes' : 'No'}</Table.Td></Table.Tr>)}
+              {visiblePieces.map((piece) => <Table.Tr key={`table-${piece.index}`}><Table.Td data-label="索引"><span className="text-mono">{piece.index}</span></Table.Td><Table.Td data-label="状态">{pieceVisualStateLabel(piece)}</Table.Td><Table.Td data-label="缓存大小">{formatBytes(piece.cached_bytes)}</Table.Td><Table.Td data-label="是否固定">{piece.pinned ? '是' : '否'}</Table.Td></Table.Tr>)}
             </Table.Tbody>
           </Table>
         </div>
@@ -73,5 +73,19 @@ function LegendItem({ state, label }: { state: PieceVisualState; label: string }
 }
 
 function pieceTooltip(piece: PieceStatus, state: PieceVisualState): string {
-  return [`Piece ${piece.index}`, state, `${formatBytes(piece.cached_bytes)} cached`].join(' · ');
+  return [`数据块 ${piece.index}`, pieceVisualStateLabelFromState(state), `${formatBytes(piece.cached_bytes)} 已缓存`].join(' · ');
+}
+
+function pieceVisualStateLabel(piece: PieceStatus): string {
+  return pieceVisualStateLabelFromState(pieceVisualState(piece));
+}
+
+function pieceVisualStateLabelFromState(state: PieceVisualState): string {
+  if (state === 'pinned') {
+    return '已固定';
+  }
+  if (state === 'cached') {
+    return '已缓存';
+  }
+  return '未缓存';
 }

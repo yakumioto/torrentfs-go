@@ -13,14 +13,14 @@ export const TorrentDetailHeader = memo(function TorrentDetailHeader({ name, inf
   return (
     <div className={styles.header}>
       <div className={styles.title}>
-        <Link to="/" className={styles.backLink}><IconArrowLeft size={15} /> Torrents</Link>
-        <p className="eyebrow">Torrent detail</p>
-        <h1>{name || 'Unnamed torrent'}</h1>
-        <span className={styles.hash}>{infoHash || 'Info hash pending'}</span>
+        <Link to="/" className={styles.backLink}><IconArrowLeft size={15} /> 返回任务列表</Link>
+        <p className="eyebrow">任务详情</p>
+        <h1>{name || '未命名任务'}</h1>
+        <span className={styles.hash}>{infoHash || '信息哈希等待生成'}</span>
       </div>
       <div className={styles.actions}>
-        <Button color="coral" variant="light" leftSection={<IconTrash size={16} />} onClick={onDelete} disabled={deleteDisabled}>
-          Remove
+        <Button color="danger" variant="light" leftSection={<IconTrash size={16} />} onClick={onDelete} disabled={deleteDisabled}>
+          删除任务
         </Button>
       </div>
     </div>

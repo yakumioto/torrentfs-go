@@ -28,7 +28,9 @@
 }
 
 .name,
-.cache {
+.cache,
+.size,
+.state {
   min-width: 0;
 }
 
@@ -63,6 +65,10 @@
   padding: 0 0.75rem;
 }
 
+.mobileLabel {
+  display: none;
+}
+
 @media (max-width: 1100px) {
   .main {
     grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(10rem, 1.25fr) minmax(7rem, 0.8fr) minmax(7rem, 0.8fr);
@@ -85,6 +91,8 @@
   }
 
   .size {
+    display: grid;
+    gap: 0.18rem;
     grid-column: 1;
   }
 
@@ -94,9 +102,19 @@
   }
 
   .state {
+    display: grid;
+    justify-items: end;
+    gap: 0.18rem;
     grid-column: 2;
     grid-row: 2;
     align-self: center;
+  }
+
+  .mobileLabel {
+    display: block;
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
   }
 
   .action {

@@ -43,7 +43,7 @@ function renderDialog(fetchMock: ReturnType<typeof vi.fn>) {
   vi.stubGlobal('fetch', fetchMock);
   render(
     <QueryClientProvider client={queryClient}>
-      <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={auth}>
           <DeleteTorrentDialog torrent={makeTorrent()} opened onClose={() => undefined} />
         </AuthContext.Provider>
@@ -71,7 +71,7 @@ describe('DeleteTorrentDialog', () => {
 
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
-    const submit = screen.getByRole('button', { name: 'Delete torrent' });
+    const submit = screen.getByRole('button', { name: '删除任务' });
     expect(submit).toBeEnabled();
     fireEvent.click(submit);
 
@@ -85,8 +85,8 @@ describe('DeleteTorrentDialog', () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(operation)));
     renderDialog(fetchMock);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete torrent' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除任务' }));
 
-    await waitFor(() => expect(screen.getByText('Deleting torrent…')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('正在删除任务…')).toBeInTheDocument());
   });
 });
