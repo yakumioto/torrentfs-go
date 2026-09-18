@@ -34,6 +34,10 @@ Flags:
   -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
 
+Configuration precedence is explicit -data-dir, then TORRENTFS_* environment
+variables, then the TOML file, then built-in defaults. See the README for the
+complete environment variable list.
+
 <torrents-dir> must be an existing directory. Its direct regular, non-symlink
 files whose names end in .torrent are scanned at startup and while running.
 A single-file torrent is exposed under the mount point as a regular file
@@ -347,13 +351,12 @@ func validateTorrentDir(path string) error {
 }
 
 func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {
-	cfg := config.Default()
-	if path != "" {
-		var err error
-		cfg, err = config.Load(path)
-		if err != nil {
-			return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
+	cfg, err := config.Load(path)
+	if err != nil {
+		if path == "" {
+			return config.Config{}, fmt.Errorf("load config: %w", err)
 		}
+		return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
 	}
 	if dataDirSet {
 		cfg.Paths.DataDir = dataDir

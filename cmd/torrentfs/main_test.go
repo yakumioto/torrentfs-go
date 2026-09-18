@@ -439,6 +439,116 @@ func TestLoadConfigKeepsFileDataDirWhenFlagWasOmitted(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesEnvironmentWhenConfigPathIsOmitted(t *testing.T) {
+	unsetConfigEnvironment(t)
+	dataDir := filepath.Join(t.TempDir(), "environment-data")
+	t.Setenv("TORRENTFS_PATHS_DATA_DIR", dataDir)
+
+	cfg, err := loadConfig("", "", false)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Paths.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want %q", cfg.Paths.DataDir, dataDir)
+	}
+}
+
+func TestLoadConfigEnvironmentOverridesFile(t *testing.T) {
+	unsetConfigEnvironment(t)
+	fileDataDir := filepath.Join(t.TempDir(), "file-data")
+	envDataDir := filepath.Join(t.TempDir(), "environment-data")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = "+strconv.Quote(fileDataDir)+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_PATHS_DATA_DIR", envDataDir)
+
+	cfg, err := loadConfig(path, "", false)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Paths.DataDir != envDataDir {
+		t.Fatalf("DataDir = %q, want environment value %q", cfg.Paths.DataDir, envDataDir)
+	}
+}
+
+func TestLoadConfigExplicitDataDirRemainsFinalOverride(t *testing.T) {
+	unsetConfigEnvironment(t)
+	fileDataDir := filepath.Join(t.TempDir(), "file-data")
+	envDataDir := filepath.Join(t.TempDir(), "environment-data")
+	cliDataDir := filepath.Join(t.TempDir(), "cli-data")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = "+strconv.Quote(fileDataDir)+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_PATHS_DATA_DIR", envDataDir)
+
+	cfg, err := loadConfig(path, cliDataDir, true)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Paths.DataDir != cliDataDir {
+		t.Fatalf("DataDir = %q, want CLI value %q", cfg.Paths.DataDir, cliDataDir)
+	}
+}
+
+func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
+	unsetConfigEnvironment(t)
+	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
+	var stderr bytes.Buffer
+
+	code := run([]string{"-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2", code)
+	}
+	for _, want := range []string{"TORRENTFS_CONNECTIONS_LISTEN_PORT", "connections.listen_port"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "invalid-run-port") {
+		t.Fatalf("stderr = %q, must not contain raw environment value", stderr.String())
+	}
+}
+
+func unsetConfigEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"TORRENTFS_PATHS_DATA_DIR",
+		"TORRENTFS_PATHS_PAYLOAD_DIR",
+		"TORRENTFS_CONNECTIONS_LISTEN_HOST",
+		"TORRENTFS_CONNECTIONS_LISTEN_PORT",
+		"TORRENTFS_PROXY_SOCKS5_URL",
+		"TORRENTFS_CACHE_CAPACITY_BYTES",
+		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
+		"TORRENTFS_IDENTITY_PEER_ID_PREFIX",
+		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION",
+		"TORRENTFS_HTTP_LISTEN_ADDR",
+		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES",
+		"TORRENTFS_HTTP_AUTH_ENABLED",
+		"TORRENTFS_HTTP_AUTH_USERNAME",
+		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH",
+		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE",
+		"TORRENTFS_HTTP_AUTH_TOKEN_TTL",
+		"TORRENTFS_LOG_LEVEL",
+		"TORRENTFS_LOG_FORMAT",
+		"TORRENTFS_LOG_ADD_SOURCE",
+	} {
+		name := name
+		previous, wasSet := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if wasSet {
+				_ = os.Setenv(name, previous)
+			} else {
+				_ = os.Unsetenv(name)
+			}
+		})
+	}
+}
+
 func TestValidateTorrentDirRejectsSymlink(t *testing.T) {
 	target := t.TempDir()
 	link := filepath.Join(t.TempDir(), "torrents")

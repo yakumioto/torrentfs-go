@@ -41,6 +41,16 @@ jobs:
           mode: lint
           golangci-lint-version: ${{ env.GOLANGCI_LINT_VERSION }}
 
+  docker-config:
+    name: Docker default and environment configuration smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run Docker configuration smoke
+        run: ./scripts/docker-config-smoke.sh
+
   # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
   # skipping every real-mount test.

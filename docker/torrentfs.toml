@@ -1,0 +1,37 @@
+# Default configuration for the Docker image.
+# Environment variables can override every value at startup.
+
+[paths]
+data_dir = "/data"
+payload_dir = ""
+
+[http]
+listen_addr = "127.0.0.1:8080"
+max_upload_bytes = 10485760
+
+[http.auth]
+enabled = false
+username = ""
+password_hash = ""
+password_hash_file = ""
+token_ttl = "30m"
+
+[connections]
+listen_host = ""
+listen_port = 0
+
+[proxy]
+socks5_url = ""
+
+[cache]
+capacity_bytes = 67108864
+
+[identity]
+tracker_user_agent = "qBittorrent/4.4.0"
+peer_id_prefix = "-qB4400-"
+extended_handshake_client_version = "qBittorrent/4.4.0"
+
+[log]
+level = "info"
+format = "text"
+add_source = false
