@@ -29,14 +29,32 @@ const (
 	lowWaterDenominator  int64 = 4
 )
 
-// HighWater returns the byte size that triggers eviction for a capacity.
+// HighWater returns the byte size that triggers eviction for a capacity. For a
+// positive capacity it is never zero: a capacity of 1 or 2 bytes would otherwise
+// round both marks down to zero and evict every insertion immediately, so the
+// cache would accept a piece that fits and then refuse to keep it.
 func HighWater(capacity int64) int64 {
-	return capacity * highWaterNumerator / highWaterDenominator
+	if capacity <= 0 {
+		return 0
+	}
+	if mark := capacity * highWaterNumerator / highWaterDenominator; mark > 0 {
+		return mark
+	}
+	return 1
 }
 
-// LowWater returns the byte size that ends an eviction pass for a capacity.
+// LowWater returns the byte size that ends an eviction pass for a capacity. Like
+// HighWater it is clamped to at least one byte, and clamped marks keep the
+// ordering low <= high <= capacity for every positive capacity because
+// max(1, cap*3/4) <= max(1, cap*7/8).
 func LowWater(capacity int64) int64 {
-	return capacity * lowWaterNumerator / lowWaterDenominator
+	if capacity <= 0 {
+		return 0
+	}
+	if mark := capacity * lowWaterNumerator / lowWaterDenominator; mark > 0 {
+		return mark
+	}
+	return 1
 }
 
 // pinBytesCap returns how many bytes may be pinned at once. It leaves the
@@ -123,7 +141,7 @@ func (c *Cache) Put(key Key, value []byte) {
 	if _, ok := c.pinned[key]; ok {
 		c.pinnedBytes += int64(len(stored))
 	}
-	c.evictLocked()
+	c.evictLocked(elem)
 	if c.used > c.capacity {
 		// Reclaiming everything evictable was not enough (pinned entries
 		// remain), so the insert cannot be honoured. Roll it back so the hard
@@ -170,7 +188,7 @@ func (c *Cache) Unpin(key Key) {
 	defer c.mu.Unlock()
 	c.unpinLocked(key)
 	if c.used > HighWater(c.capacity) {
-		c.evictLocked()
+		c.evictLocked(nil)
 	}
 }
 
@@ -279,12 +297,17 @@ func (c *Cache) Size() int64 {
 // evictLocked reclaims from the least-recently-used end until the cache is back
 // under the low-water mark, skipping pinned entries. It gives up when no
 // unpinned victim is left.
-func (c *Cache) evictLocked() {
+//
+// keep, when non-nil, is the entry an insertion is trying to place: the pass
+// must never evict it. A piece that fits the capacity has to stay resident, and
+// when it is the only entry the low-water target is below its size, so without
+// this the cache would evict the very piece it just accepted.
+func (c *Cache) evictLocked(keep *list.Element) {
 	if c.used <= HighWater(c.capacity) {
 		return
 	}
 	for c.used > LowWater(c.capacity) {
-		victim := c.victimLocked()
+		victim := c.victimLocked(keep)
 		if victim == nil {
 			return
 		}
@@ -292,9 +315,12 @@ func (c *Cache) evictLocked() {
 	}
 }
 
-// victimLocked returns the least-recently-used unpinned entry.
-func (c *Cache) victimLocked() *list.Element {
+// victimLocked returns the least-recently-used unpinned entry, never keep.
+func (c *Cache) victimLocked(keep *list.Element) *list.Element {
 	for elem := c.lru.Back(); elem != nil; elem = elem.Prev() {
+		if elem == keep {
+			continue
+		}
 		if _, ok := c.pinned[elem.Value.(*entry).key]; !ok {
 			return elem
 		}

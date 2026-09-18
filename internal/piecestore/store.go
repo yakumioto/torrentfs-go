@@ -91,11 +91,24 @@ func (s *Store) Close() error {
 	return nil
 }
 
-func (s *Store) stagingBytes(key cache.Key) ([]byte, bool) {
+// readStaging copies the [off, off+len(dst)) window of key's staging buffer
+// into dst. The copy happens under the store lock so a concurrent WriteAt for
+// the same piece cannot mutate the bytes while they are being read; handing out
+// the buffer itself would leave the copy racing against the writer.
+//
+// The bool reports whether a staging buffer exists at all; the int is how many
+// bytes it supplied. An offset past the buffer yields zero bytes, not a panic.
+func (s *Store) readStaging(key cache.Key, dst []byte, off int64) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	buf, ok := s.staging[key]
-	return buf, ok
+	if !ok {
+		return 0, false
+	}
+	if off < 0 || off > int64(len(buf)) {
+		return 0, true
+	}
+	return copy(dst, buf[off:]), true
 }
 
 func (s *Store) dropStaging(key cache.Key) []byte {
@@ -117,10 +130,14 @@ var _ storage.PieceImpl = (*piece)(nil)
 
 // ReadAt serves the piece from the LRU, then from the staging buffer of an
 // in-progress download. A resident piece is always served in full: a short read
-// reports io.ErrUnexpectedEOF rather than io.EOF so anacrolix's wrapper never
-// mistakes a live piece for lost data and calls MarkNotComplete on it. Only a
-// piece that is in neither place returns io.EOF, which is the truthful answer.
+// reports an error rather than a clean end of the piece, so anacrolix's wrapper
+// never mistakes live data for lost data and calls MarkNotComplete on it. Only
+// a piece that is in neither place returns io.EOF, which is the truthful answer.
 func (p *piece) ReadAt(b []byte, off int64) (int, error) {
+	// io.ReaderAt requires a non-nil error whenever fewer than len(b) bytes are
+	// returned, so the caller's original request length is what the result is
+	// measured against -- not the piece-clamped window served below.
+	requested := len(b)
 	if off < 0 {
 		return 0, errors.New("piecestore: negative read offset")
 	}
@@ -135,12 +152,28 @@ func (p *piece) ReadAt(b []byte, off int64) (int, error) {
 	}
 
 	if data, ok := p.store.cache.Get(p.key); ok {
-		return copyResident(b, data, off)
+		n, err := copyResident(b, data, off)
+		return shortRead(n, requested, err)
 	}
-	if data, ok := p.store.stagingBytes(p.key); ok {
-		return copyResident(b, data, off)
+	if n, ok := p.store.readStaging(p.key, b, off); ok {
+		return shortRead(n, requested, nil)
 	}
 	return 0, io.EOF
+}
+
+// shortRead reports the end of a piece as io.EOF whenever the caller asked for
+// more bytes than the piece provides. Without it a read whose buffer crosses
+// the piece end would come back short with a nil error, which io.ReaderAt
+// forbids and which lets a caller mistake a truncated piece-boundary read for a
+// successful one.
+func shortRead(n, requested int, err error) (int, error) {
+	if err != nil {
+		return n, err
+	}
+	if n < requested {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // copyResident copies the requested window out of resident data. A buffer that

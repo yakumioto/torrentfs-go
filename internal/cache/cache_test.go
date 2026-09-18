@@ -155,6 +155,96 @@ func TestCacheRollsBackInsertItCannotFit(t *testing.T) {
 	}
 }
 
+func TestWatermarksStayOrderedForSmallCapacities(t *testing.T) {
+	for capacity := int64(1); capacity <= 64; capacity++ {
+		high := HighWater(capacity)
+		low := LowWater(capacity)
+		if low <= 0 || high <= 0 {
+			t.Fatalf("capacity %d: watermarks = high %d, low %d; want both positive", capacity, high, low)
+		}
+		if low > high {
+			t.Fatalf("capacity %d: low %d > high %d", capacity, low, high)
+		}
+		if high > capacity {
+			t.Fatalf("capacity %d: high %d exceeds the capacity", capacity, high)
+		}
+	}
+	if got := HighWater(0); got != 0 {
+		t.Fatalf("HighWater(0) = %d, want 0", got)
+	}
+	if got := LowWater(0); got != 0 {
+		t.Fatalf("LowWater(0) = %d, want 0", got)
+	}
+}
+
+// TestCacheRetainsAFittingEntryAtSmallCapacity covers capacities whose
+// fractional watermarks round to zero. Both marks are clamped to one byte, and
+// an eviction pass never reclaims the entry the insertion is placing, so a
+// piece that fits the capacity stays resident instead of being evicted by the
+// very insert that accepted it.
+func TestCacheRetainsAFittingEntryAtSmallCapacity(t *testing.T) {
+	for _, capacity := range []int64{1, 2, 3, 4} {
+		c := New(capacity)
+		key := Key{Torrent: "a", Piece: 1}
+		c.Put(key, bytes.Repeat([]byte("x"), int(capacity)))
+		if !c.Has(key) {
+			t.Fatalf("capacity %d: a fitting entry was not retained", capacity)
+		}
+		if got := c.Size(); got != capacity {
+			t.Fatalf("capacity %d: Size = %d, want %d", capacity, got, capacity)
+		}
+	}
+}
+
+// TestCacheRetainsItsOnlyEntryAtCapacityOne pins the smallest valid capacity.
+// Both watermarks rounded down to zero there, so any eviction pass -- including
+// the one Unpin runs after releasing a read window -- reclaimed the only entry,
+// and the cache could never hold the single piece that fits it.
+func TestCacheRetainsItsOnlyEntryAtCapacityOne(t *testing.T) {
+	c := New(1)
+	key := Key{Torrent: "a", Piece: 1}
+	c.Put(key, []byte("x"))
+	if !c.Has(key) || c.Size() != 1 {
+		t.Fatalf("after Put: Has = %v, Size = %d; want the fitting entry retained", c.Has(key), c.Size())
+	}
+	c.Unpin(key)
+	if !c.Has(key) {
+		t.Fatal("Unpin evicted the only resident entry")
+	}
+	c.Put(key, []byte("x"))
+	if !c.Has(key) || c.Size() != 1 {
+		t.Fatalf("after re-insert: Has = %v, Size = %d", c.Has(key), c.Size())
+	}
+}
+
+// TestCacheKeepsNewEntryWhenItAloneExceedsLowWater pins the same rule for a
+// larger piece: with capacity 10 the low-water mark is 7, so a 9-byte piece
+// cannot be reclaimed to the mark and must not be evicted for trying.
+func TestCacheKeepsNewEntryWhenItAloneExceedsLowWater(t *testing.T) {
+	c := New(10)
+	key := Key{Torrent: "a", Piece: 1}
+	c.Put(key, bytes.Repeat([]byte("y"), 9))
+	if !c.Has(key) {
+		t.Fatal("a 9-byte entry was evicted from a 10-byte cache")
+	}
+	if got := c.Size(); got != 9 {
+		t.Fatalf("Size = %d, want 9", got)
+	}
+	// Eviction still reclaims the least-recently-used entry to make room: the
+	// protection only stops an insert from evicting itself.
+	newer := Key{Torrent: "a", Piece: 2}
+	c.Put(newer, []byte("z"))
+	if !c.Has(newer) {
+		t.Fatal("the newest entry was evicted by its own insertion")
+	}
+	if c.Has(key) {
+		t.Fatal("the least-recently-used entry was not reclaimed")
+	}
+	if got := c.Size(); got != 1 {
+		t.Fatalf("Size = %d, want 1", got)
+	}
+}
+
 func TestCacheSizeOfAndSnapshot(t *testing.T) {
 	c := New(1024)
 	a0 := Key{Torrent: "a", Piece: 0}

@@ -106,8 +106,17 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 		return TorrentStatusView{}, ErrUnknownTorrent
 	}
 
+	// One cache snapshot supplies both the torrent's aggregate cached_bytes and
+	// every per-piece cached_bytes, so the response is internally consistent
+	// even while the cache is being evicted or filled underneath it.
+	cached, pinned := s.pieceCache.Snapshot(hash.HexString())
+	var cachedBytes int64
+	for _, size := range cached {
+		cachedBytes += size
+	}
+
 	view := TorrentStatusView{
-		Torrent: s.buildView(hash, st, entry),
+		Torrent: s.buildViewWithCached(hash, st, entry, cachedBytes),
 		Pieces:  make([]PieceStatus, 0),
 		Files:   make([]FileStatus, 0),
 	}
@@ -119,7 +128,6 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 		return view, nil
 	}
 
-	cached, pinned := s.pieceCache.Snapshot(hash.HexString())
 	pieceCount := info.NumPieces()
 	view.MetainfoReady = true
 	view.PieceLength = info.PieceLength

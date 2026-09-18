@@ -374,13 +374,12 @@ func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]by
 
 func (f *raFile) Close() error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closed = true
-	window := f.window
-	f.window = nil
-	f.mu.Unlock()
-	for _, key := range window {
+	for _, key := range f.window {
 		f.cache.Unpin(key)
 	}
+	f.window = nil
 	return nil
 }
 
@@ -400,15 +399,20 @@ func (f *raFile) windowKeys(request cache.ReadRequest, length int64) []cache.Key
 // unpinned first, so a seek makes the old region immediately reclaimable while
 // the new one is held. A pin that exceeds the cache's pin budget is simply not
 // granted: the read then relies on recency instead.
+//
+// Window replacement and its unpin/pin pair run under one lock. Releasing the
+// lock between them lets two concurrent reads interleave as replace(A),
+// replace(B), unpin(prev of A), unpin(A), pin(A), pin(B): the stale window A is
+// pinned after B became active and stays pinned until some later read or Close
+// happens to release it, permanently shrinking what eviction may reclaim.
 func (f *raFile) protectWindow(window []cache.Key) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.closed {
-		f.mu.Unlock()
 		return
 	}
 	previous := f.window
 	f.window = window
-	f.mu.Unlock()
 	for _, key := range previous {
 		f.cache.Unpin(key)
 	}

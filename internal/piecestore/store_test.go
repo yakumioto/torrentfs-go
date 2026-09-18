@@ -1,10 +1,12 @@
 package piecestore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	g "github.com/anacrolix/generics"
@@ -136,6 +138,112 @@ func TestResidentPieceIsServedInFull(t *testing.T) {
 	if _, err := piece.ReadAt(make([]byte, 4), pieceLength); !errors.Is(err, io.EOF) {
 		t.Fatalf("read at the piece end = %v, want io.EOF", err)
 	}
+}
+
+// TestReadAtPastPieceEndReturnsEOF pins the io.ReaderAt contract: a buffer that
+// runs past the piece end must come back with a non-nil error, never as a short
+// read that looks successful.
+func TestReadAtPastPieceEndReturnsEOF(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	key, piece := openPiece(t, store, metainfo.Hash{7}, pieceLength)
+	c.Put(key, []byte("abcdefgh"))
+
+	buf := make([]byte, pieceLength+8)
+	n, err := piece.ReadAt(buf, 0)
+	if n != pieceLength {
+		t.Fatalf("n = %d, want %d", n, pieceLength)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want io.EOF for a buffer past the piece end", err)
+	}
+	if string(buf[:n]) != "abcdefgh" {
+		t.Fatalf("data = %q, want abcdefgh", buf[:n])
+	}
+
+	// The same rule for a window that ends before the buffer does.
+	partial := make([]byte, 12)
+	n, err = piece.ReadAt(partial, 4)
+	if n != 4 || !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadAt(4, 12) = (%d, %v), want (4, io.EOF)", n, err)
+	}
+	if string(partial[:n]) != "efgh" {
+		t.Fatalf("data = %q, want efgh", partial[:n])
+	}
+}
+
+func TestReadAtPastPieceEndFromStagingReturnsEOF(t *testing.T) {
+	const pieceLength = 8
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{8}, pieceLength)
+	if _, err := piece.WriteAt([]byte("abcdefgh"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	buf := make([]byte, 12)
+	n, err := piece.ReadAt(buf, 4)
+	if n != 4 || !errors.Is(err, io.EOF) {
+		t.Fatalf("staging ReadAt = (%d, %v), want (4, io.EOF)", n, err)
+	}
+	if string(buf[:n]) != "efgh" {
+		t.Fatalf("staging data = %q, want efgh", buf[:n])
+	}
+}
+
+// TestReadAtConcurrentWithWriteAt drives readers and a writer over one piece at
+// the same time. ReadAt copies the staging window under the store lock, so this
+// pairing is synchronized; when stagingBytes handed the buffer out instead, the
+// copy raced the writer on the same backing array and the race detector
+// reported it here.
+func TestReadAtConcurrentWithWriteAt(t *testing.T) {
+	const pieceLength = 64
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{9}, pieceLength)
+
+	chunk := bytes.Repeat([]byte("w"), 16)
+	fill := func() {
+		for off := int64(0); off < pieceLength; off += int64(len(chunk)) {
+			if _, err := piece.WriteAt(chunk, off); err != nil {
+				t.Errorf("WriteAt: %v", err)
+				return
+			}
+		}
+	}
+	// Give the piece a staging buffer first. The test is about the read copy
+	// racing the writer, not about the state before the first write: with no
+	// buffer at all a read correctly reports the piece as missing.
+	fill()
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			fill()
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, pieceLength)
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if n, err := piece.ReadAt(buf, 0); n != pieceLength || err != nil {
+					t.Errorf("ReadAt = (%d, %v), want (%d, nil)", n, err, pieceLength)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestWriteAtOutsidePieceIsRejected(t *testing.T) {

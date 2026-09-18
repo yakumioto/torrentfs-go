@@ -318,6 +318,16 @@ func (s *Session) viewFor(hash metainfo.Hash, st *Torrent) *TorrentView {
 // loaded is ready, and how much of it is available is reported separately as
 // cached bytes.
 func (s *Session) buildView(hash metainfo.Hash, st *Torrent, entry *registryEntry) TorrentView {
+	return s.buildViewWithCached(hash, st, entry, s.pieceCache.SizeOf(hash.HexString()))
+}
+
+// buildViewWithCached builds a torrent view from a cache occupancy the caller
+// already measured. A status response carries the same number twice -- once for
+// the torrent and once summed over its pieces -- so its caller takes one cache
+// snapshot and passes the matching total here; measuring it separately would
+// let an eviction between the two lock acquisitions produce a response whose
+// aggregate disagreed with its own per-piece values.
+func (s *Session) buildViewWithCached(hash metainfo.Hash, st *Torrent, entry *registryEntry, cachedBytes int64) TorrentView {
 	view := TorrentView{ID: hash.HexString(), InfoHash: hash.HexString(), State: StateAdding}
 	if entry != nil {
 		view.Name = entry.Name
@@ -330,7 +340,7 @@ func (s *Session) buildView(hash metainfo.Hash, st *Torrent, entry *registryEntr
 	}
 	view.Name = st.Name()
 	view.TotalBytes = st.Length()
-	view.CachedBytes = s.pieceCache.SizeOf(hash.HexString())
+	view.CachedBytes = cachedBytes
 	if view.State == StateDeleting || view.State == StateDeleteFailed || view.State == StateError {
 		return view
 	}

@@ -371,9 +371,11 @@ cap, not a reservation: the cache fills lazily, so a small workload's resident
 memory stays small. A value of zero or less is rejected at startup. Eviction
 starts at 7/8 of this value and reclaims down to 3/4, so a read window always
 has headroom without waiting for the cache to fill completely; the high- and
-low-water marks are derived, not configurable. A torrent whose piece length
-exceeds the capacity cannot be added: it could never be read, so it is refused
-at add time instead of looping between download and eviction.
+low-water marks are derived, not configurable, and each is clamped to at least
+one byte so that a very small capacity still retains the one piece that fits
+it. A torrent whose piece length exceeds the capacity cannot be added: it could
+never be read, so it is refused at add time instead of looping between download
+and eviction.
 
 An empty `[http].listen_addr` disables the API. The default binds loopback
 only. Binding a non-loopback address requires a complete enabled
