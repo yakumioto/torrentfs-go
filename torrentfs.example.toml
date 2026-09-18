@@ -3,7 +3,12 @@
 # One existing torrents directory remains a required command-line input.
 # mountpoint is required unless the HTTP API is enabled (http.listen_addr).
 # Configuration is loaded on every startup; an explicit -data-dir flag
-# overrides paths.data_dir.
+# overrides paths.data_dir. Every leaf key can also be set with an environment
+# variable named TORRENTFS_<SECTION>_<KEY>, with nested sections joined by
+# underscores (for example, http.auth.token_ttl becomes
+# TORRENTFS_HTTP_AUTH_TOKEN_TTL). The precedence is explicit -data-dir,
+# environment variables, this file, then built-in defaults. Only the exact
+# documented environment variable names are read.
 #
 # The FUSE mount exposes torrent data only, read-only. Torrent management
 # (add, delete, status) happens over the HTTP API below; there is no

@@ -163,6 +163,7 @@ jobs:
         shell: bash
         env:
           IMAGE: ${{ steps.metadata.outputs.amd64_tag }}
+          PLATFORM: linux/amd64
           EXPECTED_CREATED: ${{ steps.metadata.outputs.created }}
           EXPECTED_TAG: ${{ steps.metadata.outputs.tag }}
           EXPECTED_SHA: ${{ github.sha }}
@@ -172,7 +173,29 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.created"}}')" = "$EXPECTED_CREATED"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EXPECTED_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
-          docker run --rm --platform linux/amd64 "$IMAGE" -h >/dev/null
+          docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
+
+          container="torrentfs-nightly-default-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
+            'test -r /etc/torrentfs/torrentfs.toml && test -d /data && test -d /torrents'
+          docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
+          state=""
+          for _ in {1..60}; do
+            state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+            if [[ "$state" == running ]]; then
+              break
+            fi
+            if [[ "$state" == exited || "$state" == dead ]]; then
+              docker logs "$container" || true
+              exit 1
+            fi
+            sleep 0.2
+          done
+          [[ "$state" == running ]]
+          docker kill --signal TERM "$container" >/dev/null
+          test "$(timeout 30 docker wait "$container")" = 0
 
       - name: Build Linux arm64 validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -195,6 +218,7 @@ jobs:
         shell: bash
         env:
           IMAGE: ${{ steps.metadata.outputs.arm64_tag }}
+          PLATFORM: linux/arm64
           EXPECTED_CREATED: ${{ steps.metadata.outputs.created }}
           EXPECTED_TAG: ${{ steps.metadata.outputs.tag }}
           EXPECTED_SHA: ${{ github.sha }}
@@ -204,7 +228,29 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.created"}}')" = "$EXPECTED_CREATED"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EXPECTED_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
-          docker run --rm --platform linux/arm64 "$IMAGE" -h >/dev/null
+          docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
+
+          container="torrentfs-nightly-default-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
+            'test -r /etc/torrentfs/torrentfs.toml && test -d /data && test -d /torrents'
+          docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
+          state=""
+          for _ in {1..60}; do
+            state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+            if [[ "$state" == running ]]; then
+              break
+            fi
+            if [[ "$state" == exited || "$state" == dead ]]; then
+              docker logs "$container" || true
+              exit 1
+            fi
+            sleep 0.2
+          done
+          [[ "$state" == running ]]
+          docker kill --signal TERM "$container" >/dev/null
+          test "$(timeout 30 docker wait "$container")" = 0
 
       - name: Log in to GHCR after validation
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4

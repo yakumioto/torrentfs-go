@@ -90,10 +90,11 @@ go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] <tor
 managed entirely over HTTP. `<torrents-dir>` is exactly one existing, readable
 and writable directory. A file path such as
 `/data/torrentfs/input.torrent` is rejected: single-file positional input is
-not supported. Without `-config`, defaults are used; a TOML file loads the
-sections shown in `torrentfs.example.toml`, and an explicit `-data-dir`
-overrides `[paths].data_dir`. `-data-dir` stores downloaded torrent data only;
-it is distinct from `<torrents-dir>`.
+not supported. Configuration is merged as explicit `-data-dir` (when set) >
+environment variables > TOML file > built-in defaults. Without `-config`, the
+loader uses the built-in defaults and environment variables; a TOML file loads
+the sections shown in `torrentfs.example.toml`. `-data-dir` stores downloaded
+torrent data only; it is distinct from `<torrents-dir>`.
 
 At startup, torrentfs restores managed metadata and scans only direct regular,
 non-symlink files in `<torrents-dir>` whose names end in lower-case `.torrent`.
@@ -103,6 +104,9 @@ it without restart, and removing a source releases its torrent when no other
 directory source or managed metadata source refers to the same info hash.
 Duplicate files for one hash share one torrent. Configuration is read at every
 startup; changing the file takes effect after a restart, not through SIGHUP.
+Without `-config`, the built-in defaults are
+combined with the supported environment variables; an explicit TOML file
+replaces only the values it contains.
 
 Write sources through a temporary filename such as `input.torrent.part`, then
 atomically rename it to `input.torrent`. Torrentfs checks file identity, size,
@@ -288,6 +292,41 @@ format = "text"
 add_source = false
 ```
 
+Each leaf TOML key has a matching environment variable. Only the exact names
+below are read; unrelated `TORRENTFS_*` variables are ignored.
+
+| TOML key | Environment variable | Value format |
+| --- | --- | --- |
+| `paths.data_dir` | `TORRENTFS_PATHS_DATA_DIR` | string |
+| `paths.payload_dir` | `TORRENTFS_PATHS_PAYLOAD_DIR` | string |
+| `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | string |
+| `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | decimal integer |
+| `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | string |
+| `cache.capacity_bytes` | `TORRENTFS_CACHE_CAPACITY_BYTES` | decimal integer |
+| `identity.tracker_user_agent` | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | string |
+| `identity.peer_id_prefix` | `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | string |
+| `identity.extended_handshake_client_version` | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | string |
+| `http.listen_addr` | `TORRENTFS_HTTP_LISTEN_ADDR` | string |
+| `http.max_upload_bytes` | `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | decimal integer |
+| `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | Go boolean |
+| `http.auth.username` | `TORRENTFS_HTTP_AUTH_USERNAME` | string |
+| `http.auth.password_hash` | `TORRENTFS_HTTP_AUTH_PASSWORD_HASH` | bcrypt hash string |
+| `http.auth.password_hash_file` | `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` | file path |
+| `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | Go duration, such as `30m` |
+| `log.level` | `TORRENTFS_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
+| `log.format` | `TORRENTFS_LOG_FORMAT` | `text` or `json` |
+| `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | Go boolean |
+
+Values are merged per field with this precedence: an explicitly supplied
+`-data-dir` flag > environment variable > TOML file > built-in default. An
+environment variable that is present but empty clears a string field; empty
+numeric, boolean, and duration values are invalid. Environment overrides are
+applied before cross-field validation, so they can replace a lower-priority
+value that would otherwise fail validation. Explicitly clear
+`TORRENTFS_HTTP_AUTH_PASSWORD_HASH` when switching to
+`TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE`; authentication still requires exactly
+one password source.
+
 `log.level` accepts `debug`, `info`, `warn`, or `error`; the default is `info`,
 so debug records are disabled unless explicitly enabled. `log.format` accepts
 `text` or `json`, and `add_source` includes the source file and line in each
@@ -307,7 +346,22 @@ When `http.auth.enabled` is true, `username` and exactly one bcrypt
 `password_hash` or owner-readable-only `password_hash_file` are required.
 `password_hash` is a bcrypt hash, never a plaintext password.
 `password_hash_file` must point to a regular, non-symlink file readable only by
-its owner. The default `token_ttl` is 30 minutes and may not exceed 24 hours. Log in with
+its owner. For an exposed deployment configured by environment variables, set
+all of the required authentication fields together, preferably using a secret
+file:
+
+```sh
+docker run --rm -p 8080:8080 \
+  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/password-hash,readonly \
+  -e TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+  -e TORRENTFS_HTTP_AUTH_ENABLED=true \
+  -e TORRENTFS_HTTP_AUTH_USERNAME=alice \
+  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
+  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
+  torrentfs
+```
+
+The default `token_ttl` is 30 minutes and may not exceed 24 hours. Log in with
 `POST /api/v1/auth/login` using `{"username":"...","password":"..."}`;
 the response contains an opaque Bearer token. Send it explicitly as
 `Authorization: Bearer <token>` on later requests. Tokens are held only in
@@ -401,18 +455,49 @@ DHT and UTP, so it never contacts the public network.
 
 ## Docker HTTP smoke
 
-The image contains only the Go binary and runtime libraries; Node and `web/dist`
-are build-stage inputs embedded in that binary. Run the HTTP-only check without
-FUSE:
+The image contains the Go binary, runtime libraries, and the built-in
+`/etc/torrentfs/torrentfs.toml`; Node and `web/dist` are build-stage inputs
+embedded in that binary. The image also creates `/data` and `/torrents` so its
+command can start without any external configuration. Run the HTTP-only check
+without FUSE:
 
 ```sh
 ./scripts/http-smoke.sh
 ```
 
-For a headless container, bind a listener explicitly and enable authentication:
+The configuration smoke checks the built-in file, the image default command,
+environment-only overrides, and an external TOML file:
+
+```sh
+./scripts/docker-config-smoke.sh
+```
+
+With no arguments, the image starts a headless HTTP service on loopback using
+its built-in configuration and the container-local `/data` and `/torrents`
+directories. Those directories are temporary container storage unless they are
+bind mounted. To expose the API, set a non-loopback listener and complete
+authentication configuration together; environment variables override the
+built-in file without an additional `-config` argument:
 
 ```sh
 docker build -t torrentfs .
+docker run --rm \
+  -p 8080:8080 \
+  -v /srv/torrentfs-data:/data \
+  -v /srv/torrents:/torrents \
+  -e TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+  -e TORRENTFS_HTTP_AUTH_ENABLED=true \
+  -e TORRENTFS_HTTP_AUTH_USERNAME=alice \
+  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq' \
+  torrentfs
+```
+
+The image default listener remains loopback-only, and `-p` does not change what
+the daemon listens on. Put an exposed deployment behind TLS at the edge. An
+external TOML file remains supported when a deployment wants file-based
+configuration:
+
+```sh
 docker run --rm \
   -p 8080:8080 \
   -v /srv/torrentfs-data:/data \
@@ -421,13 +506,10 @@ docker run --rm \
   torrentfs -config /config.toml /torrents
 ```
 
-Use `[http].listen_addr = "0.0.0.0:8080"` and a complete `[http.auth]` section
-in that config. `-p` publishes a port but does not change what the daemon
-listens on. The default remains loopback-only; put an exposed deployment behind
-TLS at the edge. The HTTP smoke checks the public root and deep link, asset
-MIME/cache behavior, API `401` plus `WWW-Authenticate`, login `no-store`,
-authenticated list, logout, and the rule that unknown API paths never become
-SPA HTML.
+Use `listen_addr = "0.0.0.0:8080"` and a complete authentication section in
+that file. The HTTP smoke checks the public root and deep link, asset MIME/cache
+behavior, API `401` plus `WWW-Authenticate`, login `no-store`, authenticated
+list, logout, and the rule that unknown API paths never become SPA HTML.
 
 ## Docker (rootful)
 

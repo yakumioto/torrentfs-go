@@ -22,6 +22,7 @@ var (
 	errRequired             = errors.New("value is required")
 	errPortRange            = errors.New("must be between 0 and 65535")
 	errCapacityRange        = errors.New("must be non-negative")
+	errProxyURL             = errors.New("must be a valid URL")
 	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
 	errProxyHost            = errors.New("must include a proxy host")
 	errProxyPort            = errors.New("proxy port must be between 1 and 65535")
@@ -320,7 +321,7 @@ func validateProxyURL(raw string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return err
+		return &url.Error{Op: "parse", URL: "<redacted>", Err: errProxyURL}
 	}
 	if !strings.EqualFold(u.Scheme, "socks5") && !strings.EqualFold(u.Scheme, "socks5h") {
 		return errProxyScheme

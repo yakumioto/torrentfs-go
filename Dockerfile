@@ -20,8 +20,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fuse3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
+RUN mkdir -p /etc/torrentfs /data /torrents
+COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
 
 WORKDIR /
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/torrentfs"]
-CMD ["-h"]
+CMD ["-config", "/etc/torrentfs/torrentfs.toml", "/torrents"]
