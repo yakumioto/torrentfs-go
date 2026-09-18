@@ -1,12 +1,10 @@
 import type { Torrent } from '../types/api';
 
-export type TorrentFilter = 'all' | 'downloading' | 'seeding' | 'completed' | 'error';
+export type TorrentFilter = 'all' | 'ready' | 'error';
 
 export interface TorrentSummary {
   total: number;
-  downloading: number;
-  seeding: number;
-  completed: number;
+  ready: number;
   error: number;
 }
 
@@ -21,12 +19,8 @@ export function matchesTorrentSearch(torrent: Torrent, search: string): boolean 
 
 export function matchesTorrentFilter(torrent: Torrent, filter: TorrentFilter): boolean {
   switch (filter) {
-    case 'downloading':
-      return torrent.state === 'adding' || torrent.state === 'downloading';
-    case 'seeding':
-      return torrent.state === 'seeding';
-    case 'completed':
-      return torrent.progress >= 1 || torrent.state === 'seeding';
+    case 'ready':
+      return torrent.state === 'ready';
     case 'error':
       return torrent.state === 'error' || torrent.state === 'delete_failed';
     case 'all':
@@ -41,9 +35,7 @@ export function filterTorrents(torrents: Torrent[], search: string, filter: Torr
 export function summarizeTorrents(torrents: Torrent[]): TorrentSummary {
   return {
     total: torrents.length,
-    downloading: torrents.filter((torrent) => matchesTorrentFilter(torrent, 'downloading')).length,
-    seeding: torrents.filter((torrent) => matchesTorrentFilter(torrent, 'seeding')).length,
-    completed: torrents.filter((torrent) => matchesTorrentFilter(torrent, 'completed')).length,
+    ready: torrents.filter((torrent) => matchesTorrentFilter(torrent, 'ready')).length,
     error: torrents.filter((torrent) => matchesTorrentFilter(torrent, 'error')).length,
   };
 }

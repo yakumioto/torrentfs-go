@@ -24,7 +24,6 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
 	values := map[string]string{
 		"TORRENTFS_PATHS_DATA_DIR":                             dataDir,
-		"TORRENTFS_PATHS_PAYLOAD_DIR":                          "/payload",
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST":                    "127.0.0.1",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT":                    "12345",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
@@ -49,7 +48,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if got.Paths.DataDir != dataDir || got.Paths.PayloadDir != "/payload" {
+	if got.Paths.DataDir != dataDir {
 		t.Fatalf("paths = %+v", got.Paths)
 	}
 	if got.Connections.ListenHost != "127.0.0.1" || got.Connections.ListenPort != 12345 {
@@ -87,8 +86,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 19 {
-		t.Fatalf("environment binding count = %d, want 19", len(environmentBindings))
+	if len(environmentBindings) != 18 {
+		t.Fatalf("environment binding count = %d, want 18", len(environmentBindings))
 	}
 	for name := range values {
 		if name == "TORRENTFS_FUSE_REQUIRED" {
@@ -152,10 +151,7 @@ listen_addr = "0.0.0.0:8080"
 }
 
 func TestLoadEnvironmentAllowsExplicitEmptyStrings(t *testing.T) {
-	path := writeConfigFile(t, `[paths]
-payload_dir = "/file/payload"
-
-[proxy]
+	path := writeConfigFile(t, `[proxy]
 socks5_url = "socks5://proxy.example:1080"
 
 [identity]
@@ -164,7 +160,6 @@ peer_id_prefix = "file-prefix"
 extended_handshake_client_version = "file-version"
 `)
 	values := map[string]string{
-		"TORRENTFS_PATHS_PAYLOAD_DIR":                          "",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "",
 		"TORRENTFS_IDENTITY_PEER_ID_PREFIX":                    "",
@@ -174,8 +169,8 @@ extended_handshake_client_version = "file-version"
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got.Paths.PayloadDir != "" || got.Proxy.Socks5URL != "" {
-		t.Fatalf("optional string values were not cleared: paths=%+v proxy=%+v", got.Paths, got.Proxy)
+	if got.Proxy.Socks5URL != "" {
+		t.Fatalf("optional string values were not cleared: proxy=%+v", got.Proxy)
 	}
 	if got.Identity != (Identity{}) {
 		t.Fatalf("identity = %+v, want explicit empty values", got.Identity)

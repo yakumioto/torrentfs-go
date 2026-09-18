@@ -14,7 +14,7 @@
   font-size: 0.8rem;
 }
 
-.coverageComplete {
+.coverageCached {
   color: var(--success);
 }
 
@@ -22,6 +22,6 @@
   color: var(--accent);
 }
 
-.coverageWaiting {
+.coverageUncached {
   color: var(--warning);
 }

@@ -39,26 +39,9 @@ func (c *cancelAfterFirstCheckContext) Err() error {
 }
 func (c *cancelAfterFirstCheckContext) Value(any) any { return nil }
 
-func waitComplete(t *testing.T, ctx context.Context, st *session.Torrent) {
-	t.Helper()
-	select {
-	case <-st.GotInfo():
-	case <-ctx.Done():
-		t.Fatalf("timed out waiting for torrent info")
-	}
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if st.BytesCompleted() == st.Length() {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("torrent never became complete: %d/%d bytes", st.BytesCompleted(), st.Length())
-}
-
 // TestSessionReadsExistingData exercises the offline happy path: add a local
-// single-file torrent whose data already exists under the data dir, wait for
-// it to be verified, then read it back through the Backend view.
+// single-file torrent, load its pieces into the in-memory cache, then read the
+// data back through the Backend view.
 func TestSessionReadsExistingData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -86,10 +69,8 @@ func TestSessionReadsExistingData(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered by hash")
 	}
-	waitComplete(t, ctx, st)
-	if !st.Seeding() {
-		t.Fatal("complete torrent is not seeding")
-	}
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 	if got := st.Name(); got != "payload.bin" {
 		t.Fatalf("Name = %q, want payload.bin", got)
 	}
@@ -223,10 +204,8 @@ func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent missing after initial add")
 	}
-	waitComplete(t, ctx, st)
-	if !st.Seeding() {
-		t.Fatal("initial torrent is not seeding")
-	}
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	if err := sess.AddTorrent(newCancelAfterFirstCheckContext(), source); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled duplicate AddTorrent = %v, want context.Canceled", err)
@@ -235,8 +214,8 @@ func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
 	if !ok || current != st {
 		t.Fatalf("torrent after cancelled duplicate = (%p, %v), want original (%p, true)", current, ok, st)
 	}
-	if !current.Seeding() {
-		t.Fatal("cancelled duplicate stopped the existing torrent")
+	if current.CachedBytes() != current.Length() {
+		t.Fatal("cancelled duplicate dropped the existing torrent's cached data")
 	}
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
@@ -254,8 +233,8 @@ func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
 	if err := sess.AddTorrent(context.Background(), source); err != nil {
 		t.Fatalf("subsequent duplicate AddTorrent: %v", err)
 	}
-	if current, ok := sess.Torrent(hash); !ok || current != st || !current.Seeding() {
-		t.Fatalf("torrent after subsequent duplicate = (%p, %v), want original seeding torrent", current, ok)
+	if current, ok := sess.Torrent(hash); !ok || current != st || current.CachedBytes() != current.Length() {
+		t.Fatalf("torrent after subsequent duplicate = (%p, %v), want original cached torrent", current, ok)
 	}
 }
 
@@ -304,7 +283,8 @@ func TestSessionTorrentNamedMetadataIsPlainData(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent named metadata was not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	ra, err := sess.OpenFile(hash, "metadata")
 	if err != nil {
@@ -375,7 +355,7 @@ func TestSessionDeleteRemovesAllInternalMetadataReferences(t *testing.T) {
 			t.Errorf("Close: %v", err)
 		}
 	}()
-	op, err := second.DeleteTorrent(ctx, hash.HexString(), false)
+	op, err := second.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("DeleteTorrent: %v", err)
 	}
@@ -447,7 +427,8 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 	if !ok {
 		t.Fatal("first session did not register the managed torrent")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, first, hash, content)
+	waitCached(t, ctx, st)
 	if err := first.Close(context.Background()); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
@@ -469,7 +450,8 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 	if !ok {
 		t.Fatal("restored torrent missing from session")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, second, hash, content)
+	waitCached(t, ctx, st)
 	views := second.Torrents()
 	if len(views) != 1 || views[0].Hash != hash || views[0].Name != "payload.bin" {
 		t.Fatalf("Torrents after restart = %+v", views)
@@ -539,7 +521,7 @@ func TestSessionPendingMagnetIntentSurvivesRestart(t *testing.T) {
 		t.Fatalf("pending magnet task missing after restart: %+v", second.ListTorrents())
 	}
 
-	op, err := second.DeleteTorrent(ctx, view.ID, false)
+	op, err := second.DeleteTorrent(ctx, view.ID)
 	if err != nil {
 		t.Fatalf("DeleteTorrent: %v", err)
 	}
@@ -648,7 +630,7 @@ func TestSessionDuplicateInternalReferencesShareOneTask(t *testing.T) {
 		t.Fatalf("List with duplicate internal references = %d, want 1", len(sess.List()))
 	}
 
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("DeleteTorrent: %v", err)
 	}

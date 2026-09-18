@@ -71,9 +71,8 @@ export class ApiClient {
     return this.request<Torrent>('/torrents', { method: 'POST', body, signal });
   }
 
-  deleteTorrent(id: string, purgeData: boolean, signal?: AbortSignal): Promise<Operation> {
-    const query = purgeData ? '?purge_data=true' : '';
-    return this.request<Operation>(`/torrents/${encodeURIComponent(id)}${query}`, {
+  deleteTorrent(id: string, signal?: AbortSignal): Promise<Operation> {
+    return this.request<Operation>(`/torrents/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       signal,
     });

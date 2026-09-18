@@ -94,7 +94,6 @@ stop_clean() {
 cat >"$work_dir/external.toml" <<EOF
 [paths]
 data_dir = "/data"
-payload_dir = ""
 
 [http]
 listen_addr = "0.0.0.0:8080"

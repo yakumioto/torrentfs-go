@@ -27,7 +27,7 @@ type Backend interface {
 	ListTorrents() []session.TorrentView
 	TorrentViewFor(id string) (session.TorrentView, error)
 	TorrentStatusFor(id string) (session.TorrentStatusView, error)
-	DeleteTorrent(ctx context.Context, id string, purgeData bool) (*session.Operation, error)
+	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
 	Operation(id string) (session.Operation, bool)
 }
 

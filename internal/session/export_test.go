@@ -2,11 +2,51 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
+
+// SeedPiecesForTest loads content into the session's in-memory piece cache as
+// if the pieces had been downloaded and verified, then syncs anacrolix's
+// completion view so the torrent can serve reads and uploads. Tests use it in
+// place of the old on-disk payload fixture, which no longer exists. Test-only.
+func (s *Session) SeedPiecesForTest(hash metainfo.Hash, content []byte) error {
+	s.mu.RLock()
+	st, ok := s.torrents[hash]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session: seed: unknown torrent %s", hash)
+	}
+	info := st.tor.Info()
+	if info == nil {
+		return fmt.Errorf("session: seed: torrent %s has no info", hash)
+	}
+	if info.PieceLength <= 0 {
+		return fmt.Errorf("session: seed: torrent %s has invalid piece length", hash)
+	}
+
+	count := info.NumPieces()
+	for index := 0; index < count; index++ {
+		start := int64(index) * info.PieceLength
+		end := start + info.PieceLength
+		if end > int64(len(content)) {
+			end = int64(len(content))
+		}
+		if start >= end {
+			break
+		}
+		s.pieceCache.Put(cache.Key{Torrent: hash.HexString(), Piece: index}, content[start:end])
+	}
+	for index := 0; index < count; index++ {
+		st.tor.Piece(index).UpdateCompletion()
+	}
+	return nil
+}
 
 // StartMetadataFetch starts the real magnet metadata-persist worker for a
 // torrent whose info is already known, so tests can drive the persistence path

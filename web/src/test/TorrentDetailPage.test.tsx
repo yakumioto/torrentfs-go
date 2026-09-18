@@ -21,8 +21,7 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
     name: 'Stale detail title',
     state: 'adding',
     total_bytes: 100,
-    completed_bytes: 0,
-    progress: 0,
+    cached_bytes: 0,
     created_at: '2026-09-17T00:00:00Z',
     ...overrides,
   };
@@ -42,8 +41,8 @@ describe('TorrentDetailPage', () => {
   it('uses the latest status torrent for metadata and pending state', async () => {
     const detailTorrent = makeTorrent();
     const statusSnapshots = [
-      makeStatus(makeTorrent({ name: 'Resolved detail title', state: 'downloading', progress: 0.35, completed_bytes: 35 })),
-      makeStatus(makeTorrent({ name: 'Updated detail title', state: 'seeding', progress: 1, completed_bytes: 100 })),
+      makeStatus(makeTorrent({ name: 'Resolved detail title', state: 'ready', cached_bytes: 35 })),
+      makeStatus(makeTorrent({ name: 'Updated detail title', state: 'error', cached_bytes: 100 })),
     ];
     let statusIndex = 0;
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -85,11 +84,11 @@ describe('TorrentDetailPage', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Resolved detail title' })).toBeInTheDocument());
     expect(screen.queryByText('Waiting for metadata')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Downloading')).toHaveLength(2);
+    expect(screen.getAllByText('Ready')).toHaveLength(2);
 
     await queryClient.refetchQueries({ queryKey: queryKeys.torrentStatus('torrent-1') });
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Updated detail title' })).toBeInTheDocument());
-    expect(screen.getAllByText('Seeding')).toHaveLength(2);
+    expect(screen.getAllByText('Error')).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

@@ -4,8 +4,7 @@ import styles from './StateBadge.module.css';
 
 const VARIANT_CLASS: Record<string, string> = {
   adding: styles.adding,
-  downloading: styles.downloading,
-  seeding: styles.seeding,
+  ready: styles.ready,
   error: styles.error,
   deleting: styles.deleting,
   delete_failed: styles.deleteFailed,

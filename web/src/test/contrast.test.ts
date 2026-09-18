@@ -21,7 +21,7 @@ function contrast(foreground: string, background: string): number {
 }
 
 const TEXT_TOKENS = ['text-primary', 'text-secondary', 'text-subtle'];
-// --surface-3 backs the progress track and piece cells and carries no text, so it is not a text background.
+// --surface-3 backs the cache-occupancy track and piece cells and carries no text, so it is not a text background.
 const TEXT_BACKGROUNDS = ['bg', 'surface-1', 'surface-2'];
 
 describe('dark theme text contrast', () => {

@@ -21,6 +21,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
+	"github.com/yakumioto/torrentfs-go/internal/piecestore"
 )
 
 type lifecycle uint8
@@ -68,10 +69,8 @@ type Session struct {
 	scanCancel      context.CancelFunc
 	scanDone        chan struct{}
 
-	// payloadRoot is the managed root under which each torrent gets its own
-	// payloadRoot/<info_hash> directory. storageCloser owns the file storage
-	// the client does not close on its own when DefaultStorage is set.
-	payloadRoot   string
+	// storageCloser owns the piece store the client does not close on its own
+	// when DefaultStorage is set.
 	storageCloser storage.ClientImplCloser
 
 	// stateDir holds the durable per-torrent state sidecars that let the
@@ -149,16 +148,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("create-metadata-dir", err)
 		return nil, err
 	}
-	payloadRoot := cfg.Paths.PayloadDir
-	if payloadRoot == "" {
-		payloadRoot = filepath.Join(cfg.Paths.DataDir, "payload")
-	}
-	payloadRoot = filepath.Clean(payloadRoot)
-	if err := os.MkdirAll(payloadRoot, 0o755); err != nil {
-		err = fmt.Errorf("session: create payload dir: %w", err)
-		logInitFailure("create-payload-dir", err)
-		return nil, err
-	}
+	warnLegacyPayloadDir(cfg.Paths.DataDir, logger)
 	stateDir := filepath.Join(cfg.Paths.DataDir, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		err = fmt.Errorf("session: create state dir: %w", err)
@@ -180,22 +170,11 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort
 	configureSeeding(cc)
-	// Every torrent owns payloadRoot/<info_hash>, so a purge target is always
-	// the torrent's exclusive directory and never a name shared with another.
-	pieceCompletion, completionErr := storage.NewDefaultPieceCompletionForDir(payloadRoot)
-	if completionErr != nil {
-		logger.Warn("piece completion persistence unavailable", "dir", payloadRoot, "err", completionErr)
-		pieceCompletion = storage.NewMapPieceCompletion()
-	}
-	storageCloser := storage.NewFileOpts(storage.NewFileClientOpts{
-		ClientBaseDir: payloadRoot,
-		TorrentDirMaker: func(baseDir string, _ *metainfo.Info, hash metainfo.Hash) string {
-			return filepath.Join(baseDir, hash.HexString())
-		},
-		PieceCompletion: pieceCompletion,
-		Logger:          logger,
-	})
-	cc.DefaultStorage = storageCloser
+	// Pieces live only in memory: the store keeps them in the LRU cache until
+	// they are evicted, and never writes them to disk.
+	pieceCache := cache.New(cfg.Cache.CapacityBytes)
+	pieceStore := piecestore.New(pieceCache, logger)
+	cc.DefaultStorage = pieceStore
 	if forwardLogger {
 		cc.Slogger = logger
 	}
@@ -220,7 +199,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cl:              cl,
 		cfg:             cfg,
 		logger:          logger,
-		pieceCache:      cache.New(cfg.Cache.CapacityBytes),
+		pieceCache:      pieceCache,
 		closeDone:       make(chan struct{}),
 		torrents:        make(map[metainfo.Hash]*Torrent),
 		metadata:        make(map[string]metainfo.Hash),
@@ -231,8 +210,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		pendingMagnets:  make(map[metainfo.Hash]managedMagnet),
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
-		payloadRoot:     payloadRoot,
-		storageCloser:   storageCloser,
+		storageCloser:   pieceStore,
 		stateDir:        stateDir,
 		states:          make(map[metainfo.Hash]*registryEntry),
 		operations:      make(map[string]*Operation),
@@ -289,7 +267,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	s.logger.Info("session ready",
 		"torrents_dir", s.torrentsDir,
 		"data_dir", cfg.Paths.DataDir,
-		"payload_dir", s.payloadRoot,
+		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"listen_port", cfg.Connections.ListenPort,
 	)
 	return s, nil
@@ -395,4 +373,19 @@ func (s *Session) ensureActiveLocked() error {
 		return fmt.Errorf("session: not active: %w", filesystem.ErrClosed)
 	}
 	return nil
+}
+
+// warnLegacyPayloadDir reports an on-disk payload tree left behind by a version
+// that persisted pieces. The new session never reads or writes it, so the only
+// job here is to tell the operator it can be reclaimed.
+func warnLegacyPayloadDir(dataDir string, logger *slog.Logger) {
+	root := filepath.Join(dataDir, "payload")
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	logger.Warn("legacy payload directory is no longer used and can be removed",
+		"dir", root,
+		"hint", "pieces are now kept in memory only",
+	)
 }

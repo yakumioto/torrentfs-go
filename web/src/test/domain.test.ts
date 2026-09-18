@@ -5,25 +5,26 @@ import { pieceVisualState } from '../components/detail/piece-state';
 import { sortTorrents } from '../queries/sort';
 import { formatDate } from '../utils/format';
 
-const piece = (overrides: Partial<PieceStatus> = {}): PieceStatus => ({ index: 0, known: true, complete: false, partial: false, wanted: true, checking: false, ...overrides });
+const piece = (overrides: Partial<PieceStatus> = {}): PieceStatus => ({ index: 0, cached: false, cached_bytes: 0, pinned: false, ...overrides });
 
-const torrent = (overrides: Partial<Torrent> = {}): Torrent => ({ id: 'a', info_hash: 'a', name: 'alpha', state: 'downloading', total_bytes: 10, completed_bytes: 0, progress: 0, created_at: '2026-01-01T00:00:00Z', ...overrides });
+const torrent = (overrides: Partial<Torrent> = {}): Torrent => ({ id: 'a', info_hash: 'a', name: 'alpha', state: 'ready', total_bytes: 10, cached_bytes: 0, created_at: '2026-01-01T00:00:00Z', ...overrides });
 
-describe('piece state encoding', () => {
-  it('uses checking, complete, partial, known incomplete, then unknown precedence', () => {
-    expect(pieceVisualState(piece({ checking: true, complete: true }))).toBe('checking');
-    expect(pieceVisualState(piece({ complete: true, partial: true }))).toBe('complete');
-    expect(pieceVisualState(piece({ partial: true }))).toBe('partial');
-    expect(pieceVisualState(piece({ known: false }))).toBe('unknown');
-    expect(pieceVisualState(piece())).toBe('incomplete');
+describe('piece cache state encoding', () => {
+  it('ranks pinned ahead of cached ahead of uncached', () => {
+    expect(pieceVisualState(piece({ pinned: true, cached: true }))).toBe('pinned');
+    expect(pieceVisualState(piece({ pinned: true }))).toBe('pinned');
+    expect(pieceVisualState(piece({ cached: true }))).toBe('cached');
+    expect(pieceVisualState(piece())).toBe('uncached');
   });
 });
 
 describe('file coverage', () => {
-  it('does not invent byte precision and handles zero-size ranges', () => {
+  it('counts cached pieces and handles zero-size ranges', () => {
     const zero: FileStatus = { path: 'empty', size: 0, piece_start: 2, piece_end: 2 };
-    expect(fileCoverage(zero, [])).toEqual({ label: 'Complete · zero bytes', tone: 'complete' });
-    expect(fileCoverage({ path: 'x', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, complete: true }), piece({ index: 1, partial: true })])).toEqual({ label: '1 complete · 1 partial', tone: 'partial' });
+    expect(fileCoverage(zero, [])).toEqual({ label: 'Zero bytes', tone: 'cached' });
+    expect(fileCoverage({ path: 'x', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1 })])).toEqual({ label: 'Cached 1 / 2 pieces', tone: 'partial' });
+    expect(fileCoverage({ path: 'y', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0, cached: true }), piece({ index: 1, cached: true })])).toEqual({ label: 'Cached', tone: 'cached' });
+    expect(fileCoverage({ path: 'z', size: 10, piece_start: 0, piece_end: 2 }, [piece({ index: 0 }), piece({ index: 1 })])).toEqual({ label: 'Cached 0 / 2 pieces', tone: 'uncached' });
   });
 });
 

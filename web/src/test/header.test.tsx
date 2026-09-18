@@ -20,10 +20,9 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
     id: 'torrent-1',
     info_hash: 'abc123',
     name: 'Example torrent',
-    state: 'downloading',
+    state: 'ready',
     total_bytes: 100,
-    completed_bytes: 25,
-    progress: 0.25,
+    cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
     ...overrides,
   };
@@ -34,7 +33,7 @@ function makeStatus(torrent: Torrent): TorrentStatus {
     torrent,
     metainfo_ready: true,
     piece_length: 16,
-    pieces: [{ index: 0, known: true, complete: true, partial: false, wanted: true, checking: false }],
+    pieces: [{ index: 0, cached: true, cached_bytes: 16, pinned: false }],
     files: [{ path: 'file.txt', size: 100, piece_start: 0, piece_end: 1 }],
   };
 }
@@ -121,7 +120,7 @@ describe('Header refresh control', () => {
   });
 
   it('refreshes only the active status query on detail pages', async () => {
-    const torrent = makeTorrent({ name: 'Detail torrent', state: 'seeding', completed_bytes: 100, progress: 1 });
+    const torrent = makeTorrent({ name: 'Detail torrent', cached_bytes: 100 });
     const status = makeStatus(torrent);
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       void init;

@@ -48,10 +48,10 @@ func TestSessionErrorPathsForUnknownTorrentAndFile(t *testing.T) {
 	}
 }
 
-// TestSessionIncompleteTorrentDoesNotFabricateData adds a torrent whose data
-// is only partially present and which has no peers. A read must either fail or
-// block; it must never report success with invented bytes, and Close must
-// release any blocked reader.
+// TestSessionIncompleteTorrentDoesNotFabricateData adds a torrent whose cache
+// holds nothing and which has no peers. A read must either fail or block; it
+// must never report success with invented bytes, and Close must release any
+// blocked reader.
 func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
@@ -67,15 +67,8 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write torrent: %v", err)
 	}
-	// Only half of the first piece exists on disk; nothing else is available
-	// and no seeder ever joins the swarm.
-	partialDir := payloadDir(dataDir, hash)
-	if err := os.MkdirAll(partialDir, 0o755); err != nil {
-		t.Fatalf("make data dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(partialDir, "payload.bin"), content[:testPieceLength/2], 0o644); err != nil {
-		t.Fatalf("write partial data: %v", err)
-	}
+	// Nothing is seeded and no seeder ever joins the swarm, so every piece
+	// stays missing.
 
 	sess := newLoopbackSession(t, testConfig(dataDir))
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
@@ -90,8 +83,8 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("torrent info never arrived: %v", ctx.Err())
 	}
-	if st.BytesCompleted() == st.Length() {
-		t.Fatal("torrent with partial data must not be complete")
+	if st.CachedBytes() != 0 {
+		t.Fatalf("torrent cache = %d bytes, want empty", st.CachedBytes())
 	}
 
 	// The structured status snapshot must show an incomplete torrent rather
@@ -100,14 +93,14 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TorrentStatusFor: %v", err)
 	}
-	complete := 0
+	cached := 0
 	for _, piece := range status.Pieces {
-		if piece.Complete {
-			complete++
+		if piece.Cached {
+			cached++
 		}
 	}
-	if complete == len(status.Pieces) && len(status.Pieces) > 0 {
-		t.Fatalf("all %d pieces reported complete for a partial torrent", len(status.Pieces))
+	if cached != 0 {
+		t.Fatalf("%d pieces reported cached for an empty torrent", cached)
 	}
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
@@ -173,7 +166,8 @@ func TestFuseMissingPathErrno(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {

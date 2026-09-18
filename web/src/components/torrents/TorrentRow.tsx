@@ -12,14 +12,10 @@ import { TorrentProgress } from './TorrentProgress';
 export function TorrentRow({ torrent }: { torrent: Torrent }) {
   const navigate = useNavigate();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deletePurgeData, setDeletePurgeData] = useState(false);
   const disabled = torrent.state === 'deleting';
   const name = torrent.name || 'Unnamed torrent';
 
-  const openDelete = (purgeData: boolean) => {
-    setDeletePurgeData(purgeData);
-    setDeleteOpen(true);
-  };
+  const openDelete = () => setDeleteOpen(true);
 
   return (
     <div className={styles.row} role="listitem">
@@ -29,7 +25,7 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
           <span className={styles.hash}>{torrent.info_hash || 'Info hash pending'}</span>
         </div>
         <div className={`${styles.size} text-mono`}>{formatBytes(torrent.total_bytes)}</div>
-        <TorrentProgress className={styles.progress} progress={torrent.progress} completedBytes={torrent.completed_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
+        <TorrentProgress className={styles.cache} cachedBytes={torrent.cached_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
         <StateBadge className={styles.state} state={torrent.state} />
         <div className={`${styles.added} text-mono`} title={torrent.created_at}>{formatDate(torrent.created_at)}</div>
       </Link>
@@ -53,11 +49,8 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
               Open details
             </Menu.Item>
             <Menu.Divider />
-            <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={() => openDelete(false)}>
+            <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={openDelete}>
               Remove torrent
-            </Menu.Item>
-            <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={() => openDelete(true)}>
-              Remove torrent + data
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>
@@ -65,7 +58,6 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
       <DeleteTorrentDialog
         torrent={torrent}
         opened={deleteOpen}
-        initialPurgeData={deletePurgeData}
         onClose={() => setDeleteOpen(false)}
       />
     </div>

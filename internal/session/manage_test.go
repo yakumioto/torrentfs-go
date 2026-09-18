@@ -45,34 +45,21 @@ func waitOperation(t *testing.T, sess *session.Session, id string) session.Opera
 	}
 }
 
-func seedPayload(t *testing.T, dataDir string, hash metainfo.Hash, name string, content []byte) string {
-	t.Helper()
-	dir := payloadDir(dataDir, hash)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("make payload dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	return dir
-}
-
 func registryPath(dataDir string, hash metainfo.Hash) string {
 	return filepath.Join(dataDir, "state", hash.HexString()+".json")
 }
 
-func writeRegistry(t *testing.T, dataDir string, hash metainfo.Hash, state string, purge bool, opID string) {
+func writeRegistry(t *testing.T, dataDir string, hash metainfo.Hash, state string, opID string) {
 	t.Helper()
 	now := time.Now().UTC()
 	entry := map[string]any{
-		"id":              hash.HexString(),
-		"info_hash":       hash.HexString(),
-		"name":            "payload.bin",
-		"state":           state,
-		"purge_requested": purge,
-		"operation_id":    opID,
-		"created_at":      now,
-		"updated_at":      now,
+		"id":           hash.HexString(),
+		"info_hash":    hash.HexString(),
+		"name":         "payload.bin",
+		"state":        state,
+		"operation_id": opID,
+		"created_at":   now,
+		"updated_at":   now,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -87,13 +74,12 @@ func writeRegistry(t *testing.T, dataDir string, hash metainfo.Hash, state strin
 	}
 }
 
-func TestAddListDeleteKeepsPayloadByDefault(t *testing.T) {
+func TestAddListDelete(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("payload-", 512))
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
-	seedPayload(t, dataDir, hash, "payload.bin", content)
 
 	sess := newManageSession(t, dataDir)
 	view, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
@@ -115,16 +101,13 @@ func TestAddListDeleteKeepsPayloadByDefault(t *testing.T) {
 		t.Fatalf("ListTorrents = %+v, want one entry for %s", list, hash.HexString())
 	}
 
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("DeleteTorrent: %v", err)
 	}
 	final := waitOperation(t, sess, op.ID)
 	if final.State != session.StateDeleted {
 		t.Fatalf("delete state = %s (%s), want deleted", final.State, final.Error)
-	}
-	if _, err := os.Stat(payloadDir(dataDir, hash)); err != nil {
-		t.Fatalf("payload removed with purge_data=false: %v", err)
 	}
 	if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
 		t.Fatalf("TorrentViewFor after delete = %v, want ErrUnknownTorrent", err)
@@ -181,11 +164,11 @@ func TestRepeatedDeleteReturnsSameOperation(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 
-	first, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	first, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
-	second, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	second, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("second delete: %v", err)
 	}
@@ -194,100 +177,6 @@ func TestRepeatedDeleteReturnsSameOperation(t *testing.T) {
 	}
 	if final := waitOperation(t, sess, first.ID); final.State != session.StateDeleted {
 		t.Fatalf("delete state = %s, want deleted", final.State)
-	}
-}
-
-func TestDeleteWithPurgeRemovesOnlyItsOwnDirectory(t *testing.T) {
-	ctx := testTimeout(t)
-	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
-
-	contentA := []byte("torrent a payload")
-	bytesA, hashA := buildSingleFileTorrentBytes(t, "a.bin", contentA, nil)
-	seedPayload(t, dataDir, hashA, "a.bin", contentA)
-
-	contentB := []byte("torrent b payload")
-	bytesB, hashB := buildSingleFileTorrentBytes(t, "b.bin", contentB, nil)
-	dirB := seedPayload(t, dataDir, hashB, "b.bin", contentB)
-
-	sess := newManageSession(t, dataDir)
-	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: bytesA}); err != nil {
-		t.Fatalf("add a: %v", err)
-	}
-	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: bytesB}); err != nil {
-		t.Fatalf("add b: %v", err)
-	}
-
-	op, err := sess.DeleteTorrent(ctx, hashA.HexString(), true)
-	if err != nil {
-		t.Fatalf("delete a: %v", err)
-	}
-	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
-		t.Fatalf("delete a state = %s (%s), want deleted", final.State, final.Error)
-	}
-	if _, err := os.Stat(payloadDir(dataDir, hashA)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("torrent a payload survived purge: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dirB, "b.bin")); err != nil {
-		t.Fatalf("torrent b payload was disturbed: %v", err)
-	}
-}
-
-func TestPurgeRefusesUnmanagedSymlinkTarget(t *testing.T) {
-	ctx := testTimeout(t)
-	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
-	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("symlink payload"), nil)
-	sess := newManageSession(t, dataDir)
-	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
-		t.Fatalf("add: %v", err)
-	}
-
-	// Replace the torrent's payload directory with a symlink to data outside
-	// the managed root. Purging must refuse rather than follow the link.
-	outside := filepath.Join(work, "outside")
-	if err := os.MkdirAll(outside, 0o755); err != nil {
-		t.Fatalf("make outside dir: %v", err)
-	}
-	precious := filepath.Join(outside, "precious.bin")
-	if err := os.WriteFile(precious, []byte("do not delete"), 0o644); err != nil {
-		t.Fatalf("write precious: %v", err)
-	}
-	target := payloadDir(dataDir, hash)
-	if err := os.Symlink(outside, target); err != nil {
-		t.Fatalf("make symlink: %v", err)
-	}
-
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), true)
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	final := waitOperation(t, sess, op.ID)
-	if final.State != session.StateDeleteFailed {
-		t.Fatalf("delete state = %s (%s), want delete_failed", final.State, final.Error)
-	}
-	if !strings.Contains(final.Error, "refus") {
-		t.Fatalf("delete error = %q, want a refusal", final.Error)
-	}
-	if _, err := os.Stat(precious); err != nil {
-		t.Fatalf("purge followed the symlink and removed data: %v", err)
-	}
-	// The task stays visible while failed so the deletion can be retried.
-	views := sess.ListTorrents()
-	if len(views) != 1 || views[0].State != session.StateDeleteFailed {
-		t.Fatalf("ListTorrents = %+v, want one delete_failed entry", views)
-	}
-
-	// Retrying without purge succeeds and leaves the payload alone.
-	retry, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
-	if err != nil {
-		t.Fatalf("retry delete: %v", err)
-	}
-	if retry.ID != op.ID {
-		t.Fatalf("retry operation id = %s, want the original %s", retry.ID, op.ID)
-	}
-	if final := waitOperation(t, sess, retry.ID); final.State != session.StateDeleted {
-		t.Fatalf("retry state = %s (%s), want deleted", final.State, final.Error)
 	}
 }
 
@@ -305,22 +194,17 @@ func TestDeleteRefusedForDirectorySourcedTorrent(t *testing.T) {
 	if err := os.WriteFile(userTorrent, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write user torrent: %v", err)
 	}
-	payload := seedPayload(t, dataDir, hash, "payload.bin", content)
-
 	sess := newManageSession(t, dataDir)
 	if _, ok := sess.Torrent(hash); !ok {
 		t.Fatal("torrent was not registered from the torrents directory")
 	}
 
-	_, err := sess.DeleteTorrent(ctx, hash.HexString(), true)
+	_, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if !errors.Is(err, session.ErrExternalReference) {
 		t.Fatalf("delete = %v, want ErrExternalReference", err)
 	}
 	if _, ok := sess.Torrent(hash); !ok {
 		t.Fatal("refused delete still removed the torrent")
-	}
-	if _, err := os.Stat(filepath.Join(payload, "payload.bin")); err != nil {
-		t.Fatalf("refused delete disturbed the payload: %v", err)
 	}
 	if _, err := os.Stat(userTorrent); err != nil {
 		t.Fatalf("refused delete removed the user's .torrent: %v", err)
@@ -332,7 +216,7 @@ func TestAddRejectedWhileDeleteFailed(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("blocked"), nil)
-	writeRegistry(t, dataDir, hash, string(session.StateDeleteFailed), false, "op-existing")
+	writeRegistry(t, dataDir, hash, string(session.StateDeleteFailed), "op-existing")
 
 	sess := newManageSession(t, dataDir)
 	_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
@@ -342,60 +226,47 @@ func TestAddRejectedWhileDeleteFailed(t *testing.T) {
 }
 
 func TestResumeCompletesInterruptedDeletion(t *testing.T) {
-	for _, purge := range []bool{false, true} {
-		name := "keep"
-		if purge {
-			name = "purge"
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	torrentsDir := filepath.Join(work, "torrents")
+	content := []byte("interrupted deletion payload")
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+
+	metadataDir := filepath.Join(torrentsDir, ".metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	writeRegistry(t, dataDir, hash, string(session.StateDeleting), "op-resume")
+
+	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
 		}
-		t.Run(name, func(t *testing.T) {
-			work := t.TempDir()
-			dataDir := filepath.Join(work, "data")
-			torrentsDir := filepath.Join(work, "torrents")
-			content := []byte("interrupted deletion payload")
-			torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	}()
 
-			metadataDir := filepath.Join(torrentsDir, ".metadata")
-			if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-				t.Fatalf("make metadata dir: %v", err)
-			}
-			if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
-				t.Fatalf("write metadata: %v", err)
-			}
-			payload := seedPayload(t, dataDir, hash, "payload.bin", content)
-			writeRegistry(t, dataDir, hash, string(session.StateDeleting), purge, "op-resume")
-
-			sess, err := session.New(testConfig(dataDir), torrentsDir)
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
-			defer func() {
-				if err := sess.Close(context.Background()); err != nil {
-					t.Errorf("Close: %v", err)
-				}
-			}()
-
-			// resumeDeletions runs before New returns, so the interruption is
-			// already resolved.
-			if views := sess.ListTorrents(); len(views) != 0 {
-				t.Fatalf("ListTorrents after resume = %+v, want empty", views)
-			}
-			if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
-				t.Fatalf("TorrentViewFor after resume = %v, want ErrUnknownTorrent", err)
-			}
-			if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("state sidecar survived resume: %v", err)
-			}
-			_, statErr := os.Stat(payload)
-			if purge && !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("payload survived resume with purge_data=true: %v", statErr)
-			}
-			if !purge && statErr != nil {
-				t.Fatalf("payload removed by resume with purge_data=false: %v", statErr)
-			}
-			if op, ok := sess.Operation("op-resume"); !ok || op.State != session.StateDeleted {
-				t.Fatalf("resumed operation = %+v (%v), want deleted", op, ok)
-			}
-		})
+	// resumeDeletions runs before New returns, so the interruption is already
+	// resolved.
+	if views := sess.ListTorrents(); len(views) != 0 {
+		t.Fatalf("ListTorrents after resume = %+v, want empty", views)
+	}
+	if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("TorrentViewFor after resume = %v, want ErrUnknownTorrent", err)
+	}
+	if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state sidecar survived resume: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, hash.HexString()+".torrent")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("internal metadata survived resume: %v", err)
+	}
+	if op, ok := sess.Operation("op-resume"); !ok || op.State != session.StateDeleted {
+		t.Fatalf("resumed operation = %+v (%v), want deleted", op, ok)
 	}
 }
 
@@ -407,8 +278,7 @@ func TestDeleteReleasesGoroutinesAndFileDescriptors(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("leak-", 1024))
-	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
-	seedPayload(t, dataDir, hash, "payload.bin", content)
+	torrentBytes, _ := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
 
 	baselineGoroutines := runtime.NumGoroutine()
 	baselineFDs := openFDCount(t)
@@ -438,7 +308,7 @@ func TestDeleteReleasesGoroutinesAndFileDescriptors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	op, err := sess.DeleteTorrent(ctx, view.ID, false)
+	op, err := sess.DeleteTorrent(ctx, view.ID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -477,7 +347,7 @@ func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
 		t.Fatalf("pending metadata fetches = %d, want 1", got)
 	}
 
-	op, err := sess.DeleteTorrent(ctx, hexHash, false)
+	op, err := sess.DeleteTorrent(ctx, hexHash)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -501,34 +371,18 @@ func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
 }
 
 func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
-	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("late write"), nil)
-	sess := newManageSession(t, dataDir)
-	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
-		t.Fatalf("add: %v", err)
-	}
+	// A task whose deletion failed stays ownershipped by the interrupted
+	// deletion until it is retried.
+	writeRegistry(t, dataDir, hash, string(session.StateDeleteFailed), "op-existing")
 
-	// Force a failed delete by pointing the payload directory at a symlink.
-	outside := filepath.Join(work, "outside")
-	if err := os.MkdirAll(outside, 0o755); err != nil {
-		t.Fatalf("make outside dir: %v", err)
-	}
-	if err := os.Symlink(outside, payloadDir(dataDir, hash)); err != nil {
-		t.Fatalf("make symlink: %v", err)
-	}
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), true)
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleteFailed {
-		t.Fatalf("delete state = %s (%s), want delete_failed", final.State, final.Error)
-	}
+	sess := newManageSession(t, dataDir)
 
 	// A late metadata write must be refused even with a live context, so it
 	// can never recreate the sidecar and revive the task.
-	err = sess.WriteMetadataForTest(context.Background(), hash, torrentBytes)
+	err := sess.WriteMetadataForTest(context.Background(), hash, torrentBytes)
 	if !errors.Is(err, session.ErrDeleting) {
 		t.Fatalf("late metadata write = %v, want ErrDeleting", err)
 	}
@@ -562,7 +416,7 @@ func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 		t.Fatalf("pending metadata fetches = %d, want 1", got)
 	}
 
-	op, err := sess.DeleteTorrent(ctx, hash.HexString(), false)
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -599,8 +453,7 @@ func TestResumeDeletionClearsMetadataIndexAndAllowsRepersist(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	seedPayload(t, dataDir, hash, "payload.bin", content)
-	writeRegistry(t, dataDir, hash, string(session.StateDeleting), false, "op-resume-index")
+	writeRegistry(t, dataDir, hash, string(session.StateDeleting), "op-resume-index")
 
 	sess, err := session.New(testConfig(dataDir), torrentsDir)
 	if err != nil {

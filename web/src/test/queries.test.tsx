@@ -26,7 +26,7 @@ describe('query contracts', () => {
   });
 
   it('stops an operation interval after a 404 even when deleting data remains cached', () => {
-    const deleting: Operation = { operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting', purge_data: false };
+    const deleting: Operation = { operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' };
     expect(operationRefetchInterval(deleting, undefined)).toBe(1500);
     expect(operationRefetchInterval(deleting, new ApiError(404, 'unknown operation'))).toBe(false);
     expect(operationRefetchInterval({ ...deleting, state: 'deleted' }, undefined)).toBe(false);
@@ -35,7 +35,7 @@ describe('query contracts', () => {
   it('stops the real operation hook after a 404 response', async () => {
     const missing = new ApiError(404, 'unknown operation');
     const api = {
-      getOperation: vi.fn().mockResolvedValueOnce({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting', purge_data: false }).mockRejectedValue(missing),
+      getOperation: vi.fn().mockResolvedValueOnce({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' }).mockRejectedValue(missing),
     } as unknown as ApiClient;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;

@@ -28,7 +28,7 @@
 }
 
 .name,
-.progress {
+.cache {
   min-width: 0;
 }
 
@@ -88,7 +88,7 @@
     grid-column: 1;
   }
 
-  .progress {
+  .cache {
     grid-column: 1 / -1;
     grid-row: 3;
   }

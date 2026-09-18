@@ -21,7 +21,7 @@ var (
 
 	errRequired             = errors.New("value is required")
 	errPortRange            = errors.New("must be between 0 and 65535")
-	errCapacityRange        = errors.New("must be non-negative")
+	errCapacityRange        = errors.New("must be a positive number of bytes")
 	errProxyURL             = errors.New("must be a valid URL")
 	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
 	errProxyHost            = errors.New("must include a proxy host")
@@ -41,7 +41,7 @@ var (
 )
 
 const (
-	defaultCacheCapacityBytes int64 = 64 << 20
+	defaultCacheCapacityBytes int64 = 2 << 30
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
 	defaultMaxUploadBytes     int64 = 10 << 20
 	defaultLogLevel                 = "info"
@@ -99,12 +99,11 @@ type Config struct {
 
 // Paths groups the filesystem paths torrentfs manages at runtime.
 type Paths struct {
-	// DataDir is where the torrent session stores and reads torrent data.
-	// It must exist and be writable; the session creates it if missing.
+	// DataDir is where the torrent session keeps the state it still persists:
+	// the metadata cache and the per-torrent deletion sidecars. Piece data is
+	// never written here. It must exist and be writable; the session creates it
+	// if missing.
 	DataDir string `toml:"data_dir"`
-	// PayloadDir is the managed root under which every torrent gets its own
-	// per-info-hash directory. Empty uses <data_dir>/payload.
-	PayloadDir string `toml:"payload_dir"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -186,8 +185,8 @@ type Identity struct {
 
 // Default returns the default configuration: a per-user data directory under
 // the OS cache dir (falling back to the temp dir), an ephemeral listen port,
-// an empty proxy, qBittorrent 4.4.0 identity values, and a 64 MiB in-memory
-// piece cache.
+// an empty proxy, qBittorrent 4.4.0 identity values, and a 2 GiB in-memory
+// piece cache sized for a host with about 4 GB of RAM.
 func Default() Config {
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
@@ -231,7 +230,7 @@ func (c Config) Validate() error {
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
 	}
-	if c.Cache.CapacityBytes < 0 {
+	if c.Cache.CapacityBytes <= 0 {
 		return invalid("cache.capacity_bytes", errCapacityRange)
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {

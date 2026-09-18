@@ -109,7 +109,8 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	if !ok {
 		t.Fatalf("torrent %s not registered", metainfo.Hash(hash))
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, content)
+	waitCached(t, ctx, st)
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {
@@ -213,7 +214,7 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 		"a.txt":     []byte("alpha file"),
 		"sub/b.txt": []byte("beta file"),
 	}
-	torrentPath, hash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
 
 	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
 	if err != nil {
@@ -231,7 +232,8 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 	if !ok {
 		t.Fatal("torrent not registered")
 	}
-	waitComplete(t, ctx, st)
+	seedPieces(t, sess, hash, all)
+	waitCached(t, ctx, st)
 
 	server, err := filesystem.Mount(mnt, sess, nil)
 	if err != nil {

@@ -2,24 +2,23 @@ import type { FileStatus, PieceStatus } from '../../types/api';
 
 export interface Coverage {
   label: string;
-  tone: 'complete' | 'partial' | 'waiting';
+  tone: 'cached' | 'partial' | 'uncached';
 }
 
 export function fileCoverage(file: FileStatus, pieces: PieceStatus[]): Coverage {
   if (file.piece_start === file.piece_end) {
-    return { label: 'Complete · zero bytes', tone: 'complete' };
+    return { label: 'Zero bytes', tone: 'cached' };
   }
   const range = pieces.slice(Math.max(0, file.piece_start), Math.max(file.piece_start, file.piece_end));
   if (range.length === 0) {
-    return { label: 'Waiting for pieces', tone: 'waiting' };
+    return { label: 'No piece metadata', tone: 'uncached' };
   }
-  const complete = range.filter((piece) => piece.complete).length;
-  const partial = range.filter((piece) => piece.partial && !piece.complete).length;
-  if (complete === range.length) {
-    return { label: 'Complete', tone: 'complete' };
+  const cached = range.filter((piece) => piece.cached).length;
+  if (cached === range.length) {
+    return { label: 'Cached', tone: 'cached' };
   }
-  if (complete > 0 || partial > 0) {
-    return { label: `${complete} complete · ${partial} partial`, tone: 'partial' };
+  if (cached > 0) {
+    return { label: `Cached ${cached} / ${range.length} pieces`, tone: 'partial' };
   }
-  return { label: `${range.length} pieces waiting`, tone: 'waiting' };
+  return { label: `Cached 0 / ${range.length} pieces`, tone: 'uncached' };
 }
