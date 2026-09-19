@@ -28,7 +28,7 @@ func TestDHTNetworkForConnUsesSocketIPFamily(t *testing.T) {
 				}
 				t.Fatalf("listen %s: %v", tt.network, err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 
 			if got := dhtNetworkForConn(conn); got != tt.want {
 				t.Fatalf("dhtNetworkForConn = %q, want %q", got, tt.want)
@@ -101,7 +101,7 @@ func TestConfigureDHTStartingNodesFiltersEachSocketFamily(t *testing.T) {
 				}
 				t.Fatalf("listen %s: %v", tt.network, err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 
 			server := &dht.ServerConfig{
 				Conn:          conn,

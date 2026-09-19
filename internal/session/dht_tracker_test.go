@@ -33,7 +33,7 @@ func TestDHTQueryKeepsSocketAddressFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen controlled IPv4 target: %v", err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 	targetAddr := dht.NewAddr(target.LocalAddr())
 
 	server4 := newTestDHTServer(t, conn4)
@@ -68,7 +68,7 @@ func TestTorrentClientDHTServersFollowAddressFamilyFlags(t *testing.T) {
 	if err != nil {
 		t.Skipf("IPv6 loopback is unavailable: %v", err)
 	}
-	probe.Close()
+	_ = probe.Close()
 
 	tests := []struct {
 		name     string
