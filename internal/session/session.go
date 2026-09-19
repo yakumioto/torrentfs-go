@@ -186,6 +186,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if customize != nil {
 		customize(cc)
 	}
+	configureDhtStartingNodes(cc)
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
 		err = fmt.Errorf("session: new client: %w", err)
