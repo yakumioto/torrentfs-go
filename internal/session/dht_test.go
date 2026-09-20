@@ -145,6 +145,26 @@ func TestDHTRecorderWarnsOncePerStateChange(t *testing.T) {
 	}
 }
 
+// TestDHTRecorderStopsLoggingAfterStop pins the shutdown guarantee: a late DHT
+// routing-table refresh must not reach the session's log sink once the session
+// has closed. It is deterministic -- no goroutines, no timing.
+func TestDHTRecorderStopsLoggingAfterStop(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	recorder := newDhtRecorder()
+
+	recorder.observe(logger, dhtFamilyState{family: "udp6", localAddr: "[::1]:42000", resolved: 8})
+	if got := strings.Count(buf.String(), "dht starting nodes unavailable"); got != 1 {
+		t.Fatalf("warnings before stop = %d, want 1; log=%q", got, buf.String())
+	}
+
+	recorder.stop()
+	recorder.observe(logger, dhtFamilyState{family: "udp4", localAddr: "127.0.0.1:42000", resolved: 8})
+	if got := strings.Count(buf.String(), "dht starting nodes unavailable"); got != 1 {
+		t.Fatalf("warnings after stop = %d, want 1; log=%q", got, buf.String())
+	}
+}
+
 func TestConfigureDHTStartingNodesFiltersEachSocketFamily(t *testing.T) {
 	nodes := []dht.Addr{
 		dht.NewAddr(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}),

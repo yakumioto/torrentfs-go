@@ -95,8 +95,13 @@ func TestDHTQuerySucceedsWithinIPv6Loopback(t *testing.T) {
 	if result.Err != nil {
 		t.Fatalf("udp6 ping to ::1: %v", result.Err)
 	}
-	if result.Writes != 1 {
-		t.Fatalf("udp6 ping writes = %d, want 1", result.Writes)
+	// Writes counts datagrams actually sent, and a resend is legal: NumTries is
+	// 3 and QueryResendDelay is 1ms, so a reply arriving after the first resend
+	// makes Writes 2 without anything being wrong. "Completed a round trip on
+	// udp6" is asserted by Err == nil above; "sent at least one datagram on
+	// udp6" is asserted here.
+	if result.Writes < 1 {
+		t.Fatalf("udp6 ping writes = %d, want at least 1", result.Writes)
 	}
 }
 

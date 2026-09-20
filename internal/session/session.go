@@ -387,6 +387,11 @@ func (s *Session) Close(ctx context.Context) error {
 		}
 		t.tor.Drop()
 	}
+	// cl.Close() shuts the DHT server down, but upstream dht.Server.Close does
+	// not join TableMaintainer, so that goroutine can still log one more
+	// starting-nodes record through the session logger. stop makes Close
+	// return only once no further session log can be written.
+	s.dhtRecorder.stop()
 	for _, err := range s.cl.Close() {
 		if err != nil {
 			errs = append(errs, err)

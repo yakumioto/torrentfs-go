@@ -48,6 +48,13 @@ type dhtFamilyState struct {
 type dhtRecorder struct {
 	mu       sync.Mutex
 	families map[string]dhtFamilyState
+	// stopped is set by stop during session teardown. Once set, no further
+	// record is logged. Because stop takes the same mu, a record already in
+	// flight finishes logging before stop returns, so "logged by the DHT
+	// goroutine" happens-before "stop returned" happens-before "Session.Close
+	// returned". A caller that closes or reads the log sink after Close
+	// therefore no longer races a late DHT record.
+	stopped bool
 }
 
 func newDhtRecorder() *dhtRecorder {
@@ -59,9 +66,12 @@ func (r *dhtRecorder) observe(logger *slog.Logger, state dhtFamilyState) {
 		return
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return
+	}
 	previous, seen := r.families[state.family]
 	r.families[state.family] = state
-	r.mu.Unlock()
 	if logger == nil {
 		return
 	}
@@ -91,6 +101,19 @@ func (r *dhtRecorder) observe(logger *slog.Logger, state dhtFamilyState) {
 			"reason", reason,
 		)
 	}
+}
+
+// stop silences the recorder for the rest of the session's life. It blocks
+// until a concurrent observe has finished logging its record, which is what
+// lets Session.Close promise "no session log after it returns". It is
+// idempotent and safe on a nil receiver.
+func (r *dhtRecorder) stop() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
 }
 
 func (r *dhtRecorder) snapshot() []DhtFamilyStatus {
