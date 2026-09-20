@@ -181,31 +181,52 @@ jobs:
           docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
             'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents'
           docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
+          readiness_deadline=$(( $(date +%s) + 60 ))
           state=""
           ready=false
-          for _ in {1..300}; do
-            state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+          while :; do
+            now="$(date +%s)"
+            if (( now >= readiness_deadline )); then
+              break
+            fi
+            inspect_timeout=$(( readiness_deadline - now ))
+            if (( inspect_timeout > 2 )); then
+              inspect_timeout=2
+            fi
+            state="$(timeout "${inspect_timeout}s" docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
             if [[ "$state" == exited || "$state" == dead ]]; then
-              exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+              exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
               printf 'Validation container exited before readiness: platform=%s state=%s exit_code=%s\n' \
                 "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-              docker logs "$container" || true
+              timeout 5s docker logs --tail 200 "$container" 2>&1 || true
               exit 1
             fi
             if [[ "$state" == running ]]; then
-              logs="$(docker logs "$container" 2>&1 || true)"
+              now="$(date +%s)"
+              if (( now >= readiness_deadline )); then
+                break
+              fi
+              log_timeout=$(( readiness_deadline - now ))
+              if (( log_timeout > 2 )); then
+                log_timeout=2
+              fi
+              logs="$(timeout "${log_timeout}s" docker logs --tail 200 "$container" 2>&1 || true)"
               if [[ "$logs" == *"http api listening"* ]]; then
                 ready=true
                 break
               fi
             fi
+            now="$(date +%s)"
+            if (( now >= readiness_deadline )); then
+              break
+            fi
             sleep 0.2
           done
           if [[ "$ready" != true ]]; then
-            exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+            exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
             printf 'Validation container did not become ready: platform=%s state=%s exit_code=%s\n' \
               "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-            docker logs "$container" || true
+            timeout 5s docker logs --tail 200 "$container" 2>&1 || true
             exit 1
           fi
           docker kill --signal TERM "$container" >/dev/null
@@ -250,31 +271,52 @@ jobs:
           docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
             'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents'
           docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
+          readiness_deadline=$(( $(date +%s) + 60 ))
           state=""
           ready=false
-          for _ in {1..300}; do
-            state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+          while :; do
+            now="$(date +%s)"
+            if (( now >= readiness_deadline )); then
+              break
+            fi
+            inspect_timeout=$(( readiness_deadline - now ))
+            if (( inspect_timeout > 2 )); then
+              inspect_timeout=2
+            fi
+            state="$(timeout "${inspect_timeout}s" docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
             if [[ "$state" == exited || "$state" == dead ]]; then
-              exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+              exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
               printf 'Validation container exited before readiness: platform=%s state=%s exit_code=%s\n' \
                 "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-              docker logs "$container" || true
+              timeout 5s docker logs --tail 200 "$container" 2>&1 || true
               exit 1
             fi
             if [[ "$state" == running ]]; then
-              logs="$(docker logs "$container" 2>&1 || true)"
+              now="$(date +%s)"
+              if (( now >= readiness_deadline )); then
+                break
+              fi
+              log_timeout=$(( readiness_deadline - now ))
+              if (( log_timeout > 2 )); then
+                log_timeout=2
+              fi
+              logs="$(timeout "${log_timeout}s" docker logs --tail 200 "$container" 2>&1 || true)"
               if [[ "$logs" == *"http api listening"* ]]; then
                 ready=true
                 break
               fi
             fi
+            now="$(date +%s)"
+            if (( now >= readiness_deadline )); then
+              break
+            fi
             sleep 0.2
           done
           if [[ "$ready" != true ]]; then
-            exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+            exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
             printf 'Validation container did not become ready: platform=%s state=%s exit_code=%s\n' \
               "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-            docker logs "$container" || true
+            timeout 5s docker logs --tail 200 "$container" 2>&1 || true
             exit 1
           fi
           docker kill --signal TERM "$container" >/dev/null
