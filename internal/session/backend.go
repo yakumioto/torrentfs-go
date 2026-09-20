@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
+	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
@@ -44,6 +46,26 @@ type TorrentStatusView struct {
 	PieceLength   int64
 	Pieces        []PieceStatus
 	Files         []FileStatus
+	Network       NetworkStatus
+}
+
+// NetworkStatus is the client-visible network state behind a status snapshot.
+// It is reporting only: the torrent's ready state stays what it always was,
+// because "ready" means the metainfo is loaded, never that peers exist.
+type NetworkStatus struct {
+	// EffectiveListenPort is the port the client actually listens on, which
+	// differs from the configured port whenever that port is 0.
+	EffectiveListenPort int
+	// TotalPeers, PendingPeers, ActivePeers and ConnectedSeeders are the
+	// torrent's peer gauges; PiecesComplete counts verified pieces.
+	TotalPeers       int
+	PendingPeers     int
+	ActivePeers      int
+	ConnectedSeeders int
+	PiecesComplete   int
+	// DhtFamilies reports each address family's DHT view. It is empty when the
+	// client runs without DHT.
+	DhtFamilies []DhtFamilyStatus
 }
 
 // Torrents implements filesystem.Backend. Torrents whose metainfo is not yet
@@ -119,6 +141,7 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 		Torrent: s.buildViewWithCached(hash, st, entry, cachedBytes),
 		Pieces:  make([]PieceStatus, 0),
 		Files:   make([]FileStatus, 0),
+		Network: s.networkStatus(st),
 	}
 	if st == nil {
 		return view, nil
@@ -154,6 +177,53 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 		})
 	}
 	return view, nil
+}
+
+// networkStatus snapshots the client's listen port, the torrent's peer gauges,
+// and each address family's DHT view. st may be nil: the client-level parts are
+// still reported for a torrent that is not registered yet.
+func (s *Session) networkStatus(st *Torrent) NetworkStatus {
+	status := NetworkStatus{
+		EffectiveListenPort: s.cl.LocalPort(),
+		DhtFamilies:         s.dhtStatus(),
+	}
+	if st == nil {
+		return status
+	}
+	gauges := st.tor.Stats().TorrentGauges
+	status.TotalPeers = gauges.TotalPeers
+	status.PendingPeers = gauges.PendingPeers
+	status.ActivePeers = gauges.ActivePeers
+	status.ConnectedSeeders = gauges.ConnectedSeeders
+	status.PiecesComplete = gauges.PiecesComplete
+	return status
+}
+
+// dhtStatus merges the last recorded bootstrap outcome per family with the live
+// node counts of each running DHT server, so a caller can tell "no server for
+// this family" from "server with an empty routing table".
+func (s *Session) dhtStatus() []DhtFamilyStatus {
+	families := s.dhtRecorder.snapshot()
+	index := make(map[string]int, len(families))
+	for i, family := range families {
+		index[family.Family] = i
+	}
+	for _, server := range s.cl.DhtServers() {
+		family := dhtNetworkForAddr(server.Addr())
+		i, ok := index[family]
+		if !ok {
+			families = append(families, DhtFamilyStatus{Family: family})
+			i = len(families) - 1
+			index[family] = i
+		}
+		families[i].LocalAddr = server.Addr().String()
+		if stats, ok := server.Stats().(dht.ServerStats); ok {
+			families[i].Nodes = stats.Nodes
+			families[i].GoodNodes = stats.GoodNodes
+		}
+	}
+	sort.Slice(families, func(i, j int) bool { return families[i].Family < families[j].Family })
+	return families
 }
 
 func filePieceRange(f *torrent.File, info *metainfo.Info, torrentLength int64, pieceCount int) (int, int, error) {

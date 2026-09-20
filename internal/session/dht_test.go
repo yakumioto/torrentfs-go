@@ -1,7 +1,10 @@
 package session
 
 import (
+	"bytes"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/anacrolix/dht/v2"
@@ -72,6 +75,76 @@ func TestFilterDHTStartingNodesBySocketFamily(t *testing.T) {
 	}
 }
 
+// TestFilterDHTStartingNodesIPv4OnlyResolverMatchesLog reproduces the logged
+// failure mode: DNS answers with IPv4 addresses only, so the udp6 socket is
+// left with nothing while udp4 keeps every address.
+func TestFilterDHTStartingNodesIPv4OnlyResolverMatchesLog(t *testing.T) {
+	nodes := []dht.Addr{
+		dht.NewAddr(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}),
+		dht.NewAddr(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 6881}),
+	}
+
+	if got := filterDhtStartingNodes("udp4", nodes); len(got) != 2 {
+		t.Fatalf("udp4 filtered nodes = %d, want 2", len(got))
+	}
+	if got := filterDhtStartingNodes("udp6", nodes); len(got) != 0 {
+		t.Fatalf("udp6 filtered nodes = %d, want 0", len(got))
+	}
+}
+
+// TestStaticStartingNodesServeEachFamily checks the explicit bootstrap path:
+// one entry per family resolves without DNS and reaches the family that asked.
+func TestStaticStartingNodesServeEachFamily(t *testing.T) {
+	getter := staticStartingNodes([]string{"127.0.0.1:6881", "[::1]:6881"})
+
+	nodes, err := getter()
+	if err != nil {
+		t.Fatalf("starting nodes: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("starting nodes = %v, want one address per family", nodes)
+	}
+	if got := filterDhtStartingNodes("udp4", nodes); len(got) != 1 || got[0].String() != "127.0.0.1:6881" {
+		t.Fatalf("udp4 nodes = %v, want [127.0.0.1:6881]", got)
+	}
+	if got := filterDhtStartingNodes("udp6", nodes); len(got) != 1 || got[0].String() != "[::1]:6881" {
+		t.Fatalf("udp6 nodes = %v, want [[::1]:6881]", got)
+	}
+}
+
+// TestDHTRecorderWarnsOncePerStateChange pins the "bounded" part of Phase 1.2:
+// a family that keeps failing the same way is reported once, and recovery is
+// reported when it happens.
+func TestDHTRecorderWarnsOncePerStateChange(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	recorder := newDhtRecorder()
+	unavailable := dhtFamilyState{family: "udp6", localAddr: "[::1]:42000", resolved: 8, kept: 0}
+
+	for range 3 {
+		recorder.observe(logger, unavailable)
+	}
+	if got := strings.Count(buf.String(), "dht starting nodes unavailable"); got != 1 {
+		t.Fatalf("unavailable warnings = %d, want 1; log=%q", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "dht_udp6_unavailable") {
+		t.Fatalf("warning lost its status name: %q", buf.String())
+	}
+
+	recorder.observe(logger, dhtFamilyState{family: "udp6", localAddr: "[::1]:42000", resolved: 8, kept: 3})
+	if got := strings.Count(buf.String(), "dht starting nodes available"); got != 1 {
+		t.Fatalf("availability notices = %d, want 1; log=%q", got, buf.String())
+	}
+
+	snapshot := recorder.snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot = %+v, want one family", snapshot)
+	}
+	if !snapshot[0].Ready || snapshot[0].Kept != 3 || snapshot[0].Resolved != 8 || snapshot[0].Family != "udp6" {
+		t.Fatalf("snapshot = %+v, want a ready udp6 family", snapshot[0])
+	}
+}
+
 func TestConfigureDHTStartingNodesFiltersEachSocketFamily(t *testing.T) {
 	nodes := []dht.Addr{
 		dht.NewAddr(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}),
@@ -84,7 +157,7 @@ func TestConfigureDHTStartingNodesFiltersEachSocketFamily(t *testing.T) {
 			return nodes, nil
 		}
 	}
-	configureDhtStartingNodes(cc)
+	configureDhtStartingNodes(cc, nil, nil)
 
 	tests := []struct {
 		name    string

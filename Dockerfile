@@ -24,6 +24,9 @@ RUN mkdir -p /etc/torrentfs /data /torrents
 COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
 
 WORKDIR /
-EXPOSE 8080
+# 8080 serves the HTTP API and Web UI. 6881 is the fixed peer port from
+# docker/torrentfs.toml; publish it for both TCP and UDP to accept inbound
+# peers: -p 6881:6881/tcp -p 6881:6881/udp. EXPOSE alone publishes nothing.
+EXPOSE 8080 6881/tcp 6881/udp
 ENTRYPOINT ["/usr/local/bin/torrentfs"]
 CMD ["-config", "/etc/torrentfs/torrentfs.toml", "/torrents"]

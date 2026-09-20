@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,50 @@ var environmentBindings = []envBinding{
 				return err
 			}
 			cfg.Connections.ListenPort = value
+			return nil
+		},
+	},
+	{
+		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV4",
+		field: "connections.disable_ipv4",
+		apply: func(cfg *Config, raw string) error {
+			value, err := parseEnvBool(raw)
+			if err != nil {
+				return err
+			}
+			cfg.Connections.DisableIPv4 = value
+			return nil
+		},
+	},
+	{
+		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV6",
+		field: "connections.disable_ipv6",
+		apply: func(cfg *Config, raw string) error {
+			value, err := parseEnvBool(raw)
+			if err != nil {
+				return err
+			}
+			cfg.Connections.DisableIPv6 = value
+			return nil
+		},
+	},
+	{
+		name:  "TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING",
+		field: "connections.no_port_forwarding",
+		apply: func(cfg *Config, raw string) error {
+			value, err := parseEnvBool(raw)
+			if err != nil {
+				return err
+			}
+			cfg.Connections.NoPortForwarding = value
+			return nil
+		},
+	},
+	{
+		name:  "TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES",
+		field: "connections.bootstrap_nodes",
+		apply: func(cfg *Config, raw string) error {
+			cfg.Connections.BootstrapNodes = parseEnvList(raw)
 			return nil
 		},
 	},
@@ -196,6 +241,18 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 		}
 	}
 	return nil
+}
+
+// parseEnvList splits a comma-separated environment value. Blank entries are
+// dropped so a trailing comma is not a configuration error.
+func parseEnvList(raw string) []string {
+	var values []string
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }
 
 func parseEnvInt(raw string) (int, error) {

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -199,7 +200,7 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	defaults := config.Default()
-	if cfg.Connections != defaults.Connections {
+	if !reflect.DeepEqual(cfg.Connections, defaults.Connections) {
 		t.Fatalf("Connections = %+v, want defaults %+v", cfg.Connections, defaults.Connections)
 	}
 	if cfg.Proxy != defaults.Proxy {

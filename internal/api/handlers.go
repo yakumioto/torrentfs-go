@@ -50,6 +50,30 @@ type torrentStatusResponse struct {
 	PieceLength   int64                 `json:"piece_length"`
 	Pieces        []pieceStatusResponse `json:"pieces"`
 	Files         []fileStatusResponse  `json:"files"`
+	Network       networkStatusResponse `json:"network"`
+}
+
+// networkStatusResponse reports network visibility next to the piece data.
+// Every field is additive; metainfo_ready keeps its original meaning.
+type networkStatusResponse struct {
+	EffectiveListenPort int                       `json:"effective_listen_port"`
+	TotalPeers          int                       `json:"total_peers"`
+	PendingPeers        int                       `json:"pending_peers"`
+	ActivePeers         int                       `json:"active_peers"`
+	ConnectedSeeders    int                       `json:"connected_seeders"`
+	PieceComplete       int                       `json:"piece_complete"`
+	Dht                 []dhtFamilyStatusResponse `json:"dht"`
+}
+
+type dhtFamilyStatusResponse struct {
+	Family    string `json:"family"`
+	LocalAddr string `json:"local_addr"`
+	Nodes     int    `json:"nodes"`
+	GoodNodes int    `json:"good_nodes"`
+	Resolved  int    `json:"resolved"`
+	Kept      int    `json:"kept"`
+	Ready     bool   `json:"ready"`
+	Error     string `json:"error,omitempty"`
 }
 
 func newTorrentResponse(view session.TorrentView) torrentResponse {
@@ -87,6 +111,32 @@ func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusRespo
 			Size:       file.Size,
 			PieceStart: file.PieceStart,
 			PieceEnd:   file.PieceEnd,
+		}
+	}
+	out.Network = newNetworkStatusResponse(view.Network)
+	return out
+}
+
+func newNetworkStatusResponse(view session.NetworkStatus) networkStatusResponse {
+	out := networkStatusResponse{
+		EffectiveListenPort: view.EffectiveListenPort,
+		TotalPeers:          view.TotalPeers,
+		PendingPeers:        view.PendingPeers,
+		ActivePeers:         view.ActivePeers,
+		ConnectedSeeders:    view.ConnectedSeeders,
+		PieceComplete:       view.PiecesComplete,
+		Dht:                 make([]dhtFamilyStatusResponse, len(view.DhtFamilies)),
+	}
+	for i, family := range view.DhtFamilies {
+		out.Dht[i] = dhtFamilyStatusResponse{
+			Family:    family.Family,
+			LocalAddr: family.LocalAddr,
+			Nodes:     family.Nodes,
+			GoodNodes: family.GoodNodes,
+			Resolved:  family.Resolved,
+			Kept:      family.Kept,
+			Ready:     family.Ready,
+			Error:     family.Error,
 		}
 	}
 	return out

@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -72,6 +74,14 @@ type Session struct {
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.
 	storageCloser storage.ClientImplCloser
+
+	// instanceLock holds the exclusive flock on <torrents-dir>/.metadata so a
+	// second process cannot manage the same directory.
+	instanceLock *os.File
+
+	// dhtRecorder keeps the last per-family bootstrap outcome for the status
+	// API and for transition-only DHT logging.
+	dhtRecorder *dhtRecorder
 
 	// stateDir holds the durable per-torrent state sidecars that let the
 	// session resume an interrupted deletion after a restart.
@@ -155,6 +165,11 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("create-state-dir", err)
 		return nil, err
 	}
+	instanceLock, err := lockInstance(metadataDir)
+	if err != nil {
+		logInitFailure("acquire-instance-lock", err)
+		return nil, err
+	}
 
 	cc := torrent.NewDefaultClientConfig()
 	if cfg.Identity.TrackerUserAgent != "" {
@@ -169,6 +184,14 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	cc.DataDir = cfg.Paths.DataDir
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort
+	cc.DisableIPv4 = cfg.Connections.DisableIPv4
+	cc.DisableIPv6 = cfg.Connections.DisableIPv6
+	cc.NoDefaultPortForwarding = cfg.Connections.NoPortForwarding
+	if len(cfg.Connections.BootstrapNodes) > 0 {
+		cc.DhtStartingNodes = func(string) dht.StartingNodesGetter {
+			return staticStartingNodes(cfg.Connections.BootstrapNodes)
+		}
+	}
 	configureSeeding(cc)
 	// Pieces live only in memory: the store keeps them in the LRU cache until
 	// they are evicted, and never writes them to disk.
@@ -186,11 +209,23 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if customize != nil {
 		customize(cc)
 	}
-	configureDhtStartingNodes(cc)
+	// The peer ID is resolved after customize so an explicitly injected client
+	// config always wins, and before NewClient so the durable identity is the
+	// one this client announces with.
+	peerID, err := resolvePeerID(cfg.Paths.DataDir, cc.PeerID, cc.Bep20, logger)
+	if err != nil {
+		logInitFailure("resolve-peer-id", err)
+		releaseInstanceLock(instanceLock)
+		return nil, err
+	}
+	cc.PeerID = peerID
+	dhtRecorder := newDhtRecorder()
+	configureDhtStartingNodes(cc, dhtRecorder, logger)
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
 		err = fmt.Errorf("session: new client: %w", err)
 		logInitFailure("new-client", err)
+		releaseInstanceLock(instanceLock)
 		return nil, err
 	}
 	if peerDialer != nil {
@@ -212,6 +247,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
 		storageCloser:   pieceStore,
+		instanceLock:    instanceLock,
+		dhtRecorder:     dhtRecorder,
 		stateDir:        stateDir,
 		states:          make(map[metainfo.Hash]*registryEntry),
 		operations:      make(map[string]*Operation),
@@ -270,8 +307,26 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		"data_dir", cfg.Paths.DataDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"listen_port", cfg.Connections.ListenPort,
+		"effective_listen_port", s.EffectiveListenPort(),
+		"listen_addrs", strings.Join(s.listenAddrs(), ","),
 	)
 	return s, nil
+}
+
+// EffectiveListenPort returns the port the client actually listens on. With a
+// dynamic configured port it is the only place the real value is observable,
+// and with a fixed port it is what the tracker announce carries.
+func (s *Session) EffectiveListenPort() int {
+	return s.cl.LocalPort()
+}
+
+func (s *Session) listenAddrs() []string {
+	addrs := s.cl.ListenAddrs()
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		out = append(out, addr.String())
+	}
+	return out
 }
 
 // Close releases every open file handle, drops every torrent, and shuts the
@@ -301,6 +356,7 @@ func (s *Session) Close(ctx context.Context) error {
 	scanDone := s.scanDone
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
+	instanceLock := s.instanceLock
 	s.mu.Unlock()
 	s.logger.Info("session closing")
 
@@ -343,6 +399,9 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 
 	err := errors.Join(errs...)
+	// Nothing else touches the torrents directory once the client is closed, so
+	// the instance lock is safe to release before the state is finalized.
+	releaseInstanceLock(instanceLock)
 	if err == nil {
 		s.logger.Info("session closed")
 	}
@@ -362,6 +421,7 @@ func (s *Session) Close(ctx context.Context) error {
 	s.scanCancel = nil
 	s.scanDone = nil
 	s.storageCloser = nil
+	s.instanceLock = nil
 	s.state = stateClosed
 	s.closeErr = err
 	close(s.closeDone)

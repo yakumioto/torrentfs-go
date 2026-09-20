@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -86,6 +87,25 @@ var NewWithClientConfig = newWithClientConfig
 // TorrentClientConfig is the concrete client configuration type tests adjust
 // through NewWithClientConfig.
 type TorrentClientConfig = torrent.ClientConfig
+
+// PeerIDForTest returns the 20-byte peer ID the client announces with.
+// Test-only.
+func (s *Session) PeerIDForTest() string {
+	id := s.cl.PeerID()
+	return string(id[:])
+}
+
+// DhtServerFamiliesForTest reports the address family of every DHT server the
+// client runs. Test-only.
+func (s *Session) DhtServerFamiliesForTest() []string {
+	servers := s.cl.DhtServers()
+	families := make([]string, 0, len(servers))
+	for _, server := range servers {
+		families = append(families, dhtNetworkForAddr(server.Addr()))
+	}
+	slices.Sort(families)
+	return families
+}
 
 // SetReadaheadForTest changes the session reader's byte window for a cold-read
 // integration test. It is not part of the public API.
