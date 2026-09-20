@@ -152,6 +152,13 @@ func UnderlyingTorrentForTest(st *Torrent) *torrent.Torrent {
 // UnderlyingClientForTest exposes the anacrolix client so discovery tests can
 // read Client.WriteStatus, which reports the per-torrent DHT announce counter.
 // There is no per-torrent status entry point in this version. Test-only.
+//
+// This seam exists to reach observation points. Whatever it is used to read
+// must be concurrency-safe as read: WriteStatus holds the client's read lock
+// for its whole run, so every accessor it reaches has to be synchronized too.
+// The tracker segment reaches internal/mytimer.Timer.When(), which upstream
+// reads without a lock — that is why go.mod pins v1.61.0-bep27.2 rather than
+// -bep27.1 (MIO-46).
 func UnderlyingClientForTest(s *Session) *torrent.Client {
 	return s.cl
 }

@@ -32,6 +32,13 @@ import (
 // v1.61.0 has no Local Peer Discovery (BEP 14) support at all, so there is
 // nothing to assert for LPD here. If a future dependency bump enables upstream
 // LPD, the private-torrent guard must be re-verified for that path too.
+//
+// The announce counter is read through Client.WriteStatus, which is only a
+// usable observation point while every accessor it reaches is synchronized.
+// It reads the tracker dispatcher's timer deadline via mytimer.Timer.When(),
+// which upstream leaves unlocked, so go.mod pins v1.61.0-bep27.2: the fork
+// takes a read lock there. Before any future dependency bump, re-check that
+// WriteStatus is race-free with the whole package running.
 
 const bep27SettleWindow = 3 * time.Second
 
