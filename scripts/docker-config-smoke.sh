@@ -15,6 +15,7 @@ done
 
 work_dir="$(mktemp -d)"
 image="torrentfs-config-smoke:$$"
+conflict_image="torrentfs-config-conflict:$$"
 default_container="torrentfs-config-default-$$"
 env_container="torrentfs-config-env-$$"
 file_container="torrentfs-config-file-$$"
@@ -27,6 +28,7 @@ cleanup() {
 		docker rm -f "$container" >/dev/null 2>&1 || true
 	done
 	docker image rm "$image" >/dev/null 2>&1 || true
+	docker image rm "$conflict_image" >/dev/null 2>&1 || true
 	rm -rf -- "$work_dir"
 	exit "$status"
 }
@@ -110,6 +112,18 @@ timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
 	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents' \
 	|| fail 'image is missing its readable default configuration or runtime directories'
 printf 'docker config smoke: image default configuration is readable\n'
+
+# Debian bookworm already has UID 0 and GID 100; this catches regressions that
+# unconditionally run useradd/groupadd for the requested numeric IDs.
+printf 'docker config smoke: building with existing UID/GID entries\n'
+timeout 1800 docker build \
+	--build-arg TORRENTFS_UID=0 \
+	--build-arg TORRENTFS_GID=100 \
+	--tag "$conflict_image" . >/dev/null
+timeout 30 docker run --rm --entrypoint /bin/sh "$conflict_image" -c \
+	'test -n "$(getent passwd 0)" && test -n "$(getent group 100)"' \
+	|| fail 'image failed to preserve existing numeric UID/GID entries'
+printf 'docker config smoke: existing UID/GID build passed\n'
 
 printf 'docker config smoke: starting with the image default CMD\n'
 docker run --detach --name "$default_container" "$image" >/dev/null

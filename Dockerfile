@@ -18,11 +18,25 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/torrentfs ./cmd/to
 FROM debian:bookworm-slim
 ARG TORRENTFS_UID=1000
 ARG TORRENTFS_GID=1000
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends fuse3 ca-certificates passwd \
-    && groupadd --gid "$TORRENTFS_GID" torrentfs \
-    && useradd --uid "$TORRENTFS_UID" --gid "$TORRENTFS_GID" --no-create-home --shell /usr/sbin/nologin torrentfs \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends fuse3 ca-certificates passwd; \
+    runtime_group="$(getent group "$TORRENTFS_GID" | cut -d: -f1 || true)"; \
+    if [ -z "$runtime_group" ]; then \
+        runtime_group=torrentfs; \
+        while getent group "$runtime_group" >/dev/null 2>&1; do \
+            runtime_group="${runtime_group}_"; \
+        done; \
+        groupadd --gid "$TORRENTFS_GID" "$runtime_group"; \
+    fi; \
+    if ! getent passwd "$TORRENTFS_UID" >/dev/null 2>&1; then \
+        runtime_user=torrentfs; \
+        while getent passwd "$runtime_user" >/dev/null 2>&1; do \
+            runtime_user="${runtime_user}_"; \
+        done; \
+        useradd --uid "$TORRENTFS_UID" --gid "$runtime_group" --no-create-home --shell /usr/sbin/nologin "$runtime_user"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
 RUN mkdir -p /etc/torrentfs /torrents
 COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
