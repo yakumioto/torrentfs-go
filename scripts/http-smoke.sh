@@ -12,11 +12,9 @@ command -v curl >/dev/null
 work_dir="$(mktemp -d)"
 container_name="torrentfs-http-smoke-$$"
 trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true; rm -rf -- "$work_dir" || true' EXIT
+mkdir -p "$work_dir/torrents"
 
 cat >"$work_dir/torrentfs.toml" <<'EOF'
-[paths]
-data_dir = "/data"
-
 [http]
 listen_addr = "0.0.0.0:8080"
 max_upload_bytes = 10485760
@@ -30,7 +28,7 @@ EOF
 
 image="torrentfs-http-smoke:local"
 docker build --tag "$image" .
-docker run --detach --user "$(id -u):$(id -g)" --name "$container_name" --publish 127.0.0.1::8080 --volume "$work_dir:/data" --volume "$work_dir/torrentfs.toml:/config.toml:ro" "$image" -config /config.toml /data >/dev/null
+docker run --detach --user "$(id -u):$(id -g)" --name "$container_name" --publish 127.0.0.1::8080 --volume "$work_dir/torrents:/torrents" --volume "$work_dir/torrentfs.toml:/config.toml:ro" "$image" -config /config.toml /torrents >/dev/null
 
 port=''
 for _ in {1..60}; do

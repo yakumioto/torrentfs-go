@@ -1,9 +1,6 @@
 # Default configuration for the Docker image.
 # Environment variables can override every value at startup.
 
-[paths]
-data_dir = "/data"
-
 [http]
 listen_addr = "127.0.0.1:8080"
 max_upload_bytes = 10485760

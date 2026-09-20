@@ -223,12 +223,9 @@ probe "docker info" docker info >/dev/null 2>&1 || fail "Docker daemon is unavai
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-mio17.XXXXXX")"
 TORRENT_HOST_DIR="$TMP_DIR/torrents"
-DATA_HOST_DIR="$TMP_DIR/data"
 MOUNT_HOST_DIR="$TMP_DIR/mnt"
-NEGATIVE_DATA_DIR="$TMP_DIR/negative-data"
 NEGATIVE_MOUNT_DIR="$TMP_DIR/negative-mnt"
-mkdir -p "$TORRENT_HOST_DIR" "$DATA_HOST_DIR" "$MOUNT_HOST_DIR" \
-	"$NEGATIVE_DATA_DIR" "$NEGATIVE_MOUNT_DIR"
+mkdir -p "$TORRENT_HOST_DIR" "$MOUNT_HOST_DIR" "$NEGATIVE_MOUNT_DIR"
 SEEDED_TORRENT_HOST_DIR="$TMP_DIR/seeded-torrents"
 WEBSEED_DIR="$TMP_DIR/webseed"
 mkdir -p "$SEEDED_TORRENT_HOST_DIR" "$WEBSEED_DIR"
@@ -282,10 +279,9 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the FUSE container" docker run --detach
 	--security-opt apparmor=unconfined \
 	--network host \
 	--env TORRENTFS_HTTP_LISTEN_ADDR= \
-	--mount "type=bind,src=$DATA_HOST_DIR,dst=/data" \
 	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
+	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
 fi
 POSITIVE_STARTED=1
@@ -424,17 +420,15 @@ printf 'docker smoke: FUSE container stopped and host mount disappeared cleanly\
 # pieces in different pages and asserts a zero playback-phase cancellation
 # count); this scenario covers the shutdown and EBUSY half.
 printf 'docker smoke: starting blocked-read shutdown scenario\n'
-BLOCKED_DATA_DIR="$TMP_DIR/blocked-data"
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
-mkdir -p "$BLOCKED_DATA_DIR" "$BLOCKED_MOUNT_DIR"
+mkdir -p "$BLOCKED_MOUNT_DIR"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run --detach --name "$BLOCKED_READ_CONTAINER" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
-	--mount "type=bind,src=$BLOCKED_DATA_DIR,dst=/data" \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$BLOCKED_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
+	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
 	fail "could not start the blocked-read container"
 fi
 BLOCKED_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)"
@@ -552,9 +546,8 @@ printf 'docker smoke: blocked-read shutdown completed without a daemon-owned unm
 # until the peer goes away. Needs rootful Docker, /dev/fuse, SYS_ADMIN, and bind
 # propagation, so it runs here and not in the CI gate.
 printf 'docker smoke: starting peer mount namespace shutdown scenario\n'
-PEER_DATA_DIR="$TMP_DIR/peer-data"
 PEER_MOUNT_DIR="$TMP_DIR/peer-mnt"
-mkdir -p "$PEER_DATA_DIR" "$PEER_MOUNT_DIR"
+mkdir -p "$PEER_MOUNT_DIR"
 # The peer daemon is fed by the web seed so a read cannot block on a missing
 # piece; the outstanding-request cause belongs to the blocked-read scenario,
 # not this one.
@@ -564,10 +557,9 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker ru
 	--security-opt apparmor=unconfined \
 	--network host \
 	--env TORRENTFS_HTTP_LISTEN_ADDR= \
-	--mount "type=bind,src=$PEER_DATA_DIR,dst=/data" \
 	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents >/dev/null; then
+	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
 	fail "could not start the peer-namespace container"
 fi
 PEER_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
@@ -660,10 +652,9 @@ if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
-	--mount "type=bind,src=$NEGATIVE_DATA_DIR,dst=/data" \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/example.torrent 2>&1)"; then
+	"$IMAGE" -mountpoint /mnt /torrents/example.torrent 2>&1)"; then
 	NEGATIVE_STATUS=0
 else
 	NEGATIVE_STATUS=$?
@@ -684,10 +675,9 @@ if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
-	--mount "type=bind,src=$NEGATIVE_DATA_DIR,dst=/data" \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt -data-dir /data /torrents/missing 2>&1)"; then
+	"$IMAGE" -mountpoint /mnt /torrents/missing 2>&1)"; then
 	NEGATIVE_STATUS=0
 else
 	NEGATIVE_STATUS=$?
