@@ -554,6 +554,27 @@ around its `when` field, which upstream still reads unsynchronized. Without it
 status observation point. The replace directive is temporary: drop it once
 anacrolix/torrent publishes a release containing both.
 
+## Known upstream issues
+
+`github.com/anacrolix/torrent` v1.61.0 — and therefore the pinned
+`v1.61.0-bep27.1` fork below — can panic inside `PeerConn.servePeerRequest`:
+
+```
+peerconn.go:766: panic: assertion failed: MapContains(c.unreadPeerRequests, r)
+```
+
+`peerRequestDataReadFailed` returns early when the torrent is already closed,
+before removing the request from `unreadPeerRequests` and before `useBestReject`
+runs, so the deferred invariant check in `servePeerRequest` fires. The window is
+a peer request whose data read fails while its torrent is being closed or
+dropped. This is a code-level root cause read from the upstream source, not a
+reproduced failure.
+
+torrentfs does not work around this. The `replace` directive above pins the fork
+to an exact release plus three named hunks, so adding a hunk for an unrelated
+upstream defect would change what that pin means. The fix belongs in
+`anacrolix/torrent`.
+
 ## Error behavior
 
 Reads never fabricate data. When the pieces behind a range are unavailable, a

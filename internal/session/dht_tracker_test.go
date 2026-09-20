@@ -67,6 +67,15 @@ func TestDHTQueryKeepsSocketAddressFamily(t *testing.T) {
 	}
 }
 
+// dhtTestQueryWindow is the resend delay the success case's querier uses.
+// dht.Server gives up after roughly NumTries x QueryResendDelay, and the shared
+// 1ms exists so the silent-target case below fails fast inside its 1s context —
+// the success case used to share it and was left with a 3ms window, which is
+// occasionally too short under race instrumentation. A successful query returns
+// on its first reply, so this window is only spent when the round trip really
+// does fail.
+const dhtTestQueryWindow = 200 * time.Millisecond
+
 // TestDHTQuerySucceedsWithinIPv6Loopback fills the gap left by the family test
 // above: it only ever exercised the udp6 failure path, so nothing proved that a
 // udp6 socket can actually complete a query against a udp6 peer.
@@ -83,7 +92,7 @@ func TestDHTQuerySucceedsWithinIPv6Loopback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = targetConn.Close() })
 
-	querier := newTestDHTServer(t, querierConn)
+	querier := newTestDHTServerWithResendDelay(t, querierConn, dhtTestQueryWindow)
 	target := newTestDHTServer(t, targetConn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -95,8 +104,13 @@ func TestDHTQuerySucceedsWithinIPv6Loopback(t *testing.T) {
 	if result.Err != nil {
 		t.Fatalf("udp6 ping to ::1: %v", result.Err)
 	}
-	if result.Writes != 1 {
-		t.Fatalf("udp6 ping writes = %d, want 1", result.Writes)
+	// Writes counts datagrams actually sent, and a resend is legal: the give-up
+	// window is NumTries x QueryResendDelay (here 3 x 200ms), so a reply that
+	// was not processed before the next resend still makes Writes 2 without
+	// anything being wrong. "Completed a round trip on udp6" is asserted by
+	// Err == nil above; "sent at least one datagram on udp6" is asserted here.
+	if result.Writes < 1 {
+		t.Fatalf("udp6 ping writes = %d, want at least 1", result.Writes)
 	}
 }
 
@@ -227,12 +241,21 @@ func dhtServerFamily(addr net.Addr) string {
 
 func newTestDHTServer(t *testing.T, conn net.PacketConn) *dht.Server {
 	t.Helper()
+	return newTestDHTServerWithResendDelay(t, conn, time.Millisecond)
+}
+
+// newTestDHTServerWithResendDelay builds a test DHT server with the caller's
+// resend delay. dht.Server gives up on a query after roughly
+// NumTries x QueryResendDelay, so this parameter is that query's effective
+// response window.
+func newTestDHTServerWithResendDelay(t *testing.T, conn net.PacketConn, resendDelay time.Duration) *dht.Server {
+	t.Helper()
 	server, err := dht.NewServer(&dht.ServerConfig{
 		Conn:        conn,
 		NoSecurity:  true,
 		SendLimiter: rate.NewLimiter(rate.Inf, 1),
 		QueryResendDelay: func() time.Duration {
-			return time.Millisecond
+			return resendDelay
 		},
 	})
 	if err != nil {
