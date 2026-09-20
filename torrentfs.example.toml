@@ -84,3 +84,9 @@ level = "info"
 format = "text"
 # Include the source file and line for each record.
 add_source = false
+
+[mount]
+# Keep access limited to the mounting UID/GID. Set true only when every local
+# UID should be able to read the mounted data; non-root mounts also require
+# user_allow_other in /etc/fuse.conf.
+allow_other = false

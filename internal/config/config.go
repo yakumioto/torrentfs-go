@@ -94,6 +94,7 @@ type Config struct {
 	Identity    Identity    `toml:"identity"`
 	HTTP        HTTP        `toml:"http"`
 	Log         Log         `toml:"log"`
+	Mount       Mount       `toml:"mount"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -112,6 +113,14 @@ type Log struct {
 	Level     string `toml:"level"`
 	Format    string `toml:"format"`
 	AddSource bool   `toml:"add_source"`
+}
+
+// Mount groups FUSE mount behaviour that is not derived from the process identity.
+type Mount struct {
+	// AllowOther passes allow_other to the kernel, lifting FUSE's default
+	// restriction that only the mounting user may access the mount.
+	// It defaults to false.
+	AllowOther bool `toml:"allow_other"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -188,8 +197,8 @@ type Identity struct {
 }
 
 // Default returns the default configuration: an ephemeral listen port, an
-// empty proxy, qBittorrent 4.4.0 identity values, and a 2 GiB in-memory piece
-// cache sized for a host with about 4 GB of RAM.
+// empty proxy, qBittorrent 4.4.0 identity values, owner-only FUSE access, and
+// a 2 GiB in-memory piece cache sized for a host with about 4 GB of RAM.
 func Default() Config {
 	return Config{
 		Connections: Connections{
@@ -215,6 +224,9 @@ func Default() Config {
 		Log: Log{
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
+		},
+		Mount: Mount{
+			AllowOther: false,
 		},
 	}
 }

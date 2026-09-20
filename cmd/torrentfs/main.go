@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
@@ -118,6 +119,9 @@ func run(args []string, stderr io.Writer) int {
 		"mountpoint", *mountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,
+		"mount_uid", os.Getuid(),
+		"mount_gid", os.Getgid(),
+		"mount_allow_other", cfg.Mount.AllowOther,
 		"log_level", logLevel,
 		"log_format", logFormat,
 	)
@@ -154,7 +158,12 @@ func run(args []string, stderr io.Writer) int {
 
 	var server *fuse.Server
 	if *mountpoint != "" {
-		server, err = filesystem.Mount(*mountpoint, sess, nil)
+		mountOpts := &fs.Options{
+			UID: uint32(os.Getuid()),
+			GID: uint32(os.Getgid()),
+		}
+		mountOpts.MountOptions.AllowOther = cfg.Mount.AllowOther
+		server, err = filesystem.Mount(*mountpoint, sess, mountOpts)
 		if err != nil {
 			logger.Error("fuse mount failed", "mountpoint", *mountpoint, "err", err)
 			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)

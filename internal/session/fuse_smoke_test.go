@@ -112,7 +112,10 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	seedPieces(t, sess, hash, content)
 	waitCached(t, ctx, st)
 
-	server, err := filesystem.Mount(mnt, sess, nil)
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
@@ -129,6 +132,13 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	}
 	if !info.Mode().IsRegular() {
 		t.Fatalf("%s mode = %v, want a regular file", path, info.Mode())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("%s stat type = %T, want *syscall.Stat_t", path, info.Sys())
+	}
+	if stat.Uid != uint32(os.Getuid()) || stat.Gid != uint32(os.Getgid()) {
+		t.Fatalf("%s ownership = %d:%d, want %d:%d", path, stat.Uid, stat.Gid, os.Getuid(), os.Getgid())
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {

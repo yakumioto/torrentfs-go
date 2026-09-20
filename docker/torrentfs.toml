@@ -40,3 +40,8 @@ extended_handshake_client_version = "qBittorrent/4.4.0"
 level = "info"
 format = "text"
 add_source = false
+
+[mount]
+# Non-root deployments should leave this false unless /etc/fuse.conf contains
+# user_allow_other and the wider read access is intentional.
+allow_other = false

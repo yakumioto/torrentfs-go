@@ -90,12 +90,3 @@ func Mount(mnt string, backend Backend, opts *fs.Options) (*fuse.Server, error) 
 	root := &rootNode{state: newFSState(backend)}
 	return fs.Mount(mnt, root, opts)
 }
-
-func hasMountOption(opts *fs.Options, want string) bool {
-	for _, o := range opts.MountOptions.Options {
-		if o == want {
-			return true
-		}
-	}
-	return false
-}

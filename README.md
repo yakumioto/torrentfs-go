@@ -322,6 +322,10 @@ extended_handshake_client_version = "qBittorrent/4.4.0"
 level = "info"
 format = "text"
 add_source = false
+
+[mount]
+# Only the mounting UID/GID can access the FUSE data by default.
+allow_other = false
 ```
 
 Each leaf TOML key has a matching environment variable. Only the exact names
@@ -350,6 +354,7 @@ below are read; unrelated `TORRENTFS_*` variables are ignored.
 | `log.level` | `TORRENTFS_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` or `json` |
 | `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | Go boolean |
+| `mount.allow_other` | `TORRENTFS_MOUNT_ALLOW_OTHER` | Go boolean |
 
 Values are merged per field with this precedence: environment variable > TOML
 file > built-in default. An environment variable that is present but empty
@@ -798,10 +803,13 @@ under this source subtree can affect the host, and host changes can enter the
 container. Together with a rootful container and `SYS_ADMIN`, this expands the
 mount authority boundary; use it only for trusted containers.
 
-The FUSE mount keeps the default owner-only access (`AllowOther=false`), so
-other host users may receive `EACCES` rather than see the mounted data. This is
-intentional and does not grant arbitrary host-user access; enabling `allow_other`
-requires a separate security decision and FUSE configuration.
+The FUSE mount keeps the default owner-only access (`mount.allow_other = false`), so
+other host users, including root, may receive `EACCES` rather than see the mounted
+data. The setting is an explicit opt-in: `mount.allow_other = true` (or
+`TORRENTFS_MOUNT_ALLOW_OTHER=true`) lets every local UID read the mounted data,
+including root, without changing the filesystem's read-only behavior. A non-root
+mount also requires `user_allow_other` in `/etc/fuse.conf`; the image leaves that
+line disabled by default.
 
 ### Shutdown, outstanding reads, and `Device or resource busy`
 
@@ -878,16 +886,67 @@ also stored under `/srv/torrents/.metadata`, and `/srv/mnt` must be an empty
 mountpoint on that shared host mount.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
-mount capability. The image installs `fuse3` and mount helpers and runs
-rootful, but it cannot grant itself either of those: `--device /dev/fuse` and a
-capability such as `SYS_ADMIN` (or an equivalent privileged configuration) are
-required, and some hosts also need `--security-opt apparmor=unconfined`. A
-container started without them fails to mount; it does not silently fall back.
-Treat the container as privileged: it can mount a filesystem on behalf of
-whoever runs it, so do not expose it to untrusted callers.
+mount capability. The image installs `fuse3` and mount helpers and does not
+force a process identity: the default entrypoint runs as root, while the
+`--user` procedure above runs as the matching host user. The image cannot grant
+itself the host permissions: `--device /dev/fuse` and a capability such as
+`SYS_ADMIN` (or an equivalent privileged configuration) are required, and some
+hosts also need `--security-opt apparmor=unconfined`. A container started
+without them fails to mount; it does not silently fall back. Treat the
+container as privileged: it can mount a filesystem on behalf of whoever runs
+it, so do not expose it to untrusted callers.
 
 The CI FUSE job (`TORRENTFS_FUSE_REQUIRED=1`) needs the same capability on its
 runner; a runner without it fails the job by design.
+
+### Running the FUSE mount as a host user
+
+The image intentionally has no `USER` instruction, so its default remains
+root-compatible. To run the daemon as a host user, build the image with a
+matching passwd/group entry and pass the same numeric IDs at runtime:
+
+```sh
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+docker build \
+  --build-arg TORRENTFS_UID="$HOST_UID" \
+  --build-arg TORRENTFS_GID="$HOST_GID" \
+  -t torrentfs .
+
+mkdir -p /srv/torrents /srv/mnt
+# Run this as an administrator if the directories are not already yours.
+chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
+
+docker run --detach --name torrentfs \
+  --user "$HOST_UID:$HOST_GID" \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
+  --env TORRENTFS_HTTP_LISTEN_ADDR= \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
+  torrentfs -mountpoint /mnt /torrents
+```
+
+The build arguments matter: `fusermount3` must resolve the runtime UID inside
+`/etc/passwd`, and a custom UID/GID requires rebuilding with matching arguments.
+Both bind sources must be writable by that user: `/torrents` stores `.metadata`,
+and `/mnt` must be writable so FUSE can create its submount. Keep the host mount
+shared as shown above. The host must provide `/dev/fuse`, `SYS_ADMIN`, and, on
+AppArmor hosts, permission for `apparmor=unconfined`; if `/dev/fuse` is
+`0660 root:fuse`, also add the host fuse group with `--group-add`.
+
+Verify the runtime identity and propagated ownership from the host:
+
+```sh
+docker exec torrentfs id
+findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
+ls -ln /srv/mnt
+stat -c '%u:%g %a %n' /srv/mnt/<file>  # HOST_UID:HOST_GID 444 /srv/mnt/<file>
+cat /srv/mnt/<file>                    # direct read as HOST_UID, no sudo
+docker stop torrentfs
+findmnt -T /srv/mnt                    # no FUSE mount should remain
+```
 
 ## License
 

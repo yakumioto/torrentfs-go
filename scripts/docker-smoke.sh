@@ -24,6 +24,8 @@ readonly HOST_OBSERVER_CONTAINER="torrentfs-mio17-host-observer-${BASHPID}"
 readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
+readonly HOST_UID="$(id -u)"
+readonly HOST_GID="$(id -g)"
 
 # Every Docker call is bounded: a wedged daemon or an unmount that waits forever
 # must fail the smoke instead of hanging it. The positive scenario's bound is
@@ -216,6 +218,7 @@ trap 'exit 130' INT TERM
 for command_name in docker findmnt sha256sum timeout python3; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
+(( HOST_UID != 0 )) || fail "docker smoke must run as a non-root host user to exercise UID/GID ownership"
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
 probe "docker info" docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 [[ -f "$FIXTURE_TORRENT" ]] || fail "fixture is missing: $FIXTURE_TORRENT"
@@ -268,12 +271,26 @@ printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
 printf 'docker smoke: building %s\n' "$IMAGE"
 IMAGE_TAGGED=1
-if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build --tag "$IMAGE" "$ROOT_DIR"; then
+if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build \
+	--build-arg "TORRENTFS_UID=$HOST_UID" \
+	--build-arg "TORRENTFS_GID=$HOST_GID" \
+	--tag "$IMAGE" "$ROOT_DIR"; then
 	fail "docker build failed"
 fi
 
-printf 'docker smoke: starting real FUSE mount\n'
-if ! bounded "$DOCKER_OP_TIMEOUT" "start the FUSE container" docker run --detach --name "$CONTAINER" \
+printf 'docker smoke: starting same-user host mount observer before FUSE\n'
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the same-user host mount observer" docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
+	--user "$HOST_UID:$HOST_GID" \
+	--entrypoint /bin/sh \
+	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/host-mnt,bind-propagation=rslave" \
+	"$IMAGE" -c 'sleep 300' >/dev/null; then
+	fail "could not start the host mount observer"
+fi
+HOST_OBSERVER_STARTED=1
+
+printf 'docker smoke: starting non-root real FUSE mount (uid=%s gid=%s)\n' "$HOST_UID" "$HOST_GID"
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the non-root FUSE container" docker run --detach --name "$CONTAINER" \
+	--user "$HOST_UID:$HOST_GID" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -290,13 +307,15 @@ MNT_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{rang
 	fail "container /mnt mount propagation is ${MNT_PROPAGATION:-unknown}, expected rshared"
 printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
 
-if ! bounded "$DOCKER_OP_TIMEOUT" "start the host mount observer" docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
-	--entrypoint /bin/sh \
-	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/host-mnt,bind-propagation=rslave" \
-	"$IMAGE" -c 'sleep 300' >/dev/null; then
-	fail "could not start the host mount observer"
-fi
-HOST_OBSERVER_STARTED=1
+CONTAINER_UID="$(probe "read FUSE container UID" docker exec "$CONTAINER" id -u)" || \
+	fail "could not read the FUSE container UID"
+CONTAINER_GID="$(probe "read FUSE container GID" docker exec "$CONTAINER" id -g)" || \
+	fail "could not read the FUSE container GID"
+[[ "$CONTAINER_UID" == "$HOST_UID" ]] || \
+	fail "FUSE container UID is $CONTAINER_UID, expected $HOST_UID"
+[[ "$CONTAINER_GID" == "$HOST_GID" ]] || \
+	fail "FUSE container GID is $CONTAINER_GID, expected $HOST_GID"
+printf 'docker smoke: container identity verified (%s:%s)\n' "$CONTAINER_UID" "$CONTAINER_GID"
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do
@@ -330,7 +349,18 @@ HOST_ACTUAL_HASH="$(probe "read the fixture through the propagated host mount" d
 HOST_ACTUAL_HASH="${HOST_ACTUAL_HASH%% *}"
 [[ "$HOST_ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
 	fail "host mounted payload hash $HOST_ACTUAL_HASH does not match fixture hash $EXPECTED_HASH"
-printf 'docker smoke: mounted payload verified in container and host (%s)\n' "$ACTUAL_HASH"
+HOST_DIRECT_HASH="$(sha256sum "$MOUNT_HOST_DIR/payload.txt")" || \
+	fail "host UID $HOST_UID could not read the propagated payload directly"
+HOST_DIRECT_HASH="${HOST_DIRECT_HASH%% *}"
+[[ "$HOST_DIRECT_HASH" == "$EXPECTED_HASH" ]] || \
+	fail "direct host payload hash $HOST_DIRECT_HASH does not match fixture hash $EXPECTED_HASH"
+HOST_STAT="$(stat -c '%u:%g %a %n' "$MOUNT_HOST_DIR/payload.txt")" || \
+	fail "could not stat the propagated payload"
+EXPECTED_STAT="$HOST_UID:$HOST_GID 444 $MOUNT_HOST_DIR/payload.txt"
+[[ "$HOST_STAT" == "$EXPECTED_STAT" ]] || \
+	fail "mounted payload stat is '$HOST_STAT', expected '$EXPECTED_STAT'"
+printf 'docker smoke: mounted payload verified in container and host (%s), ownership %s:%s mode 444\n' \
+	"$ACTUAL_HASH" "$HOST_UID" "$HOST_GID"
 
 # The mount exposes torrent data only: the former control directories must be
 # absent, and the legacy .stats directory must be untouched.

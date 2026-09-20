@@ -81,6 +81,18 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
+		name:  "TORRENTFS_MOUNT_ALLOW_OTHER",
+		field: "mount.allow_other",
+		apply: func(cfg *Config, raw string) error {
+			value, err := parseEnvBool(raw)
+			if err != nil {
+				return err
+			}
+			cfg.Mount.AllowOther = value
+			return nil
+		},
+	},
+	{
 		name:  "TORRENTFS_PROXY_SOCKS5_URL",
 		field: "proxy.socks5_url",
 		apply: func(cfg *Config, raw string) error {

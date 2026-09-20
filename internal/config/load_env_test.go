@@ -29,6 +29,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
 		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
 		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
+		"TORRENTFS_MOUNT_ALLOW_OTHER":                          "true",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
 		"TORRENTFS_CACHE_CAPACITY_BYTES":                       "123456",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "torrentfs-test/1.0",
@@ -64,6 +65,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if !reflect.DeepEqual(got.Connections, wantConnections) {
 		t.Fatalf("connections = %+v, want %+v", got.Connections, wantConnections)
 	}
+	if !got.Mount.AllowOther {
+		t.Fatal("mount.allow_other = false, want true")
+	}
 	if got.Proxy.Socks5URL != "socks5h://proxy.example:1080" {
 		t.Fatalf("proxy = %+v", got.Proxy)
 	}
@@ -96,8 +100,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 21 {
-		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
+	if len(environmentBindings) != 22 {
+		t.Fatalf("environment binding count = %d, want 22", len(environmentBindings))
 	}
 	for name := range values {
 		if name == "TORRENTFS_FUSE_REQUIRED" {
@@ -201,6 +205,7 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY_BYTES", raw: "not-a-capacity", field: "cache.capacity_bytes"},
 		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_BYTES", raw: "not-a-limit", field: "http.max_upload_bytes"},
 		{name: "bool", env: "TORRENTFS_HTTP_AUTH_ENABLED", raw: "not-a-bool", field: "http.auth.enabled"},
+		{name: "mount bool", env: "TORRENTFS_MOUNT_ALLOW_OTHER", raw: "not-a-bool", field: "mount.allow_other"},
 		{name: "duration", env: "TORRENTFS_HTTP_AUTH_TOKEN_TTL", raw: "not-a-duration", field: "http.auth.token_ttl"},
 	}
 	for _, tt := range tests {
