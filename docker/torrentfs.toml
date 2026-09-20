@@ -17,7 +17,14 @@ token_ttl = "30m"
 
 [connections]
 listen_host = ""
-listen_port = 0
+# A fixed peer port so it can be published with -p 6881:6881/tcp -p 6881:6881/udp.
+# Inbound peers are unreachable from a bridge network without that mapping.
+listen_port = 6881
+# Image default: no IPv6 in the container network.
+disable_ipv6 = true
+# No automatic UPnP/NAT-PMP mapping; publish the port yourself when needed.
+no_port_forwarding = true
+bootstrap_nodes = []
 
 [proxy]
 socks5_url = ""

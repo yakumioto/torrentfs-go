@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ func TestLoadWithoutPathUsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config = %+v, want defaults %+v", got, want)
 	}
 }
@@ -26,6 +27,10 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_PATHS_DATA_DIR":                             dataDir,
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST":                    "127.0.0.1",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT":                    "12345",
+		"TORRENTFS_CONNECTIONS_DISABLE_IPV4":                   "true",
+		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
+		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
+		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
 		"TORRENTFS_CACHE_CAPACITY_BYTES":                       "123456",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "torrentfs-test/1.0",
@@ -53,6 +58,16 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	}
 	if got.Connections.ListenHost != "127.0.0.1" || got.Connections.ListenPort != 12345 {
 		t.Fatalf("connections = %+v", got.Connections)
+	}
+	wantConnections := Connections{
+		ListenHost:       "127.0.0.1",
+		ListenPort:       12345,
+		DisableIPv4:      true,
+		NoPortForwarding: false,
+		BootstrapNodes:   []string{"router.example:6881"},
+	}
+	if !reflect.DeepEqual(got.Connections, wantConnections) {
+		t.Fatalf("connections = %+v, want %+v", got.Connections, wantConnections)
 	}
 	if got.Proxy.Socks5URL != "socks5h://proxy.example:1080" {
 		t.Fatalf("proxy = %+v", got.Proxy)
@@ -86,8 +101,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 18 {
-		t.Fatalf("environment binding count = %d, want 18", len(environmentBindings))
+	if len(environmentBindings) != 22 {
+		t.Fatalf("environment binding count = %d, want 22", len(environmentBindings))
 	}
 	for name := range values {
 		if name == "TORRENTFS_FUSE_REQUIRED" {

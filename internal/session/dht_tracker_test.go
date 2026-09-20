@@ -67,6 +67,39 @@ func TestDHTQueryKeepsSocketAddressFamily(t *testing.T) {
 	}
 }
 
+// TestDHTQuerySucceedsWithinIPv6Loopback fills the gap left by the family test
+// above: it only ever exercised the udp6 failure path, so nothing proved that a
+// udp6 socket can actually complete a query against a udp6 peer.
+func TestDHTQuerySucceedsWithinIPv6Loopback(t *testing.T) {
+	querierConn, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback is unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = querierConn.Close() })
+
+	targetConn, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Fatalf("listen IPv6 target: %v", err)
+	}
+	t.Cleanup(func() { _ = targetConn.Close() })
+
+	querier := newTestDHTServer(t, querierConn)
+	target := newTestDHTServer(t, targetConn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := querier.Query(ctx, dht.NewAddr(target.Addr()), "ping", dht.QueryInput{
+		NumTries:     3,
+		RateLimiting: dht.QueryRateLimiting{NoWaitFirst: true},
+	})
+	if result.Err != nil {
+		t.Fatalf("udp6 ping to ::1: %v", result.Err)
+	}
+	if result.Writes != 1 {
+		t.Fatalf("udp6 ping writes = %d, want 1", result.Writes)
+	}
+}
+
 func TestTorrentClientDHTServersFollowAddressFamilyFlags(t *testing.T) {
 	probe, err := net.ListenPacket("udp6", "[::1]:0")
 	if err != nil {

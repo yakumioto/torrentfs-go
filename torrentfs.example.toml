@@ -47,8 +47,22 @@ token_ttl = "30m"
 [connections]
 # Empty listens on all suitable local interfaces.
 listen_host = ""
-# 0 selects an available port.
+# 0 selects an available port. It is reported at startup as
+# effective_listen_port and is what the tracker announce carries. To accept
+# inbound peers, set a fixed port and publish it for both TCP and UDP.
 listen_port = 0
+# Disable one address family for listeners, dialers, and DHT. Disabling both is
+# rejected at startup.
+disable_ipv4 = false
+disable_ipv6 = false
+# UPnP/NAT-PMP port mapping. Left off so a host with no UPnP device behaves the
+# same as one with a device and no mapping rule. Outbound connections do not
+# need it.
+no_port_forwarding = true
+# Replaces the built-in DHT bootstrap hosts. Entries are host:port and are
+# resolved per address family; empty uses the built-in list. Useful when the
+# default resolver returns no address of the family a socket needs.
+bootstrap_nodes = []
 
 [proxy]
 # Empty disables SOCKS5. Use socks5:// or socks5h://, optionally with auth.

@@ -252,9 +252,11 @@ inactivity window.
   .metadata/<info-hash>.torrent      # managed metainfo published by the API
   .metadata/<info-hash>.magnet       # durable intent for an unresolved magnet
   .metadata/<legacy-name>.torrent    # legacy managed source, restored but never rewritten
+  .metadata/instance.lock            # single-instance lock, held while the process runs
   .stats/                            # legacy empty directory: ignored, never created, never removed
 
 <data-dir>/
+  peer_id                            # durable 20-byte peer ID, written once on first start
   state/<info-hash>.json             # interrupted-deletion sidecars only, no piece state
 ```
 
@@ -305,6 +307,15 @@ token_ttl = "30m"
 [connections]
 listen_host = ""
 listen_port = 0
+# Turn off one peer address family. Disabling both is rejected at startup.
+disable_ipv4 = false
+disable_ipv6 = false
+# UPnP/NAT-PMP port mapping. Off by default: a deployment that has no UPnP
+# device then behaves the same as one that has a device but no mapping rule.
+no_port_forwarding = true
+# Replaces the built-in DHT bootstrap hosts. Each entry is a host:port that is
+# resolved per address family; empty uses the built-in list.
+bootstrap_nodes = []
 
 [proxy]
 socks5_url = ""
@@ -331,6 +342,10 @@ below are read; unrelated `TORRENTFS_*` variables are ignored.
 | `paths.data_dir` | `TORRENTFS_PATHS_DATA_DIR` | string |
 | `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | string |
 | `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | decimal integer |
+| `connections.disable_ipv4` | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | Go boolean |
+| `connections.disable_ipv6` | `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | Go boolean |
+| `connections.no_port_forwarding` | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | Go boolean |
+| `connections.bootstrap_nodes` | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | comma-separated `host:port` list |
 | `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | string |
 | `cache.capacity_bytes` | `TORRENTFS_CACHE_CAPACITY_BYTES` | decimal integer |
 | `identity.tracker_user_agent` | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | string |
@@ -429,12 +444,73 @@ extended-handshake `v` value are `qBittorrent/4.4.0`, and `peer_id_prefix` is
 `-qB4400-`. `[identity].tracker_user_agent` changes only the `User-Agent`
 header on HTTP tracker announce requests; it does not change metainfo, webseed,
 or scrape requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is
-limited to 20 bytes, and any remaining bytes are generated randomly for each
-session. A 20-byte prefix leaves no random suffix. The generated peer ID is
-used for BitTorrent handshakes and announces. Explicit TOML values override
-the defaults; explicitly setting an identity value to an empty string delegates
-that field to the anacrolix default. `v` is sent only when the peer supports the
-extended handshake.
+limited to 20 bytes, and the remaining bytes are generated randomly. A 20-byte
+prefix leaves no random suffix. The complete 20-byte peer ID is written once to
+`<data-dir>/peer_id` on first start and reused on every later start, so a
+private tracker sees one stable peer instead of a new one after each restart.
+Deleting that file — or changing `peer_id_prefix` so the stored ID no longer
+matches, which logs a warning — generates and stores a new identity. A
+`peer_id` file whose length is not exactly 20 bytes fails startup instead of
+being silently regenerated. The peer ID is used for BitTorrent handshakes and
+announces. Explicit TOML values override the defaults; explicitly setting an
+identity value to an empty string delegates that field to the anacrolix
+default. `v` is sent only when the peer supports the extended handshake.
+
+## Peer ports, NAT, and single-instance operation
+
+Inbound peer connections need a reachable port. With `listen_port = 0` the
+client picks a free port at startup, and that port is what the tracker announce
+carries. The `session ready` record reports it as `effective_listen_port`,
+alongside the configured `listen_port` (which keeps its original meaning, the
+raw configuration value) and the `listen_addrs` actually bound. Note that with a
+dynamic port each listener may end up on a different port; `effective_listen_port`
+is the port the client reports to peers. To accept inbound peers, set a fixed
+`listen_port` and publish the same port for TCP and UDP — with Docker,
+`-p 6881:6881/tcp -p 6881:6881/udp`. A dynamic port cannot be published in
+advance, and a bridge-network container is not reachable from the swarm without
+that mapping.
+
+`no_port_forwarding` defaults to `true`, so torrentfs never asks UPnP or
+NAT-PMP for a mapping: a host with no UPnP device behaves exactly like one that
+has a device but no mapping rule. Outbound connections work either way; only
+inbound reachability depends on the mapping.
+
+`disable_ipv4` and `disable_ipv6` turn off an address family for listeners,
+dialers, and DHT server sockets together. Only one family may be disabled;
+disabling both leaves no transport and is rejected at startup. Disabling the
+family whose DHT bootstrap hosts carry no usable address is the usual way to
+stop the repeated bootstrap attempts described below.
+
+`bootstrap_nodes` replaces the built-in DHT bootstrap hosts with explicit
+`host:port` entries, resolved per address family on each attempt. Use it when
+the default resolver's answers carry no address of a family a socket needs, or
+when only a specific bootstrap host is reachable.
+
+Diagnostics: `GET /api/v1/torrents/{id}/status` reports a `network` object with
+`effective_listen_port`, the torrent's `total_peers`, `pending_peers`,
+`active_peers`, `connected_seeders`, and `piece_complete`, plus one DHT entry
+per address family (`nodes`, `good_nodes`, `resolved`, `kept`, `ready`). Every
+field is additive: `metainfo_ready` still means only that the metainfo is
+loaded, never that peers exist. An empty tracker peer list is a successful
+announce and is honoured for the tracker's interval, so no immediate retry is
+issued. A DHT family that cannot be bootstrapped is logged once per state
+change as `dht starting nodes unavailable` with a status name such as
+`dht_udp6_unavailable`, instead of once per routing-table refresh. The upstream
+record that repeats every refresh (`error bootstrapping during bucket refresh`)
+is demoted to `debug`, so it is not emitted at the default level; set
+`level = "debug"` to see it.
+
+`listen_host` is applied to every listener and dialer, not per address family.
+A literal IPv4 address such as `127.0.0.1` therefore fails the IPv6 listener
+(`listen tcp6: no suitable address found`) on a dual-stack build, which aborts
+startup. Leave `listen_host` empty to bind both families, or disable the family
+you are not binding with `disable_ipv4` / `disable_ipv6`.
+
+One torrents directory is managed by one process at a time: the session holds
+an exclusive lock on `<torrents-dir>/.metadata/instance.lock`, and a second
+instance pointed at the same directory fails to start with an actionable error.
+The lock is released when the process exits; it does not cover two machines
+sharing one tracker account with different torrents directories.
 
 ## Error behavior
 
@@ -555,8 +631,23 @@ docker run --rm \
 ```
 
 The image default listener remains loopback-only, and `-p` does not change what
-the daemon listens on. Put an exposed deployment behind TLS at the edge. An
-external TOML file remains supported when a deployment wants file-based
+the daemon listens on. Put an exposed deployment behind TLS at the edge.
+
+The image sets a fixed peer port (`listen_port = 6881`). Publish it for TCP and
+UDP to accept inbound peers; without the mapping the container still downloads
+from outbound connections but cannot be dialed:
+
+```sh
+docker run --rm \
+  -p 8080:8080 \
+  -p 6881:6881/tcp \
+  -p 6881:6881/udp \
+  -v /srv/torrentfs-data:/data \
+  -v /srv/torrents:/torrents \
+  torrentfs
+```
+
+An external TOML file remains supported when a deployment wants file-based
 configuration:
 
 ```sh

@@ -32,6 +32,9 @@ type loopbackTracker struct {
 type trackerAnnounce struct {
 	UserAgent string
 	PeerID    []byte
+	Port      int
+	Key       string
+	Event     string
 }
 
 type trackerAnnounceResponse struct {
@@ -76,6 +79,9 @@ func (tr *loopbackTracker) announceSnapshot(hash string) []trackerAnnounce {
 		out[i] = trackerAnnounce{
 			UserAgent: announce.UserAgent,
 			PeerID:    append([]byte(nil), announce.PeerID...),
+			Port:      announce.Port,
+			Key:       announce.Key,
+			Event:     announce.Event,
 		}
 	}
 	return out
@@ -101,9 +107,17 @@ func (tr *loopbackTracker) handleAnnounce(w http.ResponseWriter, r *http.Request
 	}
 	addr := net.JoinHostPort(host, port)
 	stopped := query.Get("event") == "stopped"
+	announcePort, err := strconv.Atoi(port)
+	if err != nil {
+		http.Error(w, "bad port", http.StatusBadRequest)
+		return
+	}
 	announce := trackerAnnounce{
 		UserAgent: r.UserAgent(),
 		PeerID:    append([]byte(nil), query.Get("peer_id")...),
+		Port:      announcePort,
+		Key:       query.Get("key"),
+		Event:     query.Get("event"),
 	}
 
 	tr.mu.Lock()

@@ -30,6 +30,8 @@ var (
 	errTrackerUserAgent     = errors.New("must not contain carriage return or line feed")
 	errListenAddr           = errors.New("must be a host:port address")
 	errPositive             = errors.New("must be positive")
+	errAddressFamilies      = errors.New("must not disable IPv4 and IPv6 at the same time")
+	errBootstrapNode        = errors.New("must be a host:port address with a port between 1 and 65535")
 	errAuthUsernameRequired = errors.New("must not be empty when authentication is enabled")
 	errAuthUsernameControl  = errors.New("must not contain control characters")
 	errAuthHashRequired     = errors.New("exactly one password hash source is required when authentication is enabled")
@@ -159,6 +161,20 @@ type Connections struct {
 	// ListenPort is the TCP/UDP port for incoming peer connections.
 	// 0 selects a random free port.
 	ListenPort int `toml:"listen_port"`
+	// DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
+	DisableIPv4 bool `toml:"disable_ipv4"`
+	// DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
+	// Only one family may be disabled: disabling both leaves no transport.
+	DisableIPv6 bool `toml:"disable_ipv6"`
+	// NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true
+	// so a deployment with no UPnP device behaves the same as one that has a
+	// device but no mapping rule.
+	NoPortForwarding bool `toml:"no_port_forwarding"`
+	// BootstrapNodes overrides the default DHT bootstrap hosts with explicit
+	// host:port entries. Entries are resolved per address family and filtered
+	// to the family of the socket that asks for them. Empty uses the
+	// client's built-in bootstrap list.
+	BootstrapNodes []string `toml:"bootstrap_nodes"`
 }
 
 // Proxy groups optional outbound proxy settings.
@@ -197,8 +213,9 @@ func Default() Config {
 			DataDir: filepath.Join(base, "torrentfs"),
 		},
 		Connections: Connections{
-			ListenHost: "",
-			ListenPort: 0,
+			ListenHost:       "",
+			ListenPort:       0,
+			NoPortForwarding: true,
 		},
 		Cache: Cache{
 			CapacityBytes: defaultCacheCapacityBytes,
@@ -229,6 +246,14 @@ func (c Config) Validate() error {
 	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
+	}
+	if c.Connections.DisableIPv4 && c.Connections.DisableIPv6 {
+		return invalid("connections.disable_ipv4", errAddressFamilies)
+	}
+	for _, node := range c.Connections.BootstrapNodes {
+		if err := validateBootstrapNode(node); err != nil {
+			return invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err))
+		}
 	}
 	if c.Cache.CapacityBytes <= 0 {
 		return invalid("cache.capacity_bytes", errCapacityRange)
@@ -312,6 +337,21 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// validateBootstrapNode checks one DHT bootstrap entry. Port 0 is rejected
+// because a bootstrap host offering port 0 is a configuration mistake the
+// resolver would otherwise turn into a silent no-op.
+func validateBootstrapNode(raw string) error {
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil || host == "" {
+		return errBootstrapNode
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return errBootstrapNode
+	}
+	return nil
 }
 
 func validateProxyURL(raw string) error {
