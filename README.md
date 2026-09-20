@@ -546,10 +546,13 @@ Two further notes:
 
 Support comes from a pinned fork of `github.com/anacrolix/torrent`: release
 v1.61.0 has the `private` field but never reads it at runtime, so `go.mod`
-replaces the module with `github.com/yakumioto/torrent v1.61.0-bep27.1`, which is
-v1.61.0 plus exactly the three upstream hunks from commit `76452a2c8a2f`. The
-replace directive is temporary: drop it once anacrolix/torrent publishes a
-release containing that commit.
+replaces the module with `github.com/yakumioto/torrent v1.61.0-bep27.2`. That
+release is v1.61.0 plus the three upstream hunks from commit `76452a2c8a2f`,
+and one hunk of our own: `internal/mytimer.Timer.When()` takes a read lock
+around its `when` field, which upstream still reads unsynchronized. Without it
+`Client.WriteStatus` races the announce-timer goroutine and cannot be used as a
+status observation point. The replace directive is temporary: drop it once
+anacrolix/torrent publishes a release containing both.
 
 ## Error behavior
 
@@ -629,6 +632,14 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 
 The swarm test binds loopback only, uses an in-process tracker, and disables
 DHT and UTP, so it never contacts the public network.
+
+When adding or changing an **observation point** — a status or state API the
+tests read to assert behavior — first confirm that API is concurrency-safe for
+the way the test calls it. Then run the package under the race detector as a
+whole (`go test -race ./...`), not just the new test: a race in the observed
+API usually needs the rest of the package running to fire, so a single
+`-run` narrows the run until it is clean and hides the defect. No data race
+involving the observation point may remain in that output.
 
 ## Docker HTTP smoke
 

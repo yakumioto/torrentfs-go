@@ -95,9 +95,15 @@ require (
 )
 
 // v1.61.0 has no BEP 27 isolation: private torrents still announce to and
-// query DHT and still exchange peers via PEX. The fork carries exactly the
-// three upstream hunks from anacrolix/torrent commit 76452a2c8a2f, so the rest
+// query DHT and still exchange peers via PEX. The fork carries the three
+// upstream hunks from anacrolix/torrent commit 76452a2c8a2f, so the rest
 // of the dependency stays byte-identical to the v1.61.0 release.
 //
-// Drop this replace once upstream publishes a release containing that commit.
-replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.1
+// It also carries one hunk of our own: internal/mytimer.Timer.When() takes a
+// read lock around the `when` field, which upstream reads unsynchronized.
+// Client.WriteStatus walks that read under the client's read lock, so without
+// the fix it is a data race against the announce-timer goroutine and cannot be
+// used as a status observation point (MIO-46).
+//
+// Drop this replace once upstream publishes a release containing both.
+replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.2
