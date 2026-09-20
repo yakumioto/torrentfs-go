@@ -19,15 +19,13 @@ import (
 
 const testPieceLength = 256 << 10
 
-func testConfig(dataDir string) config.Config {
-	cfg := config.Default()
-	cfg.Paths.DataDir = dataDir
-	return cfg
+func testConfig() config.Config {
+	return config.Default()
 }
 
-func testTorrentDir(t *testing.T, dataDir string) string {
+func testTorrentDir(t *testing.T, base string) string {
 	t.Helper()
-	dir := filepath.Join(filepath.Dir(dataDir), "torrents")
+	dir := filepath.Join(base, "torrents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
@@ -67,9 +65,8 @@ func waitCached(t *testing.T, ctx context.Context, st *session.Torrent) {
 // buildSingleFileTorrent produces a .torrent file that describes data. It writes
 // no data anywhere: a test feeds the pieces through seedPieces once the torrent
 // is registered.
-func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data []byte) (torrentPath string, hash metainfo.Hash) {
+func buildSingleFileTorrent(t *testing.T, torrentDir, name string, data []byte) (torrentPath string, hash metainfo.Hash) {
 	t.Helper()
-	_ = dataDir
 
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, name, data, nil)
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
@@ -79,9 +76,9 @@ func buildSingleFileTorrent(t *testing.T, dataDir, torrentDir, name string, data
 	return torrentPath, hash
 }
 
-// buildSingleFileTorrentBytes encodes a single-file .torrent describing data
-// laid out as DataDir/<name>. Tracker tiers are embedded verbatim, so a test
-// can point the torrent at a loopback tracker without touching global config.
+// buildSingleFileTorrentBytes encodes a single-file .torrent describing data.
+// Tracker tiers are embedded verbatim, so a test can point the torrent at a
+// loopback tracker without touching global config.
 func buildSingleFileTorrentBytes(t *testing.T, name string, data []byte, trackers [][]string) ([]byte, metainfo.Hash) {
 	t.Helper()
 	pieces := make([]byte, 0, (len(data)+testPieceLength-1)/testPieceLength*sha1.Size)
@@ -114,7 +111,7 @@ func buildSingleFileTorrentBytes(t *testing.T, name string, data []byte, tracker
 	return torrentBytes, mi.HashInfoBytes()
 }
 
-func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files map[string][]byte) (torrentPath string, hash metainfo.Hash, all []byte) {
+func buildMultiFileTorrent(t *testing.T, torrentDir, name string, files map[string][]byte) (torrentPath string, hash metainfo.Hash, all []byte) {
 	t.Helper()
 	paths := make([]string, 0, len(files))
 	for path := range files {
@@ -155,7 +152,6 @@ func buildMultiFileTorrent(t *testing.T, dataDir, torrentDir, name string, files
 		t.Fatalf("encode multi-file metainfo: %v", err)
 	}
 	hash = mi.HashInfoBytes()
-	_ = dataDir
 	torrentPath = filepath.Join(torrentDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write multi-file torrent: %v", err)

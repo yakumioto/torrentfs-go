@@ -418,13 +418,11 @@ func TestOperationLookup(t *testing.T) {
 
 func TestServerAgainstRealSession(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	cfg := config.Default()
-	cfg.Paths.DataDir = dataDir
 
 	sess, err := session.New(cfg, torrentsDir)
 	if err != nil {

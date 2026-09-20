@@ -49,9 +49,9 @@ func TestSessionReadsExistingData(t *testing.T) {
 	work := t.TempDir()
 	dataDir := work + "/data"
 	content := []byte(strings.Repeat("hello torrentfs\n", 200)) // ~3.4 KiB
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	cfg := testConfig(dataDir)
+	cfg := testConfig()
 	sess, err := session.New(cfg, testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -117,7 +117,7 @@ func TestSessionAddTorrentMissingMetainfoPreservesPathError(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	missing := filepath.Join(work, "inputs", "missing.torrent")
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -151,9 +151,9 @@ func TestSessionDuplicateAddIsIdempotent(t *testing.T) {
 
 	work := t.TempDir()
 	dataDir := work + "/data"
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("dup me"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("dup me"))
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -184,9 +184,9 @@ func TestSessionDuplicateAddCancellationPreservesExistingTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte("duplicate cancellation")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -255,10 +255,10 @@ func TestSessionTorrentNamedMetadataIsPlainData(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte("torrent named metadata")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "metadata", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "metadata", content)
 
 	torrentsDir := testTorrentDir(t, dataDir)
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestSessionDeleteRemovesAllInternalMetadataReferences(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte("legacy metadata references")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
@@ -334,7 +334,7 @@ func TestSessionDeleteRemovesAllInternalMetadataReferences(t *testing.T) {
 		t.Fatalf("write legacy metadata: %v", err)
 	}
 
-	first, err := session.New(testConfig(dataDir), torrentsDir)
+	first, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestSessionDeleteRemovesAllInternalMetadataReferences(t *testing.T) {
 		t.Fatalf("first Close: %v", err)
 	}
 
-	second, err := session.New(testConfig(dataDir), torrentsDir)
+	second, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestSessionDeleteRemovesAllInternalMetadataReferences(t *testing.T) {
 	}
 
 	// A restart must not resurrect the deleted task from a leftover source.
-	third, err := session.New(testConfig(dataDir), torrentsDir)
+	third, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("third New: %v", err)
 	}
@@ -411,14 +411,14 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("restored metadata\n", 200))
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
 	}
 
 	torrentsDir := testTorrentDir(t, dataDir)
-	first, err := session.New(testConfig(dataDir), torrentsDir)
+	first, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 		t.Fatalf("canonical metadata file missing: %v", err)
 	}
 
-	second, err := session.New(testConfig(dataDir), torrentsDir)
+	second, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestSessionPendingMagnetIntentSurvivesRestart(t *testing.T) {
 	torrentsDir := testTorrentDir(t, dataDir)
 	magnet := "magnet:?xt=urn:btih:" + strings.Repeat("c", 40)
 
-	first, err := session.New(testConfig(dataDir), torrentsDir)
+	first, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestSessionPendingMagnetIntentSurvivesRestart(t *testing.T) {
 		t.Fatalf("first Close: %v", err)
 	}
 
-	second, err := session.New(testConfig(dataDir), torrentsDir)
+	second, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestSessionPendingMagnetIntentSurvivesRestart(t *testing.T) {
 func TestSessionMetadataRescanIgnoresSymlinksAndTemporaryEntries(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("rescan entries"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("rescan entries"))
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
@@ -556,7 +556,7 @@ func TestSessionMetadataRescanIgnoresSymlinksAndTemporaryEntries(t *testing.T) {
 		t.Fatalf("write metadata directory: %v", err)
 	}
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestSessionMetadataRescanRejectsCorruptTorrent(t *testing.T) {
 		t.Fatalf("write corrupt metadata: %v", err)
 	}
 
-	_, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	_, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err == nil {
 		t.Fatal("New corrupt metadata succeeded")
 	}
@@ -601,7 +601,7 @@ func TestSessionDuplicateInternalReferencesShareOneTask(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("duplicate metadata"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("duplicate metadata"))
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
@@ -616,7 +616,7 @@ func TestSessionDuplicateInternalReferencesShareOneTask(t *testing.T) {
 		t.Fatalf("write legacy metadata: %v", err)
 	}
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -661,7 +661,7 @@ func TestSessionIgnoresLegacyStatsDirectory(t *testing.T) {
 		t.Fatalf("write legacy stats marker: %v", err)
 	}
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -675,12 +675,11 @@ func TestSessionIgnoresLegacyStatsDirectory(t *testing.T) {
 	}
 
 	// A fresh directory must not gain a .stats anchor either.
-	freshDataDir := filepath.Join(work, "fresh-data")
 	freshTorrentsDir := filepath.Join(work, "fresh-torrents")
 	if err := os.MkdirAll(freshTorrentsDir, 0o755); err != nil {
 		t.Fatalf("make fresh torrents dir: %v", err)
 	}
-	fresh, err := session.New(testConfig(freshDataDir), freshTorrentsDir)
+	fresh, err := session.New(testConfig(), freshTorrentsDir)
 	if err != nil {
 		t.Fatalf("fresh New: %v", err)
 	}
@@ -702,7 +701,7 @@ func TestSessionUploadRollsBackWhenPersistenceFails(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("rollback payload"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("rollback payload"))
 	torrentBytes, err := os.ReadFile(torrentPath)
 	if err != nil {
 		t.Fatalf("read torrent: %v", err)
@@ -718,7 +717,7 @@ func TestSessionUploadRollsBackWhenPersistenceFails(t *testing.T) {
 		t.Fatalf("block canonical metadata path: %v", err)
 	}
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -741,7 +740,7 @@ func TestSessionUploadRollsBackWhenPersistenceFails(t *testing.T) {
 
 func TestSessionCloseIsIdempotentAndRejectsNewOperations(t *testing.T) {
 	work := t.TempDir()
-	sess, err := session.New(testConfig(filepath.Join(work, "data")), testTorrentDir(t, filepath.Join(work, "data")))
+	sess, err := session.New(testConfig(), testTorrentDir(t, filepath.Join(work, "data")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -765,11 +764,11 @@ func TestSessionLayoutFlagMatchesMetainfo(t *testing.T) {
 
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	singlePath, singleHash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("single layout"))
+	singlePath, singleHash := buildSingleFileTorrent(t, work, "payload.bin", []byte("single layout"))
 	multiFiles := map[string][]byte{"only.bin": []byte("one file but a directory")}
-	multiPath, multiHash, _ := buildMultiFileTorrent(t, dataDir, work, "multi", multiFiles)
+	multiPath, multiHash, _ := buildMultiFileTorrent(t, work, "multi", multiFiles)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -802,10 +801,16 @@ func TestSessionLayoutFlagMatchesMetainfo(t *testing.T) {
 // and carries no stats anchor next to it.
 func TestSessionMetadataRootIsInsideTorrentsDir(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
-	torrentsDir := testTorrentDir(t, dataDir)
+	torrentsDir := filepath.Join(work, "torrents")
+	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	before, err := os.ReadDir(work)
+	if err != nil {
+		t.Fatalf("read work directory before New: %v", err)
+	}
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -819,7 +824,25 @@ func TestSessionMetadataRootIsInsideTorrentsDir(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf(".metadata = (%v, %v), want directory", info, err)
 	}
+	peerID, err := os.ReadFile(filepath.Join(torrentsDir, ".metadata", "peer_id"))
+	if err != nil {
+		t.Fatalf("read peer ID: %v", err)
+	}
+	if len(peerID) != 20 {
+		t.Fatalf("peer ID length = %d, want 20", len(peerID))
+	}
+	stateInfo, err := os.Stat(filepath.Join(torrentsDir, ".metadata", "state"))
+	if err != nil || !stateInfo.IsDir() {
+		t.Fatalf("state directory = (%v, %v), want directory", stateInfo, err)
+	}
 	if _, err := os.Stat(filepath.Join(torrentsDir, ".stats")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".stats = %v, want not created", err)
+	}
+	after, err := os.ReadDir(work)
+	if err != nil {
+		t.Fatalf("read work directory after New: %v", err)
+	}
+	if len(before) != 1 || len(after) != 1 || before[0].Name() != "torrents" || after[0].Name() != "torrents" {
+		t.Fatalf("directories outside torrents changed: before=%v after=%v", before, after)
 	}
 }

@@ -15,9 +15,9 @@ import (
 
 const directorySyncTimeout = 5 * time.Second
 
-func newDirectorySession(t *testing.T, dataDir, torrentsDir string) *session.Session {
+func newDirectorySession(t *testing.T, torrentsDir string) *session.Session {
 	t.Helper()
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -43,10 +43,9 @@ func waitForTorrent(t *testing.T, sess *session.Session, hash metainfo.Hash) {
 
 func TestSessionRequiresExistingTorrentDirectory(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	missing := filepath.Join(work, "missing")
 
-	if _, err := session.New(testConfig(dataDir), missing); err == nil {
+	if _, err := session.New(testConfig(), missing); err == nil {
 		t.Fatal("New succeeded with a missing torrents directory")
 	}
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
@@ -57,34 +56,32 @@ func TestSessionRequiresExistingTorrentDirectory(t *testing.T) {
 	if err := os.WriteFile(file, []byte("not a directory"), 0o644); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
-	if _, err := session.New(testConfig(dataDir), file); err == nil {
+	if _, err := session.New(testConfig(), file); err == nil {
 		t.Fatal("New succeeded with a regular-file torrents input")
 	}
 }
 
 func TestSessionScansTorrentDirectoryAtStartup(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
-	_, hash := buildSingleFileTorrent(t, dataDir, torrentsDir, "startup.bin", []byte("startup source"))
+	_, hash := buildSingleFileTorrent(t, torrentsDir, "startup.bin", []byte("startup source"))
 
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 	waitForTorrent(t, sess, hash)
 }
 
 func TestSessionSynchronizesTorrentDirectoryAddAndRemove(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 
-	path, hash := buildSingleFileTorrent(t, dataDir, torrentsDir, "dynamic.bin", []byte("dynamic source"))
+	path, hash := buildSingleFileTorrent(t, torrentsDir, "dynamic.bin", []byte("dynamic source"))
 	waitForTorrent(t, sess, hash)
 
 	if err := os.Remove(path); err != nil {
@@ -102,7 +99,6 @@ func TestSessionSynchronizesTorrentDirectoryAddAndRemove(t *testing.T) {
 
 func TestSessionIgnoresNonTorrentDirectoryEntries(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -134,7 +130,7 @@ func TestSessionIgnoresNonTorrentDirectoryEntries(t *testing.T) {
 		t.Fatalf("make metadata directory: %v", err)
 	}
 
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 	if got := len(sess.List()); got != 0 {
 		t.Fatalf("List after ignored entries = %d, want 0", got)
 	}
@@ -151,13 +147,12 @@ func TestSessionIgnoresNonTorrentDirectoryEntries(t *testing.T) {
 
 func TestSessionWaitsForStableTorrentFile(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	bytes, hash := buildSingleFileTorrentBytes(t, "stable.bin", []byte("stable source"), nil)
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 	path := filepath.Join(torrentsDir, "incoming.torrent")
 	if err := os.WriteFile(path, bytes[:len(bytes)/2], 0o644); err != nil {
 		t.Fatalf("write partial torrent: %v", err)
@@ -178,7 +173,6 @@ func TestSessionWaitsForStableTorrentFile(t *testing.T) {
 
 func TestSessionRetainsOldSourceUntilReplacementIsValid(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -189,7 +183,7 @@ func TestSessionRetainsOldSourceUntilReplacementIsValid(t *testing.T) {
 	if err := os.WriteFile(path, first, 0o644); err != nil {
 		t.Fatalf("write first source: %v", err)
 	}
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 	waitForTorrent(t, sess, firstHash)
 
 	if err := os.WriteFile(path, []byte("broken replacement"), 0o644); err != nil {
@@ -220,7 +214,6 @@ func TestSessionRetainsOldSourceUntilReplacementIsValid(t *testing.T) {
 
 func TestSessionKeepsDuplicateDirectoryAndMetadataReferences(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -233,7 +226,7 @@ func TestSessionKeepsDuplicateDirectoryAndMetadataReferences(t *testing.T) {
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 	waitForTorrent(t, sess, hash)
 
 	if err := os.Remove(first); err != nil {
@@ -269,13 +262,12 @@ func TestSessionKeepsDuplicateDirectoryAndMetadataReferences(t *testing.T) {
 
 func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	bytes, hash := buildSingleFileTorrentBytes(t, "metadata.bin", []byte("metadata source"), nil)
-	oldMetadataDir := filepath.Clean(dataDir) + ".metadata"
+	oldMetadataDir := filepath.Join(work, "legacy-data", ".metadata")
 	if err := os.MkdirAll(oldMetadataDir, 0o755); err != nil {
 		t.Fatalf("make legacy metadata dir: %v", err)
 	}
@@ -283,7 +275,7 @@ func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 		t.Fatalf("write legacy metadata: %v", err)
 	}
 
-	first := newDirectorySession(t, dataDir, torrentsDir)
+	first := newDirectorySession(t, torrentsDir)
 	if got := len(first.List()); got != 0 {
 		t.Fatalf("legacy metadata was restored: List = %d, want 0", got)
 	}
@@ -303,7 +295,7 @@ func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 		t.Fatalf("first Close: %v", err)
 	}
 
-	second := newDirectorySession(t, dataDir, torrentsDir)
+	second := newDirectorySession(t, torrentsDir)
 	waitForTorrent(t, second, hash)
 	if _, err := os.Stat(canonical); err != nil {
 		t.Fatalf("canonical metadata file lost after restart: %v", err)
@@ -312,13 +304,12 @@ func TestSessionUsesOnlyMetadataInsideTorrentDirectory(t *testing.T) {
 
 func TestSessionCloseRacesTorrentDirectorySynchronization(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.Mkdir(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	bytes, _ := buildSingleFileTorrentBytes(t, "race.bin", []byte("race source"), nil)
-	sess := newDirectorySession(t, dataDir, torrentsDir)
+	sess := newDirectorySession(t, torrentsDir)
 
 	stop := make(chan struct{})
 	writerDone := make(chan struct{})

@@ -31,12 +31,11 @@ Usage:
 Flags:
   -mountpoint <dir>  directory to mount on (required unless the HTTP API is enabled)
   -config <file>     TOML configuration file
-  -data-dir <dir>    override the configured torrent session data directory
   -h, --help         show this help and exit
 
-Configuration precedence is explicit -data-dir, then TORRENTFS_* environment
-variables, then the TOML file, then built-in defaults. See the README for the
-complete environment variable list.
+Configuration precedence is TORRENTFS_* environment variables, then the TOML
+file, then built-in defaults. See the README for the complete environment
+variable list.
 
 <torrents-dir> must be an existing directory. Its direct regular, non-symlink
 files whose names end in .torrent are scanned at startup and while running.
@@ -69,7 +68,6 @@ func run(args []string, stderr io.Writer) int {
 	var (
 		mountpoint = flags.String("mountpoint", "", "directory to mount on")
 		configPath = flags.String("config", "", "TOML configuration file")
-		dataDir    = flags.String("data-dir", "", "override the configured data directory")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -88,13 +86,7 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	dataDirSet := false
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "data-dir" {
-			dataDirSet = true
-		}
-	})
-	cfg, err := loadConfig(*configPath, *dataDir, dataDirSet)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
@@ -122,7 +114,6 @@ func run(args []string, stderr io.Writer) int {
 	logger.Info("torrentfs starting",
 		"version", "dev",
 		"torrents_dir", torrentsDir,
-		"data_dir", cfg.Paths.DataDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"mountpoint", *mountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
@@ -350,8 +341,8 @@ func validateTorrentDir(path string) error {
 	return nil
 }
 
-func loadConfig(path, dataDir string, dataDirSet bool) (config.Config, error) {
-	cfg, err := config.LoadWithDataDir(path, dataDir, dataDirSet)
+func loadConfig(path string) (config.Config, error) {
+	cfg, err := config.Load(path)
 	if err != nil {
 		if path == "" {
 			return config.Config{}, fmt.Errorf("load config: %w", err)

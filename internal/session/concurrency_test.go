@@ -74,9 +74,9 @@ func TestFuseConcurrentReads(t *testing.T) {
 	for i := range content {
 		content[i] = byte(i*17 + i/97)
 	}
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -162,10 +162,10 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	}
 
 	content := []byte("namespace churn payload")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 	churnBytes, churnHash := buildSingleFileTorrentBytes(t, "churn.bin", []byte("churn payload"), nil)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 	ctx := testTimeout(t)
 
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
+	torrentsDir := filepath.Join(work, "torrents")
 	mnt := filepath.Join(work, "mnt")
 	if err := os.Mkdir(mnt, 0o755); err != nil {
 		t.Fatalf("make mountpoint: %v", err)
@@ -355,7 +355,7 @@ func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 		t.Fatalf("write torrent: %v", err)
 	}
 
-	sess := newLoopbackSession(t, testConfig(dataDir))
+	sess := newLoopbackSession(t, testConfig(), torrentsDir)
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
@@ -507,9 +507,9 @@ func TestSessionOpenFileReadsStopAfterClose(t *testing.T) {
 	for i := range content {
 		content[i] = byte(i)
 	}
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestSessionOpenFileReadsStopAfterClose(t *testing.T) {
 func TestSessionConcurrentCloseIsSafe(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
-	sess, err := session.New(testConfig(filepath.Join(work, "data")), testTorrentDir(t, filepath.Join(work, "data")))
+	sess, err := session.New(testConfig(), testTorrentDir(t, filepath.Join(work, "data")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -579,9 +579,9 @@ func TestSessionClosingStateRejectsOperations(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("closed state"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("closed state"))
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

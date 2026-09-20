@@ -51,7 +51,7 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 
 	// Seeder: its in-memory cache is filled directly.
 	seederDir := filepath.Join(work, "seeder-data")
-	seeder := newLoopbackSession(t, testConfig(seederDir))
+	seeder := newLoopbackSession(t, testConfig(), seederDir)
 	if err := seeder.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("seeder AddTorrent: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	handler, logState := newPhaseLogHandler()
 	limiter := rate.NewLimiter(overlapDownloadRate, overlapLimiterBurst)
 	leecherDir := filepath.Join(work, "leecher-data")
-	leecher := newLoopbackSessionWithCustomize(t, testConfig(leecherDir), func(cc *session.TorrentClientConfig) {
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), leecherDir, func(cc *session.TorrentClientConfig) {
 		cc.DownloadRateLimiter = limiter
 		cc.Slogger = slog.New(handler)
 	})

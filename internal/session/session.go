@@ -147,19 +147,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("validate-torrents-dir", err)
 		return nil, err
 	}
-	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
-		err = fmt.Errorf("session: create data dir: %w", err)
-		logInitFailure("create-data-dir", err)
-		return nil, err
-	}
 	metadataDir := metadataRoot(torrentsDir)
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		err = fmt.Errorf("session: create metadata dir: %w", err)
 		logInitFailure("create-metadata-dir", err)
 		return nil, err
 	}
-	warnLegacyPayloadDir(cfg.Paths.DataDir, logger)
-	stateDir := filepath.Join(cfg.Paths.DataDir, "state")
+	stateDir := filepath.Join(metadataDir, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		err = fmt.Errorf("session: create state dir: %w", err)
 		logInitFailure("create-state-dir", err)
@@ -181,7 +175,6 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if cfg.Identity.ExtendedHandshakeClientVersion != "" {
 		cc.ExtendedHandshakeClientVersion = cfg.Identity.ExtendedHandshakeClientVersion
 	}
-	cc.DataDir = cfg.Paths.DataDir
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort
 	cc.DisableIPv4 = cfg.Connections.DisableIPv4
@@ -194,7 +187,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	configureSeeding(cc)
 	// Pieces live only in memory: the store keeps them in the LRU cache until
-	// they are evicted, and never writes them to disk.
+	// they are evicted, and never writes them to disk. Because DefaultStorage is
+	// always set, the client's DataDir fallback is unused.
 	pieceCache := cache.New(cfg.Cache.CapacityBytes)
 	pieceStore := piecestore.New(pieceCache, logger)
 	cc.DefaultStorage = pieceStore
@@ -212,7 +206,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// The peer ID is resolved after customize so an explicitly injected client
 	// config always wins, and before NewClient so the durable identity is the
 	// one this client announces with.
-	peerID, err := resolvePeerID(cfg.Paths.DataDir, cc.PeerID, cc.Bep20, logger)
+	peerID, err := resolvePeerID(metadataDir, cc.PeerID, cc.Bep20, logger)
 	if err != nil {
 		logInitFailure("resolve-peer-id", err)
 		releaseInstanceLock(instanceLock)
@@ -304,7 +298,6 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	go s.watchTorrentDir(scanCtx, s.scanDone)
 	s.logger.Info("session ready",
 		"torrents_dir", s.torrentsDir,
-		"data_dir", cfg.Paths.DataDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"listen_port", cfg.Connections.ListenPort,
 		"effective_listen_port", s.EffectiveListenPort(),
@@ -439,19 +432,4 @@ func (s *Session) ensureActiveLocked() error {
 		return fmt.Errorf("session: not active: %w", filesystem.ErrClosed)
 	}
 	return nil
-}
-
-// warnLegacyPayloadDir reports an on-disk payload tree left behind by a version
-// that persisted pieces. The new session never reads or writes it, so the only
-// job here is to tell the operator it can be reclaimed.
-func warnLegacyPayloadDir(dataDir string, logger *slog.Logger) {
-	root := filepath.Join(dataDir, "payload")
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) == 0 {
-		return
-	}
-	logger.Warn("legacy payload directory is no longer used and can be removed",
-		"dir", root,
-		"hint", "pieces are now kept in memory only",
-	)
 }

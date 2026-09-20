@@ -16,9 +16,9 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-func newManageSession(t *testing.T, dataDir string) *session.Session {
+func newManageSession(t *testing.T, torrentsDir string) *session.Session {
 	t.Helper()
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -45,11 +45,11 @@ func waitOperation(t *testing.T, sess *session.Session, id string) session.Opera
 	}
 }
 
-func registryPath(dataDir string, hash metainfo.Hash) string {
-	return filepath.Join(dataDir, "state", hash.HexString()+".json")
+func registryPath(torrentsDir string, hash metainfo.Hash) string {
+	return filepath.Join(torrentsDir, ".metadata", "state", hash.HexString()+".json")
 }
 
-func writeRegistry(t *testing.T, dataDir string, hash metainfo.Hash, state string, opID string) {
+func writeRegistry(t *testing.T, torrentsDir string, hash metainfo.Hash, state string, opID string) {
 	t.Helper()
 	now := time.Now().UTC()
 	entry := map[string]any{
@@ -65,11 +65,11 @@ func writeRegistry(t *testing.T, dataDir string, hash metainfo.Hash, state strin
 	if err != nil {
 		t.Fatalf("encode state: %v", err)
 	}
-	dir := filepath.Join(dataDir, "state")
+	dir := filepath.Join(torrentsDir, ".metadata", "state")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("make state dir: %v", err)
 	}
-	if err := os.WriteFile(registryPath(dataDir, hash), data, 0o644); err != nil {
+	if err := os.WriteFile(registryPath(torrentsDir, hash), data, 0o644); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 }
@@ -81,7 +81,7 @@ func TestAddListDelete(t *testing.T) {
 	content := []byte(strings.Repeat("payload-", 512))
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
 
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	view, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
 	if err != nil {
 		t.Fatalf("AddTorrentAndPersist: %v", err)
@@ -119,7 +119,7 @@ func TestAddListDelete(t *testing.T) {
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed metainfo survived delete: %v", err)
 	}
-	if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(registryPath(testTorrentDir(t, dataDir), hash)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state sidecar survived delete: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestAddTorrentDeduplicatesByInfoHash(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("dedupe payload"), nil)
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 
 	first, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestRepeatedDeleteReturnsSameOperation(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("idempotent delete"), nil)
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -183,7 +183,6 @@ func TestRepeatedDeleteReturnsSameOperation(t *testing.T) {
 func TestDeleteRefusedForDirectorySourcedTorrent(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -194,12 +193,20 @@ func TestDeleteRefusedForDirectorySourcedTorrent(t *testing.T) {
 	if err := os.WriteFile(userTorrent, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write user torrent: %v", err)
 	}
-	sess := newManageSession(t, dataDir)
+	sess, err := session.New(testConfig(), torrentsDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if _, ok := sess.Torrent(hash); !ok {
 		t.Fatal("torrent was not registered from the torrents directory")
 	}
 
-	_, err := sess.DeleteTorrent(ctx, hash.HexString())
+	_, err = sess.DeleteTorrent(ctx, hash.HexString())
 	if !errors.Is(err, session.ErrExternalReference) {
 		t.Fatalf("delete = %v, want ErrExternalReference", err)
 	}
@@ -216,9 +223,9 @@ func TestAddRejectedWhileDeleteFailed(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("blocked"), nil)
-	writeRegistry(t, dataDir, hash, string(session.StateDeleteFailed), "op-existing")
+	writeRegistry(t, testTorrentDir(t, dataDir), hash, string(session.StateDeleteFailed), "op-existing")
 
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
 	if !errors.Is(err, session.ErrDeleting) {
 		t.Fatalf("add during delete_failed = %v, want ErrDeleting", err)
@@ -227,7 +234,6 @@ func TestAddRejectedWhileDeleteFailed(t *testing.T) {
 
 func TestResumeCompletesInterruptedDeletion(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	content := []byte("interrupted deletion payload")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
@@ -239,9 +245,9 @@ func TestResumeCompletesInterruptedDeletion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	writeRegistry(t, dataDir, hash, string(session.StateDeleting), "op-resume")
+	writeRegistry(t, torrentsDir, hash, string(session.StateDeleting), "op-resume")
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -259,7 +265,7 @@ func TestResumeCompletesInterruptedDeletion(t *testing.T) {
 	if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
 		t.Fatalf("TorrentViewFor after resume = %v, want ErrUnknownTorrent", err)
 	}
-	if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(registryPath(torrentsDir, hash)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state sidecar survived resume: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(metadataDir, hash.HexString()+".torrent")); !errors.Is(err, os.ErrNotExist) {
@@ -300,7 +306,7 @@ func TestDeleteReleasesGoroutinesAndFileDescriptors(t *testing.T) {
 		}
 	}
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -335,7 +341,7 @@ func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
 	hash := metainfo.NewHashFromHex(hexHash)
 	magnet := "magnet:?xt=urn:btih:" + hexHash + "&dn=adding-task"
 
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	view, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: magnet})
 	if err != nil {
 		t.Fatalf("add magnet: %v", err)
@@ -365,7 +371,7 @@ func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata sidecar present after delete: %v", err)
 	}
-	if _, err := os.Stat(registryPath(dataDir, hash)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(registryPath(testTorrentDir(t, dataDir), hash)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state sidecar present after delete: %v", err)
 	}
 }
@@ -376,9 +382,9 @@ func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("late write"), nil)
 	// A task whose deletion failed stays ownershipped by the interrupted
 	// deletion until it is retried.
-	writeRegistry(t, dataDir, hash, string(session.StateDeleteFailed), "op-existing")
+	writeRegistry(t, testTorrentDir(t, dataDir), hash, string(session.StateDeleteFailed), "op-existing")
 
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 
 	// A late metadata write must be refused even with a live context, so it
 	// can never recreate the sidecar and revive the task.
@@ -397,7 +403,7 @@ func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("resurrect"), nil)
-	sess := newManageSession(t, dataDir)
+	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -441,7 +447,6 @@ func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 
 func TestResumeDeletionClearsMetadataIndexAndAllowsRepersist(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	content := []byte("resume metadata index")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
@@ -453,9 +458,9 @@ func TestResumeDeletionClearsMetadataIndexAndAllowsRepersist(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(metadataDir, hash.HexString()+".torrent"), torrentBytes, 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	writeRegistry(t, dataDir, hash, string(session.StateDeleting), "op-resume-index")
+	writeRegistry(t, torrentsDir, hash, string(session.StateDeleting), "op-resume-index")
 
-	sess, err := session.New(testConfig(dataDir), torrentsDir)
+	sess, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

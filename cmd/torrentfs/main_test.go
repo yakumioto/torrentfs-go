@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -300,7 +299,7 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 
 func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.toml")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = \"\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	var stderr bytes.Buffer
@@ -313,7 +312,7 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
-	for _, want := range []string{path, "paths.data_dir", "value is required"} {
+	for _, want := range []string{path, "connections.listen_port"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -323,8 +322,7 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 	work := t.TempDir()
 	configPath := filepath.Join(work, "config.toml")
-	configBody := "[paths]\ndata_dir = " + strconv.Quote(filepath.Join(work, "data")) + "\n\n" +
-		"[http]\nlisten_addr = \"127.0.0.1:8080\"\n\n" +
+	configBody := "[http]\nlisten_addr = \"127.0.0.1:8080\"\n\n" +
 		"[http.auth]\nenabled = true\nusername = \"alice\"\npassword_hash = \"not-a-bcrypt-hash\"\n"
 	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -340,6 +338,17 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "password_hash") {
 		t.Fatalf("stderr = %q, want password_hash error", stderr.String())
+	}
+}
+
+func TestRunRejectsRemovedDataDirFlag(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"-data-dir", t.TempDir(), "-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("stderr = %q, want unknown flag error", stderr.String())
 	}
 }
 
@@ -407,109 +416,6 @@ func TestRunRejectsMissingTorrentDirectory(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAppliesExplicitDataDirOverride(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = \"from-file\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	override := filepath.Join(t.TempDir(), "override")
-
-	cfg, err := loadConfig(path, override, true)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != override {
-		t.Fatalf("DataDir = %q, want %q", cfg.Paths.DataDir, override)
-	}
-}
-
-func TestLoadConfigKeepsFileDataDirWhenFlagWasOmitted(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	dataDir := filepath.Join(t.TempDir(), "from-file")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = \""+dataDir+"\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadConfig(path, "", false)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != dataDir {
-		t.Fatalf("DataDir = %q, want %q", cfg.Paths.DataDir, dataDir)
-	}
-}
-
-func TestLoadConfigUsesEnvironmentWhenConfigPathIsOmitted(t *testing.T) {
-	unsetConfigEnvironment(t)
-	dataDir := filepath.Join(t.TempDir(), "environment-data")
-	t.Setenv("TORRENTFS_PATHS_DATA_DIR", dataDir)
-
-	cfg, err := loadConfig("", "", false)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != dataDir {
-		t.Fatalf("DataDir = %q, want %q", cfg.Paths.DataDir, dataDir)
-	}
-}
-
-func TestLoadConfigEnvironmentOverridesFile(t *testing.T) {
-	unsetConfigEnvironment(t)
-	fileDataDir := filepath.Join(t.TempDir(), "file-data")
-	envDataDir := filepath.Join(t.TempDir(), "environment-data")
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = "+strconv.Quote(fileDataDir)+"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("TORRENTFS_PATHS_DATA_DIR", envDataDir)
-
-	cfg, err := loadConfig(path, "", false)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != envDataDir {
-		t.Fatalf("DataDir = %q, want environment value %q", cfg.Paths.DataDir, envDataDir)
-	}
-}
-
-func TestLoadConfigExplicitDataDirRemainsFinalOverride(t *testing.T) {
-	unsetConfigEnvironment(t)
-	fileDataDir := filepath.Join(t.TempDir(), "file-data")
-	envDataDir := filepath.Join(t.TempDir(), "environment-data")
-	cliDataDir := filepath.Join(t.TempDir(), "cli-data")
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = "+strconv.Quote(fileDataDir)+"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("TORRENTFS_PATHS_DATA_DIR", envDataDir)
-
-	cfg, err := loadConfig(path, cliDataDir, true)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != cliDataDir {
-		t.Fatalf("DataDir = %q, want CLI value %q", cfg.Paths.DataDir, cliDataDir)
-	}
-}
-
-func TestLoadConfigExplicitDataDirOverridesEmptySources(t *testing.T) {
-	unsetConfigEnvironment(t)
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = \"\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("TORRENTFS_PATHS_DATA_DIR", "")
-	dataDir := filepath.Join(t.TempDir(), "cli-data")
-
-	cfg, err := loadConfig(path, dataDir, true)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Paths.DataDir != dataDir {
-		t.Fatalf("DataDir = %q, want CLI value %q", cfg.Paths.DataDir, dataDir)
-	}
-}
-
 func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	unsetConfigEnvironment(t)
 	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
@@ -532,7 +438,6 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 func unsetConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"TORRENTFS_PATHS_DATA_DIR",
 		"TORRENTFS_PATHS_PAYLOAD_DIR",
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT",
@@ -594,7 +499,6 @@ func TestRunDirectoryInputReportsExpandedTorrentError(t *testing.T) {
 	var stderr bytes.Buffer
 	code := run([]string{
 		"-mountpoint", filepath.Join(work, "mnt"),
-		"-data-dir", filepath.Join(work, "data"),
 		torrentDir,
 	}, &stderr)
 	if code != 1 {

@@ -30,7 +30,6 @@ var failingStorageCloserErr = errors.New("storage close failed")
 
 func TestSessionCloseFailureHasNoCalleeErrorLog(t *testing.T) {
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
 	torrentsDir := filepath.Join(work, "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -42,7 +41,6 @@ func TestSessionCloseFailureHasNoCalleeErrorLog(t *testing.T) {
 		t.Fatalf("logging.New: %v", err)
 	}
 	cfg := config.Default()
-	cfg.Paths.DataDir = dataDir
 	sess, err := New(cfg, torrentsDir, WithLogger(logger))
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -16,14 +16,13 @@ import (
 
 // newLoopbackSession creates a session whose client is confined to loopback:
 // no DHT, no uTP, no port forwarding. The session is closed automatically.
-func newLoopbackSession(t *testing.T, cfg config.Config) *session.Session {
-	return newLoopbackSessionWithCustomize(t, cfg, nil)
+func newLoopbackSession(t *testing.T, cfg config.Config, torrentsDir string) *session.Session {
+	return newLoopbackSessionWithCustomize(t, cfg, torrentsDir, nil)
 }
 
-func newLoopbackSessionWithCustomize(t *testing.T, cfg config.Config, customize func(*session.TorrentClientConfig)) *session.Session {
+func newLoopbackSessionWithCustomize(t *testing.T, cfg config.Config, torrentsDir string, customize func(*session.TorrentClientConfig)) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 		t.Fatalf("write seeder torrent: %v", err)
 	}
 
-	seeder := newLoopbackSession(t, testConfig(seederDir))
+	seeder := newLoopbackSession(t, testConfig(), seederDir)
 	if err := seeder.AddTorrent(ctx, session.Source{MetainfoPath: seederTorrent}); err != nil {
 		t.Fatalf("seeder AddTorrent: %v", err)
 	}
@@ -93,7 +92,7 @@ func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	if err := os.WriteFile(leecherTorrent, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write leecher torrent: %v", err)
 	}
-	leecher := newLoopbackSession(t, testConfig(leecherDir))
+	leecher := newLoopbackSession(t, testConfig(), leecherDir)
 	if err := leecher.AddTorrent(ctx, session.Source{MetainfoPath: leecherTorrent}); err != nil {
 		t.Fatalf("leecher AddTorrent: %v", err)
 	}

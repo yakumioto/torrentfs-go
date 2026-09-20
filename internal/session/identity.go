@@ -15,8 +15,8 @@ import (
 // peerIDSize is the fixed BitTorrent peer ID length in bytes.
 const peerIDSize = 20
 
-// peerIDFileName is the durable peer ID inside the data directory. Without it
-// every restart would look like a brand-new peer to a private tracker: the
+// peerIDFileName is the durable peer ID inside the metadata directory. Without
+// it every restart would look like a brand-new peer to a private tracker: the
 // client picks a fresh random suffix and a fresh dynamic port each time.
 const peerIDFileName = "peer_id"
 
@@ -25,16 +25,16 @@ const peerIDFileName = "peer_id"
 // registries, and (once the peer ID is durable) the same peer identity.
 const instanceLockFileName = "instance.lock"
 
-func peerIDPath(dataDir string) string {
-	return filepath.Join(dataDir, peerIDFileName)
+func peerIDPath(metadataDir string) string {
+	return filepath.Join(metadataDir, peerIDFileName)
 }
 
 // resolvePeerID returns the peer ID the client must use. An explicitly
 // configured peer ID wins and is never persisted. Otherwise the ID is read from
-// the data directory and generated once when missing. A stored ID whose length
+// the metadata directory and generated once when missing. A stored ID whose length
 // is wrong is a hard failure: silently regenerating it would reintroduce the
 // identity drift this function exists to prevent.
-func resolvePeerID(dataDir, configured, prefix string, logger *slog.Logger) (string, error) {
+func resolvePeerID(metadataDir, configured, prefix string, logger *slog.Logger) (string, error) {
 	if configured != "" {
 		if len(configured) != peerIDSize {
 			return "", fmt.Errorf("session: peer ID must be exactly %d bytes, got %d", peerIDSize, len(configured))
@@ -42,7 +42,7 @@ func resolvePeerID(dataDir, configured, prefix string, logger *slog.Logger) (str
 		return configured, nil
 	}
 
-	path := peerIDPath(dataDir)
+	path := peerIDPath(metadataDir)
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:

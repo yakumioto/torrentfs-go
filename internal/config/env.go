@@ -17,14 +17,6 @@ type envBinding struct {
 
 var environmentBindings = []envBinding{
 	{
-		name:  "TORRENTFS_PATHS_DATA_DIR",
-		field: "paths.data_dir",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Paths.DataDir = raw
-			return nil
-		},
-	},
-	{
 		name:  "TORRENTFS_CONNECTIONS_LISTEN_HOST",
 		field: "connections.listen_host",
 		apply: func(cfg *Config, raw string) error {

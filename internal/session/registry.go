@@ -63,7 +63,7 @@ func (o *Operation) clone() Operation {
 }
 
 // registryEntry is the durable per-torrent sidecar written to
-// <data_dir>/state/<info_hash>.json.
+// <torrents-dir>/.metadata/state/<info_hash>.json.
 type registryEntry struct {
 	ID          string       `json:"id"`
 	InfoHash    string       `json:"info_hash"`

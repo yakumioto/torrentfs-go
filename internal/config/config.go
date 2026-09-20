@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -90,22 +88,12 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 
 // Config holds torrentfs runtime settings.
 type Config struct {
-	Paths       Paths       `toml:"paths"`
 	Connections Connections `toml:"connections"`
 	Proxy       Proxy       `toml:"proxy"`
 	Cache       Cache       `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
 	HTTP        HTTP        `toml:"http"`
 	Log         Log         `toml:"log"`
-}
-
-// Paths groups the filesystem paths torrentfs manages at runtime.
-type Paths struct {
-	// DataDir is where the torrent session keeps the state it still persists:
-	// the metadata cache and the per-torrent deletion sidecars. Piece data is
-	// never written here. It must exist and be writable; the session creates it
-	// if missing.
-	DataDir string `toml:"data_dir"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -199,19 +187,11 @@ type Identity struct {
 	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version"`
 }
 
-// Default returns the default configuration: a per-user data directory under
-// the OS cache dir (falling back to the temp dir), an ephemeral listen port,
-// an empty proxy, qBittorrent 4.4.0 identity values, and a 2 GiB in-memory
-// piece cache sized for a host with about 4 GB of RAM.
+// Default returns the default configuration: an ephemeral listen port, an
+// empty proxy, qBittorrent 4.4.0 identity values, and a 2 GiB in-memory piece
+// cache sized for a host with about 4 GB of RAM.
 func Default() Config {
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		base = os.TempDir()
-	}
 	return Config{
-		Paths: Paths{
-			DataDir: filepath.Join(base, "torrentfs"),
-		},
 		Connections: Connections{
 			ListenHost:       "",
 			ListenPort:       0,
@@ -241,9 +221,6 @@ func Default() Config {
 
 // Validate checks values that must be valid before starting a session.
 func (c Config) Validate() error {
-	if c.Paths.DataDir == "" {
-		return invalid("paths.data_dir", errRequired)
-	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
 	}

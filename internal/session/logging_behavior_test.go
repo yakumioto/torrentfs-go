@@ -25,7 +25,7 @@ func TestAddTorrentFailureIncludesStructuredContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
-	sess, err := session.New(testConfig(dataDir), torrentsDir, session.WithLogger(logger))
+	sess, err := session.New(testConfig(), torrentsDir, session.WithLogger(logger))
 	if err != nil {
 		t.Fatalf("session.New: %v", err)
 	}
@@ -54,9 +54,9 @@ func TestPieceCacheIsNotRestoredAcrossRestart(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	torrentsDir := testTorrentDir(t, dataDir)
 	content := []byte(strings.Repeat("memory only", 500))
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	first, err := session.New(testConfig(dataDir), torrentsDir)
+	first, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("first session.New: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestPieceCacheIsNotRestoredAcrossRestart(t *testing.T) {
 		t.Fatalf("piece completion database files found after shutdown: %v", leftovers)
 	}
 
-	second, err := session.New(testConfig(dataDir), torrentsDir)
+	second, err := session.New(testConfig(), torrentsDir)
 	if err != nil {
 		t.Fatalf("second session.New: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestStorageUsesInjectedLogger(t *testing.T) {
 	// A cache whose low-water mark is below the piece length makes the store
 	// warn on open, which is the observable signal that the injected logger
 	// reaches the piece store.
-	cfg := testConfig(dataDir)
+	cfg := testConfig()
 	cfg.Cache.CapacityBytes = testPieceLength + testPieceLength/8
 	sess, err := session.New(cfg, torrentsDir, session.WithLogger(logger))
 	if err != nil {
