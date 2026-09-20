@@ -512,6 +512,45 @@ instance pointed at the same directory fails to start with an actionable error.
 The lock is released when the process exits; it does not cover two machines
 sharing one tracker account with different torrents directories.
 
+## Private torrents (BEP 27)
+
+A torrent whose metainfo carries `private=1` is isolated from peer discovery, as
+[BEP 27](https://www.bittorrent.org/beps/bep_0027.html) requires. For such a
+torrent torrentfs does not announce to or query the DHT, does not exchange peers
+over PEX (`ut_pex`), and does not use Local Peer Discovery. Only the trackers
+declared inside the torrent are used. Public torrents are unaffected: their DHT
+bootstrap, announcements, and PEX behave exactly as before.
+
+This is a property of the torrent, not a setting. There is no per-torrent or
+global switch to turn it on, and nothing to configure.
+
+How a torrent is added decides whether the isolation covers the whole session:
+
+- **`.torrent` file, embedded bytes, or an already known info dict** — the
+  metainfo is present at add time, so the torrent is isolated from the first
+  byte. This is the recommended way to add a private torrent.
+- **magnet link** — a magnet carries no info dict, so the private flag is unknown
+  until metadata is fetched. Until then the torrent is treated as public and may
+  announce to the DHT; the moment the metadata lands, the DHT announcer stops on
+  its next pass. The exposure window is exactly the metadata fetch. A private
+  magnet still resolves its metadata through its tracker, so downloads work — but
+  if your tracker forbids any DHT contact, add the torrent by file instead of by
+  magnet.
+
+Two further notes:
+
+- A `private=1` torrent with no trackers cannot find peers at all. That is the
+  correct BEP 27 outcome, not a fault.
+- `private=1` is honoured whether it is `true` only; a missing flag, `false`, or a
+  v2-only metainfo all mean "public", matching the upstream definition.
+
+Support comes from a pinned fork of `github.com/anacrolix/torrent`: release
+v1.61.0 has the `private` field but never reads it at runtime, so `go.mod`
+replaces the module with `github.com/yakumioto/torrent v1.61.0-bep27.1`, which is
+v1.61.0 plus exactly the three upstream hunks from commit `76452a2c8a2f`. The
+replace directive is temporary: drop it once anacrolix/torrent publishes a
+release containing that commit.
+
 ## Error behavior
 
 Reads never fabricate data. When the pieces behind a range are unavailable, a

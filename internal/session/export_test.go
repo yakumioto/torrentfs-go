@@ -142,6 +142,20 @@ func SetReadProbe(ch chan ReadProbeEvent) (restore func()) {
 	return func() { readProbe.Store(previous) }
 }
 
+// UnderlyingTorrentForTest exposes the anacrolix torrent behind a session
+// handle so discovery tests can drive it directly, for example to inject peer
+// addresses or request every piece. Test-only.
+func UnderlyingTorrentForTest(st *Torrent) *torrent.Torrent {
+	return st.tor
+}
+
+// UnderlyingClientForTest exposes the anacrolix client so discovery tests can
+// read Client.WriteStatus, which reports the per-torrent DHT announce counter.
+// There is no per-torrent status entry point in this version. Test-only.
+func UnderlyingClientForTest(s *Session) *torrent.Client {
+	return s.cl
+}
+
 // SameRAFile reports whether two reader handles are the same session raFile,
 // and whether they share one pieceLoader. Test-only.
 func SameRAFile(a, b io.ReaderAt) (sameFile, sameLoader bool) {
