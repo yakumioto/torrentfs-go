@@ -16,8 +16,12 @@ COPY --from=web-build /src/web/dist ./web/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/torrentfs ./cmd/torrentfs
 
 FROM debian:bookworm-slim
+ARG TORRENTFS_UID=1000
+ARG TORRENTFS_GID=1000
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fuse3 ca-certificates \
+    && apt-get install -y --no-install-recommends fuse3 ca-certificates passwd \
+    && groupadd --gid "$TORRENTFS_GID" torrentfs \
+    && useradd --uid "$TORRENTFS_UID" --gid "$TORRENTFS_GID" --no-create-home --shell /usr/sbin/nologin torrentfs \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
 RUN mkdir -p /etc/torrentfs /torrents

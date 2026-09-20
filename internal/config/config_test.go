@@ -23,6 +23,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Log != (config.Log{Level: "info", Format: "text"}) {
 		t.Fatalf("Default log = %+v, want info/text", cfg.Log)
 	}
+	if cfg.Mount.AllowOther {
+		t.Fatal("Default mount.allow_other = true, want false")
+	}
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
@@ -72,6 +75,9 @@ extended_handshake_client_version = "torrentfs-test/1.0"
 level = "debug"
 format = "json"
 add_source = true
+
+[mount]
+allow_other = true
 `)
 
 	cfg, err := config.Load(path)
@@ -86,6 +92,9 @@ add_source = true
 	}
 	if cfg.Log != (config.Log{Level: "debug", Format: "json", AddSource: true}) {
 		t.Fatalf("Log = %+v, want debug/json/source", cfg.Log)
+	}
+	if !cfg.Mount.AllowOther {
+		t.Fatal("Mount.AllowOther = false, want true")
 	}
 	if cfg.Cache.CapacityBytes != 8192 {
 		t.Fatalf("CapacityBytes = %d, want 8192", cfg.Cache.CapacityBytes)
@@ -202,6 +211,9 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	}
 	if cfg.Log != defaults.Log {
 		t.Fatalf("Log = %+v, want defaults %+v", cfg.Log, defaults.Log)
+	}
+	if cfg.Mount != defaults.Mount {
+		t.Fatalf("Mount = %+v, want defaults %+v", cfg.Mount, defaults.Mount)
 	}
 }
 
