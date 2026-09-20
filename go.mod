@@ -93,3 +93,11 @@ require (
 	modernc.org/sqlite v1.21.1 // indirect
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
+
+// v1.61.0 has no BEP 27 isolation: private torrents still announce to and
+// query DHT and still exchange peers via PEX. The fork carries exactly the
+// three upstream hunks from anacrolix/torrent commit 76452a2c8a2f, so the rest
+// of the dependency stays byte-identical to the v1.61.0 release.
+//
+// Drop this replace once upstream publishes a release containing that commit.
+replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.1
