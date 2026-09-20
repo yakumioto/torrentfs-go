@@ -83,7 +83,7 @@ docker image inspect ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<
 ## Usage
 
 ```sh
-go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] <torrents-dir>
+go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] <torrents-dir>
 ```
 
 `-mountpoint` is required unless the HTTP API is enabled
@@ -91,12 +91,11 @@ go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] [-data-dir <dir>] <tor
 managed entirely over HTTP. `<torrents-dir>` is exactly one existing, readable
 and writable directory. A file path such as
 `/data/torrentfs/input.torrent` is rejected: single-file positional input is
-not supported. Configuration is merged as explicit `-data-dir` (when set) >
-environment variables > TOML file > built-in defaults. Without `-config`, the
-loader uses the built-in defaults and environment variables; a TOML file loads
-the sections shown in `torrentfs.example.toml`. `-data-dir` holds the state
-torrentfs still persists (metadata and deletion sidecars); piece data never
-goes there. It is distinct from `<torrents-dir>`.
+not supported. Configuration is merged as environment variables > TOML file >
+built-in defaults. Without `-config`, the loader uses the built-in defaults and
+environment variables; a TOML file loads the sections shown in
+`torrentfs.example.toml`. All persistent state is stored under
+`<torrents-dir>/.metadata`; piece data is memory-only.
 
 At startup, torrentfs restores managed metadata and scans only direct regular,
 non-symlink files in `<torrents-dir>` whose names end in lower-case `.torrent`.
@@ -252,27 +251,21 @@ inactivity window.
   .metadata/<info-hash>.torrent      # managed metainfo published by the API
   .metadata/<info-hash>.magnet       # durable intent for an unresolved magnet
   .metadata/<legacy-name>.torrent    # legacy managed source, restored but never rewritten
+  .metadata/peer_id                   # durable 20-byte peer ID for this torrents directory
+  .metadata/state/<info-hash>.json    # interrupted-deletion sidecars only
   .metadata/instance.lock            # single-instance lock, held while the process runs
   .stats/                            # legacy empty directory: ignored, never created, never removed
-
-<data-dir>/
-  peer_id                            # durable 20-byte peer ID, written once on first start
-  state/<info-hash>.json             # interrupted-deletion sidecars only, no piece state
 ```
 
 `.metadata` is an implementation detail of the torrents directory: it is
-persisted, restored on startup, and never mounted. A legacy `.stats` directory
-from an older version is ignored — the current release neither creates it nor
-deletes it, and it holds no piece state. **No piece data and no piece
-completion is stored anywhere**: the cache exists only in memory, a restart
-starts empty, and neither the cache contents, the cache hit count, nor transient
-read priorities survive a restart. There is no initial rehash and no attempt to
-recover a piece from disk.
-
-An older release kept pieces under `<data-dir>/payload/`. That directory is no
-longer read or written; if it exists and is not empty, startup logs a warning
-naming it so it can be reclaimed by hand. Removing it changes nothing about the
-running service.
+persisted, restored on startup, and never mounted. It contains the managed
+metainfo, pending magnet intents, peer identity, deletion sidecars, and instance
+lock. A legacy `.stats` directory from an older version is ignored — the current
+release neither creates it nor deletes it, and it holds no piece state. **No
+piece data and no piece completion is stored anywhere**: the cache exists only
+in memory, a restart starts empty, and neither the cache contents, the cache hit
+count, nor transient read priorities survive a restart. There is no initial
+rehash and no attempt to recover a piece from disk.
 
 A magnet URI is accepted immediately: its intent is published as
 `.metadata/<info-hash>.magnet` before registration, so a restart before the
@@ -289,9 +282,6 @@ user-owned top-level `.torrent` file is refused with `409`.
 The supported TOML keys are:
 
 ```toml
-[paths]
-data_dir = "./torrentfs-data"
-
 [http]
 listen_addr = "127.0.0.1:8080"
 max_upload_bytes = 10485760
@@ -339,7 +329,6 @@ below are read; unrelated `TORRENTFS_*` variables are ignored.
 
 | TOML key | Environment variable | Value format |
 | --- | --- | --- |
-| `paths.data_dir` | `TORRENTFS_PATHS_DATA_DIR` | string |
 | `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | string |
 | `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | decimal integer |
 | `connections.disable_ipv4` | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | Go boolean |
@@ -362,12 +351,11 @@ below are read; unrelated `TORRENTFS_*` variables are ignored.
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` or `json` |
 | `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | Go boolean |
 
-Values are merged per field with this precedence: an explicitly supplied
-`-data-dir` flag > environment variable > TOML file > built-in default. An
-environment variable that is present but empty clears a string field; empty
-numeric, boolean, and duration values are invalid. Environment overrides are
-applied before cross-field validation, so they can replace a lower-priority
-value that would otherwise fail validation. Explicitly clear
+Values are merged per field with this precedence: environment variable > TOML
+file > built-in default. An environment variable that is present but empty
+clears a string field; empty numeric, boolean, and duration values are invalid.
+Environment overrides are applied before cross-field validation, so they can
+replace a lower-priority value that would otherwise fail validation. Explicitly clear
 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH` when switching to
 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE`; authentication still requires exactly
 one password source.
@@ -446,13 +434,13 @@ header on HTTP tracker announce requests; it does not change metainfo, webseed,
 or scrape requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is
 limited to 20 bytes, and the remaining bytes are generated randomly. A 20-byte
 prefix leaves no random suffix. The complete 20-byte peer ID is written once to
-`<data-dir>/peer_id` on first start and reused on every later start, so a
-private tracker sees one stable peer instead of a new one after each restart.
-Deleting that file — or changing `peer_id_prefix` so the stored ID no longer
-matches, which logs a warning — generates and stores a new identity. A
-`peer_id` file whose length is not exactly 20 bytes fails startup instead of
-being silently regenerated. The peer ID is used for BitTorrent handshakes and
-announces. Explicit TOML values override the defaults; explicitly setting an
+`<torrents-dir>/.metadata/peer_id` on first start and reused on every later
+start, so a private tracker sees one stable peer instead of a new one after each
+restart. Each torrents directory has its own identity. Deleting that file — or
+changing `peer_id_prefix` so the stored ID no longer matches, which logs a
+warning — generates and stores a new identity. A `peer_id` file whose length is
+not exactly 20 bytes fails startup instead of being silently regenerated. The
+peer ID is used for BitTorrent handshakes and announces. Explicit TOML values override the defaults; explicitly setting an
 identity value to an empty string delegates that field to the anacrolix
 default. `v` is sent only when the peer supports the extended handshake.
 
@@ -610,10 +598,13 @@ Upgrading from a release that persisted pieces on disk:
 
 | Change | Detail |
 | --- | --- |
-| `paths.payload_dir` / `TORRENTFS_PATHS_PAYLOAD_DIR` removed | Pieces are memory-only, so there is no payload root to configure. Drop the key; an old value is ignored. |
+| `paths.data_dir` / `-data-dir` / `TORRENTFS_PATHS_DATA_DIR` removed | The `[paths]` TOML section is rejected as an unknown field; the removed environment variable is ignored. State now lives under each `<torrents-dir>/.metadata`. |
+| Peer identity moved | `<data-dir>/peer_id` is not migrated. Copy it manually to `<torrents-dir>/.metadata/peer_id` if preserving a private-tracker identity matters; otherwise a new 20-byte identity is generated. |
+| Deletion sidecars moved | `<data-dir>/state/` is not migrated. Copy unfinished sidecars manually to `<torrents-dir>/.metadata/state/` if recovery is required. |
+| Peer IDs are per torrents directory | The old shared data directory could make multiple torrents directories share one identity. Each torrents directory now has its own `.metadata/peer_id`. |
+| Legacy payload warning removed | `<data-dir>/payload/` is no longer inspected; pieces remain memory-only and old files are left untouched. |
 | `cache.capacity_bytes` default 64 MiB → 2 GiB | The default now targets a ~4 GB host. Set it explicitly for smaller containers. |
 | `cache.capacity_bytes = 0` is now invalid | `0` meant "cache nothing", which would make every read fail. Startup rejects it. |
-| `<data-dir>/payload/` is no longer used | Old piece files are neither read nor deleted. Startup warns when the directory is non-empty so it can be removed by hand. |
 | `purge_data` removed | `DELETE /api/v1/torrents/{id}?purge_data=...` loses the parameter and the operation response loses the `purge_data` field. Deleting a task now always drops its cached pieces. An old client that still sends the parameter gets a normal `202`: Go's HTTP server ignores unknown query parameters. |
 | `completed_bytes` and `progress` removed | There is no download-progress concept. Read `cached_bytes` instead. |
 | Per-piece `known`/`complete`/`partial`/`checking`/`wanted`/`available_bytes` removed | Replaced by `cached` / `cached_bytes` / `pinned`, which describe cache residency. |
@@ -666,9 +657,8 @@ involving the observation point may remain in that output.
 
 The image contains the Go binary, runtime libraries, and the built-in
 `/etc/torrentfs/torrentfs.toml`; Node and `web/dist` are build-stage inputs
-embedded in that binary. The image also creates `/data` and `/torrents` so its
-command can start without any external configuration. Run the HTTP-only check
-without FUSE:
+embedded in that binary. The image also creates `/torrents` so its command can
+start without any external configuration. Run the HTTP-only check without FUSE:
 
 ```sh
 ./scripts/http-smoke.sh
@@ -682,17 +672,16 @@ environment-only overrides, and an external TOML file:
 ```
 
 With no arguments, the image starts a headless HTTP service on loopback using
-its built-in configuration and the container-local `/data` and `/torrents`
-directories. Those directories are temporary container storage unless they are
-bind mounted. To expose the API, set a non-loopback listener and complete
-authentication configuration together; environment variables override the
-built-in file without an additional `-config` argument:
+its built-in configuration and the container-local `/torrents` directory. The
+directory is temporary container storage unless it is bind mounted. To expose
+the API, set a non-loopback listener and complete authentication configuration
+together; environment variables override the built-in file without an
+additional `-config` argument:
 
 ```sh
 docker build -t torrentfs .
 docker run --rm \
   -p 8080:8080 \
-  -v /srv/torrentfs-data:/data \
   -v /srv/torrents:/torrents \
   -e TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   -e TORRENTFS_HTTP_AUTH_ENABLED=true \
@@ -713,7 +702,6 @@ docker run --rm \
   -p 8080:8080 \
   -p 6881:6881/tcp \
   -p 6881:6881/udp \
-  -v /srv/torrentfs-data:/data \
   -v /srv/torrents:/torrents \
   torrentfs
 ```
@@ -724,7 +712,6 @@ configuration:
 ```sh
 docker run --rm \
   -p 8080:8080 \
-  -v /srv/torrentfs-data:/data \
   -v /srv/torrents:/torrents \
   -v /srv/torrentfs.toml:/config.toml:ro \
   torrentfs -config /config.toml /torrents
@@ -780,16 +767,15 @@ Mount a host directory at `/torrents` and pass that directory as the sole
 positional argument:
 
 ```sh
-mkdir -p /srv/torrentfs-data /srv/torrents /srv/mnt
+mkdir -p /srv/torrents /srv/mnt
 docker build -t torrentfs .
 docker run --rm \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
-  -v /srv/torrentfs-data:/data \
   -v /srv/torrents:/torrents \
   --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
-  torrentfs -mountpoint /mnt -data-dir /data /torrents
+  torrentfs -mountpoint /mnt /torrents
 ```
 
 Docker's default bind propagation is `rprivate`, which keeps a FUSE
@@ -887,10 +873,9 @@ never be used as, or mistaken for, a successful graceful unmount.
 `/torrents/.metadata`; do not mount it read-only. Add and remove direct regular
 lower-case `*.torrent` files in that directory while the container is running,
 or manage torrents through the HTTP API. Use a temporary filename followed by
-an atomic rename for file-based writers. `/srv/torrentfs-data` stores
-the metadata cache and deletion sidecars, and `/srv/mnt` must be an empty
-mountpoint on that shared host mount; `-data-dir` does not change the torrent
-source directory.
+an atomic rename for file-based writers. Peer identity and deletion sidecars are
+also stored under `/srv/torrents/.metadata`, and `/srv/mnt` must be an empty
+mountpoint on that shared host mount.
 
 Mounting FUSE needs the host to grant the container the FUSE device and the
 mount capability. The image installs `fuse3` and mount helpers and runs

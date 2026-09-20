@@ -17,9 +17,6 @@ import (
 
 func TestDefault(t *testing.T) {
 	cfg := config.Default()
-	if cfg.Paths.DataDir == "" {
-		t.Fatal("Default DataDir is empty")
-	}
 	if cfg.Cache.CapacityBytes != 2<<30 {
 		t.Fatalf("Default cache capacity = %d, want %d", cfg.Cache.CapacityBytes, 2<<30)
 	}
@@ -55,11 +52,7 @@ func TestDefault(t *testing.T) {
 }
 
 func TestLoadCompleteConfig(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
 	path := writeConfig(t, `
-[paths]
-data_dir = "`+dataDir+`"
-
 [connections]
 listen_host = "127.0.0.1"
 listen_port = 23456
@@ -85,9 +78,6 @@ add_source = true
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Paths.DataDir != dataDir {
-		t.Fatalf("DataDir = %q, want %q", cfg.Paths.DataDir, dataDir)
-	}
 	if cfg.Connections.ListenHost != "127.0.0.1" || cfg.Connections.ListenPort != 23456 {
 		t.Fatalf("Connections = %+v", cfg.Connections)
 	}
@@ -111,11 +101,7 @@ add_source = true
 }
 
 func TestLoadHTTPSection(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
 	path := writeConfig(t, `
-[paths]
-data_dir = `+quote(dataDir)+`
-
 [http]
 listen_addr = "127.0.0.1:9000"
 max_upload_bytes = 2048
@@ -170,7 +156,7 @@ func TestLoadClientIdentityFormats(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := writeConfig(t, "[paths]\ndata_dir = "+quote(filepath.Join(t.TempDir(), "data"))+"\n\n[identity]\n"+
+			path := writeConfig(t, "[identity]\n"+
 				"tracker_user_agent = "+quote(tt.trackerAgent)+"\n"+
 				"peer_id_prefix = "+quote(tt.peerIDPrefix)+"\n"+
 				"extended_handshake_client_version = "+quote(tt.handshakeValue)+"\n")
@@ -192,8 +178,7 @@ func TestLoadClientIdentityFormats(t *testing.T) {
 }
 
 func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
-	path := writeConfig(t, "[paths]\ndata_dir = "+quote(dataDir)+"\n")
+	path := writeConfig(t, "")
 
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -221,8 +206,7 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 }
 
 func TestLoadUsesDefaultsForEmptyIdentitySection(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
-	path := writeConfig(t, "[paths]\ndata_dir = "+quote(dataDir)+"\n\n[identity]\n")
+	path := writeConfig(t, "[identity]\n")
 
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -247,7 +231,7 @@ func TestLoadAllowsExplicitEmptyIdentityValues(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
-	path := writeConfig(t, "[paths]\ndata_dir = \"/tmp/torrentfs\"\n\n[unknown]\nvalue = true\n")
+	path := writeConfig(t, "[unknown]\nvalue = true\n")
 
 	_, err := config.Load(path)
 	if err == nil {
@@ -262,6 +246,22 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsRemovedPathsSection(t *testing.T) {
+	_, err := config.Load(writeConfig(t, `[paths]
+data_dir = "/tmp/torrentfs"
+`))
+	if err == nil {
+		t.Fatal("Load with removed paths section succeeded")
+	}
+	var strictErr *toml.StrictMissingError
+	if !errors.As(err, &strictErr) {
+		t.Fatalf("Load error = %T %v, want *toml.StrictMissingError", err, err)
+	}
+	if !strings.Contains(err.Error(), "paths") {
+		t.Fatalf("Load error = %q, want paths key details", err)
+	}
+}
+
 func TestLoadWrapsSyntaxAndTypeErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -269,15 +269,15 @@ func TestLoadWrapsSyntaxAndTypeErrors(t *testing.T) {
 	}{
 		{
 			name: "syntax",
-			body: "[paths\ndata_dir = \"/tmp/torrentfs\"\n",
+			body: "[connections\nlisten_port = 123\n",
 		},
 		{
 			name: "type",
-			body: "[paths]\ndata_dir = \"/tmp/torrentfs\"\n\n[connections]\nlisten_port = \"bad\"\n",
+			body: "[connections]\nlisten_port = \"bad\"\n",
 		},
 		{
 			name: "duration",
-			body: "[paths]\ndata_dir = \"/tmp/torrentfs\"\n\n[http.auth]\ntoken_ttl = \"not-a-duration\"\n",
+			body: "[http.auth]\ntoken_ttl = \"not-a-duration\"\n",
 		},
 	}
 	for _, tt := range tests {
@@ -413,13 +413,6 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 		setup func(*config.Config)
 		field string
 	}{
-		{
-			name: "empty data dir",
-			setup: func(cfg *config.Config) {
-				cfg.Paths.DataDir = ""
-			},
-			field: "paths.data_dir",
-		},
 		{
 			name: "negative port",
 			setup: func(cfg *config.Config) {

@@ -90,9 +90,9 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	for i := range content {
 		content[i] = byte('a' + i%26)
 	}
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -214,9 +214,9 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 		"a.txt":     []byte("alpha file"),
 		"sub/b.txt": []byte("beta file"),
 	}
-	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	torrentPath, hash, all := buildMultiFileTorrent(t, work, "multi", files)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

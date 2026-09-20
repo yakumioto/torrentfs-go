@@ -22,9 +22,7 @@ func TestLoadWithoutPathUsesDefaults(t *testing.T) {
 }
 
 func TestLoadEnvironmentBindings(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
 	values := map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR":                             dataDir,
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST":                    "127.0.0.1",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT":                    "12345",
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV4":                   "true",
@@ -53,9 +51,6 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if got.Paths.DataDir != dataDir {
-		t.Fatalf("paths = %+v", got.Paths)
-	}
 	if got.Connections.ListenHost != "127.0.0.1" || got.Connections.ListenPort != 12345 {
 		t.Fatalf("connections = %+v", got.Connections)
 	}
@@ -101,8 +96,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 22 {
-		t.Fatalf("environment binding count = %d, want 22", len(environmentBindings))
+	if len(environmentBindings) != 21 {
+		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
 	}
 	for name := range values {
 		if name == "TORRENTFS_FUSE_REQUIRED" {
@@ -115,18 +110,13 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 }
 
 func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
-	fileDataDir := filepath.Join(t.TempDir(), "file-data")
-	path := writeConfigFile(t, "[paths]\ndata_dir = \""+fileDataDir+"\"\n\n[cache]\ncapacity_bytes = 123\n")
+	path := writeConfigFile(t, "[cache]\ncapacity_bytes = 123\n")
 
 	got, err := load(path, lookupEnvironment(map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR":       filepath.Join(t.TempDir(), "env-data"),
 		"TORRENTFS_CACHE_CAPACITY_BYTES": "456",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
-	}
-	if got.Paths.DataDir == fileDataDir {
-		t.Fatalf("DataDir = %q, environment should override file", got.Paths.DataDir)
 	}
 	if got.Cache.CapacityBytes != 456 {
 		t.Fatalf("CapacityBytes = %d, want environment value 456", got.Cache.CapacityBytes)
@@ -141,18 +131,26 @@ func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
 	}
 }
 
-func TestLoadEnvironmentCanReplaceInvalidFileValuesBeforeValidation(t *testing.T) {
-	path := writeConfigFile(t, `[paths]
-data_dir = ""
+func TestLoadIgnoresRemovedDataDirEnvironment(t *testing.T) {
+	got, err := load("", lookupEnvironment(map[string]string{
+		"TORRENTFS_PATHS_DATA_DIR": filepath.Join(t.TempDir(), "ignored"),
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !reflect.DeepEqual(got, Default()) {
+		t.Fatalf("config changed after removed environment variable: %+v", got)
+	}
+}
 
-[connections]
+func TestLoadEnvironmentCanReplaceInvalidFileValuesBeforeValidation(t *testing.T) {
+	path := writeConfigFile(t, `[connections]
 listen_port = -1
 
 [http]
 listen_addr = "0.0.0.0:8080"
 `)
 	values := map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR":          filepath.Join(t.TempDir(), "env-data"),
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT": "1234",
 		"TORRENTFS_HTTP_LISTEN_ADDR":        "127.0.0.1:8080",
 	}
@@ -282,21 +280,6 @@ password_hash = "file-hash"
 	}
 	if got.HTTP.Auth.PasswordHash != "" || got.HTTP.Auth.PasswordHashFile != "/run/secrets/hash" {
 		t.Fatalf("auth sources = %+v", got.HTTP.Auth)
-	}
-}
-
-func TestLoadWithDataDirOverridePrecedesValidation(t *testing.T) {
-	path := writeConfigFile(t, "[paths]\ndata_dir = \"\"\n")
-	dataDir := filepath.Join(t.TempDir(), "cli-data")
-
-	got, err := loadWithDataDir(path, lookupEnvironment(map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR": "",
-	}), dataDir, true)
-	if err != nil {
-		t.Fatalf("loadWithDataDir: %v", err)
-	}
-	if got.Paths.DataDir != dataDir {
-		t.Fatalf("DataDir = %q, want CLI override %q", got.Paths.DataDir, dataDir)
 	}
 }
 

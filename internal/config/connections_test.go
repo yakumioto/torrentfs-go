@@ -26,10 +26,7 @@ func TestDefaultDisablesPortForwarding(t *testing.T) {
 }
 
 func TestLoadReadsConnectionSection(t *testing.T) {
-	path := writeConfig(t, `[paths]
-data_dir = `+quote(filepath.Join(t.TempDir(), "data"))+`
-
-[connections]
+	path := writeConfig(t, `[connections]
 listen_host = "127.0.0.1"
 listen_port = 6881
 disable_ipv4 = false
@@ -129,7 +126,6 @@ func TestValidateRejectsInvalidConnections(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
-			cfg.Paths.DataDir = filepath.Join(t.TempDir(), "data")
 			tt.setup(&cfg)
 
 			err := cfg.Validate()

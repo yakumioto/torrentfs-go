@@ -22,9 +22,9 @@ func TestSessionErrorPathsForUnknownTorrentAndFile(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", []byte("error paths"))
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", []byte("error paths"))
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestSessionErrorPathsForUnknownTorrentAndFile(t *testing.T) {
 func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
-	dataDir := filepath.Join(work, "data")
+	torrentsDir := filepath.Join(work, "torrents")
 	tracker := newLoopbackTracker(t)
 
 	content := make([]byte, 2*testPieceLength)
@@ -70,7 +70,7 @@ func TestSessionIncompleteTorrentDoesNotFabricateData(t *testing.T) {
 	// Nothing is seeded and no seeder ever joins the swarm, so every piece
 	// stays missing.
 
-	sess := newLoopbackSession(t, testConfig(dataDir))
+	sess := newLoopbackSession(t, testConfig(), torrentsDir)
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
@@ -148,9 +148,9 @@ func TestFuseMissingPathErrno(t *testing.T) {
 		t.Fatalf("make mountpoint: %v", err)
 	}
 	content := []byte("errno payload")
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

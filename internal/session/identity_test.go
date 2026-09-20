@@ -51,19 +51,19 @@ func (e *handshakeEvents) configure(cc *session.TorrentClientConfig) {
 	}
 }
 
-func identityTorrentsDir(t *testing.T, dataDir string) string {
+func identityTorrentsDir(t *testing.T, base string) string {
 	t.Helper()
-	dir := filepath.Join(dataDir, "torrents")
+	dir := filepath.Join(base, "torrents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	return dir
 }
 
-func newIdentitySession(t *testing.T, cfg config.Config, events *handshakeEvents) *session.Session {
+func newIdentitySession(t *testing.T, cfg config.Config, torrentsDir string, events *handshakeEvents) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
+	sess, err := session.NewWithClientConfig(cfg, torrentsDir, func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true
@@ -87,8 +87,8 @@ func newIdentitySession(t *testing.T, cfg config.Config, events *handshakeEvents
 func TestIdentityMapsToClientConfig(t *testing.T) {
 	t.Run("defaults use qBittorrent identity", func(t *testing.T) {
 		var got clientIdentity
-		cfg := testConfig(t.TempDir())
-		sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
+		cfg := testConfig()
+		sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, t.TempDir()), func(cc *session.TorrentClientConfig) {
 			got = clientIdentity{
 				trackerUserAgent:               cc.HTTPUserAgent,
 				peerIDPrefix:                   cc.Bep20,
@@ -146,10 +146,10 @@ func TestIdentityMapsToClientConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := testConfig(t.TempDir())
+			cfg := testConfig()
 			cfg.Identity = tt.identity
 			var got clientIdentity
-			sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, cfg.Paths.DataDir), func(cc *session.TorrentClientConfig) {
+			sess, err := session.NewWithClientConfig(cfg, identityTorrentsDir(t, t.TempDir()), func(cc *session.TorrentClientConfig) {
 				got = clientIdentity{
 					trackerUserAgent:               cc.HTTPUserAgent,
 					peerIDPrefix:                   cc.Bep20,
@@ -201,12 +201,13 @@ func TestIdentityReachesTrackerAndPeerHandshake(t *testing.T) {
 	qbEvents := newHandshakeEvents()
 	transmissionEvents := newHandshakeEvents()
 
-	qbDataDir := filepath.Join(work, "qbittorrent-data")
-	qbConfig := testConfig(qbDataDir)
-	transmissionConfig := testConfig(filepath.Join(work, "transmission-data"))
+	qbTorrentsDir := identityTorrentsDir(t, filepath.Join(work, "qbittorrent-data"))
+	transmissionTorrentsDir := identityTorrentsDir(t, filepath.Join(work, "transmission-data"))
+	qbConfig := testConfig()
+	transmissionConfig := testConfig()
 	transmissionConfig.Identity = transmissionIdentity
-	qb := newIdentitySession(t, qbConfig, qbEvents)
-	transmission := newIdentitySession(t, transmissionConfig, transmissionEvents)
+	qb := newIdentitySession(t, qbConfig, qbTorrentsDir, qbEvents)
+	transmission := newIdentitySession(t, transmissionConfig, transmissionTorrentsDir, transmissionEvents)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -16,7 +16,7 @@ import (
 
 func openWarmSession(t *testing.T, dataDir, torrentPath string, hash metainfo.Hash, content []byte) *session.Session {
 	t.Helper()
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestSessionPieceCacheServesReads(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("piececache", (testPieceLength/10)+1))
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 	sess := openWarmSession(t, dataDir, torrentPath, hash, content)
 
 	ra, err := sess.OpenFile(hash, "payload.bin")
@@ -94,7 +94,7 @@ func TestSessionPieceCacheReadsAcrossFileBoundary(t *testing.T) {
 		"second.bin": []byte(strings.Repeat("B", 200<<10)),
 		"third.bin":  []byte("tail"),
 	}
-	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	torrentPath, hash, all := buildMultiFileTorrent(t, work, "multi", files)
 	sess := openWarmSession(t, dataDir, torrentPath, hash, all)
 
 	ra, err := sess.OpenFile(hash, "second.bin")
@@ -114,7 +114,7 @@ func TestTorrentStatusCompleteSnapshot(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	content := []byte(strings.Repeat("state ", (testPieceLength/5)+1))
-	torrentPath, hash := buildSingleFileTorrent(t, dataDir, work, "payload.bin", content)
+	torrentPath, hash := buildSingleFileTorrent(t, work, "payload.bin", content)
 	sess := openWarmSession(t, dataDir, torrentPath, hash, content)
 
 	status, err := sess.TorrentStatusFor(hash.HexString())
@@ -146,7 +146,7 @@ func TestTorrentStatusSharesBoundaryPieces(t *testing.T) {
 		"second.bin": []byte(strings.Repeat("B", 200<<10)),
 		"third.bin":  []byte("tail"),
 	}
-	torrentPath, hash, all := buildMultiFileTorrent(t, dataDir, work, "multi", files)
+	torrentPath, hash, all := buildMultiFileTorrent(t, work, "multi", files)
 	sess := openWarmSession(t, dataDir, torrentPath, hash, all)
 
 	status, err := sess.TorrentStatusFor(hash.HexString())
@@ -176,7 +176,7 @@ func TestTorrentStatusSharesBoundaryPieces(t *testing.T) {
 func TestTorrentStatusUnknownTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
-	sess, err := session.New(testConfig(dataDir), testTorrentDir(t, dataDir))
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

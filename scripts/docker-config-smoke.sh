@@ -92,9 +92,6 @@ stop_clean() {
 }
 
 cat >"$work_dir/external.toml" <<EOF
-[paths]
-data_dir = "/data"
-
 [http]
 listen_addr = "0.0.0.0:8080"
 
@@ -104,13 +101,13 @@ username = "alice"
 password_hash = "$password_hash"
 token_ttl = "30m"
 EOF
-mkdir -p "$work_dir/data"
+mkdir -p "$work_dir/torrents"
 
 printf 'docker config smoke: building %s\n' "$image"
 timeout 1800 docker build --tag "$image" . >/dev/null
 
 timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
-	'test -r /etc/torrentfs/torrentfs.toml && test -d /data && test -d /torrents' \
+	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents' \
 	|| fail 'image is missing its readable default configuration or runtime directories'
 printf 'docker config smoke: image default configuration is readable\n'
 
@@ -118,7 +115,7 @@ printf 'docker config smoke: starting with the image default CMD\n'
 docker run --detach --name "$default_container" "$image" >/dev/null
 wait_running "$default_container"
 timeout 10 docker exec "$default_container" /bin/sh -c \
-	'test -d /data && test -d /torrents && test -r /etc/torrentfs/torrentfs.toml' \
+	'test -d /torrents && test -r /etc/torrentfs/torrentfs.toml' \
 	|| fail 'default container cannot access its configured runtime paths'
 stop_clean "$default_container"
 printf 'docker config smoke: default CMD stayed running and stopped cleanly\n'
@@ -153,9 +150,9 @@ printf 'docker config smoke: starting with an external TOML file\n'
 docker run --detach --name "$file_container" \
 	--user "$(id -u):$(id -g)" \
 	--publish 127.0.0.1::8080 \
-	--mount "type=bind,src=$work_dir/data,dst=/data" \
+	--mount "type=bind,src=$work_dir/torrents,dst=/torrents" \
 	--mount "type=bind,src=$work_dir/external.toml,dst=/config.toml,readonly" \
-	"$image" -config /config.toml /data >/dev/null
+	"$image" -config /config.toml /torrents >/dev/null
 wait_running "$file_container"
 file_port="$(published_port "$file_container")"
 file_url="http://127.0.0.1:$file_port"

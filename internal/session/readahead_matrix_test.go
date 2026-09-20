@@ -42,7 +42,7 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 	hashHex := hash.HexString()
 
 	seederDir := filepath.Join(t.TempDir(), "seeder-data")
-	seeder := newLoopbackSession(t, testConfig(seederDir))
+	seeder := newLoopbackSession(t, testConfig(), seederDir)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := seeder.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
@@ -82,7 +82,7 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 func runColdSeekCandidate(t *testing.T, tracker *loopbackTracker, hashHex string, hash metainfo.Hash, torrentBytes, content []byte, pieceLength, positionOffset int64, candidate readaheadCandidate, caseNumber int) {
 	t.Helper()
 	dataDir := filepath.Join(t.TempDir(), "leecher-data")
-	leecher := newLoopbackSessionWithCustomize(t, testConfig(dataDir), func(cc *session.TorrentClientConfig) {
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), dataDir, func(cc *session.TorrentClientConfig) {
 		cc.DownloadRateLimiter = newMatrixLimiter()
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)

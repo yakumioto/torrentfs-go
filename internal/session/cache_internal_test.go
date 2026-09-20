@@ -24,10 +24,8 @@ import (
 
 const internalTestPieceLength = 256 << 10
 
-func internalTestConfig(dataDir string) config.Config {
-	cfg := config.Default()
-	cfg.Paths.DataDir = dataDir
-	return cfg
+func internalTestConfig() config.Config {
+	return config.Default()
 }
 
 func internalTestTorrentDir(t *testing.T, dataDir string) string {
@@ -45,7 +43,7 @@ func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 	content := bytes.Repeat([]byte("cache"), internalTestPieceLength/5+1)
 	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
 
-	sess, err := New(internalTestConfig(dataDir), internalTestTorrentDir(t, dataDir))
+	sess, err := New(internalTestConfig(), internalTestTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -103,7 +101,7 @@ func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 
 func TestSessionUsesConfiguredPieceCacheCapacity(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
-	cfg := internalTestConfig(dataDir)
+	cfg := internalTestConfig()
 	cfg.Cache.CapacityBytes = 1234
 
 	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
@@ -885,7 +883,7 @@ func TestSessionRejectsPieceLargerThanCache(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	content := []byte("small request from a large piece")
 	pieceLength := int64(1024)
-	cfg := internalTestConfig(dataDir)
+	cfg := internalTestConfig()
 	cfg.Cache.CapacityBytes = pieceLength - 1
 	torrentPath, _ := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, pieceLength)
 
@@ -1077,7 +1075,7 @@ func TestTorrentStatusCachedBytesMatchesItsPieces(t *testing.T) {
 	}
 	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
 
-	cfg := internalTestConfig(dataDir)
+	cfg := internalTestConfig()
 	// Three pieces of capacity: the writer below keeps two or three resident,
 	// so evictions fire and the resident total oscillates.
 	cfg.Cache.CapacityBytes = 3 * internalTestPieceLength

@@ -143,7 +143,8 @@ func TestBEP27PrivateTorrentDoesNotAnnounceToDHT(t *testing.T) {
 	defer cancel()
 
 	work := t.TempDir()
-	sess := newLoopbackSessionWithCustomize(t, testConfig(filepath.Join(work, "data")),
+	torrentsDir := filepath.Join(work, "torrents")
+	sess := newLoopbackSessionWithCustomize(t, testConfig(), torrentsDir,
 		func(cc *session.TorrentClientConfig) {
 			// DHT stays on; only the bootstrap target is replaced with a
 			// loopback address nothing listens on.
@@ -199,6 +200,8 @@ func TestBEP27PrivateTorrentDoesNotExchangePEX(t *testing.T) {
 	defer cancel()
 
 	work := t.TempDir()
+	seederDir := filepath.Join(work, "seeder-torrents")
+	leecherDir := filepath.Join(work, "leecher-torrents")
 	content := make([]byte, 2*testPieceLength)
 	for i := range content {
 		content[i] = byte(i%251 + 1)
@@ -209,7 +212,7 @@ func TestBEP27PrivateTorrentDoesNotExchangePEX(t *testing.T) {
 	var mu sync.Mutex
 	pexByHash := map[metainfo.Hash]int{}
 	connsByHash := map[metainfo.Hash]int{}
-	seeder := newLoopbackSessionWithCustomize(t, testConfig(filepath.Join(work, "seeder")),
+	seeder := newLoopbackSessionWithCustomize(t, testConfig(), seederDir,
 		func(cc *session.TorrentClientConfig) {
 			// Count established connections per infohash, so the private
 			// negative can show that a private peer connection did exist and
@@ -252,7 +255,7 @@ func TestBEP27PrivateTorrentDoesNotExchangePEX(t *testing.T) {
 	seedPieces(t, seeder, publicHash, content)
 	seedPieces(t, seeder, privateHash, content)
 
-	leecher := newLoopbackSession(t, testConfig(filepath.Join(work, "leecher")))
+	leecher := newLoopbackSession(t, testConfig(), leecherDir)
 	addMetainfoBytes(t, ctx, leecher, publicBytes)
 	addMetainfoBytes(t, ctx, leecher, privateBytes)
 

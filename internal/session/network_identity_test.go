@@ -18,10 +18,9 @@ import (
 // newLivingSession creates a session on loopback that never touches DHT and
 // returns it without auto-closing: restart and lock tests need explicit control
 // over the session lifetime.
-func newLivingSession(t *testing.T, cfg config.Config, customize func(*session.TorrentClientConfig)) *session.Session {
+func newLivingSession(t *testing.T, cfg config.Config, torrentsDir string, customize func(*session.TorrentClientConfig)) *session.Session {
 	t.Helper()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
@@ -81,12 +80,12 @@ func TestConnectionSettingsMapToClientConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := testConfig(t.TempDir())
+			cfg := testConfig()
 			if tt.configure != nil {
 				tt.configure(&cfg)
 			}
 			cfg.Connections.ListenHost = "127.0.0.1"
-			torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
+			torrentsDir := filepath.Join(t.TempDir(), "torrents")
 			if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 				t.Fatalf("make torrents dir: %v", err)
 			}
@@ -126,10 +125,10 @@ func TestConnectionSettingsMapToClientConfig(t *testing.T) {
 // TestDisableIPv6KeepsOnlyIPv4DHTServers checks that the connection flag, not
 // just the raw client option, decides how many DHT servers run.
 func TestDisableIPv6KeepsOnlyIPv4DHTServers(t *testing.T) {
-	cfg := testConfig(t.TempDir())
+	cfg := testConfig()
 	cfg.Connections.DisableIPv6 = true
 	cfg.Connections.ListenHost = "127.0.0.1"
-	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
@@ -161,10 +160,10 @@ func TestDisableIPv4KeepsOnlyIPv6DHTServers(t *testing.T) {
 		t.Fatalf("close IPv6 probe: %v", err)
 	}
 
-	cfg := testConfig(t.TempDir())
+	cfg := testConfig()
 	cfg.Connections.DisableIPv4 = true
 	cfg.Connections.ListenHost = "::1"
-	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
@@ -206,9 +205,10 @@ func TestEffectiveListenPortMatchesTrackerAnnounce(t *testing.T) {
 		t.Fatalf("write torrent: %v", err)
 	}
 
-	cfg := testConfig(filepath.Join(work, "data"))
+	cfg := testConfig()
 	cfg.Connections.ListenPort = 0
-	sess := newLivingSession(t, cfg, nil)
+	torrentsDir := filepath.Join(work, "torrents")
+	sess := newLivingSession(t, cfg, torrentsDir, nil)
 	defer closeSession(t, sess)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -238,10 +238,10 @@ func TestEffectiveListenPortMatchesTrackerAnnounce(t *testing.T) {
 // TestPeerIDPersistsAcrossRestarts pins Phase 3.1: a private tracker sees one
 // stable peer identity instead of a new one per restart.
 func TestPeerIDPersistsAcrossRestarts(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
-	cfg := testConfig(dataDir)
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
+	cfg := testConfig()
 
-	first := newLivingSession(t, cfg, nil)
+	first := newLivingSession(t, cfg, torrentsDir, nil)
 	firstID := first.PeerIDForTest()
 	closeSession(t, first)
 
@@ -252,14 +252,14 @@ func TestPeerIDPersistsAcrossRestarts(t *testing.T) {
 		t.Fatalf("peer ID %q does not carry prefix %q", firstID, cfg.Identity.PeerIDPrefix)
 	}
 
-	second := newLivingSession(t, cfg, nil)
+	second := newLivingSession(t, cfg, torrentsDir, nil)
 	secondID := second.PeerIDForTest()
 	closeSession(t, second)
 
 	if secondID != firstID {
 		t.Fatalf("peer ID changed across restart: %q -> %q", firstID, secondID)
 	}
-	stored, err := os.ReadFile(filepath.Join(dataDir, "peer_id"))
+	stored, err := os.ReadFile(filepath.Join(torrentsDir, ".metadata", "peer_id"))
 	if err != nil {
 		t.Fatalf("read peer ID file: %v", err)
 	}
@@ -268,12 +268,14 @@ func TestPeerIDPersistsAcrossRestarts(t *testing.T) {
 	}
 }
 
-func TestPeerIDDiffersPerDataDir(t *testing.T) {
-	first := newLivingSession(t, testConfig(filepath.Join(t.TempDir(), "data")), nil)
+func TestPeerIDDiffersPerTorrentsDir(t *testing.T) {
+	firstDir := filepath.Join(t.TempDir(), "torrents")
+	first := newLivingSession(t, testConfig(), firstDir, nil)
 	firstID := first.PeerIDForTest()
 	closeSession(t, first)
 
-	second := newLivingSession(t, testConfig(filepath.Join(t.TempDir(), "data")), nil)
+	secondDir := filepath.Join(t.TempDir(), "torrents")
+	second := newLivingSession(t, testConfig(), secondDir, nil)
 	secondID := second.PeerIDForTest()
 	closeSession(t, second)
 
@@ -286,19 +288,16 @@ func TestPeerIDDiffersPerDataDir(t *testing.T) {
 // file must not silently produce a new identity, which is the drift Phase 3.1
 // exists to stop.
 func TestCorruptPeerIDFileFailsStartup(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("make data dir: %v", err)
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
+	metadataDir := filepath.Join(torrentsDir, ".metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, "peer_id"), []byte("too-short"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(metadataDir, "peer_id"), []byte("too-short"), 0o644); err != nil {
 		t.Fatalf("write corrupt peer ID: %v", err)
 	}
 
-	cfg := testConfig(dataDir)
-	torrentsDir := filepath.Join(dataDir, "torrents")
-	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
-		t.Fatalf("make torrents dir: %v", err)
-	}
+	cfg := testConfig()
 	sess, err := session.NewWithClientConfig(cfg, torrentsDir, func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
 		cc.DisableUTP = true
@@ -316,10 +315,10 @@ func TestCorruptPeerIDFileFailsStartup(t *testing.T) {
 // TestSecondInstanceOnSameTorrentsDirFails pins Phase 3.2: one torrents
 // directory is managed by one process, and the lock is released on close.
 func TestSecondInstanceOnSameTorrentsDirFails(t *testing.T) {
-	cfg := testConfig(filepath.Join(t.TempDir(), "data"))
-	torrentsDir := filepath.Join(cfg.Paths.DataDir, "torrents")
+	cfg := testConfig()
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
 
-	first := newLivingSession(t, cfg, nil)
+	first := newLivingSession(t, cfg, torrentsDir, nil)
 
 	_, err := session.NewWithClientConfig(cfg, torrentsDir, func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
@@ -335,6 +334,6 @@ func TestSecondInstanceOnSameTorrentsDirFails(t *testing.T) {
 
 	closeSession(t, first)
 
-	second := newLivingSession(t, cfg, nil)
+	second := newLivingSession(t, cfg, torrentsDir, nil)
 	closeSession(t, second)
 }

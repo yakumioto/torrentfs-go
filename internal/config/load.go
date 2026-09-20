@@ -15,17 +15,7 @@ func Load(path string) (Config, error) {
 	return load(path, os.LookupEnv)
 }
 
-// LoadWithDataDir applies an explicit data directory override before validating
-// the merged configuration. It preserves the command-line -data-dir precedence.
-func LoadWithDataDir(path, dataDir string, dataDirSet bool) (Config, error) {
-	return loadWithDataDir(path, os.LookupEnv, dataDir, dataDirSet)
-}
-
 func load(path string, lookup envLookup) (Config, error) {
-	return loadWithDataDir(path, lookup, "", false)
-}
-
-func loadWithDataDir(path string, lookup envLookup, dataDir string, dataDirSet bool) (Config, error) {
 	cfg := Default()
 	if path != "" {
 		file, err := os.Open(path)
@@ -48,9 +38,6 @@ func loadWithDataDir(path string, lookup envLookup, dataDir string, dataDirSet b
 	}
 	if err := applyEnvironment(&cfg, lookup); err != nil {
 		return Config{}, fmt.Errorf("config: apply environment: %w", err)
-	}
-	if dataDirSet {
-		cfg.Paths.DataDir = dataDir
 	}
 	if err := cfg.Validate(); err != nil {
 		if path == "" {
