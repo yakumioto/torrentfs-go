@@ -76,7 +76,11 @@ type Cache struct {
 
 	// pinned holds the keys that eviction must skip. A key may be pinned
 	// before it is resident, so that data arriving later is protected.
-	pinned      map[Key]struct{}
+	pinned map[Key]struct{}
+	// pinnedSizes tracks the bytes reserved by each pin. For legacy Pin calls,
+	// an absent resident reserves zero until data arrives; PinSize can reserve a
+	// known piece size before insertion.
+	pinnedSizes map[Key]int64
 	pinnedBytes int64
 
 	// usedByTorrent tracks resident bytes per torrent so the management API can
@@ -91,6 +95,7 @@ func New(capacity int64) *Cache {
 		items:         make(map[Key]*list.Element),
 		lru:           list.New(),
 		pinned:        make(map[Key]struct{}),
+		pinnedSizes:   make(map[Key]int64),
 		usedByTorrent: make(map[string]int64),
 	}
 }
@@ -139,7 +144,10 @@ func (c *Cache) Put(key Key, value []byte) {
 	c.used += int64(len(stored))
 	c.usedByTorrent[key.Torrent] += int64(len(stored))
 	if _, ok := c.pinned[key]; ok {
-		c.pinnedBytes += int64(len(stored))
+		oldReservation := c.pinnedSizes[key]
+		newReservation := int64(len(stored))
+		c.pinnedBytes += newReservation - oldReservation
+		c.pinnedSizes[key] = newReservation
 	}
 	c.evictLocked(elem)
 	if c.used > c.capacity {
@@ -164,21 +172,51 @@ func (c *Cache) Remove(key Key) {
 }
 
 // Pin protects key from eviction. Pinning a key that is not resident yet is
-// allowed: the protection applies if the piece arrives later. Pin fails when it
-// would push the pinned total past the pin budget, in which case the caller
-// must proceed without protection.
+// allowed and retains the legacy zero-cost behavior; callers that know the
+// eventual piece size should use PinSize so future pins cannot consume the
+// entire cache without spending budget.
 func (c *Cache) Pin(key Key) bool {
+	return c.pin(key, 0, false)
+}
+
+// PinSize protects key from eviction and reserves size bytes even when the key
+// is not resident yet. This prevents a read-ahead window from pinning an
+// unbounded number of zero-cost future pieces and starving the requested piece.
+func (c *Cache) PinSize(key Key, size int64) bool {
+	if size < 0 {
+		return false
+	}
+	return c.pin(key, size, true)
+}
+
+func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	actual := c.sizeOfLocked(key)
+	if requested > actual {
+		actual = requested
+	}
 	if _, ok := c.pinned[key]; ok {
+		if !reserve || actual <= c.pinnedSizes[key] {
+			return true
+		}
+		if c.pinnedBytes+(actual-c.pinnedSizes[key]) > c.pinBytesCap() {
+			return false
+		}
+		c.pinnedBytes += actual - c.pinnedSizes[key]
+		c.pinnedSizes[key] = actual
 		return true
 	}
-	size := c.sizeOfLocked(key)
-	if c.pinnedBytes+size > c.pinBytesCap() {
+	reservation := actual
+	if !reserve && c.sizeOfLocked(key) == 0 {
+		reservation = 0
+	}
+	if c.pinnedBytes+reservation > c.pinBytesCap() {
 		return false
 	}
 	c.pinned[key] = struct{}{}
-	c.pinnedBytes += size
+	c.pinnedSizes[key] = reservation
+	c.pinnedBytes += reservation
 	return true
 }
 
@@ -268,6 +306,7 @@ func (c *Cache) InvalidateTorrent(torrent string) {
 	for key := range c.pinned {
 		if key.Torrent == torrent {
 			delete(c.pinned, key)
+			delete(c.pinnedSizes, key)
 		}
 	}
 	c.pinnedBytes = c.recountPinnedLocked()
@@ -340,13 +379,14 @@ func (c *Cache) unpinLocked(key Key) {
 		return
 	}
 	delete(c.pinned, key)
-	c.pinnedBytes -= c.sizeOfLocked(key)
+	c.pinnedBytes -= c.pinnedSizes[key]
+	delete(c.pinnedSizes, key)
 }
 
 func (c *Cache) recountPinnedLocked() int64 {
 	var total int64
 	for key := range c.pinned {
-		total += c.sizeOfLocked(key)
+		total += c.pinnedSizes[key]
 	}
 	return total
 }
@@ -364,6 +404,7 @@ func (c *Cache) remove(elem *list.Element) {
 		delete(c.usedByTorrent, item.key.Torrent)
 	}
 	if _, ok := c.pinned[item.key]; ok {
-		c.pinnedBytes -= n
+		c.pinnedBytes -= c.pinnedSizes[item.key]
+		c.pinnedSizes[item.key] = 0
 	}
 }

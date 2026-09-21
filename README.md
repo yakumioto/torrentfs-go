@@ -609,14 +609,35 @@ share 名固定为 `torrentfs`，路径固定为 `/mnt/torrentfs`；`/torrents` 
 secret 文件必须是普通、非符号链接、非空、单行、不超过 1024 字节，且不可被 group/other 读取（例如 `chmod 400`）。下面的示例同时发布 HTTP 和 SMB，因此准备了两个 secret：SMB 密码明文文件，以及 HTTP 认证用的单行 bcrypt hash 文件。两者都不提交到仓库：
 
 ```sh
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+# The SMB runtime UID must be non-root. A root host user can choose a dedicated
+# numeric identity; a non-root host user can reuse their own UID/GID.
+if [ "$HOST_UID" -eq 0 ]; then
+  RUNTIME_UID=1500
+  RUNTIME_GID=1500
+else
+  RUNTIME_UID="$HOST_UID"
+  RUNTIME_GID="$HOST_GID"
+fi
+
+IMAGE=torrentfs:uid-$RUNTIME_UID
 mkdir -p /srv/torrents /srv/secrets
-printf '%s\n' '<smb-password>' > /srv/secrets/smb-password
-# 任意工具生成的单行 bcrypt hash 均可；这里用 apache2-utils 的 htpasswd，
-# 没有本地 htpasswd 时可以用容器代替：
-#   docker run --rm httpd:2.4 htpasswd -nbBC 10 '' '<http-password>'
-htpasswd -bnBC 10 '' '<http-password>' | tr -d ':\n' > /srv/secrets/torrentfs-password-hash
-printf '\n' >> /srv/secrets/torrentfs-password-hash
-chmod 400 /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
+sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/torrents
+sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/secrets
+
+docker build \
+  --build-arg TORRENTFS_UID="$RUNTIME_UID" \
+  --build-arg TORRENTFS_GID="$RUNTIME_GID" \
+  -t "$IMAGE" .
+printf '%s\n' '<smb-password>' | sudo tee /srv/secrets/smb-password >/dev/null
+# Generate one bcrypt line with a throwaway helper image when htpasswd is not
+# installed locally; the output is immediately owned by the runtime identity.
+docker run --rm httpd:2.4 htpasswd -nbBC 10 '' '<http-password>' \
+  | tr -d ':\n' | sudo tee /srv/secrets/torrentfs-password-hash >/dev/null
+printf '\n' | sudo tee -a /srv/secrets/torrentfs-password-hash >/dev/null
+sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
+sudo chmod 400 /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
 
 docker run --rm \
   --device /dev/fuse \
@@ -636,8 +657,15 @@ docker run --rm \
   --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/torrentfs-password-hash \
   --env TORRENTFS_SMB_ENABLED=true \
   --env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/smb-password \
-  torrentfs
+  "$IMAGE"
 ```
+
+The `sudo chown` steps are intentional: torrentfs writes `/torrents/.metadata`
+with the image runtime UID, while the HTTP hash is read after torrentfs drops
+privileges. If the host user is not root, they must be able to run these
+ownership commands (or pre-create the directories/files with the same numeric
+UID/GID). The root-host example deliberately uses UID/GID 1500; SMB mode rejects
+runtime UID 0.
 
 如果只需要 SMB，可以省略 `--publish 8080`、`--env TORRENTFS_HTTP_*` 和 `--env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` 三组 HTTP 参数：镜像内置的 HTTP listener 保持 container-local `127.0.0.1:8080`，不发布即可。
 

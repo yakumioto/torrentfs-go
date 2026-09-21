@@ -458,6 +458,14 @@ func (f *raFile) protectWindow(window []cache.Key) {
 		f.cache.Unpin(key)
 	}
 	for _, key := range window {
-		f.cache.Pin(key)
+		f.cache.PinSize(key, f.pieceSize(key.Piece))
 	}
+}
+
+func (f *raFile) pieceSize(index int) int64 {
+	start := int64(index) * f.pieceLength
+	if remaining := f.torrentSize - start; remaining < f.pieceLength {
+		return remaining
+	}
+	return f.pieceLength
 }

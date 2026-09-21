@@ -18,12 +18,12 @@ readonly START_TIMEOUT=60
 # web-seeded download finishes comfortably inside this bound on a slow runner.
 readonly CLIENT_TIMEOUT=180
 readonly CLIENT_SMB_TIMEOUT=120
-readonly FILE_SIZE=$((16 * 1024 * 1024 + 123))
+readonly FILE_SIZE=$((64 * 1024 * 1024 + 123))
 readonly PIECE_LENGTH=$((1 * 1024 * 1024))
-# Smaller than the payload so reads must fetch pieces, but not so small that the
-# read window thrashes: the cache must still hold the reader's readahead.
+# Smaller than the payload and large enough for the reader's readahead window;
+# the full read still evicts the early pieces before the cold-cache seek below.
 readonly CACHE_BYTES=$((8 * 1024 * 1024))
-readonly RANDOM_OFFSET=$((12 * 1024 * 1024 + 12345))
+readonly RANDOM_OFFSET=$((40 * 1024 * 1024 + 12345))
 readonly RANDOM_LENGTH=8192
 # Kernel-level "this host cannot do CIFS at all" failures, as opposed to a real
 # regression in the mount or the data it returns.

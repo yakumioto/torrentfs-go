@@ -250,6 +250,83 @@ func TestReadAtConcurrentWithWriteAt(t *testing.T) {
 // streaming read honest: a window that includes bytes a peer has not delivered
 // yet reports the piece as missing. Returning the zero fill instead let
 // anacrolix's reader copy unwritten bytes into the file.
+func TestMarkCompleteCannotPromoteAStaleStagingGeneration(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{12}
+	key, first := openPiece(t, store, hash, pieceLength)
+	_, second := openPiece(t, store, hash, pieceLength)
+
+	if _, err := first.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("first WriteAt: %v", err)
+	}
+	if n, err := first.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("first hash read = (%d, %v), want full data", n, err)
+	}
+	if err := first.MarkComplete(); err != nil {
+		t.Fatalf("first MarkComplete: %v", err)
+	}
+	if _, ok := c.Get(key); !ok {
+		t.Fatal("first generation was not promoted")
+	}
+
+	// A new PieceImpl starts a new download generation and invalidates the old
+	// resident value before its replacement arrives.
+	if _, err := second.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("second WriteAt: %v", err)
+	}
+	if n, err := second.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("second hash read = (%d, %v), want full data", n, err)
+	}
+	completeDone := make(chan error, 1)
+	go func() { completeDone <- first.MarkComplete() }()
+	if err := <-completeDone; err == nil {
+		t.Fatal("stale PieceImpl promoted a newer staging generation")
+	}
+	if c.Has(key) {
+		t.Fatal("stale completion restored the old resident value")
+	}
+	if err := second.MarkComplete(); err != nil {
+		t.Fatalf("second MarkComplete: %v", err)
+	}
+	got, ok := c.Get(key)
+	if !ok || string(got) != "corrupt!" {
+		t.Fatalf("resident generation = (%q, %t), want corrupt!", got, ok)
+	}
+}
+
+func TestResidentReadCannotAuthorizeDifferentStagingGeneration(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{13}
+	key, piece := openPiece(t, store, hash, pieceLength)
+	if _, err := piece.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if _, err := piece.ReadAt(make([]byte, pieceLength), 0); err != nil {
+		t.Fatalf("hash read: %v", err)
+	}
+	if err := piece.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete: %v", err)
+	}
+
+	// A normal resident read happens before a replacement staging generation
+	// starts. It must not authorize that replacement's MarkComplete.
+	resident := make([]byte, pieceLength)
+	if n, err := piece.ReadAt(resident, 0); n != pieceLength || err != nil || string(resident) != "verified" {
+		t.Fatalf("resident read = (%d, %v, %q)", n, err, resident)
+	}
+	if _, err := piece.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("replacement WriteAt: %v", err)
+	}
+	if err := piece.MarkComplete(); err == nil {
+		t.Fatal("replacement was completed without a hash read of its generation")
+	}
+	if c.Has(key) {
+		t.Fatal("replacement failure restored a resident value")
+	}
+}
+
 func TestStagingReadRejectsUnreceivedWindows(t *testing.T) {
 	const pieceLength = 8
 	store, _ := testStore(t, 1<<20)
