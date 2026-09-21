@@ -592,6 +592,55 @@ docker run --detach --name torrentfs \
 
 两个 bind source 都必须对该用户可写：`/torrents` 要保存 `.metadata`，`/mnt` 要允许 FUSE 创建 submount。若 `/dev/fuse` 是 `root:fuse` 且用户不在 fuse 组，还需要按宿主机策略补充 `--group-add`。可以用 `docker exec torrentfs id`、`findmnt -T /srv/mnt` 和 `docker stop torrentfs` 检查身份、传播和清理结果。
 
+### 可选的单容器 SMB 只读共享
+
+默认关闭。设置 `TORRENTFS_SMB_ENABLED=true` 后，容器入口在同一个 mount namespace 内先让 torrentfs 挂载只读 FUSE 到固定的内部路径 `/mnt/torrentfs`，确认该路径的 fstype 为 `fuse.*` 之后才启动 `smbd`，仅监听 TCP 445。宿主机不需要看到 `/mnt/torrentfs`，也不需要 `rshared` 或跨容器 mount propagation。
+
+| 变量 | 说明 |
+| --- | --- |
+| `TORRENTFS_SMB_ENABLED` | `true`/`false`（默认 `false`）。只有严格为 `true`、`1` 时才进入 SMB 模式 |
+| `TORRENTFS_SMB_USERNAME` | 可选。默认使用镜像构建参数解析出的 torrentfs 运行账号；若覆盖，必须解析到同一个运行 UID |
+| `TORRENTFS_SMB_PASSWORD_FILE` | 启用 SMB 时必填。指向只读 secret 文件，密码只经 stdin 写入 Samba passdb |
+
+share 名固定为 `torrentfs`，路径固定为 `/mnt/torrentfs`；`/torrents` 不会被共享，因为其中包含可写的 `.metadata`、peer identity 和锁文件。share 始终 `read only = yes`，`guest ok = no`，`map to guest = never`，只发布 TCP 445，不启动 `nmbd`，也不暴露 137/138/139。
+
+`/dev/fuse`、`SYS_ADMIN` 和 `CAP_NET_BIND_SERVICE` 是运行前提：SMB 模式下 torrentfs 和 smbd 都以镜像内解析出的专用非 root 身份运行，`CAP_NET_BIND_SERVICE` 让该身份可以绑定 445。权限方案是同 UID：Samba 用 `force user`/`force group` 映射到同一个运行身份，因此不需要 `allow_other`，FUSE 访问范围不会因为 SMB 而扩大。AppArmor/安全策略是否放行由宿主策略决定；缺少设备、capability 或 secret 时容器会在启动任何 listener 之前以非零状态失败，并输出诊断，不会退化成共享一个普通目录。
+
+secret 文件必须是普通、非符号链接、非空、单行、不超过 1024 字节，且不可被 group/other 读取（例如 `chmod 400`）：
+
+```sh
+mkdir -p /srv/torrents /srv/secrets
+printf '%s\n' '<smb-password>' > /srv/secrets/smb-password   # 不要提交到仓库
+chmod 400 /srv/secrets/smb-password
+
+docker run --rm \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --cap-add NET_BIND_SERVICE \
+  --security-opt apparmor=unconfined \
+  --publish 445:445 \
+  --publish 8080:8080 \
+  --publish 6881:6881/tcp --publish 6881:6881/udp \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src=/srv/secrets/smb-password,dst=/run/secrets/smb-password,readonly \
+  --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+  --env TORRENTFS_HTTP_AUTH_ENABLED=true \
+  --env TORRENTFS_HTTP_AUTH_USERNAME=alice \
+  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
+  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/smb-password \
+  torrentfs
+```
+
+身份与退出语义：
+
+- 容器入口以 root 启动，仅为完成 passdb 初始化、运行身份切换和绑定 445；torrentfs、`smbd` 及其子进程都以专用非 root 身份运行，FUSE 与 SMB 文件访问身份一致。构建参数把运行 UID 设为 `0` 时，SMB 模式会明确拒绝启动。
+- 用户传入自己的 `-mountpoint` 时入口会拒绝启动，避免 Samba path 与 FUSE path 分叉。
+- torrentfs 或 smbd 任一核心进程异常退出、或 FUSE mount 在运行期消失，容器都会停止另一个进程并以非零状态退出。
+- 收到 `SIGTERM`/`SIGINT` 时先有界停止并回收 Samba（超时才 `SIGKILL`），再通知 torrentfs 执行既有的 HTTP → session → FUSE unmount 关闭链；正常关闭返回 0，强制终止会记录日志并返回非零。
+- 客户端随机 seek（例如播放器跳到文件中段）会经 Samba `pread` → FUSE `Read(off)` → piece planner/cache 拉取对应 pieces，读取链路与 HTTP/FUSE 模式完全一致。内存 cache 与 Samba 共享同一 cgroup，规划 cache 余量时要把两者算在一起。
+- 显式开启 `mount.allow_other=true` 会扩大同一 user namespace 内的访问面；SMB 模式本身不依赖它，也不由入口强制打开。
+
 ## 构建、测试与贡献
 
 前端构建产物被 Go embed，因此本地 quality 检查应先完成前端检查和构建，再执行 Go 命令。下面的顺序与 CI 可复用 action 一致：
@@ -636,6 +685,14 @@ golangci-lint run ./...
   ```sh
   ./scripts/docker-smoke.sh
   ```
+
+- **单容器 SMB 检查**：需要 Linux Docker daemon、`/dev/fuse`、`SYS_ADMIN`、`CAP_NET_BIND_SERVICE`、通常的 `apparmor=unconfined`、`python3`、`sha256sum`、`dd` 和 `timeout`。脚本构建镜像与独立 SMB client 镜像，在隔离 Docker network 里验证认证与 guest 拒绝、目录列举、全量读取哈希、只读拒写、`.metadata` 不可见、正常 SIGTERM 顺序，以及 smbd/torrentfs 异常退出的联动和退出码：
+
+  ```sh
+  ./scripts/docker-smb-smoke.sh
+  ```
+
+  默认还会在 client 容器内用 `mount.cifs` 只读挂载 share，并以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于内存 cache 的区间，与源文件对应切片比对，证明随机 seek 走的是现有 piece planner/cache，而不是顺序下载。这一步需要宿主机内核提供 CIFS 模块并允许 nested `mount.cifs`；GitHub hosted runner 不满足时，CI 设置 `TORRENTFS_SMB_SKIP_CIFS=1` 跳过该段，由 required 的 `TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...`（含 `>4 GiB` 虚拟文件的大偏移用例）承担随机读取证据。在支持 CIFS 的 rootful 主机上应不带该变量运行一次，作为手工必跑项。
 
 `TORRENTFS_FUSE_REQUIRED` 只控制测试门禁，不是 daemon 的运行时配置。CI nightly 的多平台 OCI 构建与本地 `scripts/nightly-build.sh` 归档脚本是不同入口；本 README 的命令用于本地构建、运行和验证，不把手工归档脚本写成 nightly 发布保证。
 

@@ -23,6 +23,7 @@ type torrentFileNode struct {
 func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o444
 	out.Size = uint64(n.size)
+	out.Nlink = 1
 	return 0
 }
 

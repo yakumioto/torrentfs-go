@@ -31,6 +31,10 @@ func (n *rootNode) children() []rootEntry {
 
 func (n *rootNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o555
+	// A directory link count of zero is not a valid POSIX stat result and makes
+	// stat-driven consumers (for example smbd resolving share entries) reject
+	// every child of the mount root.
+	out.Nlink = 2
 	return 0
 }
 
