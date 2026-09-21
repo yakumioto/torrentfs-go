@@ -81,6 +81,7 @@ type Cache struct {
 	// an absent resident reserves zero until data arrives; PinSize can reserve a
 	// known piece size before insertion.
 	pinnedSizes map[Key]int64
+	pinnedSized map[Key]bool
 	pinnedBytes int64
 
 	// usedByTorrent tracks resident bytes per torrent so the management API can
@@ -96,6 +97,7 @@ func New(capacity int64) *Cache {
 		lru:           list.New(),
 		pinned:        make(map[Key]struct{}),
 		pinnedSizes:   make(map[Key]int64),
+		pinnedSized:   make(map[Key]bool),
 		usedByTorrent: make(map[string]int64),
 	}
 }
@@ -131,11 +133,17 @@ func (c *Cache) Put(key Key, value []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if elem, ok := c.items[key]; ok {
-		c.remove(elem)
-	}
 	if c.capacity <= 0 || int64(len(value)) > c.capacity {
 		return
+	}
+	if c.pinnedSized[key] {
+		oldReservation := c.pinnedSizes[key]
+		if c.pinnedBytes-oldReservation+int64(len(value)) > c.pinBytesCap() {
+			return
+		}
+	}
+	if elem, ok := c.items[key]; ok {
+		c.remove(elem)
 	}
 
 	stored := append([]byte(nil), value...)
@@ -197,7 +205,13 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 		actual = requested
 	}
 	if _, ok := c.pinned[key]; ok {
+		if reserve && !c.pinnedSized[key] && c.pinnedBytes > c.pinBytesCap() {
+			return false
+		}
 		if !reserve || actual <= c.pinnedSizes[key] {
+			if reserve {
+				c.pinnedSized[key] = true
+			}
 			return true
 		}
 		if c.pinnedBytes+(actual-c.pinnedSizes[key]) > c.pinBytesCap() {
@@ -205,6 +219,7 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 		}
 		c.pinnedBytes += actual - c.pinnedSizes[key]
 		c.pinnedSizes[key] = actual
+		c.pinnedSized[key] = true
 		return true
 	}
 	reservation := actual
@@ -216,6 +231,7 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 	}
 	c.pinned[key] = struct{}{}
 	c.pinnedSizes[key] = reservation
+	c.pinnedSized[key] = reserve
 	c.pinnedBytes += reservation
 	return true
 }
@@ -307,6 +323,7 @@ func (c *Cache) InvalidateTorrent(torrent string) {
 		if key.Torrent == torrent {
 			delete(c.pinned, key)
 			delete(c.pinnedSizes, key)
+			delete(c.pinnedSized, key)
 		}
 	}
 	c.pinnedBytes = c.recountPinnedLocked()
@@ -381,6 +398,7 @@ func (c *Cache) unpinLocked(key Key) {
 	delete(c.pinned, key)
 	c.pinnedBytes -= c.pinnedSizes[key]
 	delete(c.pinnedSizes, key)
+	delete(c.pinnedSized, key)
 }
 
 func (c *Cache) recountPinnedLocked() int64 {
@@ -403,8 +421,7 @@ func (c *Cache) remove(elem *list.Element) {
 	if c.usedByTorrent[item.key.Torrent] -= n; c.usedByTorrent[item.key.Torrent] <= 0 {
 		delete(c.usedByTorrent, item.key.Torrent)
 	}
-	if _, ok := c.pinned[item.key]; ok {
-		c.pinnedBytes -= c.pinnedSizes[item.key]
-		c.pinnedSizes[item.key] = 0
-	}
+	// A sized reservation belongs to the pin, not to this resident entry.
+	// Keep it until Unpin so Remove/rollback cannot turn a protected key back
+	// into a zero-cost pin.
 }

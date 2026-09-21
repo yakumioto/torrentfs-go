@@ -622,22 +622,29 @@ else
 fi
 
 IMAGE=torrentfs:uid-$RUNTIME_UID
-mkdir -p /srv/torrents /srv/secrets
-sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/torrents
-sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/secrets
+# Use install through sudo so this also works when /srv is root:root 0755 and
+# the invoking user is not root. The runtime UID owns both bind sources.
+sudo install -d -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0755 /srv/torrents /srv/secrets
+
+# Create both files as 0400 before writing their contents. This avoids a
+# group/other-readable window, even briefly.
+sudo install -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0400 /dev/null /srv/secrets/smb-password
+sudo install -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0400 /dev/null /srv/secrets/torrentfs-password-hash
 
 docker build \
   --build-arg TORRENTFS_UID="$RUNTIME_UID" \
   --build-arg TORRENTFS_GID="$RUNTIME_GID" \
   -t "$IMAGE" .
-printf '%s\n' '<smb-password>' | sudo tee /srv/secrets/smb-password >/dev/null
-# Generate one bcrypt line with a throwaway helper image when htpasswd is not
-# installed locally; the output is immediately owned by the runtime identity.
-docker run --rm httpd:2.4 htpasswd -nbBC 10 '' '<http-password>' \
-  | tr -d ':\n' | sudo tee /srv/secrets/torrentfs-password-hash >/dev/null
-printf '\n' | sudo tee -a /srv/secrets/torrentfs-password-hash >/dev/null
-sudo chown "$RUNTIME_UID:$RUNTIME_GID" /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
-sudo chmod 400 /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
+read -r -s -p 'SMB password: ' SMB_PASSWORD; printf '\n'
+printf '%s\n' "$SMB_PASSWORD" | sudo tee /srv/secrets/smb-password >/dev/null
+unset SMB_PASSWORD
+# Generate one bcrypt line from stdin with a throwaway helper image. The HTTP
+# password never appears in shell history or any process argv.
+read -r -s -p 'HTTP password: ' HTTP_PASSWORD; printf '\n'
+HTTP_HASH="$(printf '%s\n' "$HTTP_PASSWORD" | docker run --rm -i httpd:2.4 htpasswd -nBiC 10 '' | tr -d ':\r\n')"
+unset HTTP_PASSWORD
+printf '%s\n' "$HTTP_HASH" | sudo tee /srv/secrets/torrentfs-password-hash >/dev/null
+unset HTTP_HASH
 
 docker run --rm \
   --device /dev/fuse \

@@ -139,6 +139,24 @@ func TestCachePinSizeReservesAbsentPieceBudget(t *testing.T) {
 	}
 }
 
+func TestCachePinSizeReservationSurvivesRemoveUntilUnpin(t *testing.T) {
+	c := New(16)
+	first := Key{Torrent: "a", Piece: 1}
+	second := Key{Torrent: "a", Piece: 2}
+	if !c.PinSize(first, 4) {
+		t.Fatal("first sized pin should fit")
+	}
+	c.Put(first, []byte("1111"))
+	c.Remove(first)
+	if c.PinSize(second, 4) {
+		t.Fatal("removing a resident must not release its reservation before Unpin")
+	}
+	c.Unpin(first)
+	if !c.PinSize(second, 4) {
+		t.Fatal("Unpin should release the reservation")
+	}
+}
+
 func TestCacheRollsBackInsertItCannotFit(t *testing.T) {
 	// Two keys pinned while still absent cost nothing against the pin budget,
 	// so both may be pinned. When their data later arrives the pinned total can

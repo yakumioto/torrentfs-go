@@ -295,6 +295,60 @@ func TestMarkCompleteCannotPromoteAStaleStagingGeneration(t *testing.T) {
 	}
 }
 
+func TestFreshPieceImplsKeepObservedEpoch(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{14}
+	info := singlePieceInfo(pieceLength)
+	impl, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	newPiece := func() storage.PieceImpl {
+		return impl.PieceWithHash(info.Piece(0), g.None[[]byte]())
+	}
+
+	writerA := newPiece()
+	if _, err := writerA.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("writer A: %v", err)
+	}
+	hashA := newPiece()
+	if n, err := hashA.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("hash A read = (%d, %v)", n, err)
+	}
+	if err := newPiece().MarkComplete(); err != nil {
+		t.Fatalf("fresh MarkComplete A: %v", err)
+	}
+
+	stale := newPiece() // observes epoch A
+	writerB := newPiece()
+	if _, err := writerB.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("writer B: %v", err)
+	}
+	if err := stale.MarkNotComplete(); err != nil {
+		t.Fatalf("stale MarkNotComplete: %v", err)
+	}
+	freshCompleteB := newPiece() // observes epoch B, but B was never hashed
+	if err := freshCompleteB.MarkComplete(); err == nil {
+		t.Fatal("fresh MarkComplete promoted an unverified B generation")
+	}
+	if c.Has(cache.Key{Torrent: hash.HexString(), Piece: 0}) {
+		t.Fatal("unverified B generation entered the cache")
+	}
+
+	freshHashB := newPiece()
+	if n, err := freshHashB.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("hash B read = (%d, %v)", n, err)
+	}
+	if err := newPiece().MarkComplete(); err != nil {
+		t.Fatalf("fresh MarkComplete B: %v", err)
+	}
+	got, ok := c.Get(cache.Key{Torrent: hash.HexString(), Piece: 0})
+	if !ok || string(got) != "corrupt!" {
+		t.Fatalf("verified B resident = (%q, %t), want corrupt!", got, ok)
+	}
+}
+
 func TestResidentReadCannotAuthorizeDifferentStagingGeneration(t *testing.T) {
 	const pieceLength = 8
 	store, c := testStore(t, 1<<20)

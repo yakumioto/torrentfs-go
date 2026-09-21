@@ -457,7 +457,16 @@ func (f *raFile) protectWindow(window []cache.Key) {
 	for _, key := range previous {
 		f.cache.Unpin(key)
 	}
-	for _, key := range window {
+	if len(window) == 0 {
+		return
+	}
+	if !f.cache.PinSize(window[0], f.pieceSize(window[0].Piece)) && !f.cache.Has(window[0]) {
+		// The target is absent and cannot be reserved. Do not pin any future
+		// read-ahead key: even a short tail could otherwise consume the last
+		// evictable bytes and make the target insertion roll back forever.
+		return
+	}
+	for _, key := range window[1:] {
 		f.cache.PinSize(key, f.pieceSize(key.Piece))
 	}
 }

@@ -33,6 +33,7 @@ type Store struct {
 	mu             sync.Mutex
 	staging        map[cache.Key]*stagingBuffer
 	lastRead       map[cache.Key]uint64
+	epochs         map[cache.Key]uint64
 	nextGeneration uint64
 	closed         bool
 }
@@ -116,6 +117,7 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 		logger:   logger,
 		staging:  make(map[cache.Key]*stagingBuffer),
 		lastRead: make(map[cache.Key]uint64),
+		epochs:   make(map[cache.Key]uint64),
 	}
 }
 
@@ -144,10 +146,17 @@ func (s *Store) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash met
 	}
 	return storage.TorrentImpl{
 		PieceWithHash: func(p metainfo.Piece, _ g.Option[[]byte]) storage.PieceImpl {
-			return &piece{store: s, key: cache.Key{Torrent: key, Piece: p.Index()}, length: p.Length()}
+			pieceKey := cache.Key{Torrent: key, Piece: p.Index()}
+			return &piece{store: s, key: pieceKey, length: p.Length(), generation: s.epoch(pieceKey)}
 		},
 		Close: func() error { return nil },
 	}, nil
+}
+
+func (s *Store) epoch(key cache.Key) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epochs[key]
 }
 
 // Close drops every staging buffer. Pieces already promoted to the cache are
@@ -158,6 +167,7 @@ func (s *Store) Close() error {
 	s.closed = true
 	s.staging = make(map[cache.Key]*stagingBuffer)
 	s.lastRead = make(map[cache.Key]uint64)
+	s.epochs = make(map[cache.Key]uint64)
 	return nil
 }
 
@@ -267,6 +277,7 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 	buf := s.staging[p.key]
 	if buf == nil {
 		s.nextGeneration++
+		s.epochs[p.key] = s.nextGeneration
 		buf = &stagingBuffer{generation: s.nextGeneration, data: make([]byte, p.length)}
 		// A new staging generation invalidates any previously verified resident
 		// value. A hash must never verify the old value while MarkComplete later
@@ -296,7 +307,7 @@ func (p *piece) MarkComplete() error {
 		s.mu.Unlock()
 		return nil
 	}
-	if p.generation != 0 && buf.generation != p.generation {
+	if p.generation == 0 || buf.generation != p.generation {
 		s.mu.Unlock()
 		return fmt.Errorf("piecestore: stale staging generation %d for %s (current %d)", p.generation, p.key.Torrent, buf.generation)
 	}
@@ -321,7 +332,7 @@ func (p *piece) MarkComplete() error {
 func (p *piece) MarkNotComplete() error {
 	s := p.store
 	s.mu.Lock()
-	if buf := s.staging[p.key]; buf != nil && (p.generation == 0 || buf.generation == p.generation) {
+	if buf := s.staging[p.key]; buf != nil && p.generation != 0 && buf.generation == p.generation {
 		delete(s.staging, p.key)
 		delete(s.lastRead, p.key)
 	}

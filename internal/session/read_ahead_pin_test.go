@@ -30,8 +30,8 @@ func (s *orderedPieceSource) Close() error { return nil }
 
 // TestRaFileReadWithOutOfOrderReadAheadPieces ensures future pieces that arrived
 // before the requested piece cannot consume all pin budget. The target piece
-// must be insertable even when the read-ahead window includes resident pieces 1
-// and 2 in a two-piece cache.
+// must be insertable even when the read-ahead window includes future pieces in a
+// two-piece cache.
 func TestRaFileReadWithOutOfOrderReadAheadPieces(t *testing.T) {
 	const pieceLength = int64(8)
 	store := cache.New(2 * pieceLength)
@@ -74,5 +74,32 @@ func TestRaFileReadWithOutOfOrderReadAheadPieces(t *testing.T) {
 	defer source.mu.Unlock()
 	if len(source.starts) != 1 || source.starts[0] != 0 {
 		t.Fatalf("loader starts = %v, want exactly one target read at offset 0", source.starts)
+	}
+}
+
+// TestRaFileTargetPinFailureDoesNotPinShortTail covers the final-piece case:
+// when a full target piece cannot fit the pin budget, a smaller future tail must
+// not be pinned ahead of it.
+func TestRaFileTargetPinFailureDoesNotPinShortTail(t *testing.T) {
+	const pieceLength = int64(8)
+	store := cache.New(pieceLength)
+	source := &orderedPieceSource{}
+	file := &raFile{
+		loader:      source,
+		cache:       store,
+		torrentKey:  "short-tail",
+		fileSize:    pieceLength + 2,
+		pieceLength: pieceLength,
+		torrentSize: pieceLength + 2,
+		readahead:   2,
+	}
+	request := cache.ReadRequest{FileSize: file.fileSize, PieceLength: pieceLength, TorrentLength: file.torrentSize}
+	file.protectWindow(file.windowKeys(request, pieceLength+2))
+	store.Put(cache.Key{Torrent: "short-tail", Piece: 1}, []byte("ta"))
+	if _, err := file.piece(context.Background(), source, 0); err != nil {
+		t.Fatalf("target read = %v", err)
+	}
+	if !store.Has(cache.Key{Torrent: "short-tail", Piece: 0}) {
+		t.Fatal("target piece was not inserted when the short tail arrived first")
 	}
 }
