@@ -1,953 +1,490 @@
 # torrentfs
 
-Mount BitTorrent downloads as a FUSE filesystem.
+`torrentfs` 将 BitTorrent 内容挂载为只读的 FUSE 文件系统，并提供一个用于管理 torrent 的 HTTP API 和嵌入式 Web UI。
 
-> **Status: M5 — robustness and release.** `torrentfs` takes one writable
-> `torrents` directory, continuously reconciles its direct `.torrent` files,
-> and mounts a torrent data tree. The mount is **data only and read-only**: a
-> single-file torrent is exposed directly as a regular file, e.g.
-> `<mount>/movie.mp4`, so a player can open and seek it without a wrapper
-> directory; a multi-file torrent keeps its directory tree. Repeated reads use
-> an in-memory piece cache.
->
-> Torrent management — add by upload or magnet, list, delete, and per-torrent
-> piece status — lives in the HTTP API, not in the mount. Durable managed
-> metainfo and pending magnet intents are stored under
-> `<torrents-dir>/.metadata`, an implementation detail that is never mounted.
-> Pieces live only in memory: they are never written to disk and a restart
-> starts from an empty cache. The cache is bounded and evicts least-recently-used
-> pieces, so the API reports how much of a torrent is *cached* rather than how
-> much was ever downloaded.
+它管理一个已有的、可读写的 `torrents` 目录：目录中的直接 `.torrent` 文件会被扫描，API 也可以添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
 
-## Build
+## 项目定位与设计原则
 
-Requires Go 1.27+ and the Node version in `web/.nvmrc`.
-The Web UI is built before Go packages so `web/dist` is available to the Go
-`embed` package; generated `web/dist` and `web/node_modules` are not committed.
+- **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除和状态查询都通过 HTTP API 完成。
+- **管理状态与缓存分离**：由 API 管理的 metainfo、未完成的磁力链接意图和 peer identity 持久化在 `torrents-dir/.metadata`，piece 内容只存在于内存。
+- **缓存不是下载进度**：`cached_bytes` 表示当前仍驻留在内存中的字节数。piece 会被淘汰，因此这个数值可能下降；进程重启后缓存为空。
+- **显式的网络边界**：HTTP 默认只监听 loopback。绑定非 loopback 地址时必须启用认证；服务本身不终止 TLS，应放在 TLS reverse proxy 后面。
+- **API 与 UI 分层**：API 的 status 快照包含 piece、文件范围以及 `network`/DHT 诊断字段；当前 Web UI 展示文件和 piece 缓存视图，但不展示 peer/DHT 统计。
+
+### 工作结构
+
+```text
+cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
+        │
+        ├── internal/session      torrent 生命周期、metainfo、网络和内存 cache
+        ├── internal/filesystem   只读 FUSE 数据树
+        ├── internal/api          HTTP 路由、认证、管理和 status 快照
+        └── web                   React UI；构建后由 Go embed 到二进制
+
+<torrents-dir>
+├── *.torrent            直接扫描的用户源文件（只扫描目录顶层）
+└── .metadata/           API 管理的 metainfo、磁力意图和运行状态
+```
+
+启动时会恢复 `.metadata`，并扫描目录顶层的普通、非符号链接、名称以小写 `.torrent` 结尾的文件。文件写入方应先写入临时名称，再在同一目录中原子重命名为 `.torrent`。同一个 info hash 的多个源文件共享一个 torrent；同一个 `torrents` 目录同时只能由一个进程管理。
+
+## 快速开始
+
+### 环境要求
+
+- Go 1.27 或更高版本。
+- Node.js 使用 `web/.nvmrc` 指定的版本（当前为 22.23.2）以及 npm。
+- 只有在挂载 FUSE 时才需要 Linux FUSE3、`/dev/fuse` 和相应的挂载权限；只运行 HTTP API/Web UI 不需要实际挂载设备。
+- `curl` 可用于验证 HTTP API。
+
+Go 使用 `web/embed.go` 嵌入 `web/dist`，因此第一次 `go build`、`go test` 或 `go run` 前必须先生成 `web/dist`。
+
+### 本地构建并运行
 
 ```sh
+git clone git@github.com:yakumioto/torrentfs-go.git
+cd torrentfs-go
+
 npm ci --prefix web
-npm run typecheck --prefix web
-npm run lint --prefix web
-npm test --prefix web
 npm run build --prefix web
-rm -rf -- web/node_modules
-go build ./...
-go test ./...
-go test -race ./...
-go vet ./...
-golangci-lint run ./...
+
+mkdir -p "$PWD/torrents" "$PWD/mnt"
 ```
 
-For a build-only path such as the nightly package, use `./scripts/build-web.sh`;
-it runs the lockfile install, builds `web/dist`, and performs the same cleanup.
-
-`./scripts/build-web.sh` uses the lockfile, produces `web/dist`, and removes
-`web/node_modules` after the build so Go's recursive package commands do not
-inspect example source shipped inside JavaScript dependencies. CI performs the
-frontend checks and the same cleanup before running Go quality checks.
-
-## Nightly builds
-
-The `Nightly` GitHub Actions workflow runs every day at **16:17 UTC** (**00:17
-Beijing time the following day**) against the exact `main` commit that triggered
-it. It can also be started from the Actions page with `workflow_dispatch`; select
-`main` in the branch selector. Pull requests, forks, and other refs are not
-published.
-
-A successful run publishes a multi-platform OCI image for Linux/amd64 and
-Linux/arm64 at `ghcr.io/yakumioto/torrentfs-go`. The workflow builds and starts
-both platform images on the same GitHub Actions runner before logging in to GHCR
-and pushing the final image. Existing test, lint, and required FUSE checks must
-also pass; a failed check or image validation never reaches the push step.
-
-The only published tag is the immutable
-`nightly-<date>-<short-sha>-<run-id>-<run-attempt>`. Its UTC date and short SHA
-come from the triggering commit, while the workflow run ID and attempt
-distinguish the initial run from reruns. The image also records the full commit
-in `org.opencontainers.image.revision`, along with its source, commit timestamp,
-and nightly tag. No `latest`, stable, or other alias is published. Nightly runs
-do not create GitHub Releases, release assets, Actions artifacts, or
-`.dockerbuild` build records: the workflow sets `DOCKER_BUILD_RECORD_UPLOAD=false`
-and `DOCKER_BUILD_SUMMARY=false`. This workflow does not delete registry tags or
-clean up historical GitHub nightly releases.
-
-Pull a specific nightly image by its immutable tag:
+在第一个终端启动服务和挂载：
 
 ```sh
-docker pull ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt>
-docker image inspect ghcr.io/yakumioto/torrentfs-go:nightly-<date>-<short-sha>-<run-id>-<run-attempt> \
-  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+go run ./cmd/torrentfs -mountpoint "$PWD/mnt" "$PWD/torrents"
 ```
 
-## Usage
+不指定 `-config` 时使用内置默认值：HTTP 服务监听 `127.0.0.1:8080`，认证关闭，peer 监听端口由客户端选择。保持进程运行后，在第二个终端检查服务并添加一个本地 `.torrent` 文件：
 
 ```sh
-go run ./cmd/torrentfs -mountpoint <dir> [-config <file>] <torrents-dir>
+curl --fail http://127.0.0.1:8080/
+
+cp /path/to/input.torrent "$PWD/torrents/input.torrent.part"
+mv "$PWD/torrents/input.torrent.part" "$PWD/torrents/input.torrent"
 ```
 
-`-mountpoint` is required unless the HTTP API is enabled
-(`http.listen_addr` is set); without it, torrentfs runs headless and is
-managed entirely over HTTP. `<torrents-dir>` is exactly one existing, readable
-and writable directory. A file path such as
-`/data/torrentfs/input.torrent` is rejected: single-file positional input is
-not supported. Configuration is merged as environment variables > TOML file >
-built-in defaults. Without `-config`, the loader uses the built-in defaults and
-environment variables; a TOML file loads the sections shown in
-`torrentfs.example.toml`. All persistent state is stored under
-`<torrents-dir>/.metadata`; piece data is memory-only.
+文件被识别并解析后，内容会出现在 `mnt` 下。单文件 torrent 直接是一个文件，多文件 torrent 是一个目录树；挂载点中的写入、删除和重命名都会返回只读错误。也可以通过下面的 HTTP API 添加磁力链接或上传文件。
 
-At startup, torrentfs restores managed metadata and scans only direct regular,
-non-symlink files in `<torrents-dir>` whose names end in lower-case `.torrent`.
-It does not recurse into subdirectories. The directory is reconciled about
-once per 100 ms while the process runs: adding a stable valid `.torrent` loads
-it without restart, and removing a source releases its torrent when no other
-directory source or managed metadata source refers to the same info hash.
-Duplicate files for one hash share one torrent. Configuration is read at every
-startup; changing the file takes effect after a restart, not through SIGHUP.
-Without `-config`, the built-in defaults are
-combined with the supported environment variables; an explicit TOML file
-replaces only the values it contains.
+按 `Ctrl-C` 或向进程发送 `SIGTERM` 可停止服务。关闭时会先停止 HTTP 服务和 session，再卸载 FUSE，以便取消仍在等待 piece 的读取。
 
-Write sources through a temporary filename such as `input.torrent.part`, then
-atomically rename it to `input.torrent`. Torrentfs checks file identity, size,
-and modification time before and after parsing, so it does not load a file that
-changes while being read. A malformed runtime replacement leaves an already
-loaded source active and is retried after the file changes; a stable malformed
-file present at startup fails startup with its path. Symlinks, temporary files,
-other extensions, and torrent-named directories are ignored.
+### 仅运行 HTTP API 和 Web UI
 
-### Mounted layout
+启用 HTTP 后可以省略 `-mountpoint`，运行 headless 模式：
+
+```sh
+mkdir -p "$PWD/torrents"
+go run ./cmd/torrentfs -config ./torrentfs.example.toml "$PWD/torrents"
+```
+
+`-config` 指向的 TOML 文件会在每次启动时读取。如果把 `[http].listen_addr` 设为空字符串，HTTP 服务会被禁用，此时必须提供 `-mountpoint`。
+
+## FUSE 挂载布局
 
 ```text
 <mount>/
-├── <single-name>       # single-file torrent: one regular file, playable directly
-└── <multi-name>/       # multi-file torrent: the usual directory tree
+├── <single-name>       # 没有目录结构的 single-file torrent，直接是普通文件
+└── <multi-name>/       # multi-file torrent，保留 torrent 的目录结构
     └── <relative-file>
 ```
 
-The mount contains torrent data only. A torrent whose metainfo has no directory
-structure (a single-file torrent) is exposed as the regular file
-`<mount>/<name>`; a player can open `<mount>/movie.mp4` and seek it directly.
-A multi-file torrent keeps its directory tree, and a torrent that holds one
-file but has directory structure stays a directory. Every node is read-only:
-creates, writes, unlinks, and renames anywhere in the mount fail with `EROFS`.
+挂载点只呈现 torrent 数据：
 
-There is no `metadata/` or `stats/` control directory, and `metadata` and
-`stats` are no longer reserved root names: a torrent with either display name
-appears as an ordinary data node. Torrents whose display names collide are
-still disambiguated by appending a hash prefix. This is a breaking change for
-scripts that wrote to `<mount>/metadata/` or read `<mount>/stats/`; both are
-now served by the HTTP API instead.
+- 所有节点都是只读的，创建、写入、删除和重命名会失败。
+- 不会挂载 `.metadata`，也没有 `metadata/` 或 `stats/` 管理目录。
+- torrent 的显示名称发生冲突时会追加 hash 前缀以区分。
+- single-file torrent 不会额外包一层目录，因此播放器可以直接打开例如 `<mount>/movie.mp4`。
 
-### Managing torrents and reading piece state
+## HTTP API
 
-All management happens over the authenticated HTTP API (`/api/v1`):
+HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0.1:8080`，下表列出当前注册的全部管理路由：
 
-| Request | Purpose |
-| --- | --- |
-| `POST /api/v1/auth/login` | Exchange the configured username and password for an in-memory Bearer token |
-| `POST /api/v1/auth/logout` | Revoke the presented in-memory Bearer token |
-| `POST /api/v1/torrents` | Add a torrent from an uploaded `.torrent` (multipart) or a magnet URI (JSON) |
-| `GET /api/v1/torrents` | List every task |
-| `GET /api/v1/torrents/{id}` | One task's aggregate state |
-| `GET /api/v1/torrents/{id}/status` | Per-piece and per-file status snapshot |
-| `DELETE /api/v1/torrents/{id}` | Delete a task; its cached pieces are dropped with it |
-| `GET /api/v1/operations/{id}` | Poll a deletion operation |
+| 方法 | 路径 | 用途 | 成功状态 |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/auth/login` | 使用配置的用户名和密码换取 Bearer token | `200` |
+| `POST` | `/api/v1/auth/logout` | 撤销当前 Bearer token | `204` |
+| `POST` | `/api/v1/torrents` | 通过 JSON 磁力链接或 multipart 上传添加 torrent | `201` |
+| `GET` | `/api/v1/torrents` | 列出所有任务 | `200` |
+| `GET` | `/api/v1/torrents/{id}` | 查询单个任务的汇总状态 | `200` |
+| `GET` | `/api/v1/torrents/{id}/status` | 查询 piece、文件范围和网络诊断快照 | `200` |
+| `DELETE` | `/api/v1/torrents/{id}` | 发起异步删除 | `202` |
+| `GET` | `/api/v1/operations/{id}` | 查询删除 operation | `200` |
 
-`GET /api/v1/torrents/{id}/status` returns one fresh, consistent snapshot:
+`{id}` 是 40 个字符的小写十六进制 info hash。业务错误使用 `{"error":"..."}` JSON；未知 API 路径和不匹配的方法由标准 `net/http` 路由处理，不能假定所有错误响应都是 JSON。
 
-```json
-{
-  "torrent": {"id": "40-lowercase-hex", "info_hash": "40-lowercase-hex", "state": "ready", "total_bytes": 1234, "cached_bytes": 262144},
-  "metainfo_ready": true,
-  "piece_length": 262144,
-  "pieces": [{"index": 0, "cached": true, "cached_bytes": 262144, "pinned": false}],
-  "files": [{"path": "sub/file.bin", "size": 1234, "piece_start": 0, "piece_end": 1}]
-}
+### 认证
+
+默认配置适合本机使用：HTTP 只监听 loopback 且认证关闭，此时可以直接请求 API：
+
+```sh
+BASE_URL=http://127.0.0.1:8080
+curl --fail "$BASE_URL/api/v1/torrents"
 ```
 
-`pieces` is the whole torrent in absolute, zero-based, ascending piece order.
-Each file reports a half-open `[piece_start, piece_end)` range into that same
-array, so a piece spanning a file boundary is referenced by both files instead
-of being duplicated. Each piece reports whether it is resident in the cache
-right now (`cached`), how many of its bytes are resident (`cached_bytes`), and
-whether it is currently protected from eviction by an active read (`pinned`).
-A task whose metainfo has not arrived yet (an unresolved magnet) returns `200`
-with `metainfo_ready: false` and empty arrays; an unknown id returns `404`.
+启用认证时，只有 `POST /api/v1/auth/login` 不需要 token；其他 `/api/` 请求都必须带且只能带一个 `Authorization: Bearer <token>` header。静态 Web shell 和 assets 的 `GET`/`HEAD` 仍然公开，这只允许浏览器加载 UI，不会公开 torrent 数据。
 
-### External state model
+配置认证时必须设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。后者应指向一个普通、非符号链接且只允许文件所有者读取的文件；配置值不能是明文密码。例如：
 
-`state` is a lifecycle stage, never a completion percentage:
+```toml
+[http]
+listen_addr = "0.0.0.0:8080"
 
-| Value | Meaning |
+[http.auth]
+enabled = true
+username = "alice"
+password_hash = "<bcrypt-hash>"
+password_hash_file = ""
+token_ttl = "30m"
+```
+
+`token_ttl` 必须为正的 Go duration，最长 24 小时。token 只保存在 daemon 内存中，在有效请求后滑动过期时间，进程重启后全部失效；服务不使用 Cookie、URL 参数、JWT 或 refresh token。
+
+### curl 使用流程
+
+下面的流程覆盖登录、列表、添加、状态查询、异步删除和登出。认证关闭时可跳过登录，并省略后续的 `Authorization` header。
+
+1. 登录。登录请求必须使用 `application/json`：
+
+   ```sh
+   BASE_URL=http://127.0.0.1:8080
+   curl --fail --request POST "$BASE_URL/api/v1/auth/login" \
+     --header 'Content-Type: application/json' \
+     --data '{"username":"alice","password":"<password>"}'
+   ```
+
+   成功响应包含 `token`、`token_type`（值为 `Bearer`）和 `expires_in`。把响应中的 token 保存为环境变量：
+
+   ```sh
+   TOKEN='<token-from-login-response>'
+   ```
+
+2. 列出任务：
+
+   ```sh
+   curl --fail "$BASE_URL/api/v1/torrents" \
+     --header "Authorization: Bearer $TOKEN"
+   ```
+
+3. 添加磁力链接。将示例中的 info hash 替换为真实磁力链接：
+
+   ```sh
+   curl --fail --request POST "$BASE_URL/api/v1/torrents" \
+     --header "Authorization: Bearer $TOKEN" \
+     --header 'Content-Type: application/json' \
+     --data '{"magnet_uri":"magnet:?xt=urn:btih:<info-hash>"}'
+   ```
+
+   成功返回 `201` 和任务对象。磁力链接在 metainfo 到达前可能处于 `adding` 状态；这时 status 仍会返回 `200`，但 `metainfo_ready` 为 `false`，`pieces` 和 `files` 为空。
+
+4. 上传 `.torrent` 文件：
+
+   ```sh
+   curl --fail --request POST "$BASE_URL/api/v1/torrents" \
+     --header "Authorization: Bearer $TOKEN" \
+     --form 'file=@./input.torrent'
+   ```
+
+   不要手动设置 `Content-Type: multipart/form-data`。`curl` 必须自动生成包含 boundary 的 header；手动覆盖它会使服务无法解析表单。上传请求默认最多 10 MiB，可通过 `http.max_upload_bytes` 调整。
+
+5. 查看汇总和详细 status。把 `<torrent-id>` 替换为添加响应中的 `id`：
+
+   ```sh
+   TORRENT_ID='<torrent-id>'
+   curl --fail "$BASE_URL/api/v1/torrents/$TORRENT_ID" \
+     --header "Authorization: Bearer $TOKEN"
+
+   curl --fail "$BASE_URL/api/v1/torrents/$TORRENT_ID/status" \
+     --header "Authorization: Bearer $TOKEN"
+   ```
+
+   status 响应的主要字段如下：
+
+   ```json
+   {
+     "torrent": {
+       "id": "<info-hash>",
+       "info_hash": "<info-hash>",
+       "name": "example",
+       "state": "ready",
+       "total_bytes": 1234,
+       "cached_bytes": 262144,
+       "created_at": "2026-01-01T00:00:00Z"
+     },
+     "metainfo_ready": true,
+     "piece_length": 262144,
+     "pieces": [
+       {"index": 0, "cached": true, "cached_bytes": 262144, "pinned": false}
+     ],
+     "files": [
+       {"path": "file.bin", "size": 1234, "piece_start": 0, "piece_end": 1}
+     ],
+     "network": {
+       "effective_listen_port": 6881,
+       "total_peers": 0,
+       "pending_peers": 0,
+       "active_peers": 0,
+       "connected_seeders": 0,
+       "piece_complete": 0,
+       "dht": []
+     }
+   }
+   ```
+
+   `files` 中的 piece 范围是半开区间 `[piece_start, piece_end)`，指向同一份绝对、从零开始的 `pieces` 数组。`network` 是当前 raw API 已返回的诊断字段；Web UI 尚未提供 peer/DHT 面板。
+
+6. 删除任务并轮询 operation。删除不是同步完成的：
+
+   ```sh
+   DELETE_RESPONSE="$({ curl --fail --request DELETE "$BASE_URL/api/v1/torrents/$TORRENT_ID" \
+     --header "Authorization: Bearer $TOKEN"; })"
+   printf '%s\n' "$DELETE_RESPONSE"
+   OPERATION_ID='<operation_id-from-delete-response>'
+
+   curl --fail "$BASE_URL/api/v1/operations/$OPERATION_ID" \
+     --header "Authorization: Bearer $TOKEN"
+   ```
+
+   删除响应为 `202`，初始 operation 状态通常为 `deleting`；随后轮询到 `deleted` 或 `delete_failed`。如果用户目录中仍有顶层 `.torrent` 文件引用该 info hash，删除会返回 `409`。
+
+7. 登出：
+
+   ```sh
+   curl --fail --request POST "$BASE_URL/api/v1/auth/logout" \
+     --header "Authorization: Bearer $TOKEN"
+   ```
+
+   成功响应为 `204` 空 body。
+
+### 状态与错误语义
+
+`state` 描述生命周期，不是下载或完成百分比：
+
+| `state` | 含义 |
 | --- | --- |
-| `adding` | Metainfo not available yet (a magnet still resolving) |
-| `ready` | Metainfo available; the torrent is readable and seeds whatever the cache currently holds |
-| `error` | Metainfo could not be obtained |
-| `deleting` | A deletion is in progress |
-| `delete_failed` | A deletion failed and can be retried |
-| `deleted` | Terminal state of a deletion operation (never written to disk) |
+| `adding` | metainfo 尚未可用，例如磁力链接仍在解析 |
+| `ready` | metainfo 已可用，可以读取当前缓存中的内容 |
+| `error` | 无法取得或处理 metainfo |
+| `deleting` | 删除正在进行 |
+| `delete_failed` | 删除失败，可再次处理 |
+| `deleted` | 删除 operation 的终态，不会作为任务持久化 |
 
-`cached_bytes` on the torrent and on each piece is the only cache metric:
-it is how many bytes of the torrent are resident in memory *right now*. It
-falls when pieces are evicted, so a cache-usage bar can move backwards. That is
-intended — it describes the cache, not how much was ever downloaded.
+`cached_bytes` 是内存 cache 当前的占用量，而不是已经下载过的字节数；piece 被淘汰后该值会下降，重启后从零开始。`ready` 不表示整个 torrent 已经下载完成，也不表示所有 piece 都在内存中。
 
-The API deliberately does not expose download or seeding progress. anacrolix's
-completion view lags behind a memory-only cache (an evicted piece still counts
-as complete until it is read again), so reporting it would show a number that is
-wrong by design. Every `ready` task seeds from its current cache contents, which
-is exactly the acceptance rule that seeding never changes what may be evicted.
-When authentication is enabled, the login route is public and every other
-`/api/` route requires an explicit `Authorization: Bearer <token>` header. The
-embedded Web UI's static `GET`/`HEAD` shell and assets are public so a browser
-can load the document before it has a token; they contain no torrent data. When
-authentication is disabled, the API retains its anonymous loopback behavior.
-There is no anonymous non-loopback API exception.
+常见 HTTP 状态：
 
-### Web UI
+| 状态 | 典型原因 |
+| --- | --- |
+| `400` | JSON/multipart body、`Content-Type`、磁力链接或文件名无效 |
+| `401` | 认证缺失、格式错误、过期或已撤销；登录凭据错误也返回 `401` |
+| `404` | 未知 torrent/operation；认证关闭时 login/logout 也不可用；不存在的静态 asset |
+| `409` | torrent 正在删除，或仍被用户拥有的 `.torrent` 文件引用 |
+| `413` | body 超过限制；登录 body 上限固定为 8 KiB，上传上限由 `http.max_upload_bytes` 控制 |
+| `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type |
+| `500` | 未分类的内部 session/API 错误 |
 
-When the HTTP service is enabled, the same listener serves the embedded Web UI
-and `/api/v1`. Open the listener address in a browser; the shell supports the
-Dashboard, torrent detail, Files, Pieces, magnet/file add, and asynchronous
-delete flows. Files and pieces are read from the existing API snapshot, so the
-UI does not expose local data paths, add frontend-specific endpoints, or claim
-byte-level precision that the API cannot provide. Peer counts are intentionally
-shown as unavailable because they are not part of the public torrent DTO.
+受保护 API 的 `401` 响应包含 `WWW-Authenticate: Bearer`。未知路由或方法可能由标准 HTTP handler 返回 `404`/`405`，不要把它们当作 SPA 页面或统一的业务 JSON 错误。
 
-During development, run Vite from `web`:
+## Web UI
+
+HTTP 服务启用时，同一个 listener 同时提供嵌入式 Web UI 和 `/api/v1`：
+
+- Dashboard 支持按名称或 info hash 搜索、按全部/就绪/错误筛选，显示任务摘要，并提供磁力/文件添加入口。
+- 任务详情页提供概览、文件和数据块三个 tab；文件视图显示 piece 范围和缓存覆盖，piece map 区分 cached、pinned 和 uncached。
+- 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。
+- 查询默认每 5 秒刷新；浏览器页面不可见时不会在后台继续刷新。
+- 认证开启时，UI 把 opaque Bearer token 放在当前 tab 的 `sessionStorage` 中；服务端 token 仍只存在 daemon 内存中。服务重启或 token 过期后需要重新登录。
+
+生产 UI 由 Go embed 提供。静态服务只接受 `GET` 和 `HEAD`：根路径和无扩展名的前端 deep link 会回退到 `index.html`，带扩展名的未知 asset 返回 `404`；`index.html` 使用 `no-cache`，构建后的 assets 使用长期 immutable 缓存。
+
+开发时可以单独运行 Vite：
 
 ```sh
 npm ci --prefix web
 npm run dev --prefix web
 ```
 
-Vite serves on `:5173` and proxies `/api` to `http://127.0.0.1:8080`. A
-production build is same-origin and uses relative `/api/v1` requests.
+Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8080`。后端仍需在另一个终端运行；生产构建使用同源的相对 `/api/v1` 请求。
 
-When authentication is enabled, the UI keeps the opaque Bearer token in
-tab-scoped `sessionStorage`. It does not use cookies, URL parameters,
-`localStorage`, JWT decoding, or a refresh endpoint. A refresh inside the same
-tab restores that token and validates it with the existing `/api/v1/torrents`
-probe, so a still-valid token does not ask you to sign in again. Closing the tab
-ends the browser page session and drops the stored token, and a browser that
-denies `sessionStorage` access falls back to an in-memory session for that page
-load. Logout attempts to revoke the token on the server and always clears
-`sessionStorage`, the in-memory token, and the query cache, even when the revoke
-request fails.
+## 配置
 
-Server-side tokens live in daemon memory and expire on inactivity, so a `401`
-stays the authoritative signal to show the login gate: when the token has
-expired, was revoked, or was lost to a daemon restart, the UI drops the local
-session and asks for a new sign-in. Valid API requests slide the server-side
-inactivity window.
+可以直接使用内置默认值，也可以复制仓库中的完整示例：
 
-## On-disk state
+```sh
+cp torrentfs.example.toml torrentfs.local.toml
+go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
+```
+
+配置优先级按字段合并：环境变量 > TOML 文件 > 内置默认值。每个叶子 TOML key 都有对应的 `TORRENTFS_` 环境变量；嵌套 section 用下划线连接，例如 `http.auth.token_ttl` 对应 `TORRENTFS_HTTP_AUTH_TOKEN_TTL`。只有已支持的精确变量名会被读取。
+
+### 主要配置项
+
+| Section | 常用 key | 说明 |
+| --- | --- | --- |
+| `[http]` | `listen_addr`, `max_upload_bytes` | HTTP/Web listener；默认 `127.0.0.1:8080`，上传默认上限 10 MiB；为空则禁用 HTTP |
+| `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | 单用户 bcrypt 登录和内存 Bearer token |
+| `[connections]` | `listen_host`, `listen_port`, `disable_ipv4`, `disable_ipv6`, `no_port_forwarding`, `bootstrap_nodes` | peer listener、地址族、UPnP/NAT-PMP 和 DHT bootstrap |
+| `[proxy]` | `socks5_url` | 可选 `socks5://` 或 `socks5h://` 出站代理 |
+| `[cache]` | `capacity_bytes` | 内存 piece cache 硬上限，默认 2 GiB；必须为正数 |
+| `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
+| `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
+| `[mount]` | `allow_other` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载 |
+
+重要配置关系：
+
+- `http.listen_addr` 默认为 loopback。绑定 `0.0.0.0`、空 host 或其他非 loopback 地址时，必须同时启用完整的 `[http.auth]` 配置。
+- 服务没有 TLS。公开 HTTP listener 时，应在可信的 TLS reverse proxy 后面使用，并限制可访问网络。
+- `password_hash` 与 `password_hash_file` 不能同时设置，也不能都为空；密码来源必须是 bcrypt hash，而不是明文。
+- `token_ttl` 是无活动过期窗口；有效的认证请求会滑动该窗口，最长为 24 小时。
+- `connections.listen_port = 0` 会选择临时端口。需要接受入站 peer 时应设置固定端口，并同时发布 TCP 和 UDP；`no_port_forwarding` 默认关闭 UPnP/NAT-PMP 自动映射。
+- `disable_ipv4` 和 `disable_ipv6` 最多只能启用一个；同时禁用会留下没有传输协议的 session。
+- `cache.capacity_bytes` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，避免进程被 OOM kill。
+- `mount.allow_other` 默认关闭。启用后所有本机 UID 都可能读取挂载；非 root 挂载还需要 `/etc/fuse.conf` 中允许 `user_allow_other`。
+
+### 环境变量示例
+
+```sh
+TORRENTFS_HTTP_LISTEN_ADDR=127.0.0.1:8080 \
+TORRENTFS_HTTP_MAX_UPLOAD_BYTES=10485760 \
+TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
+go run ./cmd/torrentfs "$PWD/torrents"
+```
+
+环境变量可以覆盖 TOML 中对应字段，也可以用空字符串清除字符串值；数字、布尔值和 duration 不能使用空字符串。认证切换密码来源时，要显式清空不再使用的 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH`，并保留 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE`。
+
+## 持久化状态与限制
+
+`torrents-dir/.metadata` 是内部实现目录，不会出现在 FUSE 挂载中。常见内容如下：
 
 ```text
 <torrents-dir>/
-  <name>.torrent                     # user-owned source files (scanned, watched)
-  .metadata/<info-hash>.torrent      # managed metainfo published by the API
-  .metadata/<info-hash>.magnet       # durable intent for an unresolved magnet
-  .metadata/<legacy-name>.torrent    # legacy managed source, restored but never rewritten
-  .metadata/peer_id                   # durable 20-byte peer ID for this torrents directory
-  .metadata/state/<info-hash>.json    # interrupted-deletion sidecars only
-  .metadata/instance.lock            # single-instance lock, held while the process runs
-  .stats/                            # legacy empty directory: ignored, never created, never removed
+├── input.torrent
+└── .metadata/
+    ├── <info-hash>.torrent       # API 管理的 canonical metainfo
+    ├── <info-hash>.magnet        # 尚未解析完成的磁力意图
+    ├── peer_id                   # 该 torrents 目录的 20 字节 peer identity
+    ├── state/<info-hash>.json    # 中断删除的 sidecar（如有）
+    └── instance.lock             # 进程运行期间的独占锁
 ```
 
-`.metadata` is an implementation detail of the torrents directory: it is
-persisted, restored on startup, and never mounted. It contains the managed
-metainfo, pending magnet intents, peer identity, deletion sidecars, and instance
-lock. A legacy `.stats` directory from an older version is ignored — the current
-release neither creates it nor deletes it, and it holds no piece state. **No
-piece data and no piece completion is stored anywhere**: the cache exists only
-in memory, a restart starts empty, and neither the cache contents, the cache hit
-count, nor transient read priorities survive a restart. There is no initial
-rehash and no attempt to recover a piece from disk.
+- piece 数据、piece completion、cache hit 计数和临时读取优先级都只在内存中；重启不会从磁盘 rehash 或恢复 piece。
+- 顶层用户 `.torrent` 文件只读到目录第一层，不递归子目录；符号链接、临时扩展名和 torrent 命名的目录会被忽略。
+- 配置只在启动时读取，修改 TOML 或环境变量后需要重启进程。
+- 磁力链接会先持久化为 `.metadata/<info-hash>.magnet`，解析到 metainfo 后再保存 canonical `.torrent`；删除会清理该 hash 的内部来源，但不会删除用户拥有的顶层 `.torrent` 文件。
+- 一个 `torrents` 目录同时只能由一个 torrentfs 进程使用。
 
-A magnet URI is accepted immediately: its intent is published as
-`.metadata/<info-hash>.magnet` before registration, so a restart before the
-metainfo arrives retries the fetch. Once the metainfo resolves it is published
-as the canonical `.torrent` and the pending `.magnet` is removed; if both ever
-exist, the `.torrent` wins. `DELETE /api/v1/torrents/{id}` removes every
-internal metadata source for that hash — canonical and legacy names, plus a
-pending magnet — so a deleted task cannot reappear after a restart. Deleting a
-torrent also drops its cached pieces. A torrent still referenced by a
-user-owned top-level `.torrent` file is refused with `409`.
+## Docker
 
-## Configuration
+### HTTP-only 检查
 
-The supported TOML keys are:
-
-```toml
-[http]
-listen_addr = "127.0.0.1:8080"
-max_upload_bytes = 10485760
-
-[http.auth]
-enabled = false
-username = ""
-# Use either password_hash or password_hash_file, never both.
-password_hash = ""
-password_hash_file = ""
-token_ttl = "30m"
-
-[connections]
-listen_host = ""
-listen_port = 0
-# Turn off one peer address family. Disabling both is rejected at startup.
-disable_ipv4 = false
-disable_ipv6 = false
-# UPnP/NAT-PMP port mapping. Off by default: a deployment that has no UPnP
-# device then behaves the same as one that has a device but no mapping rule.
-no_port_forwarding = true
-# Replaces the built-in DHT bootstrap hosts. Each entry is a host:port that is
-# resolved per address family; empty uses the built-in list.
-bootstrap_nodes = []
-
-[proxy]
-socks5_url = ""
-
-[cache]
-capacity_bytes = 2147483648
-
-[identity]
-tracker_user_agent = "qBittorrent/4.4.0"
-peer_id_prefix = "-qB4400-"
-extended_handshake_client_version = "qBittorrent/4.4.0"
-
-[log]
-level = "info"
-format = "text"
-add_source = false
-
-[mount]
-# Only the mounting UID/GID can access the FUSE data by default.
-allow_other = false
-```
-
-Each leaf TOML key has a matching environment variable. Only the exact names
-below are read; unrelated `TORRENTFS_*` variables are ignored.
-
-| TOML key | Environment variable | Value format |
-| --- | --- | --- |
-| `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | string |
-| `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | decimal integer |
-| `connections.disable_ipv4` | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | Go boolean |
-| `connections.disable_ipv6` | `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | Go boolean |
-| `connections.no_port_forwarding` | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | Go boolean |
-| `connections.bootstrap_nodes` | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | comma-separated `host:port` list |
-| `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | string |
-| `cache.capacity_bytes` | `TORRENTFS_CACHE_CAPACITY_BYTES` | decimal integer |
-| `identity.tracker_user_agent` | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | string |
-| `identity.peer_id_prefix` | `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | string |
-| `identity.extended_handshake_client_version` | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | string |
-| `http.listen_addr` | `TORRENTFS_HTTP_LISTEN_ADDR` | string |
-| `http.max_upload_bytes` | `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | decimal integer |
-| `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | Go boolean |
-| `http.auth.username` | `TORRENTFS_HTTP_AUTH_USERNAME` | string |
-| `http.auth.password_hash` | `TORRENTFS_HTTP_AUTH_PASSWORD_HASH` | bcrypt hash string |
-| `http.auth.password_hash_file` | `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` | file path |
-| `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | Go duration, such as `30m` |
-| `log.level` | `TORRENTFS_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
-| `log.format` | `TORRENTFS_LOG_FORMAT` | `text` or `json` |
-| `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | Go boolean |
-| `mount.allow_other` | `TORRENTFS_MOUNT_ALLOW_OTHER` | Go boolean |
-
-Values are merged per field with this precedence: environment variable > TOML
-file > built-in default. An environment variable that is present but empty
-clears a string field; empty numeric, boolean, and duration values are invalid.
-Environment overrides are applied before cross-field validation, so they can
-replace a lower-priority value that would otherwise fail validation. Explicitly clear
-`TORRENTFS_HTTP_AUTH_PASSWORD_HASH` when switching to
-`TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE`; authentication still requires exactly
-one password source.
-
-`log.level` accepts `debug`, `info`, `warn`, or `error`; the default is `info`,
-so debug records are disabled unless explicitly enabled. `log.format` accepts
-`text` or `json`, and `add_source` includes the source file and line in each
-record. Logs never include authentication tokens, password hashes, or proxy
-credentials.
-
-`cache.capacity_bytes` is the hard upper bound on the in-memory piece cache. The
-default, 2147483648 (2 GiB), targets a host with about 4 GB of RAM; size it at
-roughly 50-60% of a container's memory limit, because the cap applies to the
-process and exceeding the container limit gets it OOM-killed. The default is a
-cap, not a reservation: the cache fills lazily, so a small workload's resident
-memory stays small. A value of zero or less is rejected at startup. Eviction
-starts at 7/8 of this value and reclaims down to 3/4, so a read window always
-has headroom without waiting for the cache to fill completely; the high- and
-low-water marks are derived, not configurable, and each is clamped to at least
-one byte so that a very small capacity still retains the one piece that fits
-it. A torrent whose piece length exceeds the capacity cannot be added: it could
-never be read, so it is refused at add time instead of looping between download
-and eviction.
-
-An empty `[http].listen_addr` disables the API. The default binds loopback
-only. Binding a non-loopback address requires a complete enabled
-`[http.auth]` configuration; this service does not provide TLS, so put
-non-loopback deployments behind a TLS reverse proxy.
-
-When `http.auth.enabled` is true, `username` and exactly one bcrypt
-`password_hash` or owner-readable-only `password_hash_file` are required.
-`password_hash` is a bcrypt hash, never a plaintext password.
-`password_hash_file` must point to a regular, non-symlink file readable only by
-its owner. For an exposed deployment configured by environment variables, set
-all of the required authentication fields together, preferably using a secret
-file:
-
-```sh
-docker run --rm -p 8080:8080 \
-  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/password-hash,readonly \
-  -e TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
-  -e TORRENTFS_HTTP_AUTH_ENABLED=true \
-  -e TORRENTFS_HTTP_AUTH_USERNAME=alice \
-  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
-  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
-  torrentfs
-```
-
-The default `token_ttl` is 30 minutes and may not exceed 24 hours. Log in with
-`POST /api/v1/auth/login` using `{"username":"...","password":"..."}`;
-the response contains an opaque Bearer token. Send it explicitly as
-`Authorization: Bearer <token>` on later requests. Tokens are held only in
-memory, expire after a period without a valid request, and slide their expiry
-by `token_ttl` after every valid authenticated request, so continuous use can
-slide indefinitely and there is no absolute session lifetime. They are all
-invalidated when the process restarts. `POST /api/v1/auth/logout` revokes the presented
-token. There is no JWT, refresh endpoint, refresh token, Cookie authentication,
-or automatic Cookie renewal; because authentication uses an explicit header,
-this configuration does not add Cookie-based CSRF behavior.
-
-When authentication is disabled, loopback HTTP retains the anonymous development
-behavior. Authentication is not optional for non-loopback listeners.
-`max_upload_bytes` caps an uploaded `.torrent` body.
-
-An empty `socks5_url` disables the proxy;
-otherwise use `socks5://` or `socks5h://`, optionally with username/password.
-The proxy applies to TCP peer connections and HTTP(S) tracker, metainfo, and
-webseed requests. UTP, DHT, and UDP tracker traffic are disabled or rejected in
-proxy mode, so there is no direct UDP fallback. Incoming TCP listening remains
-controlled by `[connections]` and is not routed through the SOCKS5 proxy.
-
-The default identity is qBittorrent 4.4.0: `tracker_user_agent` and the BEP 10
-extended-handshake `v` value are `qBittorrent/4.4.0`, and `peer_id_prefix` is
-`-qB4400-`. `[identity].tracker_user_agent` changes only the `User-Agent`
-header on HTTP tracker announce requests; it does not change metainfo, webseed,
-or scrape requests. `peer_id_prefix` is a prefix, not a complete peer ID: it is
-limited to 20 bytes, and the remaining bytes are generated randomly. A 20-byte
-prefix leaves no random suffix. The complete 20-byte peer ID is written once to
-`<torrents-dir>/.metadata/peer_id` on first start and reused on every later
-start, so a private tracker sees one stable peer instead of a new one after each
-restart. Each torrents directory has its own identity. Deleting that file — or
-changing `peer_id_prefix` so the stored ID no longer matches, which logs a
-warning — generates and stores a new identity. A `peer_id` file whose length is
-not exactly 20 bytes fails startup instead of being silently regenerated. The
-peer ID is used for BitTorrent handshakes and announces. Explicit TOML values override the defaults; explicitly setting an
-identity value to an empty string delegates that field to the anacrolix
-default. `v` is sent only when the peer supports the extended handshake.
-
-## Peer ports, NAT, and single-instance operation
-
-Inbound peer connections need a reachable port. With `listen_port = 0` the
-client picks a free port at startup, and that port is what the tracker announce
-carries. The `session ready` record reports it as `effective_listen_port`,
-alongside the configured `listen_port` (which keeps its original meaning, the
-raw configuration value) and the `listen_addrs` actually bound. Note that with a
-dynamic port each listener may end up on a different port; `effective_listen_port`
-is the port the client reports to peers. To accept inbound peers, set a fixed
-`listen_port` and publish the same port for TCP and UDP — with Docker,
-`-p 6881:6881/tcp -p 6881:6881/udp`. A dynamic port cannot be published in
-advance, and a bridge-network container is not reachable from the swarm without
-that mapping.
-
-`no_port_forwarding` defaults to `true`, so torrentfs never asks UPnP or
-NAT-PMP for a mapping: a host with no UPnP device behaves exactly like one that
-has a device but no mapping rule. Outbound connections work either way; only
-inbound reachability depends on the mapping.
-
-`disable_ipv4` and `disable_ipv6` turn off an address family for listeners,
-dialers, and DHT server sockets together. Only one family may be disabled;
-disabling both leaves no transport and is rejected at startup. Disabling the
-family whose DHT bootstrap hosts carry no usable address is the usual way to
-stop the repeated bootstrap attempts described below.
-
-`bootstrap_nodes` replaces the built-in DHT bootstrap hosts with explicit
-`host:port` entries, resolved per address family on each attempt. Use it when
-the default resolver's answers carry no address of a family a socket needs, or
-when only a specific bootstrap host is reachable.
-
-Diagnostics: `GET /api/v1/torrents/{id}/status` reports a `network` object with
-`effective_listen_port`, the torrent's `total_peers`, `pending_peers`,
-`active_peers`, `connected_seeders`, and `piece_complete`, plus one DHT entry
-per address family (`nodes`, `good_nodes`, `resolved`, `kept`, `ready`). Every
-field is additive: `metainfo_ready` still means only that the metainfo is
-loaded, never that peers exist. An empty tracker peer list is a successful
-announce and is honoured for the tracker's interval, so no immediate retry is
-issued. A DHT family that cannot be bootstrapped is logged once per state
-change as `dht starting nodes unavailable` with a status name such as
-`dht_udp6_unavailable`, instead of once per routing-table refresh. The upstream
-record that repeats every refresh (`error bootstrapping during bucket refresh`)
-is demoted to `debug`, so it is not emitted at the default level; set
-`level = "debug"` to see it.
-
-`listen_host` is applied to every listener and dialer, not per address family.
-A literal IPv4 address such as `127.0.0.1` therefore fails the IPv6 listener
-(`listen tcp6: no suitable address found`) on a dual-stack build, which aborts
-startup. Leave `listen_host` empty to bind both families, or disable the family
-you are not binding with `disable_ipv4` / `disable_ipv6`.
-
-One torrents directory is managed by one process at a time: the session holds
-an exclusive lock on `<torrents-dir>/.metadata/instance.lock`, and a second
-instance pointed at the same directory fails to start with an actionable error.
-The lock is released when the process exits; it does not cover two machines
-sharing one tracker account with different torrents directories.
-
-## Private torrents (BEP 27)
-
-A torrent whose metainfo carries `private=1` is isolated from peer discovery, as
-[BEP 27](https://www.bittorrent.org/beps/bep_0027.html) requires. For such a
-torrent torrentfs does not announce to or query the DHT, does not exchange peers
-over PEX (`ut_pex`), and does not use Local Peer Discovery. Only the trackers
-declared inside the torrent are used. Public torrents are unaffected: their DHT
-bootstrap, announcements, and PEX behave exactly as before.
-
-This is a property of the torrent, not a setting. There is no per-torrent or
-global switch to turn it on, and nothing to configure.
-
-How a torrent is added decides whether the isolation covers the whole session:
-
-- **`.torrent` file, embedded bytes, or an already known info dict** — the
-  metainfo is present at add time, so the torrent is isolated from the first
-  byte. This is the recommended way to add a private torrent.
-- **magnet link** — a magnet carries no info dict, so the private flag is unknown
-  until metadata is fetched. Until then the torrent is treated as public and may
-  announce to the DHT; the moment the metadata lands, the DHT announcer stops on
-  its next pass. The exposure window is exactly the metadata fetch. A private
-  magnet still resolves its metadata through its tracker, so downloads work — but
-  if your tracker forbids any DHT contact, add the torrent by file instead of by
-  magnet.
-
-Two further notes:
-
-- A `private=1` torrent with no trackers cannot find peers at all. That is the
-  correct BEP 27 outcome, not a fault.
-- `private=1` is honoured whether it is `true` only; a missing flag, `false`, or a
-  v2-only metainfo all mean "public", matching the upstream definition.
-
-Support comes from a pinned fork of `github.com/anacrolix/torrent`: release
-v1.61.0 has the `private` field but never reads it at runtime, so `go.mod`
-replaces the module with `github.com/yakumioto/torrent v1.61.0-bep27.2`. That
-release is v1.61.0 plus the three upstream hunks from commit `76452a2c8a2f`,
-and one hunk of our own: `internal/mytimer.Timer.When()` takes a read lock
-around its `when` field, which upstream still reads unsynchronized. Without it
-`Client.WriteStatus` races the announce-timer goroutine and cannot be used as a
-status observation point. The replace directive is temporary: drop it once
-anacrolix/torrent publishes a release containing both.
-
-## Known upstream issues
-
-`github.com/anacrolix/torrent` v1.61.0 — and therefore the pinned
-`v1.61.0-bep27.1` fork below — can panic inside `PeerConn.servePeerRequest`:
-
-```
-peerconn.go:766: panic: assertion failed: MapContains(c.unreadPeerRequests, r)
-```
-
-`peerRequestDataReadFailed` returns early when the torrent is already closed,
-before removing the request from `unreadPeerRequests` and before `useBestReject`
-runs, so the deferred invariant check in `servePeerRequest` fires. The window is
-a peer request whose data read fails while its torrent is being closed or
-dropped. This is a code-level root cause read from the upstream source, not a
-reproduced failure.
-
-torrentfs does not work around this. The `replace` directive above pins the fork
-to an exact release plus three named hunks, so adding a hunk for an unrelated
-upstream defect would change what that pin means. The fix belongs in
-`anacrolix/torrent`.
-
-## Error behavior
-
-Reads never fabricate data. When the pieces behind a range are unavailable, a
-read either blocks until they arrive or returns an error; it does not return
-zero-filled or partial-success content.
-
-Overlapping reads are serialized over one shared torrent reader: a new read
-waits for the read in flight instead of cancelling it, so ordinary player
-concurrency (readahead, seeks, probes) cannot turn into a cancellation storm. A
-read is cancelled only by its own request going away, by the session closing,
-or by the torrent being removed.
-
-- **No peers / no seeder.** A torrent whose data is not local and whose swarm
-  has no peers stays incomplete. Reads of missing ranges wait for pieces that
-  never arrive until the session is closed, at which point they fail rather
-  than hang. The session and mount stay healthy: the status API reports the
-  incomplete state instead of the process crashing.
-- **Partially cached pieces.** A piece that is only partly resident reports
-  `cached: false` with the resident byte count in `cached_bytes` in
-  `GET /api/v1/torrents/{id}/status`. The read path still fetches the piece as
-  a whole.
-- **Missing paths.** A torrent or file that does not exist maps to `ENOENT`; a
-  path below a single-file torrent root maps to `ENOTDIR`; the whole mount is
-  read-only, so writes into it return `EROFS`.
-- **Underlying errnos are preserved.** A wrapped `syscall.Errno` such as
-  `ENODATA` reaches the caller unchanged; only unclassified failures flatten to
-  `EIO`. A missing peer swarm is a health warning surfaced through the status
-  API and read errors, not a crash.
-
-## Breaking changes
-
-Upgrading from a release that persisted pieces on disk:
-
-| Change | Detail |
-| --- | --- |
-| `paths.data_dir` / `-data-dir` / `TORRENTFS_PATHS_DATA_DIR` removed | The `[paths]` TOML section is rejected as an unknown field; the removed environment variable is ignored. State now lives under each `<torrents-dir>/.metadata`. |
-| Peer identity moved | `<data-dir>/peer_id` is not migrated. Copy it manually to `<torrents-dir>/.metadata/peer_id` if preserving a private-tracker identity matters; otherwise a new 20-byte identity is generated. |
-| Deletion sidecars moved | `<data-dir>/state/` is not migrated. Copy unfinished sidecars manually to `<torrents-dir>/.metadata/state/` if recovery is required. |
-| Peer IDs are per torrents directory | The old shared data directory could make multiple torrents directories share one identity. Each torrents directory now has its own `.metadata/peer_id`. |
-| Legacy payload warning removed | `<data-dir>/payload/` is no longer inspected; pieces remain memory-only and old files are left untouched. |
-| `cache.capacity_bytes` default 64 MiB → 2 GiB | The default now targets a ~4 GB host. Set it explicitly for smaller containers. |
-| `cache.capacity_bytes = 0` is now invalid | `0` meant "cache nothing", which would make every read fail. Startup rejects it. |
-| `purge_data` removed | `DELETE /api/v1/torrents/{id}?purge_data=...` loses the parameter and the operation response loses the `purge_data` field. Deleting a task now always drops its cached pieces. An old client that still sends the parameter gets a normal `202`: Go's HTTP server ignores unknown query parameters. |
-| `completed_bytes` and `progress` removed | There is no download-progress concept. Read `cached_bytes` instead. |
-| Per-piece `known`/`complete`/`partial`/`checking`/`wanted`/`available_bytes` removed | Replaced by `cached` / `cached_bytes` / `pinned`, which describe cache residency. |
-| `state` values `downloading` and `seeding` removed; `ready` added | `state` is now a lifecycle stage. A `ready` task serves whatever the cache holds. |
-| `seeding` no longer exists | Every `ready` task seeds from its current cache contents; seeding never keeps a piece from being evicted. |
-
-No compatibility layer is provided: the memory-only cache and the external
-state model ship together, and field aliases would contradict the removal of
-the old persistence path.
-
-## Testing
-
-The suite has three layers:
-
-1. **Unit and offline integration** (`go test ./...`) — config, cache,
-   filesystem layout (single-file roots, read-only data nodes, former control
-   names as plain data), session lifecycle, per-file piece-range projection in
-   the status snapshot, and managed metadata handling. These run anywhere,
-   without network access.
-2. **Concurrency and error paths** — concurrent reads, lookups, directory
-   listings, and data-tree namespace churn; session close races; upload
-   rollback; magnet intent recovery; and incomplete or missing data. Run under
-   the race detector with `go test -race ./...`.
-3. **Real FUSE mounts** — a smoke mount, a single-file direct read and seek, a
-   read-only multi-file data tree, concurrent reads through the mount, and a
-   self-hosted swarm (a loopback HTTP tracker plus a seeder and a leecher
-   session) that transfers real content into a FUSE mount. These require
-   `/dev/fuse`, `fusermount`/`fusermount3`, and mount permission.
-
-Real-mount tests skip themselves, with a printed reason, where FUSE is
-unavailable — they are never counted as a passing FUSE run. To make that
-absence a failure instead, set `TORRENTFS_FUSE_REQUIRED=1`:
-
-```sh
-TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...
-```
-
-The swarm test binds loopback only, uses an in-process tracker, and disables
-DHT and UTP, so it never contacts the public network.
-
-When adding or changing an **observation point** — a status or state API the
-tests read to assert behavior — first confirm that API is concurrency-safe for
-the way the test calls it. Then run the package under the race detector as a
-whole (`go test -race ./...`), not just the new test: a race in the observed
-API usually needs the rest of the package running to fire, so a single
-`-run` narrows the run until it is clean and hides the defect. No data race
-involving the observation point may remain in that output.
-
-## Docker HTTP smoke
-
-The image contains the Go binary, runtime libraries, and the built-in
-`/etc/torrentfs/torrentfs.toml`; Node and `web/dist` are build-stage inputs
-embedded in that binary. The image also creates `/torrents` so its command can
-start without any external configuration. Run the HTTP-only check without FUSE:
+仓库提供不需要 FUSE 挂载的 HTTP smoke test：
 
 ```sh
 ./scripts/http-smoke.sh
 ```
 
-The configuration smoke checks the built-in file, the image default command,
-environment-only overrides, and an external TOML file:
+脚本需要 Docker、`curl` 和 `python3`。它会构建本地镜像并检查静态 root/deep link、缺失 asset、认证 `401`、`WWW-Authenticate`、登录、带 token 的列表和登出；它不会把任何内容发布到远端 registry。
 
-```sh
-./scripts/docker-config-smoke.sh
-```
+### 构建并运行 HTTP 服务
 
-With no arguments, the image starts a headless HTTP service on loopback using
-its built-in configuration and the container-local `/torrents` directory. The
-directory is temporary container storage unless it is bind mounted. To expose
-the API, set a non-loopback listener and complete authentication configuration
-together; environment variables override the built-in file without an
-additional `-config` argument:
+Dockerfile 使用 Node 22.23.2 构建 Web UI，再使用 Go 1.27 编译包含 `web/dist` 的二进制，运行阶段是带 `fuse3` 的 Debian 镜像：
 
 ```sh
 docker build -t torrentfs .
+```
+
+公开容器 listener 前必须配置认证。下面的命令使用 bind-mounted bcrypt hash 文件；请先创建该文件并将 `<bcrypt-hash>` 替换为真实 hash，不要把明文密码写入环境变量：
+
+```sh
+mkdir -p /srv/torrents /srv/secrets
+# /srv/secrets/torrentfs-password-hash 只包含一行 bcrypt hash，权限应为 600
+
 docker run --rm \
-  -p 8080:8080 \
-  -v /srv/torrents:/torrents \
-  -e TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
-  -e TORRENTFS_HTTP_AUTH_ENABLED=true \
-  -e TORRENTFS_HTTP_AUTH_USERNAME=alice \
-  -e TORRENTFS_HTTP_AUTH_PASSWORD_HASH='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq' \
+  --publish 8080:8080 \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/password-hash,readonly \
+  --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+  --env TORRENTFS_HTTP_AUTH_ENABLED=true \
+  --env TORRENTFS_HTTP_AUTH_USERNAME=alice \
+  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
+  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
   torrentfs
 ```
 
-The image default listener remains loopback-only, and `-p` does not change what
-the daemon listens on. Put an exposed deployment behind TLS at the edge.
+镜像内置的默认命令使用 `/torrents` 和 `/etc/torrentfs/torrentfs.toml`；环境变量会覆盖内置 TOML。`-p`/`--publish` 只发布端口，不会改变 daemon 实际监听的地址。
 
-The image sets a fixed peer port (`listen_port = 6881`). Publish it for TCP and
-UDP to accept inbound peers; without the mapping the container still downloads
-from outbound connections but cannot be dialed:
+### Docker FUSE 挂载
 
-```sh
-docker run --rm \
-  -p 8080:8080 \
-  -p 6881:6881/tcp \
-  -p 6881:6881/udp \
-  -v /srv/torrents:/torrents \
-  torrentfs
-```
-
-An external TOML file remains supported when a deployment wants file-based
-configuration:
-
-```sh
-docker run --rm \
-  -p 8080:8080 \
-  -v /srv/torrents:/torrents \
-  -v /srv/torrentfs.toml:/config.toml:ro \
-  torrentfs -config /config.toml /torrents
-```
-
-Use `listen_addr = "0.0.0.0:8080"` and a complete authentication section in
-that file. The HTTP smoke checks the public root and deep link, asset MIME/cache
-behavior, API `401` plus `WWW-Authenticate`, login `no-store`, authenticated
-list, logout, and the rule that unknown API paths never become SPA HTML.
-
-## Docker (rootful)
-
-The repository includes an offline fixture and an end-to-end Docker/FUSE check.
-From the repository root, run:
-
-```sh
-./scripts/docker-smoke.sh
-```
-
-The script builds the image, bind mounts a writable temporary `torrents`
-directory at `/torrents`, and mounts `/mnt` with recursive shared propagation.
-Pieces are never read from disk now, so instead of preloading a payload the
-script serves the fixture over plain HTTP and hands the data scenarios a
-web-seeded (BEP 19) copy of the fixture torrent; anacrolix fetches the piece
-over HTTP and writes it into the in-memory cache through the same storage path
-a BitTorrent peer would. It reads the payload through FUSE and checks that
-both the container mount and the host source directory expose the same file and
-hash, that the mount exposes no `metadata/` or `stats/` control path, that host
-writes are rejected, and that a pre-existing legacy `/torrents/.stats` is left
-untouched. It also verifies rejected single-file and missing-directory CLI
-inputs and confirms a normal stop removes the propagated host mount. A second,
-offline scenario starts an incomplete torrent with no peer, leaves two readers
-outstanding on the missing piece, and checks that SIGTERM still stops the
-process with exit code 0, without a daemon-owned unmount failure and without
-the anacrolix reader cancellation errors during the running phase. On that
-fixture the file is a single page, so the kernel collapses the two same-page
-reads into one in-flight request; the scenario therefore covers shutdown and
-unmount behaviour, and the cancellation regression itself is covered by the
-FUSE/swarm test in the Go suite. A third scenario reproduces the case where a
-second mount namespace holds a propagated copy of the FUSE mount: the peer is
-left running while the daemon gets SIGTERM, and the script checks that the
-daemon stops within its unmount deadline, exits 1, prints the timeout
-diagnostic, reports no daemon-owned unmount failure, and releases the
-propagated host mount once the peer is gone. Every Docker
-call in the script, including the teardown waits, is bounded; a timeout
-collects diagnostics and fails instead of hanging. It
-requires a working Docker daemon, `/dev/fuse`, `findmnt`, `python3` (for the
-web seed file server), `SYS_ADMIN` mount permission, and (on AppArmor hosts)
-permission to use `--security-opt apparmor=unconfined`. The fixture is mounted at runtime; it is
-not copied into the production image.
-
-Mount a host directory at `/torrents` and pass that directory as the sole
-positional argument:
+Linux rootful Docker 需要把 FUSE 设备和挂载能力交给容器：
 
 ```sh
 mkdir -p /srv/torrents /srv/mnt
-docker build -t torrentfs .
 docker run --rm \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor=unconfined \
-  -v /srv/torrents:/torrents \
-  --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
-  torrentfs -mountpoint /mnt /torrents
-```
-
-Docker's default bind propagation is `rprivate`, which keeps a FUSE
-submount created inside the container from appearing in the host source
-directory. `rslave` only propagates host mounts into the container and is not
-sufficient here; `/mnt` must use recursive bidirectional `rshared` propagation.
-On Linux, the host mount containing `/srv/mnt` must already be shared. Check
-that prerequisite with:
-
-```sh
-findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
-```
-
-Docker Desktop and other environments without Linux bind-mount propagation do
-not support this setup. Do not add `readonly` or `:ro` to the `/mnt` bind: the
-FUSE daemon needs the writable bind target to create its submount, while the
-FUSE filesystem itself remains read-only and rejects writes with `EROFS`.
-`rshared` is recursive and bidirectional, so container mount and unmount changes
-under this source subtree can affect the host, and host changes can enter the
-container. Together with a rootful container and `SYS_ADMIN`, this expands the
-mount authority boundary; use it only for trusted containers.
-
-The FUSE mount keeps the default owner-only access (`mount.allow_other = false`), so
-other host users, including root, may receive `EACCES` rather than see the mounted
-data. The setting is an explicit opt-in: `mount.allow_other = true` (or
-`TORRENTFS_MOUNT_ALLOW_OTHER=true`) lets every local UID read the mounted data,
-including root, without changing the filesystem's read-only behavior. A non-root
-mount also requires `user_allow_other` in `/etc/fuse.conf`; the image leaves that
-line disabled by default.
-
-### Shutdown, outstanding reads, and `Device or resource busy`
-
-On SIGINT/SIGTERM the process stops the HTTP API, closes the session, and only
-then unmounts the FUSE filesystem. That order is required: closing the session
-cancels and drains reads that are still waiting for pieces, so the unmount no
-longer has to wait on them. Unmounting first makes `fusermount3` fail with
-`failed to unmount /mnt: Device or resource busy` whenever a request is still
-outstanding, and the mount can then only be released lazily.
-
-A `Device or resource busy` on unmount has three distinct causes, and they need
-different answers:
-
-- **daemon-owned outstanding request.** A read issued through the mount is
-  still waiting on a missing piece. With no host process holding the mount,
-  this reproduces from the container alone. It is what the session-close-first
-  order fixes; after the fix the same scenario unmounts cleanly.
-- **a host holder.** A player, media scanner, open file descriptor, or a
-  process whose working directory is inside the propagated mount keeps the
-  mount busy. Confirm it with the owning PID and command:
-
-  ```sh
-  findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
-  fuser -vm /srv/mnt     # when fuser is installed and permitted
-  lsof /srv/mnt          # when lsof is installed and permitted
-  ```
-
-  Release the holder (stop the player/scan) and retry the unmount. When
-  `fuser`/`lsof` are missing or lack permission, the holder diagnostics are
-  simply incomplete — that is not evidence that no holder exists.
-- **another mount namespace holding a propagated copy.** Where `/mnt` is
-  propagated (`rshared`) into another namespace — another container on the same
-  host, for example — that namespace keeps a copy of the FUSE mount. The copy
-  keeps the FUSE connection alive, so it never reaches `ENODEV` and
-  `Server.Unmount` is left parked in its event-loop `Wait`. Distinguish this
-  cause from the other two by `findmnt -T <mount> -o PROPAGATION,OPTIONS` plus
-  the absence of both an outstanding read and a local fd/cwd holder. It reports
-  **no** `Device or resource busy` line: unmounting the daemon's own copy
-  succeeds, and only the connection outlives it.
-
-  That wait is bounded. The unmount stage gets `defaultUnmountTimeout` (30
-  seconds, `cmd/torrentfs/main.go`) and then gives up instead of hanging until
-  the peer goes away. On expiry torrentfs writes
-  `torrentfs: unmount <mountpoint>: unmount did not return within 30s: another
-  mount namespace may still hold a propagated copy of the FUSE mount; ...` to
-  stderr and **exits 1**. The non-zero code is deliberate: exiting 0 would
-  claim the mount was released when a peer still holds a copy, while a failure
-  tells a supervisor or orchestrator to look. The abandoned unmount cannot be
-  cancelled — only process exit ends it — so a propagating peer that outlives
-  the daemon keeps its copy as an `ENOTCONN` residual mount until its own
-  namespace ends; reclaiming it is the responsibility of whoever started that
-  container. Prefer stopping such containers before, or concurrently with, the
-  daemon: an unmount that completes on its own still exits 0.
-
-  Measured on the smoke fixture: with a peer container started with `sleep 300`
-  still running, the daemon stopped after the full 30 s deadline with exit code
-  1 and the diagnostic above, without a `Device or resource busy` line, and
-  reclaiming the peer released the propagated host mount. This blocking
-  predates the session-close-first order and is not caused by it — it was
-  reproduced on the commit before that change.
-
-`rshared` propagation on the `/mnt` bind is required for a FUSE submount to be
-visible in the host source directory; it is not the cause of a busy unmount and
-should not be relaxed to `rprivate`/`rslave`. Likewise, `fusermount3 -uz` is a
-lazy detach for cleaning up a mount that already failed to release; it must
-never be used as, or mistaken for, a successful graceful unmount.
-
-`/srv/torrents` must be writable because torrentfs creates and updates
-`/torrents/.metadata`; do not mount it read-only. Add and remove direct regular
-lower-case `*.torrent` files in that directory while the container is running,
-or manage torrents through the HTTP API. Use a temporary filename followed by
-an atomic rename for file-based writers. Peer identity and deletion sidecars are
-also stored under `/srv/torrents/.metadata`, and `/srv/mnt` must be an empty
-mountpoint on that shared host mount.
-
-Mounting FUSE needs the host to grant the container the FUSE device and the
-mount capability. The image installs `fuse3` and mount helpers and does not
-force a process identity: the default entrypoint runs as root, while the
-`--user` procedure above runs as the matching host user. The image cannot grant
-itself the host permissions: `--device /dev/fuse` and a capability such as
-`SYS_ADMIN` (or an equivalent privileged configuration) are required, and some
-hosts also need `--security-opt apparmor=unconfined`. A container started
-without them fails to mount; it does not silently fall back. Treat the
-container as privileged: it can mount a filesystem on behalf of whoever runs
-it, so do not expose it to untrusted callers.
-
-The CI FUSE job (`TORRENTFS_FUSE_REQUIRED=1`) needs the same capability on its
-runner; a runner without it fails the job by design.
-
-### Running the FUSE mount as a host user
-
-The image intentionally has no `USER` instruction, so its default remains
-root-compatible. To run the daemon as a host user, build the image with a
-matching passwd/group entry and pass the same numeric IDs at runtime:
-
-```sh
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
-docker build \
-  --build-arg TORRENTFS_UID="$HOST_UID" \
-  --build-arg TORRENTFS_GID="$HOST_GID" \
-  -t torrentfs .
-
-mkdir -p /srv/torrents /srv/mnt
-# Run this as an administrator if the directories are not already yours.
-chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
-
-docker run --detach --name torrentfs \
-  --user "$HOST_UID:$HOST_GID" \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
   --env TORRENTFS_HTTP_LISTEN_ADDR= \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
-  torrentfs -mountpoint /mnt /torrents
+  torrentfs -config /etc/torrentfs/torrentfs.toml -mountpoint /mnt /torrents
 ```
 
-The build arguments matter: `fusermount3` must resolve the runtime UID inside
-`/etc/passwd`, and a custom UID/GID requires rebuilding with matching arguments.
-Both bind sources must be writable by that user: `/torrents` stores `.metadata`,
-and `/mnt` must be writable so FUSE can create its submount. Keep the host mount
-shared as shown above. The host must provide `/dev/fuse`, `SYS_ADMIN`, and, on
-AppArmor hosts, permission for `apparmor=unconfined`; if `/dev/fuse` is
-`0660 root:fuse`, also add the host fuse group with `--group-add`.
+某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
 
-Verify the runtime identity and propagated ownership from the host:
+`/srv/mnt` 所在的主机挂载点必须支持递归双向传播；可以先检查：
 
 ```sh
-docker exec torrentfs id
 findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
-ls -ln /srv/mnt
-stat -c '%u:%g %a %n' /srv/mnt/<file>  # HOST_UID:HOST_GID 444 /srv/mnt/<file>
-cat /srv/mnt/<file>                    # direct read as HOST_UID, no sudo
-docker stop torrentfs
-findmnt -T /srv/mnt                    # no FUSE mount should remain
 ```
 
-## License
+`/mnt` bind mount 不能设为只读，因为 FUSE daemon 需要在其中创建 submount；FUSE 文件系统本身仍然是只读的。`rshared` 和 rootful `SYS_ADMIN` 会扩大挂载权限边界，不应把此容器暴露给不受信任的调用者。
 
-Mozilla Public License 2.0 — see [LICENSE](LICENSE).
+要让容器接受入站 peer，应在配置中使用固定的 `listen_port` 并发布两个传输协议，例如：
+
+```sh
+docker run --rm \
+  -p 6881:6881/tcp \
+  -p 6881:6881/udp \
+  ...
+```
+
+## 构建、测试与贡献
+
+前端构建产物被 Go embed，因此本地质量检查应先完成前端检查和构建，再执行 Go 命令：
+
+```sh
+npm ci --prefix web
+npm run typecheck --prefix web
+npm run lint --prefix web
+npm test --prefix web -- --run
+npm run build --prefix web
+rm -rf -- web/node_modules
+
+go build ./...
+go test ./...
+go test -race ./...
+```
+
+如果只需要生成供 Go 使用的前端产物，可以运行：
+
+```sh
+./scripts/build-web.sh
+```
+
+该脚本执行 lockfile 安装和 `npm run build`，完成后删除 `web/node_modules`。真实 FUSE 测试需要 `/dev/fuse`、`fusermount`/`fusermount3` 和挂载权限；环境不具备 FUSE 时相关测试会跳过。要把 FUSE 缺失视为失败，可使用：
+
+```sh
+TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...
+```
+
+需要完整 Docker/FUSE 环境时，还可以运行：
+
+```sh
+./scripts/docker-smoke.sh
+```
+
+## 许可证
+
+Mozilla Public License 2.0，见 [LICENSE](LICENSE)。
