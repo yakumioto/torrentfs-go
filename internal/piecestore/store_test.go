@@ -330,11 +330,10 @@ func TestFreshPieceImplsKeepObservedEpoch(t *testing.T) {
 	}
 	hashA := newPiece()
 	hashPiece(t, hashA, int64(pieceLength)) // the only verified token for A
-	freshCompleteA := newPiece()            // fresh Piece.Storage after hash A
 
 	// The stale reader removes A. A new corrupt generation arrives, and an
 	// ordinary streaming read observes B. That read must not manufacture a hash
-	// token for B or make freshCompleteA valid.
+	// token for B.
 	if err := stale.MarkNotComplete(); err != nil {
 		t.Fatalf("stale MarkNotComplete: %v", err)
 	}
@@ -347,6 +346,9 @@ func TestFreshPieceImplsKeepObservedEpoch(t *testing.T) {
 	if n, err := ordinaryB.ReadAt(readB, 0); n != pieceLength || err != nil || string(readB) != "corrupt!" {
 		t.Fatalf("ordinary B read = (%d, %v, %q)", n, err, readB)
 	}
+	// This is the same fresh storage object creation point used by
+	// pieceHashed immediately before it calls MarkComplete.
+	freshCompleteA := newPiece()
 	if err := freshCompleteA.MarkComplete(); err == nil {
 		t.Fatal("fresh MarkComplete for A promoted ordinary-read B")
 	}
