@@ -34,6 +34,7 @@ type Store struct {
 	staging        map[cache.Key]*stagingBuffer
 	lastRead       map[cache.Key]uint64
 	epochs         map[cache.Key]uint64
+	verifiedEpoch  map[cache.Key]uint64
 	nextGeneration uint64
 	closed         bool
 }
@@ -112,12 +113,13 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 		logger = logging.Discard()
 	}
 	return &Store{
-		capacity: c.Capacity(),
-		cache:    c,
-		logger:   logger,
-		staging:  make(map[cache.Key]*stagingBuffer),
-		lastRead: make(map[cache.Key]uint64),
-		epochs:   make(map[cache.Key]uint64),
+		capacity:      c.Capacity(),
+		cache:         c,
+		logger:        logger,
+		staging:       make(map[cache.Key]*stagingBuffer),
+		lastRead:      make(map[cache.Key]uint64),
+		epochs:        make(map[cache.Key]uint64),
+		verifiedEpoch: make(map[cache.Key]uint64),
 	}
 }
 
@@ -159,6 +161,25 @@ func (s *Store) epoch(key cache.Key) uint64 {
 	return s.epochs[key]
 }
 
+// markVerified records the token produced by the actual hash WriteTo operation.
+// Ordinary ReaderAt calls never update it.
+func (s *Store) markVerified(key cache.Key, generation uint64, length int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation == 0 || s.epochs[key] != generation {
+		return fmt.Errorf("piecestore: hash observed stale epoch %d for current %d", generation, s.epochs[key])
+	}
+	if buf := s.staging[key]; buf != nil {
+		if buf.generation != generation || !buf.covers(0, length) || s.lastRead[key] != generation {
+			return io.ErrUnexpectedEOF
+		}
+	} else if !s.cache.Has(key) {
+		return io.EOF
+	}
+	s.verifiedEpoch[key] = generation
+	return nil
+}
+
 // Close drops every staging buffer. Pieces already promoted to the cache are
 // owned by the cache and are not touched here.
 func (s *Store) Close() error {
@@ -168,6 +189,7 @@ func (s *Store) Close() error {
 	s.staging = make(map[cache.Key]*stagingBuffer)
 	s.lastRead = make(map[cache.Key]uint64)
 	s.epochs = make(map[cache.Key]uint64)
+	s.verifiedEpoch = make(map[cache.Key]uint64)
 	return nil
 }
 
@@ -206,6 +228,24 @@ type piece struct {
 }
 
 var _ storage.PieceImpl = (*piece)(nil)
+var _ io.WriterTo = (*piece)(nil)
+
+// WriteTo is the hash path used by anacrolix's Piece.WriteTo wrapper. It is the
+// only operation that issues a verified token; ordinary streaming ReaderAt calls
+// can read bytes but cannot authorize MarkComplete.
+func (p *piece) WriteTo(w io.Writer) (int64, error) {
+	n, err := io.Copy(w, io.NewSectionReader(p, 0, p.length))
+	if err != nil {
+		return n, err
+	}
+	if n != p.length {
+		return n, io.ErrUnexpectedEOF
+	}
+	if err := p.store.markVerified(p.key, p.generation, p.length); err != nil {
+		return n, err
+	}
+	return n, nil
+}
 
 // ReadAt serves the piece from the LRU, then from the staging buffer of an
 // in-progress download. A resident piece is always served in full: a short read
@@ -311,9 +351,9 @@ func (p *piece) MarkComplete() error {
 		s.mu.Unlock()
 		return fmt.Errorf("piecestore: stale staging generation %d for %s (current %d)", p.generation, p.key.Torrent, buf.generation)
 	}
-	if s.lastRead[p.key] != buf.generation {
+	if s.verifiedEpoch[p.key] != buf.generation {
 		s.mu.Unlock()
-		return fmt.Errorf("piecestore: staging generation %d was not read before completion", buf.generation)
+		return fmt.Errorf("piecestore: staging generation %d was not verified by its hash", buf.generation)
 	}
 	if !buf.covers(0, p.length) {
 		s.mu.Unlock()
@@ -321,6 +361,7 @@ func (p *piece) MarkComplete() error {
 	}
 	delete(s.staging, p.key)
 	delete(s.lastRead, p.key)
+	delete(s.verifiedEpoch, p.key)
 	s.mu.Unlock()
 	s.cache.Put(p.key, buf.data)
 	return nil

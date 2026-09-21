@@ -37,6 +37,19 @@ func openPiece(t *testing.T, store *Store, hash metainfo.Hash, pieceLength int64
 
 // singlePieceInfo returns a one-piece, single-file v1 info. The zero-value
 // Info cannot be used directly: its length helpers walk the file list.
+func hashPiece(t *testing.T, piece storage.PieceImpl, want int64) {
+	t.Helper()
+	writer, ok := piece.(io.WriterTo)
+	if !ok {
+		t.Fatal("piece does not expose the hash WriteTo path")
+	}
+	var sink bytes.Buffer
+	n, err := writer.WriteTo(&sink)
+	if err != nil || n != want {
+		t.Fatalf("hash WriteTo = (%d, %v), want (%d, nil)", n, err, want)
+	}
+}
+
 func singlePieceInfo(pieceLength int64) *metainfo.Info {
 	return &metainfo.Info{
 		Name:        "t",
@@ -94,6 +107,7 @@ func TestPieceWriteReadCompleteLifecycle(t *testing.T) {
 	if n, err := piece.ReadAt(got, 4); n != 4 || err != nil || string(got) != "efgh" {
 		t.Fatalf("staging read = (%d, %v, %q), want (4, nil, efgh)", n, err, got)
 	}
+	hashPiece(t, piece, int64(pieceLength))
 
 	if err := piece.MarkComplete(); err != nil {
 		t.Fatalf("MarkComplete: %v", err)
@@ -260,9 +274,7 @@ func TestMarkCompleteCannotPromoteAStaleStagingGeneration(t *testing.T) {
 	if _, err := first.WriteAt([]byte("verified"), 0); err != nil {
 		t.Fatalf("first WriteAt: %v", err)
 	}
-	if n, err := first.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
-		t.Fatalf("first hash read = (%d, %v), want full data", n, err)
-	}
+	hashPiece(t, first, int64(pieceLength))
 	if err := first.MarkComplete(); err != nil {
 		t.Fatalf("first MarkComplete: %v", err)
 	}
@@ -275,9 +287,7 @@ func TestMarkCompleteCannotPromoteAStaleStagingGeneration(t *testing.T) {
 	if _, err := second.WriteAt([]byte("corrupt!"), 0); err != nil {
 		t.Fatalf("second WriteAt: %v", err)
 	}
-	if n, err := second.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
-		t.Fatalf("second hash read = (%d, %v), want full data", n, err)
-	}
+	hashPiece(t, second, int64(pieceLength))
 	completeDone := make(chan error, 1)
 	go func() { completeDone <- first.MarkComplete() }()
 	if err := <-completeDone; err == nil {
@@ -308,38 +318,46 @@ func TestFreshPieceImplsKeepObservedEpoch(t *testing.T) {
 		return impl.PieceWithHash(info.Piece(0), g.None[[]byte]())
 	}
 
+	// A arrives in chunks; the mark is deliberately delayed until after the
+	// stale reader and replacement sequence below.
 	writerA := newPiece()
-	if _, err := writerA.WriteAt([]byte("verified"), 0); err != nil {
-		t.Fatalf("writer A: %v", err)
+	if _, err := writerA.WriteAt([]byte("veri"), 0); err != nil {
+		t.Fatalf("writer A prefix: %v", err)
+	}
+	stale := newPiece() // observes epoch A before the hash completion
+	if _, err := writerA.WriteAt([]byte("fied"), 4); err != nil {
+		t.Fatalf("writer A suffix: %v", err)
 	}
 	hashA := newPiece()
-	if n, err := hashA.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
-		t.Fatalf("hash A read = (%d, %v)", n, err)
-	}
-	if err := newPiece().MarkComplete(); err != nil {
-		t.Fatalf("fresh MarkComplete A: %v", err)
-	}
+	hashPiece(t, hashA, int64(pieceLength)) // the only verified token for A
+	freshCompleteA := newPiece()            // fresh Piece.Storage after hash A
 
-	stale := newPiece() // observes epoch A
+	// The stale reader removes A. A new corrupt generation arrives, and an
+	// ordinary streaming read observes B. That read must not manufacture a hash
+	// token for B or make freshCompleteA valid.
+	if err := stale.MarkNotComplete(); err != nil {
+		t.Fatalf("stale MarkNotComplete: %v", err)
+	}
 	writerB := newPiece()
 	if _, err := writerB.WriteAt([]byte("corrupt!"), 0); err != nil {
 		t.Fatalf("writer B: %v", err)
 	}
-	if err := stale.MarkNotComplete(); err != nil {
-		t.Fatalf("stale MarkNotComplete: %v", err)
+	ordinaryB := newPiece()
+	readB := make([]byte, pieceLength)
+	if n, err := ordinaryB.ReadAt(readB, 0); n != pieceLength || err != nil || string(readB) != "corrupt!" {
+		t.Fatalf("ordinary B read = (%d, %v, %q)", n, err, readB)
 	}
-	freshCompleteB := newPiece() // observes epoch B, but B was never hashed
-	if err := freshCompleteB.MarkComplete(); err == nil {
-		t.Fatal("fresh MarkComplete promoted an unverified B generation")
+	if err := freshCompleteA.MarkComplete(); err == nil {
+		t.Fatal("fresh MarkComplete for A promoted ordinary-read B")
 	}
 	if c.Has(cache.Key{Torrent: hash.HexString(), Piece: 0}) {
 		t.Fatal("unverified B generation entered the cache")
 	}
 
+	// B can only become resident after its own actual hash WriteTo issues a new
+	// token.
 	freshHashB := newPiece()
-	if n, err := freshHashB.ReadAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
-		t.Fatalf("hash B read = (%d, %v)", n, err)
-	}
+	hashPiece(t, freshHashB, int64(pieceLength))
 	if err := newPiece().MarkComplete(); err != nil {
 		t.Fatalf("fresh MarkComplete B: %v", err)
 	}
@@ -357,9 +375,7 @@ func TestResidentReadCannotAuthorizeDifferentStagingGeneration(t *testing.T) {
 	if _, err := piece.WriteAt([]byte("verified"), 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
-	if _, err := piece.ReadAt(make([]byte, pieceLength), 0); err != nil {
-		t.Fatalf("hash read: %v", err)
-	}
+	hashPiece(t, piece, int64(pieceLength))
 	if err := piece.MarkComplete(); err != nil {
 		t.Fatalf("MarkComplete: %v", err)
 	}
