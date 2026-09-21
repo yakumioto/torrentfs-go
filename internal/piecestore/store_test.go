@@ -246,6 +246,73 @@ func TestReadAtConcurrentWithWriteAt(t *testing.T) {
 	wg.Wait()
 }
 
+// TestStagingReadRejectsUnreceivedWindows pins the contract that keeps a
+// streaming read honest: a window that includes bytes a peer has not delivered
+// yet reports the piece as missing. Returning the zero fill instead let
+// anacrolix's reader copy unwritten bytes into the file.
+func TestStagingReadRejectsUnreceivedWindows(t *testing.T) {
+	const pieceLength = 8
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{10}, pieceLength)
+
+	// Only the second half has arrived.
+	if _, err := piece.WriteAt([]byte("efgh"), 4); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		off  int64
+		size int64
+	}{
+		{name: "window covering the gap", off: 0, size: pieceLength},
+		{name: "window ending in the gap", off: 0, size: 6},
+		{name: "window straddling the boundary", off: 2, size: 4},
+	} {
+		buf := bytes.Repeat([]byte{'?'}, int(tc.size))
+		n, err := piece.ReadAt(buf, tc.off)
+		if n != 0 || !errors.Is(err, io.EOF) {
+			t.Fatalf("%s: ReadAt(%d, %d) = (%d, %v, %q), want (0, io.EOF)",
+				tc.name, tc.off, tc.size, n, err, buf[:n])
+		}
+	}
+
+	// A window fully inside the received range is still served before the hash
+	// check promotes the piece.
+	buf := make([]byte, 4)
+	n, err := piece.ReadAt(buf, 4)
+	if n != 4 || err != nil || string(buf[:n]) != "efgh" {
+		t.Fatalf("received window = (%d, %v, %q), want (4, nil, efgh)", n, err, buf[:n])
+	}
+}
+
+// TestStagingCoverageMergesChunks checks that out-of-order chunk arrival builds
+// a coverage map a read can trust, including adjacent and overlapping writes.
+func TestStagingCoverageMergesChunks(t *testing.T) {
+	const pieceLength = 16
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{11}, pieceLength)
+
+	writes := []struct {
+		off  int64
+		data string
+	}{
+		{off: 8, data: "ijklmnop"}, // the tail arrives first
+		{off: 0, data: "abcdefgh"}, // then the head, adjacent to the tail
+	}
+	for _, w := range writes {
+		if _, err := piece.WriteAt([]byte(w.data), w.off); err != nil {
+			t.Fatalf("WriteAt(%d): %v", w.off, err)
+		}
+	}
+
+	buf := make([]byte, pieceLength)
+	n, err := piece.ReadAt(buf, 0)
+	if n != pieceLength || err != nil || string(buf[:n]) != "abcdefghijklmnop" {
+		t.Fatalf("merged coverage read = (%d, %v, %q), want the whole piece", n, err, buf[:n])
+	}
+}
+
 func TestWriteAtOutsidePieceIsRejected(t *testing.T) {
 	store, _ := testStore(t, 1<<20)
 	_, piece := openPiece(t, store, metainfo.Hash{5}, 8)

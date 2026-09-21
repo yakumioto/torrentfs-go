@@ -31,8 +31,73 @@ type Store struct {
 	logger   *slog.Logger
 
 	mu      sync.Mutex
-	staging map[cache.Key][]byte
+	staging map[cache.Key]*stagingBuffer
 	closed  bool
+}
+
+// byteRange is a half-open [start, end) span of a piece that has been received.
+type byteRange struct {
+	start int64
+	end   int64
+}
+
+// stagingBuffer accumulates the chunks of one piece that a peer has delivered.
+// received tracks which byte ranges actually arrived, so a read can never be
+// served the zero fill of a region that is still in flight.
+type stagingBuffer struct {
+	data     []byte
+	received []byteRange
+}
+
+// write copies a received chunk and records the range it covers.
+func (b *stagingBuffer) write(off int64, src []byte) {
+	n := copy(b.data[off:], src)
+	if n > 0 {
+		b.cover(off, off+int64(n))
+	}
+}
+
+// cover merges [start, end) into the received ranges, which stay sorted and
+// disjoint.
+func (b *stagingBuffer) cover(start, end int64) {
+	if start >= end {
+		return
+	}
+	merged := make([]byteRange, 0, len(b.received)+1)
+	placed := false
+	for _, span := range b.received {
+		switch {
+		case span.end < start: // strictly before the new range
+			merged = append(merged, span)
+		case end < span.start: // strictly after it
+			if !placed {
+				merged = append(merged, byteRange{start: start, end: end})
+				placed = true
+			}
+			merged = append(merged, span)
+		default: // overlapping or adjacent: absorb into the new range
+			if span.start < start {
+				start = span.start
+			}
+			if span.end > end {
+				end = span.end
+			}
+		}
+	}
+	if !placed {
+		merged = append(merged, byteRange{start: start, end: end})
+	}
+	b.received = merged
+}
+
+// covers reports whether every byte of [start, end) has been received.
+func (b *stagingBuffer) covers(start, end int64) bool {
+	for _, span := range b.received {
+		if span.start <= start && end <= span.end {
+			return true
+		}
+	}
+	return false
 }
 
 var _ storage.ClientImplCloser = (*Store)(nil)
@@ -46,7 +111,7 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 		capacity: c.Capacity(),
 		cache:    c,
 		logger:   logger,
-		staging:  make(map[cache.Key][]byte),
+		staging:  make(map[cache.Key]*stagingBuffer),
 	}
 }
 
@@ -87,7 +152,7 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.staging = make(map[cache.Key][]byte)
+	s.staging = make(map[cache.Key]*stagingBuffer)
 	return nil
 }
 
@@ -96,8 +161,11 @@ func (s *Store) Close() error {
 // the same piece cannot mutate the bytes while they are being read; handing out
 // the buffer itself would leave the copy racing against the writer.
 //
-// The bool reports whether a staging buffer exists at all; the int is how many
-// bytes it supplied. An offset past the buffer yields zero bytes, not a panic.
+// A window that is not fully received reports the piece as missing instead of
+// returning bytes: anacrolix's streaming reader consumes whatever this method
+// copies out, so the zero fill of a region a peer has not delivered yet would
+// surface as silent corruption in the file. The bool reports whether the window
+// was served; the int is how many bytes it supplied.
 func (s *Store) readStaging(key cache.Key, dst []byte, off int64) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,13 +173,13 @@ func (s *Store) readStaging(key cache.Key, dst []byte, off int64) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if off < 0 || off > int64(len(buf)) {
-		return 0, true
+	if off < 0 || !buf.covers(off, off+int64(len(dst))) {
+		return 0, false
 	}
-	return copy(dst, buf[off:]), true
+	return copy(dst, buf.data[off:]), true
 }
 
-func (s *Store) dropStaging(key cache.Key) []byte {
+func (s *Store) dropStaging(key cache.Key) *stagingBuffer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	buf := s.staging[key]
@@ -201,14 +269,14 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	buf := s.staging[p.key]
 	if buf == nil {
-		buf = make([]byte, p.length)
+		buf = &stagingBuffer{data: make([]byte, p.length)}
 		s.staging[p.key] = buf
 	}
-	if off < 0 || off+int64(len(b)) > int64(len(buf)) {
+	if off < 0 || off+int64(len(b)) > int64(len(buf.data)) {
 		return 0, fmt.Errorf("piecestore: write [%d,%d) outside piece length %d", off, off+int64(len(b)), p.length)
 	}
-	n := copy(buf[off:], b)
-	return n, nil
+	buf.write(off, b)
+	return len(b), nil
 }
 
 // MarkComplete promotes a verified piece into the cache and drops its staging
@@ -217,7 +285,7 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 func (p *piece) MarkComplete() error {
 	buf := p.store.dropStaging(p.key)
 	if buf != nil {
-		p.store.cache.Put(p.key, buf)
+		p.store.cache.Put(p.key, buf.data)
 	}
 	return nil
 }

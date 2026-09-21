@@ -606,12 +606,17 @@ share 名固定为 `torrentfs`，路径固定为 `/mnt/torrentfs`；`/torrents` 
 
 `/dev/fuse`、`SYS_ADMIN` 和 `CAP_NET_BIND_SERVICE` 是运行前提：SMB 模式下 torrentfs 和 smbd 都以镜像内解析出的专用非 root 身份运行，`CAP_NET_BIND_SERVICE` 让该身份可以绑定 445。权限方案是同 UID：Samba 用 `force user`/`force group` 映射到同一个运行身份，因此不需要 `allow_other`，FUSE 访问范围不会因为 SMB 而扩大。AppArmor/安全策略是否放行由宿主策略决定；缺少设备、capability 或 secret 时容器会在启动任何 listener 之前以非零状态失败，并输出诊断，不会退化成共享一个普通目录。
 
-secret 文件必须是普通、非符号链接、非空、单行、不超过 1024 字节，且不可被 group/other 读取（例如 `chmod 400`）：
+secret 文件必须是普通、非符号链接、非空、单行、不超过 1024 字节，且不可被 group/other 读取（例如 `chmod 400`）。下面的示例同时发布 HTTP 和 SMB，因此准备了两个 secret：SMB 密码明文文件，以及 HTTP 认证用的单行 bcrypt hash 文件。两者都不提交到仓库：
 
 ```sh
 mkdir -p /srv/torrents /srv/secrets
-printf '%s\n' '<smb-password>' > /srv/secrets/smb-password   # 不要提交到仓库
-chmod 400 /srv/secrets/smb-password
+printf '%s\n' '<smb-password>' > /srv/secrets/smb-password
+# 任意工具生成的单行 bcrypt hash 均可；这里用 apache2-utils 的 htpasswd，
+# 没有本地 htpasswd 时可以用容器代替：
+#   docker run --rm httpd:2.4 htpasswd -nbBC 10 '' '<http-password>'
+htpasswd -bnBC 10 '' '<http-password>' | tr -d ':\n' > /srv/secrets/torrentfs-password-hash
+printf '\n' >> /srv/secrets/torrentfs-password-hash
+chmod 400 /srv/secrets/smb-password /srv/secrets/torrentfs-password-hash
 
 docker run --rm \
   --device /dev/fuse \
@@ -623,14 +628,18 @@ docker run --rm \
   --publish 6881:6881/tcp --publish 6881:6881/udp \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --mount type=bind,src=/srv/secrets/smb-password,dst=/run/secrets/smb-password,readonly \
+  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/torrentfs-password-hash,readonly \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
   --env TORRENTFS_HTTP_AUTH_USERNAME=alice \
-  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
+  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
+  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/torrentfs-password-hash \
   --env TORRENTFS_SMB_ENABLED=true \
   --env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/smb-password \
   torrentfs
 ```
+
+如果只需要 SMB，可以省略 `--publish 8080`、`--env TORRENTFS_HTTP_*` 和 `--env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` 三组 HTTP 参数：镜像内置的 HTTP listener 保持 container-local `127.0.0.1:8080`，不发布即可。
 
 身份与退出语义：
 
@@ -686,13 +695,19 @@ golangci-lint run ./...
   ./scripts/docker-smoke.sh
   ```
 
-- **单容器 SMB 检查**：需要 Linux Docker daemon、`/dev/fuse`、`SYS_ADMIN`、`CAP_NET_BIND_SERVICE`、通常的 `apparmor=unconfined`、`python3`、`sha256sum`、`dd` 和 `timeout`。脚本构建镜像与独立 SMB client 镜像，在隔离 Docker network 里验证认证与 guest 拒绝、目录列举、全量读取哈希、只读拒写、`.metadata` 不可见、正常 SIGTERM 顺序，以及 smbd/torrentfs 异常退出的联动和退出码：
+- **单容器 SMB 检查**：需要 Linux Docker daemon、`/dev/fuse`、`SYS_ADMIN`、`CAP_NET_BIND_SERVICE`、通常的 `apparmor=unconfined`、`python3`、`sha256sum`、`dd` 和 `timeout`。脚本构建镜像与独立 SMB client 镜像，在隔离 Docker network 里验证认证与 guest 拒绝、目录列举、全量读取哈希、只读拒写、`.metadata` 不可见、容器与宿主 UID 不同时 `.metadata` 仍可读、正常 SIGTERM 顺序，以及 smbd/torrentfs 异常退出的联动和退出码。所有 client 操作共用同一个有界超时（`CLIENT_TIMEOUT`，smbclient 自身用 `-t`），失败时打印应用日志与 web seed 日志：
 
   ```sh
   ./scripts/docker-smb-smoke.sh
   ```
 
-  默认还会在 client 容器内用 `mount.cifs` 只读挂载 share，并以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于内存 cache 的区间，与源文件对应切片比对，证明随机 seek 走的是现有 piece planner/cache，而不是顺序下载。这一步需要宿主机内核提供 CIFS 模块并允许 nested `mount.cifs`；GitHub hosted runner 不满足时，CI 设置 `TORRENTFS_SMB_SKIP_CIFS=1` 跳过该段，由 required 的 `TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...`（含 `>4 GiB` 虚拟文件的大偏移用例）承担随机读取证据。在支持 CIFS 的 rootful 主机上应不带该变量运行一次，作为手工必跑项。
+  脚本还会在 client 容器内用 `mount.cifs` 只读挂载 share，并以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于内存 cache 的区间，与源文件对应切片比对，证明随机 seek 走的是现有 piece planner/cache，而不是顺序下载。这一步需要宿主机内核提供 CIFS 模块并允许 nested `mount.cifs`：脚本会区分「宿主不具备 CIFS 能力」和「挂载成功但数据错误」——前者打印明确的 `host cannot mount CIFS` 说明并继续（此时由 required 的 `TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...`，含 `>4 GiB` 虚拟文件的大偏移用例，承担随机读取证据），后者直接失败。需要无条件跳过时设置 `TORRENTFS_SMB_SKIP_CIFS=1`。CI 与 nightly 都不设置该变量，因此在支持 CIFS 的 runner 上会自动执行完整比对。
+
+  宿主 UID 与镜像内运行身份相同时，容器写入的 `.metadata` 与清理路径恰好一致，容易掩盖权限问题；用 `TORRENTFS_SMOKE_UID`/`TORRENTFS_SMOKE_GID` 指定一个不同的构建期运行身份，即可在同一台机器上验证跨 UID 的 metadata 可遍历性与 scratch 目录清理（CI runner 的 UID 与镜像默认值本就不同）：
+
+  ```sh
+  TORRENTFS_SMOKE_UID=1500 TORRENTFS_SMOKE_GID=1500 ./scripts/docker-smb-smoke.sh
+  ```
 
 `TORRENTFS_FUSE_REQUIRED` 只控制测试门禁，不是 daemon 的运行时配置。CI nightly 的多平台 OCI 构建与本地 `scripts/nightly-build.sh` 归档脚本是不同入口；本 README 的命令用于本地构建、运行和验证，不把手工归档脚本写成 nightly 发布保证。
 

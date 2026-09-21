@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 IFS=$'\n\t'
+# Keep the image default so files torrentfs creates (`.metadata`, lock files)
+# stay readable to the host user that owns the bind-mounted torrents directory,
+# which may have a different UID than the container runtime identity.
+umask 022
 
 readonly MOUNTPOINT=/mnt/torrentfs
 readonly IDENTITY_FILE=/etc/torrentfs/runtime-identity
@@ -154,8 +158,13 @@ prepare_samba() {
 	template="$(<"$SMB_TEMPLATE")"
 	config="${template//__TORRENTFS_SMB_USER__/$smb_username}"
 	config="${config//__TORRENTFS_SMB_GROUP__/$runtime_group}"
-	umask 077
-	printf '%s\n' "$config" >"$SMB_CONFIG"
+	# The restrictive umask applies to this write only. A process-wide umask
+	# would be inherited by torrentfs, whose `.metadata` would then be created
+	# unreadable to a host user with a different UID.
+	(
+		umask 077
+		printf '%s\n' "$config" >"$SMB_CONFIG"
+	)
 	chmod 0644 "$SMB_CONFIG"
 	if ! testparm -s "$SMB_CONFIG" >/dev/null; then
 		unset password
