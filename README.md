@@ -27,7 +27,7 @@ cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
 └── .metadata/           API 管理的 metainfo、磁力意图和运行状态
 ```
 
-启动时会恢复 `.metadata`，并扫描目录顶层的普通、非符号链接、名称以小写 `.torrent` 结尾的文件。文件写入方应先写入临时名称，再在同一目录中原子重命名为 `.torrent`。同一个 info hash 的多个源文件共享一个 torrent；同一个 `torrents` 目录同时只能由一个进程管理。
+启动时会恢复 `.metadata`，并只检查目录顶层名称以小写 `.torrent` 结尾的条目，不递归子目录。只有普通、非符号链接文件会被接受为有效源；匹配后缀的符号链接和目录会被识别为 invalid source，不会被加载为 torrent。文件写入方应先写入临时名称，再在同一目录中原子重命名为 `.torrent`。同一个 info hash 的多个源文件共享一个 torrent；同一个 `torrents` 目录同时只能由一个进程管理。
 
 ## 快速开始
 
@@ -36,51 +36,99 @@ cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
 - Go 1.27 或更高版本。
 - Node.js 使用 `web/.nvmrc` 指定的版本（当前为 22.23.2）以及 npm。
 - 只有在挂载 FUSE 时才需要 Linux FUSE3、`/dev/fuse` 和相应的挂载权限；只运行 HTTP API/Web UI 不需要实际挂载设备。
-- `curl` 可用于验证 HTTP API。
+- `curl` 可用于验证 HTTP API；Docker smoke 脚本还需要 Docker 和 `python3`。
 
-Go 使用 `web/embed.go` 嵌入 `web/dist`，因此第一次 `go build`、`go test` 或 `go run` 前必须先生成 `web/dist`。
+所有命令都从仓库根目录执行。Go 使用 `web/embed.go` 嵌入 `web/dist`，因此 clean checkout 必须先生成前端产物，不能直接跳过 Web 构建执行 Go 命令。
 
-### 本地构建并运行
+### 构建二进制
 
 ```sh
 git clone git@github.com:yakumioto/torrentfs-go.git
 cd torrentfs-go
 
-npm ci --prefix web
-npm run build --prefix web
+./scripts/build-web.sh
+go build -o ./torrentfs ./cmd/torrentfs
 
 mkdir -p "$PWD/torrents" "$PWD/mnt"
 ```
 
-在第一个终端启动服务和挂载：
+`./scripts/build-web.sh` 会使用 lockfile 安装前端依赖、生成 `web/dist`，然后删除 `web/node_modules`；它不会删除 `web/dist`。如果已经执行过等价的前端构建，也可以直接运行 `go run ./cmd/torrentfs`。
+
+### 三种运行模式
+
+不指定 `-config` 时使用内置默认值：HTTP 服务监听 `127.0.0.1:8080`，认证关闭，peer 监听端口由客户端选择。`<torrents-dir>` 必须事先存在、可读写且是非符号链接目录。
+
+**HTTP API 和 Web UI（headless）**：省略 `-mountpoint` 即可；默认 HTTP listener 非空，因此这是默认模式。
 
 ```sh
-go run ./cmd/torrentfs -mountpoint "$PWD/mnt" "$PWD/torrents"
+./torrentfs "$PWD/torrents"
 ```
 
-不指定 `-config` 时使用内置默认值：HTTP 服务监听 `127.0.0.1:8080`，认证关闭，peer 监听端口由客户端选择。保持进程运行后，在第二个终端检查服务并添加一个本地 `.torrent` 文件：
+在另一个终端打开 `http://127.0.0.1:8080/` 或检查服务：
 
 ```sh
 curl --fail http://127.0.0.1:8080/
+curl --fail http://127.0.0.1:8080/api/v1/torrents
+```
 
+**HTTP API/Web UI 与 FUSE 同时运行**：提供 `-mountpoint`，HTTP 仍会启动。
+
+```sh
+./torrentfs -mountpoint "$PWD/mnt" "$PWD/torrents"
+```
+
+**只运行 FUSE**：通过环境变量把 listener 置空；此时必须提供 `-mountpoint`。
+
+```sh
+TORRENTFS_HTTP_LISTEN_ADDR= \
+  ./torrentfs -mountpoint "$PWD/mnt" "$PWD/torrents"
+```
+
+也可以通过示例 TOML 启动 headless 服务：
+
+```sh
+./torrentfs -config ./torrentfs.example.toml "$PWD/torrents"
+```
+
+将本地 `.torrent` 文件放入目录时，先使用临时名称，再在同一文件系统中原子重命名：
+
+```sh
 cp /path/to/input.torrent "$PWD/torrents/input.torrent.part"
 mv "$PWD/torrents/input.torrent.part" "$PWD/torrents/input.torrent"
 ```
 
-文件被识别并解析后，内容会出现在 `mnt` 下。单文件 torrent 直接是一个文件，多文件 torrent 是一个目录树；挂载点中的写入、删除和重命名都会返回只读错误。也可以通过下面的 HTTP API 添加磁力链接或上传文件。
+文件被识别并解析后，内容会出现在 `mnt` 下。单文件 torrent 直接是一个文件，多文件 torrent 是一个目录树；挂载点中的写入、删除和重命名都会返回只读错误。也可以通过 HTTP API 添加磁力链接或上传文件，见后文 curl 流程。
 
 按 `Ctrl-C` 或向进程发送 `SIGTERM` 可停止服务。关闭时会先停止 HTTP 服务和 session，再卸载 FUSE，以便取消仍在等待 piece 的读取。
 
-### 仅运行 HTTP API 和 Web UI
+`go run ./cmd/torrentfs ...` 可以替代 `./torrentfs ...`，但同样必须先生成 `web/dist`。
 
-启用 HTTP 后可以省略 `-mountpoint`，运行 headless 模式：
+## CLI 与进程生命周期
 
-```sh
-mkdir -p "$PWD/torrents"
-go run ./cmd/torrentfs -config ./torrentfs.example.toml "$PWD/torrents"
+命令行入口只接受两个 flag 和一个 positional 参数：
+
+```text
+torrentfs -mountpoint <dir> [-config <file>] <torrents-dir>
 ```
 
-`-config` 指向的 TOML 文件会在每次启动时读取。如果把 `[http].listen_addr` 设为空字符串，HTTP 服务会被禁用，此时必须提供 `-mountpoint`。
+| 参数 | 说明 |
+| --- | --- |
+| `-mountpoint <dir>` | FUSE 挂载目录；HTTP listener 启用时可以省略 |
+| `-config <file>` | 可选 TOML 配置文件；未提供时使用内置默认值和环境变量 |
+| `<torrents-dir>` | 唯一的 positional 参数；必须是已存在、可读写、非 symlink 的目录 |
+| `-h` / `--help` | 输出帮助并退出 |
+
+单个 `.torrent` 文件不能作为 positional 参数；程序不会替用户创建 `torrents` 目录。启动时先校验参数和配置，再创建 logger、恢复 session，按需启动 HTTP 和 FUSE。HTTP listener 非空时，即使提供了 `-mountpoint` 也会同时提供 API/Web UI。
+
+退出码：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 收到 `SIGINT`/`SIGTERM` 后正常关闭 |
+| `1` | HTTP、session 或 FUSE unmount 的运行时错误 |
+| `2` | flag 用法、positional 参数、目录或配置校验错误 |
+
+正常关闭顺序是 HTTP API → session → FUSE unmount。session 会先取消和排空未完成的读取；FUSE unmount 使用 30 秒 deadline。若另一 mount namespace 仍持有传播的副本，进程会输出诊断并以 `1` 退出，而不是把未完成的 lazy unmount 当作成功。
 
 ## FUSE 挂载布局
 
@@ -209,7 +257,7 @@ token_ttl = "30m"
        "info_hash": "<info-hash>",
        "name": "example",
        "state": "ready",
-       "total_bytes": 1234,
+       "total_bytes": 262144,
        "cached_bytes": 262144,
        "created_at": "2026-01-01T00:00:00Z"
      },
@@ -219,7 +267,7 @@ token_ttl = "30m"
        {"index": 0, "cached": true, "cached_bytes": 262144, "pinned": false}
      ],
      "files": [
-       {"path": "file.bin", "size": 1234, "piece_start": 0, "piece_end": 1}
+       {"path": "file.bin", "size": 262144, "piece_start": 0, "piece_end": 1}
      ],
      "network": {
        "effective_listen_port": 6881,
@@ -280,7 +328,7 @@ token_ttl = "30m"
 | `400` | JSON/multipart body、`Content-Type`、磁力链接或文件名无效 |
 | `401` | 认证缺失、格式错误、过期或已撤销；登录凭据错误也返回 `401` |
 | `404` | 未知 torrent/operation；认证关闭时 login/logout 也不可用；不存在的静态 asset |
-| `409` | torrent 正在删除，或仍被用户拥有的 `.torrent` 文件引用 |
+| `409` | torrent 正在删除（包括 `delete_failed` 状态下重新添加同一 info hash），或仍被用户拥有的 `.torrent` 文件引用 |
 | `413` | body 超过限制；登录 body 上限固定为 8 KiB，上传上限由 `http.max_upload_bytes` 控制 |
 | `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type |
 | `500` | 未分类的内部 session/API 错误 |
@@ -317,7 +365,7 @@ cp torrentfs.example.toml torrentfs.local.toml
 go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 ```
 
-配置优先级按字段合并：环境变量 > TOML 文件 > 内置默认值。每个叶子 TOML key 都有对应的 `TORRENTFS_` 环境变量；嵌套 section 用下划线连接，例如 `http.auth.token_ttl` 对应 `TORRENTFS_HTTP_AUTH_TOKEN_TTL`。只有已支持的精确变量名会被读取。
+配置优先级按字段合并：环境变量 > TOML 文件 > 内置默认值。仓库只为下表列出的受支持字段提供精确的 `TORRENTFS_` 环境变量映射，不会自动为每个 TOML key 生成变量；嵌套 section 用下划线连接，例如 `http.auth.token_ttl` 对应 `TORRENTFS_HTTP_AUTH_TOKEN_TTL`。未列出的变量会被忽略。
 
 ### 主要配置项
 
@@ -343,16 +391,56 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 - `cache.capacity_bytes` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，避免进程被 OOM kill。
 - `mount.allow_other` 默认关闭。启用后所有本机 UID 都可能读取挂载；非 root 挂载还需要 `/etc/fuse.conf` 中允许 `user_allow_other`。
 
-### 环境变量示例
+### 环境变量与校验
+
+当前实际读取的 22 个受支持环境变量映射如下；未列出的 TOML key 没有自动生成的环境变量：
+
+| 环境变量 | TOML key | 格式 |
+| --- | --- | --- |
+| `TORRENTFS_CONNECTIONS_LISTEN_HOST` | `connections.listen_host` | 字符串 |
+| `TORRENTFS_CONNECTIONS_LISTEN_PORT` | `connections.listen_port` | 十进制整数 |
+| `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | `connections.disable_ipv4` | Go boolean |
+| `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | `connections.disable_ipv6` | Go boolean |
+| `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `connections.no_port_forwarding` | Go boolean |
+| `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `connections.bootstrap_nodes` | 逗号分隔的 `host:port` 列表 |
+| `TORRENTFS_MOUNT_ALLOW_OTHER` | `mount.allow_other` | Go boolean |
+| `TORRENTFS_PROXY_SOCKS5_URL` | `proxy.socks5_url` | 字符串 |
+| `TORRENTFS_CACHE_CAPACITY_BYTES` | `cache.capacity_bytes` | 十进制整数 |
+| `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `identity.tracker_user_agent` | 字符串 |
+| `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | `identity.peer_id_prefix` | 字符串 |
+| `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `identity.extended_handshake_client_version` | 字符串 |
+| `TORRENTFS_HTTP_LISTEN_ADDR` | `http.listen_addr` | 字符串；空值关闭 HTTP |
+| `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 十进制整数 |
+| `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
+| `TORRENTFS_HTTP_AUTH_USERNAME` | `http.auth.username` | 字符串 |
+| `TORRENTFS_HTTP_AUTH_PASSWORD_HASH` | `http.auth.password_hash` | bcrypt 字符串 |
+| `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` | `http.auth.password_hash_file` | 文件路径 |
+| `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `http.auth.token_ttl` | Go duration，如 `30m` |
+| `TORRENTFS_LOG_LEVEL` | `log.level` | `debug`/`info`/`warn`/`error` |
+| `TORRENTFS_LOG_FORMAT` | `log.format` | `text`/`json` |
+| `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` | Go boolean |
+
+例如，可以用环境变量覆盖默认 listener 和 cache 上限：
 
 ```sh
 TORRENTFS_HTTP_LISTEN_ADDR=127.0.0.1:8080 \
 TORRENTFS_HTTP_MAX_UPLOAD_BYTES=10485760 \
 TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
-go run ./cmd/torrentfs "$PWD/torrents"
+./torrentfs "$PWD/torrents"
 ```
 
-环境变量可以覆盖 TOML 中对应字段，也可以用空字符串清除字符串值；数字、布尔值和 duration 不能使用空字符串。认证切换密码来源时，要显式清空不再使用的 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH`，并保留 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE`。
+加载规则和边界：
+
+- 配置按字段合并，优先级为环境变量 > TOML 文件 > 内置默认值。严格 TOML decoder 会拒绝未知字段；旧的 `[paths]` section（包括 `paths.data_dir`）不再支持，旧的 `TORRENTFS_PATHS_DATA_DIR` 会被忽略。
+- 环境变量存在但为空时，字符串字段可以被清空；数字、布尔值和 duration 的空值会报错。环境覆盖发生在交叉字段校验前，因此切换认证密码来源时要显式清空不再使用的 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH`。
+- `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 `bootstrap_nodes` 项都必须是合法且端口在 `1..65535` 的 `host:port`。
+- `cache.capacity_bytes` 必须大于零；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
+- `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，日志 level/format 只能使用上表值。
+- HTTP listener 为空表示关闭；非空值必须是合法的 `host:port`。非 loopback listener 必须同时启用完整认证配置。
+- 认证关闭时 username、password hash 和 hash file 必须全为空；认证开启时 username 非空、token TTL 为 `>0` 且 `<=24h`，并且 `password_hash` 与 `password_hash_file` 必须恰好设置一个。
+- bcrypt hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost，不能把明文密码放入配置或环境变量。
+
+`TORRENTFS_FUSE_REQUIRED` 不是 daemon 配置，而是测试门禁。`TORRENTFS_PATHS_DATA_DIR` 是已移除的历史变量，不会恢复旧的磁盘 payload 路径。
 
 ## 持久化状态与限制
 
@@ -370,12 +458,29 @@ go run ./cmd/torrentfs "$PWD/torrents"
 ```
 
 - piece 数据、piece completion、cache hit 计数和临时读取优先级都只在内存中；重启不会从磁盘 rehash 或恢复 piece。
-- 顶层用户 `.torrent` 文件只读到目录第一层，不递归子目录；符号链接、临时扩展名和 torrent 命名的目录会被忽略。
+- 顶层用户源只按大小写敏感的 `.torrent` 后缀选择，不递归子目录；`.torrent.part`、`.TORRENT` 和 torrent 命名的目录不会成为源。匹配后缀的符号链接会被识别为 invalid source，不会被跟随加载；使用普通文件并采用临时文件后 atomic rename。
 - 配置只在启动时读取，修改 TOML 或环境变量后需要重启进程。
 - 磁力链接会先持久化为 `.metadata/<info-hash>.magnet`，解析到 metainfo 后再保存 canonical `.torrent`；删除会清理该 hash 的内部来源，但不会删除用户拥有的顶层 `.torrent` 文件。
 - 一个 `torrents` 目录同时只能由一个 torrentfs 进程使用。
 
 ## Docker
+
+Dockerfile 使用 Node 22.23.2 构建 Web UI，再使用 Go 1.27 编译包含 `web/dist` 的 `CGO_ENABLED=0` 二进制；运行阶段是安装了 `fuse3`、CA certificates 和 `passwd` 的 Debian bookworm-slim。
+
+### 镜像默认行为
+
+```sh
+docker build -t torrentfs .
+docker run --rm torrentfs
+```
+
+默认命令等价于：
+
+```text
+/usr/local/bin/torrentfs -config /etc/torrentfs/torrentfs.toml /torrents
+```
+
+镜像会创建 `/torrents`，但 HTTP listener 仍默认绑定容器内的 `127.0.0.1:8080`；`-p 8080:8080` 不会改变 daemon 的监听地址。Docker 配置与本地默认值也不同：镜像把 peer `listen_port` 固定为 `6881`，并默认禁用 IPv6；本地默认 peer 端口为 `0`，地址族都启用。环境变量可以覆盖 `/etc/torrentfs/torrentfs.toml`。
 
 ### HTTP-only 检查
 
@@ -387,13 +492,15 @@ go run ./cmd/torrentfs "$PWD/torrents"
 
 脚本需要 Docker、`curl` 和 `python3`。它会构建本地镜像并检查静态 root/deep link、缺失 asset、认证 `401`、`WWW-Authenticate`、登录、带 token 的列表和登出；它不会把任何内容发布到远端 registry。
 
-### 构建并运行 HTTP 服务
-
-Dockerfile 使用 Node 22.23.2 构建 Web UI，再使用 Go 1.27 编译包含 `web/dist` 的二进制，运行阶段是带 `fuse3` 的 Debian 镜像：
+要验证内置配置、默认 CMD、环境变量覆盖和外部 TOML 文件，可以运行：
 
 ```sh
-docker build -t torrentfs .
+./scripts/docker-config-smoke.sh
 ```
+
+该脚本还需要 `awk` 和 `timeout`；外部 TOML 以只读方式挂载，但 `/torrents` 仍必须可写。
+
+### 构建并运行 HTTP 服务
 
 公开容器 listener 前必须配置认证。下面的命令使用 bind-mounted bcrypt hash 文件；请先创建该文件并将 `<bcrypt-hash>` 替换为真实 hash，不要把明文密码写入环境变量：
 
@@ -417,11 +524,23 @@ docker run --rm \
 
 ### Docker FUSE 挂载
 
-Linux rootful Docker 需要把 FUSE 设备和挂载能力交给容器：
+Linux rootful Docker 需要把 FUSE 设备和挂载能力交给容器。Dockerfile 没有 `USER` 指令；如果省略 `--user`，daemon 会以 root 运行。默认 `mount.allow_other=false` 时，root 创建的挂载通常只对 root 的 uid/gid 可读，宿主机普通用户可能得到 `EACCES`。下面是仓库 smoke test 使用的 host-user 路径：
 
 ```sh
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
+docker build \
+  --build-arg TORRENTFS_UID="$HOST_UID" \
+  --build-arg TORRENTFS_GID="$HOST_GID" \
+  -t torrentfs .
+
 mkdir -p /srv/torrents /srv/mnt
+# 如果目录不属于当前用户，需要管理员执行此命令。
+chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
+
 docker run --rm \
+  --user "$HOST_UID:$HOST_GID" \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
@@ -431,7 +550,7 @@ docker run --rm \
   torrentfs -config /etc/torrentfs/torrentfs.toml -mountpoint /mnt /torrents
 ```
 
-某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
+`TORRENTFS_UID/GID` build args 必须与运行时 `--user` 一致；两个 bind source 都必须对该用户可写。某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
 
 `/srv/mnt` 所在的主机挂载点必须支持递归双向传播；可以先检查：
 
@@ -441,18 +560,41 @@ findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
 
 `/mnt` bind mount 不能设为只读，因为 FUSE daemon 需要在其中创建 submount；FUSE 文件系统本身仍然是只读的。`rshared` 和 rootful `SYS_ADMIN` 会扩大挂载权限边界，不应把此容器暴露给不受信任的调用者。
 
-要让容器接受入站 peer，应在配置中使用固定的 `listen_port` 并发布两个传输协议，例如：
+要让容器接受入站 peer，应使用镜像配置中的固定 `listen_port = 6881`，并在上面的 `docker run` 中追加 `--publish 6881:6881/tcp --publish 6881:6881/udp`。只发布 HTTP 端口不会让 peer 端口可达；动态端口 `0` 也不能预先发布。
+
+### 以宿主机用户运行 FUSE
+
+镜像默认不声明 `USER`，可以用匹配宿主机 UID/GID 的构建参数和运行参数降低 daemon 身份：
 
 ```sh
-docker run --rm \
-  -p 6881:6881/tcp \
-  -p 6881:6881/udp \
-  ...
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
+docker build \
+  --build-arg TORRENTFS_UID="$HOST_UID" \
+  --build-arg TORRENTFS_GID="$HOST_GID" \
+  -t torrentfs .
+
+mkdir -p /srv/torrents /srv/mnt
+# 如果目录不属于当前用户，需要管理员执行此命令。
+chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
+
+docker run --detach --name torrentfs \
+  --user "$HOST_UID:$HOST_GID" \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
+  --env TORRENTFS_HTTP_LISTEN_ADDR= \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
+  torrentfs -mountpoint /mnt /torrents
 ```
+
+两个 bind source 都必须对该用户可写：`/torrents` 要保存 `.metadata`，`/mnt` 要允许 FUSE 创建 submount。若 `/dev/fuse` 是 `root:fuse` 且用户不在 fuse 组，还需要按宿主机策略补充 `--group-add`。可以用 `docker exec torrentfs id`、`findmnt -T /srv/mnt` 和 `docker stop torrentfs` 检查身份、传播和清理结果。
 
 ## 构建、测试与贡献
 
-前端构建产物被 Go embed，因此本地质量检查应先完成前端检查和构建，再执行 Go 命令：
+前端构建产物被 Go embed，因此本地 quality 检查应先完成前端检查和构建，再执行 Go 命令。下面的顺序与 CI 可复用 action 一致：
 
 ```sh
 npm ci --prefix web
@@ -463,8 +605,12 @@ npm run build --prefix web
 rm -rf -- web/node_modules
 
 go build ./...
+go vet ./...
 go test ./...
 go test -race ./...
+
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+golangci-lint run ./...
 ```
 
 如果只需要生成供 Go 使用的前端产物，可以运行：
@@ -473,17 +619,25 @@ go test -race ./...
 ./scripts/build-web.sh
 ```
 
-该脚本执行 lockfile 安装和 `npm run build`，完成后删除 `web/node_modules`。真实 FUSE 测试需要 `/dev/fuse`、`fusermount`/`fusermount3` 和挂载权限；环境不具备 FUSE 时相关测试会跳过。要把 FUSE 缺失视为失败，可使用：
+该脚本执行 lockfile 安装、构建 `web/dist` 并删除 `web/node_modules`，不会删除 `web/dist`。
 
-```sh
-TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...
-```
+验证按依赖分层：
 
-需要完整 Docker/FUSE 环境时，还可以运行：
+- **普通前端/Go 检查**：执行上面的 typecheck、lint、Vitest、build、`go build`、`go vet`、`go test`、race test 和 `golangci-lint`。
+- **HTTP-only 容器检查**：执行 `./scripts/http-smoke.sh`；它不需要 FUSE。`./scripts/docker-config-smoke.sh` 另外验证镜像内置配置、默认 CMD、环境变量覆盖和外部 TOML。
+- **FUSE-required 测试**：真实 FUSE 测试需要 `/dev/fuse`、`fusermount`/`fusermount3` 和挂载权限；缺少 FUSE 时普通测试会跳过这些用例。要把缺少前置条件视为失败，可使用：
 
-```sh
-./scripts/docker-smoke.sh
-```
+  ```sh
+  TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...
+  ```
+
+- **rootful Docker/FUSE 检查**：Linux Docker daemon 还需要 `/dev/fuse`、`SYS_ADMIN` 或等效 capability、通常的 `apparmor=unconfined`、`findmnt`、`python3`、`sha256sum` 和 `timeout`；确认 `/srv/mnt` 所在 host mount 支持 `rshared` 后再执行：
+
+  ```sh
+  ./scripts/docker-smoke.sh
+  ```
+
+`TORRENTFS_FUSE_REQUIRED` 只控制测试门禁，不是 daemon 的运行时配置。CI nightly 的多平台 OCI 构建与本地 `scripts/nightly-build.sh` 归档脚本是不同入口；本 README 的命令用于本地构建、运行和验证，不把手工归档脚本写成 nightly 发布保证。
 
 ## 许可证
 
