@@ -107,29 +107,20 @@ validate_user_args() {
 	done
 }
 
-validate_secret() {
-	local mode size lines password_file
-	password_file="${TORRENTFS_SMB_PASSWORD_FILE:-}"
-	[[ -n "$password_file" ]] || fail 'TORRENTFS_SMB_PASSWORD_FILE is required when SMB is enabled'
-	[[ -f "$password_file" && ! -L "$password_file" ]] ||
-		fail 'SMB password file must be a regular non-symlink file'
-	[[ -r "$password_file" ]] || fail 'SMB password file is not readable'
-	mode="$(stat -c '%a' "$password_file")"
-	(( (8#$mode & 077) == 0 )) || fail 'SMB password file must not be readable by group or other users'
-	size="$(stat -c '%s' "$password_file")"
-	(( size > 0 && size <= 1024 )) || fail 'SMB password file must be between 1 and 1024 bytes'
-	if od -An -tx1 "$password_file" | grep -q '00'; then
-		fail 'SMB password file must not contain NUL bytes'
-	fi
-	lines="$(wc -l < "$password_file")"
-	(( lines <= 1 )) || fail 'SMB password file must contain one line only'
-	password="$(<"$password_file")"
+validate_smb_credentials() {
+	local password
+	smb_username="${TORRENTFS_USERNAME:-}"
+	password="${TORRENTFS_PASSWORD:-}"
+	[[ -n "$smb_username" ]] || fail 'TORRENTFS_USERNAME is required when SMB is enabled'
+	valid_account_name "$smb_username" || fail 'TORRENTFS_USERNAME is not a valid Unix account name'
+	[[ "$(id -u "$smb_username" 2>/dev/null || true)" == "$runtime_uid" ]] ||
+		fail 'TORRENTFS_USERNAME must resolve to the torrentfs runtime UID'
+	[[ -n "$password" ]] || fail 'TORRENTFS_PASSWORD is required when SMB is enabled'
 	case "$password" in
 	*$'\n'*|*$'\r'*)
-		fail 'SMB password file must contain one line only'
+		fail 'TORRENTFS_PASSWORD must not contain carriage return or line feed'
 		;;
 	esac
-	[[ -n "$password" ]] || fail 'SMB password must not be empty'
 }
 
 validate_samba_capability() {
@@ -140,21 +131,14 @@ validate_samba_capability() {
 }
 
 prepare_samba() {
-	local template config password password_file smbpasswd_error
+	local template config password smbpasswd_error
 	mkdir -p /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache \
 		/var/lib/samba /var/cache/samba /var/log/samba
 	chown -R "$runtime_uid:$runtime_gid" /run/samba /var/lib/samba /var/cache/samba /var/log/samba
 	chmod 0755 /run/samba
 	chmod 0700 /run/samba/private
 
-	smb_username="${TORRENTFS_SMB_USERNAME:-$runtime_user}"
-	valid_account_name "$smb_username" || fail 'TORRENTFS_SMB_USERNAME is not a valid Unix account name'
-	[[ "$(id -u "$smb_username" 2>/dev/null || true)" == "$runtime_uid" ]] ||
-		fail 'TORRENTFS_SMB_USERNAME must resolve to the torrentfs runtime UID'
-
-	validate_secret
-	password_file="${TORRENTFS_SMB_PASSWORD_FILE:-}"
-	password="$(<"$password_file")"
+	password="$TORRENTFS_PASSWORD"
 	template="$(<"$SMB_TEMPLATE")"
 	config="${template//__TORRENTFS_SMB_USER__/$smb_username}"
 	config="${config//__TORRENTFS_SMB_GROUP__/$runtime_group}"
@@ -315,6 +299,7 @@ fi
 
 [[ "$EUID" == 0 ]] || fail 'SMB mode requires the container entrypoint to start as root'
 read_identity
+validate_smb_credentials
 validate_user_args "$@"
 validate_torrents_dir
 validate_mountpoint

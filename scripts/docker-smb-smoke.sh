@@ -299,7 +299,7 @@ image_built=1
 printf 'docker SMB smoke: building SMB client image\n'
 docker build --tag "$CLIENT_IMAGE" - <<'EOF'
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends cifs-utils smbclient ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends cifs-utils smbclient ca-certificates curl && rm -rf /var/lib/apt/lists/*
 EOF
 client_image_built=1
 bounded 30 'create SMB network' docker network create "$NETWORK" >/dev/null
@@ -308,15 +308,26 @@ network_created=1
 smb_user="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c "awk -F= '\$1 == \"user\" { print \$2 }' /etc/torrentfs/runtime-identity")"
 [[ -n "$smb_user" ]] || fail 'could not determine runtime SMB username'
 smb_password="torrentfs-smoke-${BASHPID}-${RANDOM}"
-password_file="$work_dir/password"
-printf '%s\n' "$smb_password" >"$password_file"
-chmod 0400 "$password_file"
 credentials_file="$work_dir/$CLIENT_CREDENTIALS_NAME"
 printf 'username=%s\npassword=%s\n' "$smb_user" "$smb_password" >"$credentials_file"
 chmod 0400 "$credentials_file"
 
 start_app() {
-	local app="$1" app_torrents="$2"
+	local app="$1" app_torrents="$2" http_auth="${3:-true}"
+	local env_args=(
+		--env TORRENTFS_SMB_ENABLED=true
+		--env "TORRENTFS_USERNAME=$smb_user"
+		--env "TORRENTFS_PASSWORD=$smb_password"
+		--env "TORRENTFS_CACHE_CAPACITY_BYTES=$CACHE_BYTES"
+	)
+	if [[ "$http_auth" == true ]]; then
+		env_args+=(
+			--env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080
+			--env TORRENTFS_HTTP_AUTH_ENABLED=true
+		)
+	else
+		env_args+=(--env TORRENTFS_HTTP_AUTH_ENABLED=false)
+	fi
 	app_names+=("$app")
 	bounded "$DOCKER_OP_TIMEOUT" "start $app" docker run --detach --name "$app" \
 		--network "$NETWORK" \
@@ -327,10 +338,7 @@ start_app() {
 		--security-opt apparmor=unconfined \
 		--publish 127.0.0.1::445 \
 		--mount "type=bind,src=$app_torrents,dst=/torrents" \
-		--mount "type=bind,src=$password_file,dst=/run/secrets/smb-password,readonly" \
-		--env TORRENTFS_SMB_ENABLED=true \
-		--env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/smb-password \
-		--env "TORRENTFS_CACHE_CAPACITY_BYTES=$CACHE_BYTES" \
+		"${env_args[@]}" \
 		"$IMAGE" >/dev/null
 	local deadline=$((SECONDS + START_TIMEOUT)) state output
 	while (( SECONDS < deadline )); do
@@ -351,6 +359,34 @@ done
 	fail "$app did not become ready: $(logs "$app")"
 }
 
+http_client_authenticate() {
+	local app="$1"
+	bounded "$CLIENT_TIMEOUT" "HTTP authentication against $app" docker run --rm --network "$NETWORK" \
+		--env "APP=$app" \
+		--env "USERNAME=$smb_user" \
+		--env "PASSWORD=$smb_password" \
+		"$CLIENT_IMAGE" sh -eu -c '
+		status=0
+		for _ in $(seq 1 60); do
+			status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
+				--output /dev/null --write-out "%{http_code}" "http://$APP:8080/" || true)"
+			if [ "$status" = 200 ]; then
+				break
+			fi
+			sleep 0.2
+		done
+		[ "$status" = 200 ]
+		status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
+			--output /dev/null --write-out "%{http_code}" "http://$APP:8080/api/v1/torrents")"
+		[ "$status" = 401 ]
+		status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
+			--header "Content-Type: application/json" \
+			--data "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}" \
+			--output /dev/null --write-out "%{http_code}" "http://$APP:8080/api/v1/auth/login")"
+		[ "$status" = 200 ]
+	'
+}
+
 # smb_client runs one smbclient operation with the shared client bound. The
 # explicit -t keeps the per-operation timeout of the client itself bounded and
 # inside that bound, so a stalled server surfaces as a failure with the app log
@@ -364,9 +400,11 @@ smb_client() {
 		-A "/run/secrets/$CLIENT_CREDENTIALS_NAME" -m SMB3 -t "$CLIENT_SMB_TIMEOUT" "$@"
 }
 
-printf 'docker SMB smoke: starting authenticated share\n'
+printf 'docker SMB smoke: starting HTTP+SMB authenticated share\n'
 app_normal="${APP_PREFIX}-normal"
-start_app "$app_normal" "$torrents_dir"
+start_app "$app_normal" "$torrents_dir" true
+http_client_authenticate "$app_normal"
+printf 'docker SMB smoke: combined HTTP authentication passed\n'
 
 published_smb_port="$(probe 'inspect published SMB port' docker port "$app_normal" 445/tcp | awk -F: 'NF { print $NF; exit }')"
 [[ -n "$published_smb_port" ]] || fail 'SMB port 445/tcp was not published'
@@ -477,11 +515,28 @@ bounded "$DOCKER_OP_TIMEOUT" "signal $app_normal" docker kill --signal TERM "$ap
 stop_normal_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for $app_normal" docker wait "$app_normal")"
 [[ "$stop_normal_status" == 0 ]] || fail "normal SMB shutdown returned $stop_normal_status"
 normal_logs="$(logs "$app_normal")"
+[[ "$normal_logs" != *"$smb_password"* ]] || fail 'application logs contained the SMB password'
 smbd_line="$(printf '%s\n' "$normal_logs" | grep -n 'smbd stopped' | head -n1 | cut -d: -f1 || true)"
 torrent_line="$(printf '%s\n' "$normal_logs" | grep -n 'torrentfs stopping' | head -n1 | cut -d: -f1 || true)"
 [[ -n "$smbd_line" && -n "$torrent_line" && "$smbd_line" -lt "$torrent_line" ]] ||
 	fail "normal shutdown order was not smbd before torrentfs: $normal_logs"
 printf 'docker SMB smoke: normal SIGTERM shutdown was bounded and ordered\n'
+
+printf 'docker SMB smoke: starting SMB-only share with HTTP auth disabled\n'
+smb_only_torrents="$work_dir/smb-only-torrents"
+mkdir -p "$smb_only_torrents"
+chmod 0777 "$smb_only_torrents"
+app_smb_only="${APP_PREFIX}-smb-only"
+start_app "$app_smb_only" "$smb_only_torrents" false
+smb_client "$app_smb_only" -c 'ls' >/dev/null
+smb_only_status=0
+bounded "$DOCKER_OP_TIMEOUT" "stop $app_smb_only" docker kill --signal TERM "$app_smb_only" >/dev/null || smb_only_status=$?
+[[ "$smb_only_status" == 0 ]] || fail "SMB-only shutdown signal failed with status $smb_only_status"
+smb_only_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for $app_smb_only" docker wait "$app_smb_only")"
+[[ "$smb_only_status" == 0 ]] || fail "SMB-only shutdown returned $smb_only_status"
+smb_only_logs="$(logs "$app_smb_only")"
+[[ "$smb_only_logs" != *"$smb_password"* ]] || fail 'SMB-only application logs contained the SMB password'
+printf 'docker SMB smoke: SMB-only startup and authentication passed\n'
 
 fault_torrents="$work_dir/fault-torrents"
 mkdir -p "$fault_torrents"
