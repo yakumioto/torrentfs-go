@@ -524,6 +524,89 @@ func TestCloseTorrentDrainsConcurrentPromotion(t *testing.T) {
 	}
 }
 
+// TestMarkNotCompleteCannotDeleteReopenedLifetime pauses an old callback while
+// it owns Store.mu, then proves close/reopen cannot publish a new cache value
+// until that callback has finished its removal.
+func TestMarkNotCompleteCannotDeleteReopenedLifetime(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	defer func() { _ = store.Close() }()
+	hash := metainfo.Hash{16}
+	info := singlePieceInfo(pieceLength)
+	oldTorrent, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(old): %v", err)
+	}
+	oldPiece := oldTorrent.PieceWithHash(info.Piece(0), g.None[[]byte]()).(*piece)
+	if _, err := oldPiece.WriteAt([]byte("oldvalue"), 0); err != nil {
+		t.Fatalf("old WriteAt: %v", err)
+	}
+	hashPiece(t, oldPiece, pieceLength)
+	if err := oldPiece.MarkComplete(); err != nil {
+		t.Fatalf("old MarkComplete: %v", err)
+	}
+	key := cache.Key{Torrent: hash.HexString(), Piece: 0}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHook()
+	markDone := make(chan error, 1)
+	go func() {
+		markDone <- oldPiece.markNotComplete(func() {
+			close(entered)
+			<-release
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("old MarkNotComplete did not reach the removal barrier")
+	}
+
+	closeStarted := make(chan struct{})
+	closeDone := make(chan struct{})
+	go func() {
+		close(closeStarted)
+		store.CloseTorrent(hash.HexString())
+		c.InvalidateTorrent(hash.HexString())
+		close(closeDone)
+	}()
+	<-closeStarted
+	select {
+	case <-closeDone:
+		t.Fatal("CloseTorrent crossed an in-flight MarkNotComplete removal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseHook()
+	if err := <-markDone; err != nil {
+		t.Fatalf("old MarkNotComplete: %v", err)
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("CloseTorrent did not finish after MarkNotComplete")
+	}
+
+	newTorrent, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(new): %v", err)
+	}
+	newPiece := newTorrent.PieceWithHash(info.Piece(0), g.None[[]byte]()).(*piece)
+	if _, err := newPiece.WriteAt([]byte("newvalue"), 0); err != nil {
+		t.Fatalf("new WriteAt: %v", err)
+	}
+	hashPiece(t, newPiece, pieceLength)
+	if err := newPiece.MarkComplete(); err != nil {
+		t.Fatalf("new MarkComplete: %v", err)
+	}
+	got, ok := c.Get(key)
+	if !ok || string(got) != "newvalue" {
+		t.Fatalf("new lifetime cache entry = (%q, %t), want newvalue", got, ok)
+	}
+}
+
 func TestStorePerTorrentCloseDropsStaging(t *testing.T) {
 	const pieceLength = 16
 	store, c := testStore(t, 1<<20)

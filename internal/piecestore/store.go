@@ -483,17 +483,25 @@ func (p *piece) MarkComplete() error {
 // the next read reports the piece as missing and anacrolix downloads it again.
 // A stale PieceImpl must not discard a newer staging generation.
 func (p *piece) MarkNotComplete() error {
+	return p.markNotComplete(nil)
+}
+
+func (p *piece) markNotComplete(beforeRemove func()) error {
 	s := p.store
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.pieceOpenLocked(p) {
-		s.mu.Unlock()
 		return errTorrentClosed
 	}
 	if buf := s.staging[p.key]; buf != nil && p.generation != 0 && buf.generation == p.generation {
 		delete(s.staging, p.key)
 		delete(s.lastRead, p.key)
 	}
-	s.mu.Unlock()
+	if beforeRemove != nil {
+		beforeRemove()
+	}
+	// Keep Store.mu through Remove so a close/reopen cannot race this lifetime's
+	// callback into deleting a subsequent lifetime's resident value.
 	s.cache.Remove(p.key)
 	return nil
 }
