@@ -240,11 +240,11 @@ done
 [[ -s "$work_dir/webseed.port" ]] || fail "web seed did not start: $(sed -n '1,20p' "$work_dir/webseed.log")"
 webseed_port="$(<"$work_dir/webseed.port")"
 
-python3 - "$torrents_dir/payload.torrent" "$webseed_dir/payload.bin" "http://host.docker.internal:$webseed_port/payload.bin" <<'PY'
+python3 "$work_dir/build.torrent" "$webseed_dir/payload.bin" "http://host.docker.internal:$webseed_port/payload.bin" "$work_dir/infohash" <<'PY'
 import hashlib
 import sys
 
-output_path, source_path, url = sys.argv[1], sys.argv[2], sys.argv[3].encode()
+output_path, source_path, url, hash_path = sys.argv[1], sys.argv[2], sys.argv[3].encode(), sys.argv[4]
 size = 0
 pieces = []
 with open(source_path, "rb") as source:
@@ -265,9 +265,22 @@ def bencode(value):
     raise TypeError(type(value))
 
 info = {b"length": size, b"name": b"payload.bin", b"piece length": 1 << 20, b"pieces": b"".join(pieces)}
+info_bytes = bencode(info)
 with open(output_path, "wb") as output:
     output.write(bencode({b"info": info, b"url-list": url}))
+with open(hash_path, "w") as output:
+    output.write(hashlib.sha1(info_bytes).hexdigest())
 PY
+torrent_hash="$(<"$work_dir/infohash")"
+canonical_torrent="$torrents_dir/$torrent_hash.torrent"
+mv -- "$work_dir/build.torrent" "$canonical_torrent"
+cp -- "$canonical_torrent" "$torrents_dir/manual-copy.torrent"
+mkdir -p "$torrents_dir/.metadata/state" "$torrents_dir/.metadata/pending"
+printf '2\n' > "$torrents_dir/.metadata/layout_version"
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat >"$torrents_dir/.metadata/state/$torrent_hash.json" <<EOF
+{"id":"$torrent_hash","info_hash":"$torrent_hash","name":"payload.bin","state":"ready","created_at":"$now","updated_at":"$now"}
+EOF
 
 printf 'docker SMB smoke: building application image\n'
 # TORRENTFS_SMOKE_UID/GID override the image's runtime identity so the
@@ -473,7 +486,11 @@ fault_torrents="$work_dir/fault-torrents"
 mkdir -p "$fault_torrents"
 # Writable by the container identity, which need not share the host UID.
 chmod 0777 "$fault_torrents"
-cp -- "$torrents_dir/payload.torrent" "$fault_torrents/payload.torrent"
+cp -- "$canonical_torrent" "$fault_torrents/$torrent_hash.torrent"
+mkdir -p "$fault_torrents/.metadata/state" "$fault_torrents/.metadata/pending"
+chmod 0777 "$fault_torrents/.metadata" "$fault_torrents/.metadata/state" "$fault_torrents/.metadata/pending"
+cp -- "$torrents_dir/.metadata/layout_version" "$fault_torrents/.metadata/layout_version"
+cp -- "$torrents_dir/.metadata/state/$torrent_hash.json" "$fault_torrents/.metadata/state/$torrent_hash.json"
 app_smbd_fault="${APP_PREFIX}-smbd-fault"
 start_app "$app_smbd_fault" "$fault_torrents"
 bounded 30 'terminate smbd in fault scenario' docker exec "$app_smbd_fault" /bin/sh -c \

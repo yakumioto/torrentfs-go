@@ -286,8 +286,6 @@ func writeSessionError(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, session.ErrDeleting):
 		writeError(w, http.StatusConflict, "torrent is being deleted")
-	case errors.Is(err, session.ErrExternalReference):
-		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, session.ErrUnknownTorrent), errors.Is(err, filesystem.ErrNotFound):
 		writeError(w, http.StatusNotFound, "unknown torrent")
 	case errors.Is(err, session.ErrInvalidSource), errors.Is(err, filesystem.ErrInvalidName):

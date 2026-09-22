@@ -486,26 +486,13 @@ func TestValidateTorrentDirRejectsSymlink(t *testing.T) {
 	}
 }
 
-func TestRunDirectoryInputReportsExpandedTorrentError(t *testing.T) {
-	work := t.TempDir()
-	torrentDir := filepath.Join(work, "torrents")
-	if err := os.Mkdir(torrentDir, 0o755); err != nil {
-		t.Fatalf("make torrent directory: %v", err)
+func TestUsageDescribesAPIOnlyTorrentManagement(t *testing.T) {
+	if strings.Contains(usageText, "scanned "+"at startup") || strings.Contains(usageText, "while "+"running") {
+		t.Fatalf("usage still describes directory scanning: %q", usageText)
 	}
-	badTorrent := filepath.Join(torrentDir, "bad.torrent")
-	if err := os.WriteFile(badTorrent, []byte("not a torrent"), 0o644); err != nil {
-		t.Fatalf("write bad torrent: %v", err)
-	}
-
-	var stderr bytes.Buffer
-	code := run([]string{
-		"-mountpoint", filepath.Join(work, "mnt"),
-		torrentDir,
-	}, &stderr)
-	if code != 1 {
-		t.Fatalf("run exit code = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), badTorrent) {
-		t.Fatalf("stderr = %q, want torrent path", stderr.String())
+	for _, want := range []string{"HTTP API", "root .torrent files", "ignored"} {
+		if !strings.Contains(usageText, want) {
+			t.Fatalf("usage = %q, want %q", usageText, want)
+		}
 	}
 }

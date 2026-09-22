@@ -115,7 +115,7 @@ func TestAddListDelete(t *testing.T) {
 	if views := sess.ListTorrents(); len(views) != 0 {
 		t.Fatalf("ListTorrents after delete = %+v, want empty", views)
 	}
-	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hash.HexString()+".torrent")
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), hash.HexString()+".torrent")
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed metainfo survived delete: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRepeatedDeleteReturnsSameOperation(t *testing.T) {
 	}
 }
 
-func TestDeleteRefusedForDirectorySourcedTorrent(t *testing.T) {
+func TestManualRootTorrentIsIgnoredAndDoesNotBlockManagedDelete(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	torrentsDir := filepath.Join(work, "torrents")
@@ -193,28 +193,22 @@ func TestDeleteRefusedForDirectorySourcedTorrent(t *testing.T) {
 	if err := os.WriteFile(userTorrent, torrentBytes, 0o644); err != nil {
 		t.Fatalf("write user torrent: %v", err)
 	}
-	sess, err := session.New(testConfig(), torrentsDir)
+	sess := newManageSession(t, torrentsDir)
+	if _, ok := sess.Torrent(hash); ok {
+		t.Fatal("manual root torrent was discovered")
+	}
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("managed add: %v", err)
+	}
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("delete: %v", err)
 	}
-	defer func() {
-		if err := sess.Close(context.Background()); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-	}()
-	if _, ok := sess.Torrent(hash); !ok {
-		t.Fatal("torrent was not registered from the torrents directory")
-	}
-
-	_, err = sess.DeleteTorrent(ctx, hash.HexString())
-	if !errors.Is(err, session.ErrExternalReference) {
-		t.Fatalf("delete = %v, want ErrExternalReference", err)
-	}
-	if _, ok := sess.Torrent(hash); !ok {
-		t.Fatal("refused delete still removed the torrent")
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
+		t.Fatalf("delete state = %s (%s), want deleted", final.State, final.Error)
 	}
 	if _, err := os.Stat(userTorrent); err != nil {
-		t.Fatalf("refused delete removed the user's .torrent: %v", err)
+		t.Fatalf("managed delete removed manual root torrent: %v", err)
 	}
 }
 
@@ -367,7 +361,7 @@ func TestDeleteMagnetInAddingStateStopsMetadataFetch(t *testing.T) {
 	if _, ok := sess.Torrent(hash); ok {
 		t.Fatal("magnet torrent still registered after delete")
 	}
-	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hexHash+".torrent")
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), hexHash+".torrent")
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata sidecar present after delete: %v", err)
 	}
@@ -392,7 +386,7 @@ func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
 	if !errors.Is(err, session.ErrDeleting) {
 		t.Fatalf("late metadata write = %v, want ErrDeleting", err)
 	}
-	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hash.HexString()+".torrent")
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), hash.HexString()+".torrent")
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("late metadata write recreated the sidecar: %v", err)
 	}
@@ -439,7 +433,7 @@ func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 	if views := sess.ListTorrents(); len(views) != 0 {
 		t.Fatalf("ListTorrents = %+v, want empty", views)
 	}
-	metaPath := filepath.Join(testTorrentDir(t, dataDir), ".metadata", hash.HexString()+".torrent")
+	metaPath := filepath.Join(testTorrentDir(t, dataDir), hash.HexString()+".torrent")
 	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("late metadata fetch recreated the sidecar: %v", err)
 	}
@@ -479,8 +473,8 @@ func TestResumeDeletionClearsMetadataIndexAndAllowsRepersist(t *testing.T) {
 	if _, err := sess.AddTorrentAndPersist(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("re-add after resume: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(metadataDir, hash.HexString()+".torrent")); err != nil {
-		t.Fatalf("re-added torrent was not persisted (stale metadata index): %v", err)
+	if _, err := os.Stat(filepath.Join(torrentsDir, hash.HexString()+".torrent")); err != nil {
+		t.Fatalf("re-added torrent was not persisted: %v", err)
 	}
 }
 

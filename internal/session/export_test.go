@@ -5,12 +5,48 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
+
+// AddTorrent registers an ephemeral test torrent without writing the managed
+// registry. Production adds must use AddTorrentAndPersist.
+func (s *Session) AddTorrent(ctx context.Context, src Source) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	st, _, err := s.addTorrentLockedResult(ctx, src)
+	if err != nil {
+		s.mu.Unlock()
+		attrs := []any{"source", sourceKind(src), "err", err}
+		if src.MetainfoPath != "" {
+			attrs = append(attrs, "path", src.MetainfoPath)
+		}
+		s.logger.Error("torrent add failed", attrs...)
+		return err
+	}
+	hash := st.InfoHash()
+	if s.states[hash] == nil {
+		state := StateAdding
+		if st.Info() != nil {
+			state = StateReady
+		}
+		s.states[hash] = &registryEntry{
+			ID:        hash.HexString(),
+			InfoHash:  hash.HexString(),
+			Name:      st.Name(),
+			State:     state,
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
 
 // SeedPiecesForTest loads content into the session's in-memory piece cache as
 // if the pieces had been downloaded and verified, then syncs anacrolix's

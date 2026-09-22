@@ -77,13 +77,24 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 	if s.state != stateActive {
 		return nil
 	}
-	views := make([]filesystem.TorrentView, 0, len(s.torrents))
-	for _, t := range s.torrents {
+	hashes := make([]metainfo.Hash, 0, len(s.states))
+	for hash, entry := range s.states {
+		if entry.State == StateReady {
+			hashes = append(hashes, hash)
+		}
+	}
+	sort.Slice(hashes, func(i, j int) bool { return hashes[i].HexString() < hashes[j].HexString() })
+	views := make([]filesystem.TorrentView, 0, len(hashes))
+	for _, hash := range hashes {
+		t := s.torrents[hash]
+		if t == nil {
+			continue
+		}
 		info := t.Info()
 		if info == nil {
 			continue
 		}
-		view := filesystem.TorrentView{Name: t.Name(), Hash: t.InfoHash(), SingleFile: !info.IsDir()}
+		view := filesystem.TorrentView{Name: t.Name(), Hash: hash, SingleFile: !info.IsDir()}
 		for _, f := range t.tor.Files() {
 			view.Files = append(view.Files, filesystem.FileView{
 				Path: f.DisplayPath(),
@@ -102,6 +113,10 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 	defer s.mu.RUnlock()
 	if err := s.ensureActiveLocked(); err != nil {
 		return nil, err
+	}
+	entry, ok := s.states[hash]
+	if !ok || entry.State != StateReady {
+		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
 	}
 	t, ok := s.torrents[hash]
 	if !ok {
