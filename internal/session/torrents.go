@@ -29,13 +29,15 @@ type Source struct {
 // Torrent is a session handle on one registered torrent. It exposes the
 // anacrolix state the filesystem layer and tests need.
 type Torrent struct {
-	tor *torrent.Torrent
+	tor     *torrent.Torrent
+	session *Session
 
-	mu      sync.Mutex
-	closed  bool
-	readers map[string]*raFile // open reader handles by display path
-	cache   *cache.Cache
-	loader  pieceSource
+	mu          sync.Mutex
+	closed      bool
+	readers     map[string]*raFile // shared reader state by display path
+	cache       *cache.Cache
+	loader      pieceSource
+	coordinator *prefetchCoordinator
 }
 
 func sourceKind(src Source) string {
@@ -144,7 +146,7 @@ func (s *Session) prepareTorrentSpecLocked(ctx context.Context, spec *torrent.To
 		}
 		return existing, false, nil
 	}
-	return &Torrent{tor: t, readers: make(map[string]*raFile), cache: s.pieceCache}, true, nil
+	return &Torrent{tor: t, session: s, readers: make(map[string]*raFile), cache: s.pieceCache}, true, nil
 }
 
 func (s *Session) publishTorrentLocked(hash metainfo.Hash, st *Torrent) {
@@ -219,17 +221,22 @@ func (t *Torrent) CachedBytes() int64 {
 	return t.cache.SizeOf(t.InfoHash().HexString())
 }
 
-// readerFor returns the shared reader handle for the file with the given
-// display path, opening it on first use. Handles are owned by the session:
-// they are closed by Close, never by the filesystem's release path.
-func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
+// readerFor returns a handle on the file with the given display path. The
+// heavy reader state (fetcher, coordinator, read window) is shared by every
+// open of that path; the returned handle is cheap and idempotently closable, so
+// the filesystem's release path can drop it without disturbing other opens.
+// Once the last handle closes, the shared forward window is released.
+func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
 	}
 	if r, ok := t.readers[displayPath]; ok {
-		return r, nil
+		if !r.acquireHandle() {
+			return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+		}
+		return &openedFile{file: r}, nil
 	}
 	f := fileByDisplayPath(t.tor, displayPath)
 	if f == nil {
@@ -240,11 +247,15 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
 	}
 	if t.loader == nil {
-		t.loader = newPieceLoader(t.tor)
+		t.loader = newPieceFetcher(t.tor, t.cache)
+	}
+	if t.coordinator == nil {
+		t.coordinator = newPrefetchCoordinator(t.session, t.tor, t.cache)
 	}
 	r := &raFile{
 		loader:      t.loader,
 		cache:       t.cache,
+		coordinator: t.coordinator,
 		torrentKey:  t.InfoHash().HexString(),
 		fileOffset:  f.Offset(),
 		fileSize:    f.Length(),
@@ -252,8 +263,11 @@ func (t *Torrent) readerFor(displayPath string) (*raFile, error) {
 		torrentSize: t.tor.Length(),
 		readahead:   defaultStreamingReadahead,
 	}
+	if !r.acquireHandle() {
+		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+	}
 	t.readers[displayPath] = r
-	return r, nil
+	return &openedFile{file: r}, nil
 }
 
 // close releases every open reader handle for this torrent.
@@ -270,9 +284,13 @@ func (t *Torrent) close() error {
 	}
 	t.readers = make(map[string]*raFile)
 	loader := t.loader
+	coordinator := t.coordinator
 	t.mu.Unlock()
 
 	var errs []error
+	if coordinator != nil {
+		coordinator.close()
+	}
 	for path, r := range readers {
 		if err := r.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %q: %w", path, err))
@@ -282,6 +300,9 @@ func (t *Torrent) close() error {
 		if err := loader.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close torrent reader: %w", err))
 		}
+	}
+	if t.session != nil && t.session.pieceStore != nil {
+		t.session.pieceStore.CloseTorrent(t.InfoHash().HexString())
 	}
 	if t.cache != nil {
 		t.cache.InvalidateTorrent(t.InfoHash().HexString())

@@ -54,14 +54,16 @@ type Session struct {
 	cfg    config.Config
 	logger *slog.Logger
 
-	pieceCache  *cache.Cache
-	mu          sync.RWMutex
-	state       lifecycle
-	closeDone   chan struct{}
-	closeErr    error
-	torrents    map[metainfo.Hash]*Torrent
-	torrentsDir string
-	metadataDir string
+	pieceCache     *cache.Cache
+	pieceStore     *piecestore.Store
+	prefetchBudget *prefetchBudget
+	mu             sync.RWMutex
+	state          lifecycle
+	closeDone      chan struct{}
+	closeErr       error
+	torrents       map[metainfo.Hash]*Torrent
+	torrentsDir    string
+	metadataDir    string
 
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.
@@ -230,6 +232,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cfg:             cfg,
 		logger:          logger,
 		pieceCache:      pieceCache,
+		pieceStore:      pieceStore,
+		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),
 		closeDone:       make(chan struct{}),
 		torrents:        make(map[metainfo.Hash]*Torrent),
 		torrentsDir:     torrentsDir,

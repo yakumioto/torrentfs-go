@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
@@ -481,5 +482,180 @@ func TestCloseDropsStaging(t *testing.T) {
 	}
 	if _, err := piece.WriteAt([]byte("data"), 0); err == nil {
 		t.Fatal("WriteAt after Close succeeded")
+	}
+}
+
+// TestStorePerTorrentCloseDropsStaging proves a dropped torrent leaves no
+// staging bookkeeping behind, while another torrent's staging is untouched and
+// verified resident data survives in the cache.
+// TestCloseTorrentDrainsConcurrentPromotion ensures cache invalidation cannot
+// race a verified promotion from the torrent lifetime being torn down.
+func TestCloseTorrentDrainsConcurrentPromotion(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{15}
+	_, piece := openPiece(t, store, hash, pieceLength)
+	if _, err := piece.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	hashPiece(t, piece, pieceLength)
+
+	completeDone := make(chan error, 1)
+	go func() { completeDone <- piece.MarkComplete() }()
+	closedDone := make(chan struct{})
+	go func() {
+		store.CloseTorrent(hash.HexString())
+		c.InvalidateTorrent(hash.HexString())
+		close(closedDone)
+	}()
+	select {
+	case <-closedDone:
+	case <-time.After(time.Second):
+		t.Fatal("CloseTorrent did not drain the concurrent promotion")
+	}
+	if err := <-completeDone; err != nil && !errors.Is(err, errTorrentClosed) {
+		t.Fatalf("concurrent MarkComplete: %v", err)
+	}
+	if c.Has(cache.Key{Torrent: hash.HexString(), Piece: 0}) {
+		t.Fatal("late promotion repopulated the invalidated torrent cache")
+	}
+	if err := piece.MarkComplete(); !errors.Is(err, errTorrentClosed) {
+		t.Fatalf("MarkComplete after CloseTorrent = %v, want errTorrentClosed", err)
+	}
+}
+
+// TestMarkNotCompleteCannotDeleteReopenedLifetime pauses an old callback while
+// it owns Store.mu, then proves close/reopen cannot publish a new cache value
+// until that callback has finished its removal.
+func TestMarkNotCompleteCannotDeleteReopenedLifetime(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	defer func() { _ = store.Close() }()
+	hash := metainfo.Hash{16}
+	info := singlePieceInfo(pieceLength)
+	oldTorrent, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(old): %v", err)
+	}
+	oldPiece := oldTorrent.PieceWithHash(info.Piece(0), g.None[[]byte]()).(*piece)
+	if _, err := oldPiece.WriteAt([]byte("oldvalue"), 0); err != nil {
+		t.Fatalf("old WriteAt: %v", err)
+	}
+	hashPiece(t, oldPiece, pieceLength)
+	if err := oldPiece.MarkComplete(); err != nil {
+		t.Fatalf("old MarkComplete: %v", err)
+	}
+	key := cache.Key{Torrent: hash.HexString(), Piece: 0}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHook()
+	markDone := make(chan error, 1)
+	go func() {
+		markDone <- oldPiece.markNotComplete(func() {
+			close(entered)
+			<-release
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("old MarkNotComplete did not reach the removal barrier")
+	}
+
+	closeStarted := make(chan struct{})
+	closeDone := make(chan struct{})
+	go func() {
+		close(closeStarted)
+		store.CloseTorrent(hash.HexString())
+		c.InvalidateTorrent(hash.HexString())
+		close(closeDone)
+	}()
+	<-closeStarted
+	select {
+	case <-closeDone:
+		t.Fatal("CloseTorrent crossed an in-flight MarkNotComplete removal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseHook()
+	if err := <-markDone; err != nil {
+		t.Fatalf("old MarkNotComplete: %v", err)
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("CloseTorrent did not finish after MarkNotComplete")
+	}
+
+	newTorrent, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(new): %v", err)
+	}
+	newPiece := newTorrent.PieceWithHash(info.Piece(0), g.None[[]byte]()).(*piece)
+	if _, err := newPiece.WriteAt([]byte("newvalue"), 0); err != nil {
+		t.Fatalf("new WriteAt: %v", err)
+	}
+	hashPiece(t, newPiece, pieceLength)
+	if err := newPiece.MarkComplete(); err != nil {
+		t.Fatalf("new MarkComplete: %v", err)
+	}
+	got, ok := c.Get(key)
+	if !ok || string(got) != "newvalue" {
+		t.Fatalf("new lifetime cache entry = (%q, %t), want newvalue", got, ok)
+	}
+}
+
+func TestStorePerTorrentCloseDropsStaging(t *testing.T) {
+	const pieceLength = 16
+	store, c := testStore(t, 1<<20)
+
+	firstInfo := singlePieceInfo(pieceLength)
+	firstHash := metainfo.Hash{9}
+	first, err := store.OpenTorrent(context.Background(), firstInfo, firstHash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(first): %v", err)
+	}
+	firstPiece := first.PieceWithHash(firstInfo.Piece(0), g.None[[]byte]())
+
+	secondInfo := singlePieceInfo(pieceLength)
+	secondHash := metainfo.Hash{10}
+	second, err := store.OpenTorrent(context.Background(), secondInfo, secondHash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(second): %v", err)
+	}
+	if n, err := second.PieceWithHash(secondInfo.Piece(0), g.None[[]byte]()).WriteAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("WriteAt(second) = (%d, %v), want (%d, nil)", n, err, pieceLength)
+	}
+	if n, err := firstPiece.WriteAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("WriteAt(first) = (%d, %v), want (%d, nil)", n, err, pieceLength)
+	}
+
+	pieces, bytes := store.StagingStats()
+	if pieces != 2 || bytes != 2*pieceLength {
+		t.Fatalf("StagingStats = (%d pieces, %d bytes), want (2, %d)", pieces, bytes, 2*pieceLength)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first torrent: %v", err)
+	}
+	pieces, bytes = store.StagingStats()
+	if pieces != 1 || bytes != pieceLength {
+		t.Fatalf("StagingStats after closing one torrent = (%d pieces, %d bytes), want (1, %d)", pieces, bytes, pieceLength)
+	}
+	// Closing one torrent must not disturb another torrent's cache residency.
+	c.Put(cache.Key{Torrent: firstHash.HexString(), Piece: 0}, make([]byte, pieceLength))
+	if err := first.Close(); err != nil {
+		t.Fatalf("second close of an already closed torrent: %v", err)
+	}
+	if !c.Has(cache.Key{Torrent: firstHash.HexString(), Piece: 0}) {
+		t.Fatal("closing a torrent dropped verified resident data")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store close: %v", err)
+	}
+	if pieces, bytes := store.StagingStats(); pieces != 0 || bytes != 0 {
+		t.Fatalf("StagingStats after store close = (%d, %d), want (0, 0)", pieces, bytes)
 	}
 }

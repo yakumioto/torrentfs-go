@@ -35,6 +35,7 @@ type Store struct {
 	lastRead       map[cache.Key]uint64
 	epochs         map[cache.Key]uint64
 	verifiedEpoch  map[cache.Key]uint64
+	torrents       map[string]*torrentLifecycle
 	nextGeneration uint64
 	closed         bool
 }
@@ -52,6 +53,12 @@ type stagingBuffer struct {
 	generation uint64
 	data       []byte
 	received   []byteRange
+}
+
+// torrentLifecycle is shared by all PieceImpl values for one torrent lifetime.
+// Its closed bit is read and written only while Store.mu is held.
+type torrentLifecycle struct {
+	closed bool
 }
 
 // write copies a received chunk and records the range it covers.
@@ -107,6 +114,8 @@ func (b *stagingBuffer) covers(start, end int64) bool {
 
 var _ storage.ClientImplCloser = (*Store)(nil)
 
+var errTorrentClosed = errors.New("piecestore: torrent is closed")
+
 // New returns a store backed by c. Every piece lives in c until it is evicted.
 func New(c *cache.Cache, logger *slog.Logger) *Store {
 	if logger == nil {
@@ -120,6 +129,7 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 		lastRead:      make(map[cache.Key]uint64),
 		epochs:        make(map[cache.Key]uint64),
 		verifiedEpoch: make(map[cache.Key]uint64),
+		torrents:      make(map[string]*torrentLifecycle),
 	}
 }
 
@@ -146,13 +156,92 @@ func (s *Store) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash met
 			"cache_capacity_bytes", s.capacity,
 		)
 	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return storage.TorrentImpl{}, errors.New("piecestore: store is closed")
+	}
+	lifecycle := s.torrents[key]
+	if lifecycle == nil || lifecycle.closed {
+		lifecycle = &torrentLifecycle{}
+		s.torrents[key] = lifecycle
+	}
+	s.mu.Unlock()
 	return storage.TorrentImpl{
 		PieceWithHash: func(p metainfo.Piece, _ g.Option[[]byte]) storage.PieceImpl {
 			pieceKey := cache.Key{Torrent: key, Piece: p.Index()}
-			return &piece{store: s, key: pieceKey, length: p.Length(), generation: s.epoch(pieceKey)}
+			return &piece{
+				store:      s,
+				key:        pieceKey,
+				length:     p.Length(),
+				lifecycle:  lifecycle,
+				generation: s.epoch(pieceKey),
+			}
 		},
-		Close: func() error { return nil },
+		Close: func() error { s.closeTorrent(key, lifecycle); return nil },
 	}, nil
+}
+
+// CloseTorrent closes the current lifetime of torrent and waits for any
+// in-flight promotion to finish before returning. The session calls this
+// before invalidating the corresponding cache entries.
+func (s *Store) CloseTorrent(torrent string) {
+	s.mu.Lock()
+	lifecycle := s.torrents[torrent]
+	if lifecycle != nil {
+		s.closeTorrentLocked(torrent, lifecycle)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Store) closeTorrent(torrent string, lifecycle *torrentLifecycle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeTorrentLocked(torrent, lifecycle)
+}
+
+func (s *Store) closeTorrentLocked(torrent string, lifecycle *torrentLifecycle) {
+	if lifecycle == nil {
+		return
+	}
+	lifecycle.closed = true
+	if current, ok := s.torrents[torrent]; !ok || current != lifecycle {
+		return
+	}
+	delete(s.torrents, torrent)
+	for key := range s.staging {
+		if key.Torrent == torrent {
+			delete(s.staging, key)
+		}
+	}
+	for key := range s.lastRead {
+		if key.Torrent == torrent {
+			delete(s.lastRead, key)
+		}
+	}
+	for key := range s.epochs {
+		if key.Torrent == torrent {
+			delete(s.epochs, key)
+		}
+	}
+	for key := range s.verifiedEpoch {
+		if key.Torrent == torrent {
+			delete(s.verifiedEpoch, key)
+		}
+	}
+}
+
+// StagingStats reports how many pieces currently have a staging buffer and how
+// many bytes those buffers occupy. It is an internal observation point for
+// tests: staging is intentionally outside the cache's hard capacity accounting.
+func (s *Store) StagingStats() (pieces int, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, buf := range s.staging {
+		pieces++
+		bytes += int64(len(buf.data))
+	}
+	return pieces, bytes
 }
 
 func (s *Store) epoch(key cache.Key) uint64 {
@@ -161,11 +250,22 @@ func (s *Store) epoch(key cache.Key) uint64 {
 	return s.epochs[key]
 }
 
+func (s *Store) lifecycleOpenLocked(torrent string, lifecycle *torrentLifecycle) bool {
+	return !s.closed && lifecycle != nil && !lifecycle.closed && s.torrents[torrent] == lifecycle
+}
+
+func (s *Store) pieceOpenLocked(p *piece) bool {
+	return s.lifecycleOpenLocked(p.key.Torrent, p.lifecycle)
+}
+
 // markVerified records the token produced by the actual hash WriteTo operation.
 // Ordinary ReaderAt calls never update it.
-func (s *Store) markVerified(key cache.Key, generation uint64, length int64) error {
+func (s *Store) markVerified(key cache.Key, lifecycle *torrentLifecycle, generation uint64, length int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || lifecycle == nil || lifecycle.closed || s.torrents[key.Torrent] != lifecycle {
+		return errTorrentClosed
+	}
 	if generation == 0 || s.epochs[key] != generation {
 		return fmt.Errorf("piecestore: hash observed stale epoch %d for current %d", generation, s.epochs[key])
 	}
@@ -186,6 +286,10 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	for _, lifecycle := range s.torrents {
+		lifecycle.closed = true
+	}
+	s.torrents = make(map[string]*torrentLifecycle)
 	s.staging = make(map[cache.Key]*stagingBuffer)
 	s.lastRead = make(map[cache.Key]uint64)
 	s.epochs = make(map[cache.Key]uint64)
@@ -200,9 +304,12 @@ func (s *Store) Close() error {
 // A window that is not fully received reports the piece as missing instead of
 // returning the zero fill of a region a peer has not delivered yet. A successful
 // staging read records its generation for MarkComplete's binding check.
-func (s *Store) read(key cache.Key, dst []byte, off int64) (int, bool, error) {
+func (s *Store) read(key cache.Key, lifecycle *torrentLifecycle, dst []byte, off int64) (int, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.lifecycleOpenLocked(key.Torrent, lifecycle) {
+		return 0, false, errTorrentClosed
+	}
 	if buf, ok := s.staging[key]; ok {
 		if off < 0 || !buf.covers(off, off+int64(len(dst))) {
 			return 0, false, nil
@@ -225,6 +332,7 @@ type piece struct {
 	key        cache.Key
 	length     int64
 	generation uint64
+	lifecycle  *torrentLifecycle
 }
 
 var _ storage.PieceImpl = (*piece)(nil)
@@ -241,7 +349,7 @@ func (p *piece) WriteTo(w io.Writer) (int64, error) {
 	if n != p.length {
 		return n, io.ErrUnexpectedEOF
 	}
-	if err := p.store.markVerified(p.key, p.generation, p.length); err != nil {
+	if err := p.store.markVerified(p.key, p.lifecycle, p.generation, p.length); err != nil {
 		return n, err
 	}
 	return n, nil
@@ -270,7 +378,7 @@ func (p *piece) ReadAt(b []byte, off int64) (int, error) {
 		return 0, nil
 	}
 
-	if n, served, err := p.store.read(p.key, b, off); served {
+	if n, served, err := p.store.read(p.key, p.lifecycle, b, off); served || err != nil {
 		return shortRead(n, requested, err)
 	}
 	return 0, io.EOF
@@ -314,6 +422,9 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 	if s.closed {
 		return 0, errors.New("piecestore: store is closed")
 	}
+	if !s.pieceOpenLocked(p) {
+		return 0, errTorrentClosed
+	}
 	buf := s.staging[p.key]
 	if buf == nil {
 		s.nextGeneration++
@@ -342,27 +453,28 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 func (p *piece) MarkComplete() error {
 	s := p.store
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pieceOpenLocked(p) {
+		return errTorrentClosed
+	}
 	buf := s.staging[p.key]
 	if buf == nil {
-		s.mu.Unlock()
 		return nil
 	}
 	if p.generation == 0 || buf.generation != p.generation {
-		s.mu.Unlock()
 		return fmt.Errorf("piecestore: stale staging generation %d for %s (current %d)", p.generation, p.key.Torrent, buf.generation)
 	}
 	if s.verifiedEpoch[p.key] != buf.generation {
-		s.mu.Unlock()
 		return fmt.Errorf("piecestore: staging generation %d was not verified by its hash", buf.generation)
 	}
 	if !buf.covers(0, p.length) {
-		s.mu.Unlock()
 		return io.ErrUnexpectedEOF
 	}
 	delete(s.staging, p.key)
 	delete(s.lastRead, p.key)
 	delete(s.verifiedEpoch, p.key)
-	s.mu.Unlock()
+	// Keep Store.mu through Put so CloseTorrent cannot invalidate the cache
+	// between promotion validation and the insertion itself.
 	s.cache.Put(p.key, buf.data)
 	return nil
 }
@@ -371,13 +483,25 @@ func (p *piece) MarkComplete() error {
 // the next read reports the piece as missing and anacrolix downloads it again.
 // A stale PieceImpl must not discard a newer staging generation.
 func (p *piece) MarkNotComplete() error {
+	return p.markNotComplete(nil)
+}
+
+func (p *piece) markNotComplete(beforeRemove func()) error {
 	s := p.store
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pieceOpenLocked(p) {
+		return errTorrentClosed
+	}
 	if buf := s.staging[p.key]; buf != nil && p.generation != 0 && buf.generation == p.generation {
 		delete(s.staging, p.key)
 		delete(s.lastRead, p.key)
 	}
-	s.mu.Unlock()
+	if beforeRemove != nil {
+		beforeRemove()
+	}
+	// Keep Store.mu through Remove so a close/reopen cannot race this lifetime's
+	// callback into deleting a subsequent lifetime's resident value.
 	s.cache.Remove(p.key)
 	return nil
 }
@@ -388,5 +512,11 @@ func (p *piece) MarkNotComplete() error {
 // refuse to download at all. Neither would survive the "no piece recovery"
 // requirement.
 func (p *piece) Completion() storage.Completion {
-	return storage.Completion{Ok: true, Complete: p.store.cache.Has(p.key)}
+	s := p.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pieceOpenLocked(p) {
+		return storage.Completion{Ok: true}
+	}
+	return storage.Completion{Ok: true, Complete: s.cache.Has(p.key)}
 }

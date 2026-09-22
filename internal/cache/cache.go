@@ -17,6 +17,17 @@ type entry struct {
 	value []byte
 }
 
+// Stats is a point-in-time accounting snapshot for cache behaviour. It does
+// not change eviction or pin semantics.
+type Stats struct {
+	Hits                     uint64
+	Misses                   uint64
+	Evictions                uint64
+	EvictedBytes             int64
+	PutRejections            uint64
+	PinReservationRejections uint64
+}
+
 // Eviction watermarks as fractions of the cache capacity. A high-water mark
 // triggers eviction and a low-water mark ends it, so a burst of inserts is
 // reclaimed in one batch instead of churning at the capacity boundary. The
@@ -67,12 +78,17 @@ func (c *Cache) pinBytesCap() int64 {
 // Cache is a byte-capacity, least-recently-used cache. Insertion is bounded by
 // the capacity; eviction starts at the high-water mark and stops at the low.
 type Cache struct {
-	mu       sync.Mutex
-	capacity int64
-	used     int64
-	hits     uint64
-	items    map[Key]*list.Element
-	lru      *list.List
+	mu                       sync.Mutex
+	capacity                 int64
+	used                     int64
+	hits                     uint64
+	misses                   uint64
+	evictions                uint64
+	evictedBytes             int64
+	putRejections            uint64
+	pinReservationRejections uint64
+	items                    map[Key]*list.Element
+	lru                      *list.List
 
 	// pinned holds the keys that eviction must skip. A key may be pinned
 	// before it is resident, so that data arriving later is protected.
@@ -117,6 +133,7 @@ func (c *Cache) Get(key Key) ([]byte, bool) {
 
 	elem, ok := c.items[key]
 	if !ok {
+		c.misses++
 		return nil, false
 	}
 	c.lru.MoveToFront(elem)
@@ -134,11 +151,13 @@ func (c *Cache) Put(key Key, value []byte) {
 	defer c.mu.Unlock()
 
 	if c.capacity <= 0 || int64(len(value)) > c.capacity {
+		c.putRejections++
 		return
 	}
 	if c.pinnedSized[key] {
 		oldReservation := c.pinnedSizes[key]
 		if c.pinnedBytes-oldReservation+int64(len(value)) > c.pinBytesCap() {
+			c.putRejections++
 			return
 		}
 	}
@@ -159,6 +178,7 @@ func (c *Cache) Put(key Key, value []byte) {
 	}
 	c.evictLocked(elem)
 	if c.used > c.capacity {
+		c.putRejections++
 		// Reclaiming everything evictable was not enough (pinned entries
 		// remain), so the insert cannot be honoured. Roll it back so the hard
 		// cap holds; the caller's next read falls back to the network. The
@@ -206,6 +226,7 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 	}
 	if _, ok := c.pinned[key]; ok {
 		if reserve && !c.pinnedSized[key] && c.pinnedBytes > c.pinBytesCap() {
+			c.pinReservationRejections++
 			return false
 		}
 		if !reserve || actual <= c.pinnedSizes[key] {
@@ -215,6 +236,7 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 			return true
 		}
 		if c.pinnedBytes+(actual-c.pinnedSizes[key]) > c.pinBytesCap() {
+			c.pinReservationRejections++
 			return false
 		}
 		c.pinnedBytes += actual - c.pinnedSizes[key]
@@ -227,6 +249,7 @@ func (c *Cache) pin(key Key, requested int64, reserve bool) bool {
 		reservation = 0
 	}
 	if c.pinnedBytes+reservation > c.pinBytesCap() {
+		c.pinReservationRejections++
 		return false
 	}
 	c.pinned[key] = struct{}{}
@@ -307,6 +330,57 @@ func (c *Cache) HitCount() uint64 {
 	return c.hits
 }
 
+// ContiguousRun reports how many bytes of torrent are resident in one
+// uninterrupted run beginning at byte start. Each piece occupies step bytes in
+// the caller's geometry, the walk stops at the first missing piece or once
+// limit bytes past start have been counted, and a resident piece shorter than
+// its nominal extent ends the run at its real length. It allocates nothing, so
+// a reader can ask for its playable buffer while holding its own lock.
+func (c *Cache) ContiguousRun(torrent string, start, step, limit int64) int64 {
+	if step <= 0 || limit <= 0 {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var total int64
+	cursor := start
+	for total < limit {
+		index := cursor / step
+		elem, ok := c.items[Key{Torrent: torrent, Piece: int(index)}]
+		if !ok {
+			break
+		}
+		pieceEnd := (index + 1) * step
+		available := pieceEnd - cursor
+		if resident := int64(len(elem.Value.(*entry).value)); resident < available {
+			available = resident
+		}
+		if available <= 0 {
+			break
+		}
+		if total+available > limit {
+			available = limit - total
+		}
+		total += available
+		cursor = pieceEnd
+	}
+	return total
+}
+
+// Stats returns a point-in-time accounting snapshot. It is reporting only.
+func (c *Cache) Stats() Stats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return Stats{
+		Hits:                     c.hits,
+		Misses:                   c.misses,
+		Evictions:                c.evictions,
+		EvictedBytes:             c.evictedBytes,
+		PutRejections:            c.putRejections,
+		PinReservationRejections: c.pinReservationRejections,
+	}
+}
+
 // InvalidateTorrent removes every entry and pin belonging to torrent.
 func (c *Cache) InvalidateTorrent(torrent string) {
 	c.mu.Lock()
@@ -367,6 +441,8 @@ func (c *Cache) evictLocked(keep *list.Element) {
 		if victim == nil {
 			return
 		}
+		c.evictions++
+		c.evictedBytes += int64(len(victim.Value.(*entry).value))
 		c.remove(victim)
 	}
 }

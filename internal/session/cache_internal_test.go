@@ -664,6 +664,64 @@ func TestPieceLoaderRequestCancellationIsScopedToItsOperation(t *testing.T) {
 	}
 }
 
+// TestPieceFetcherCancelledFlightDoesNotAcceptNewWaiter covers the interval
+// between the last waiter cancelling a flight and that flight finishing. A new
+// waiter must get a fresh flight while the cancelled one drains independently.
+func TestPieceFetcherCancelledFlightDoesNotAcceptNewWaiter(t *testing.T) {
+	rootContext, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	started := make(chan struct{}, 1)
+	fetcher := &pieceFetcher{
+		rootContext: rootContext,
+		rootCancel:  rootCancel,
+		inflight:    make(map[int]*pieceFlight),
+		flights:     make(map[*pieceFlight]struct{}),
+		runFlightFn: func(*pieceFlight, int64, int64) {
+			started <- struct{}{}
+		},
+	}
+	oldContext, oldCancel := context.WithCancel(rootContext)
+	old := &pieceFlight{
+		index:   7,
+		ctx:     oldContext,
+		cancel:  oldCancel,
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
+	fetcher.inflight[old.index] = old
+	fetcher.flights[old] = struct{}{}
+
+	fetcher.detachFlight(old)
+	if _, ok := fetcher.inflight[old.index]; ok {
+		t.Fatal("cancelled flight remained joinable")
+	}
+	select {
+	case <-old.ctx.Done():
+	default:
+		t.Fatal("last waiter did not cancel the old flight")
+	}
+
+	fresh, err := fetcher.joinFlight(old.index, 0, 1)
+	if err != nil {
+		t.Fatalf("join fresh flight: %v", err)
+	}
+	if fresh == old {
+		t.Fatal("new waiter joined the cancelled flight")
+	}
+	select {
+	case <-started:
+	case <-time.After(probeWait):
+		t.Fatal("fresh flight was not launched")
+	}
+
+	fetcher.mu.Lock()
+	fresh.finished = true
+	delete(fetcher.inflight, fresh.index)
+	delete(fetcher.flights, fresh)
+	close(fresh.done)
+	fetcher.mu.Unlock()
+}
+
 type recordingPieceSource struct {
 	mu         sync.Mutex
 	data       []byte

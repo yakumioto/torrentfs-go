@@ -41,9 +41,8 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 	return &readHandle{ra: ra, size: n.size}, 0, 0
 }
 
-// readHandle serves reads for an opened torrent file. Its lifecycle does not
-// own the underlying handle: the session caches and closes those, so Release
-// is a no-op.
+// readHandle serves reads for one opened torrent file. Release closes only the
+// lightweight handle; the session keeps shared torrent state alive.
 type readHandle struct {
 	ra   io.ReaderAt
 	size int64
@@ -91,5 +90,10 @@ func (h *readHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 }
 
 func (h *readHandle) Release(ctx context.Context) syscall.Errno {
+	if closer, ok := h.ra.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			return errnoFor(err)
+		}
+	}
 	return 0
 }
