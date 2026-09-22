@@ -2,12 +2,13 @@
 #
 # One existing torrents directory remains a required command-line input.
 # mountpoint is required unless the HTTP API is enabled (http.listen_addr).
-# Configuration is loaded on every startup. Every leaf key can also be set with
-# an environment variable named TORRENTFS_<SECTION>_<KEY>, with nested sections
-# joined by underscores (for example, http.auth.token_ttl becomes
-# TORRENTFS_HTTP_AUTH_TOKEN_TTL). The precedence is environment variables, this
-# file, then built-in defaults. Only the exact documented environment variable
-# names are read.
+# Configuration is loaded on every startup. Only the exact documented
+# environment variable names are read; there is no automatic environment mapping
+# for every TOML leaf. Most supported values use TORRENTFS_<SECTION>_<KEY>, with
+# nested sections joined by underscores (for example, http.auth.token_ttl becomes
+# TORRENTFS_HTTP_AUTH_TOKEN_TTL). TORRENTFS_USERNAME and TORRENTFS_PASSWORD are
+# special shared HTTP/SMB credentials. The precedence is environment variables,
+# this file, then built-in defaults.
 #
 # The FUSE mount exposes torrent data only, read-only. Torrent management
 # (add, delete, status) happens over the HTTP API below; there is no

@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type envLookup func(string) (string, bool)
@@ -14,6 +16,11 @@ type envBinding struct {
 	field string
 	apply func(*Config, string) error
 }
+
+const (
+	httpUsernameEnvironment = "TORRENTFS_USERNAME"
+	httpPasswordEnvironment = "TORRENTFS_PASSWORD"
+)
 
 var environmentBindings = []envBinding{
 	{
@@ -169,30 +176,6 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_HTTP_AUTH_USERNAME",
-		field: "http.auth.username",
-		apply: func(cfg *Config, raw string) error {
-			cfg.HTTP.Auth.Username = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_PASSWORD_HASH",
-		field: "http.auth.password_hash",
-		apply: func(cfg *Config, raw string) error {
-			cfg.HTTP.Auth.PasswordHash = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE",
-		field: "http.auth.password_hash_file",
-		apply: func(cfg *Config, raw string) error {
-			cfg.HTTP.Auth.PasswordHashFile = raw
-			return nil
-		},
-	},
-	{
 		name:  "TORRENTFS_HTTP_AUTH_TOKEN_TTL",
 		field: "http.auth.token_ttl",
 		apply: func(cfg *Config, raw string) error {
@@ -244,6 +227,41 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 			return invalid(binding.field, errors.New("environment variable "+binding.name+": "+err.Error()))
 		}
 	}
+	return applyHTTPAuthenticationEnvironment(cfg, lookup)
+}
+
+func applyHTTPAuthenticationEnvironment(cfg *Config, lookup envLookup) error {
+	if !cfg.HTTP.Auth.Enabled {
+		return nil
+	}
+
+	username, usernameSet := lookup(httpUsernameEnvironment)
+	password, passwordSet := lookup(httpPasswordEnvironment)
+	if !usernameSet && !passwordSet {
+		return nil
+	}
+	if !usernameSet || !passwordSet {
+		return invalid("http.auth", errors.New("environment variables TORRENTFS_USERNAME and TORRENTFS_PASSWORD must be set together"))
+	}
+	if username == "" {
+		return invalid("http.auth.username", errors.New("environment variable TORRENTFS_USERNAME must not be empty"))
+	}
+	if password == "" {
+		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must not be empty"))
+	}
+	if len([]byte(password)) > 72 {
+		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must be at most 72 bytes"))
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD could not be hashed"))
+	}
+	auth := cfg.HTTP.Auth
+	auth.Username = username
+	auth.PasswordHash = string(hash)
+	auth.PasswordHashFile = ""
+	cfg.HTTP.Auth = auth
 	return nil
 }
 

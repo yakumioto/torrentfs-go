@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestLoadWithoutPathUsesDefaults(t *testing.T) {
@@ -38,9 +40,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES":                      "2048",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
-		"TORRENTFS_HTTP_AUTH_USERNAME":                         "alice",
-		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH":                    "hash",
-		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE":               "",
+		httpUsernameEnvironment:                                "alice",
+		httpPasswordEnvironment:                                "password",
 		"TORRENTFS_HTTP_AUTH_TOKEN_TTL":                        "45m",
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
 		"TORRENTFS_LOG_FORMAT":                                 "json",
@@ -84,13 +85,17 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if got.HTTP.ListenAddr != "127.0.0.1:9090" || got.HTTP.MaxUploadBytes != 2048 {
 		t.Fatalf("http = %+v", got.HTTP)
 	}
-	if got.HTTP.Auth != (Auth{
-		Enabled:      true,
-		Username:     "alice",
-		PasswordHash: "hash",
-		TokenTTL:     Duration(45 * time.Minute),
-	}) {
+	if !got.HTTP.Auth.Enabled || got.HTTP.Auth.Username != "alice" || got.HTTP.Auth.PasswordHashFile != "" || got.HTTP.Auth.PasswordHash == "password" {
 		t.Fatalf("auth = %+v", got.HTTP.Auth)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte("password")); err != nil {
+		t.Fatalf("generated password hash does not match password: %v", err)
+	}
+	if cost, err := bcrypt.Cost([]byte(got.HTTP.Auth.PasswordHash)); err != nil || cost != bcrypt.DefaultCost {
+		t.Fatalf("generated password hash cost = %d, error = %v, want %d", cost, err, bcrypt.DefaultCost)
+	}
+	if got.HTTP.Auth.TokenTTL != Duration(45*time.Minute) {
+		t.Fatalf("auth token TTL = %s, want 45m", got.HTTP.Auth.TokenTTL)
 	}
 	if got.Log != (Log{Level: "debug", Format: "json", AddSource: true}) {
 		t.Fatalf("log = %+v", got.Log)
@@ -100,11 +105,14 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 22 {
-		t.Fatalf("environment binding count = %d, want 22", len(environmentBindings))
+	if len(environmentBindings) != 19 {
+		t.Fatalf("environment binding count = %d, want 19", len(environmentBindings))
+	}
+	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
+		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)
 	}
 	for name := range values {
-		if name == "TORRENTFS_FUSE_REQUIRED" {
+		if name == "TORRENTFS_FUSE_REQUIRED" || name == httpUsernameEnvironment || name == httpPasswordEnvironment {
 			continue
 		}
 		if !wantNames[name] {
@@ -259,32 +267,187 @@ func TestLoadEnvironmentRejectsProxyCredentialsWithoutLeakingThem(t *testing.T) 
 	}
 }
 
-func TestLoadEnvironmentAuthenticationSourceSwitch(t *testing.T) {
+func TestLoadEnvironmentAuthenticationPairOverridesTOMLSource(t *testing.T) {
 	path := writeConfigFile(t, `[http.auth]
 enabled = true
-username = "alice"
-password_hash = "file-hash"
+username = "file-user"
+password_hash_file = "/run/secrets/hash"
 `)
-	_, err := load(path, lookupEnvironment(map[string]string{
-		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE": "/run/secrets/hash",
-	}))
-	if err == nil {
-		t.Fatal("load with two password sources succeeded")
-	}
-	var validationErr *ValidationError
-	if !errors.As(err, &validationErr) || validationErr.Field != "http.auth.password_hash" {
-		t.Fatalf("load error = %T %v, want password_hash validation error", err, err)
-	}
-
 	got, err := load(path, lookupEnvironment(map[string]string{
-		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH":      "",
-		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE": "/run/secrets/hash",
+		httpUsernameEnvironment: "env-user",
+		httpPasswordEnvironment: "password with spaces",
 	}))
 	if err != nil {
-		t.Fatalf("load after clearing inline hash: %v", err)
+		t.Fatalf("load with environment credentials: %v", err)
 	}
-	if got.HTTP.Auth.PasswordHash != "" || got.HTTP.Auth.PasswordHashFile != "/run/secrets/hash" {
-		t.Fatalf("auth sources = %+v", got.HTTP.Auth)
+	if got.HTTP.Auth.Username != "env-user" || got.HTTP.Auth.PasswordHashFile != "" {
+		t.Fatalf("auth sources = %+v, want environment username and inline hash", got.HTTP.Auth)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte("password with spaces")); err != nil {
+		t.Fatalf("generated password hash does not match password: %v", err)
+	}
+}
+
+func TestLoadEnvironmentAuthenticationPairRules(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       string
+		environment  map[string]string
+		wantError    bool
+		wantUsername string
+		wantPassword string
+		wantHash     string
+		wantHashFile string
+	}{
+		{
+			name: "pair absent preserves inline source",
+			config: `[http.auth]
+enabled = true
+username = "file-user"
+password_hash = "file-hash"
+`,
+			wantUsername: "file-user",
+			wantHash:     "file-hash",
+		},
+		{
+			name: "pair absent preserves file source",
+			config: `[http.auth]
+enabled = true
+username = "file-user"
+password_hash_file = "/run/secrets/hash"
+`,
+			wantUsername: "file-user",
+			wantHashFile: "/run/secrets/hash",
+		},
+		{
+			name: "username only does not borrow TOML password",
+			config: `[http.auth]
+enabled = true
+username = "file-user"
+password_hash = "file-hash"
+`,
+			environment: map[string]string{httpUsernameEnvironment: "env-user"},
+			wantError:   true,
+		},
+		{
+			name: "password only does not borrow TOML username",
+			config: `[http.auth]
+enabled = true
+username = "file-user"
+password_hash = "file-hash"
+`,
+			environment: map[string]string{httpPasswordEnvironment: "secret"},
+			wantError:   true,
+		},
+		{
+			name:   "empty username",
+			config: "[http.auth]\nenabled = true\n",
+			environment: map[string]string{
+				httpUsernameEnvironment: "",
+				httpPasswordEnvironment: "secret",
+			},
+			wantError: true,
+		},
+		{
+			name:   "empty password",
+			config: "[http.auth]\nenabled = true\n",
+			environment: map[string]string{
+				httpUsernameEnvironment: "alice",
+				httpPasswordEnvironment: "",
+			},
+			wantError: true,
+		},
+		{
+			name: "disabled ignores complete pair",
+			environment: map[string]string{
+				httpUsernameEnvironment: "invalid\nusername",
+				httpPasswordEnvironment: strings.Repeat("x", 73),
+			},
+		},
+		{
+			name:        "disabled ignores half pair",
+			environment: map[string]string{httpUsernameEnvironment: "alice"},
+		},
+		{
+			name: "environment enables auth",
+			environment: map[string]string{
+				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
+				httpUsernameEnvironment:       "alice",
+				httpPasswordEnvironment:       "secret",
+			},
+			wantUsername: "alice",
+			wantPassword: "secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := load(writeConfigFile(t, tt.config), lookupEnvironment(tt.environment))
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("load succeeded")
+				}
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("load error = %v, want ErrInvalid", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got.HTTP.Auth.Username != tt.wantUsername {
+				t.Fatalf("auth username = %q, want %q", got.HTTP.Auth.Username, tt.wantUsername)
+			}
+			if tt.wantPassword == "" && got.HTTP.Auth.PasswordHash != tt.wantHash {
+				t.Fatalf("auth password hash = %q, want %q", got.HTTP.Auth.PasswordHash, tt.wantHash)
+			}
+			if got.HTTP.Auth.PasswordHashFile != tt.wantHashFile {
+				t.Fatalf("auth password hash file = %q, want %q", got.HTTP.Auth.PasswordHashFile, tt.wantHashFile)
+			}
+			if tt.wantPassword != "" {
+				if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte(tt.wantPassword)); err != nil {
+					t.Fatalf("generated password hash does not match password: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		wantErr  bool
+	}{
+		{name: "72 ASCII bytes", password: strings.Repeat("x", 72)},
+		{name: "72 UTF-8 bytes", password: strings.Repeat("密", 24)},
+		{name: "73 ASCII bytes", password: strings.Repeat("x", 73), wantErr: true},
+		{name: "75 UTF-8 bytes", password: strings.Repeat("密", 25), wantErr: true},
+		{name: "preserves whitespace", password: "  secret  "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{
+				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
+				httpUsernameEnvironment:       "alice",
+				httpPasswordEnvironment:       tt.password,
+			}))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("load succeeded")
+				}
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("load error = %v, want ErrInvalid", err)
+				}
+				if strings.Contains(err.Error(), tt.password) {
+					t.Fatalf("load error = %q, must not contain password", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+		})
 	}
 }
 

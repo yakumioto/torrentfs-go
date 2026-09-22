@@ -147,24 +147,37 @@ stop_clean "$default_container"
 printf 'docker config smoke: default CMD stayed running and stopped cleanly\n'
 
 default_container=''
-printf 'docker config smoke: checking that incomplete SMB prerequisites fail closed\n'
-smb_preflight_status=0
-smb_preflight_output="$(timeout 30 docker run --rm \
-	--env TORRENTFS_SMB_ENABLED=true \
-	--env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/missing \
-	"$image" 2>&1)" || smb_preflight_status=$?
-[[ "$smb_preflight_status" != 0 ]] || fail 'SMB mode unexpectedly started without /dev/fuse or its secret'
-[[ "$smb_preflight_output" == *'/dev/fuse'* || "$smb_preflight_output" == *'password file'* ]] ||
-	fail "SMB preflight failure lacked a stable diagnostic: $smb_preflight_output"
-printf 'docker config smoke: SMB prerequisite failure was rejected before startup\n'
+runtime_user="$(timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
+	'grep ^user= /etc/torrentfs/runtime-identity | cut -d= -f2')"
+[[ -n "$runtime_user" ]] || fail 'could not determine image runtime username'
+smb_preflight_secret='config-smoke-secret'
+expect_smb_preflight_failure() {
+	local name="$1" expected="$2" output status=0
+	shift 2
+	output="$(timeout 30 docker run --rm --env TORRENTFS_SMB_ENABLED=true "$@" "$image" 2>&1)" || status=$?
+	[[ "$status" != 0 ]] || fail "$name unexpectedly started"
+	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
+	[[ "$output" != *"$smb_preflight_secret"* ]] || fail "$name leaked the password"
+}
+
+printf 'docker config smoke: checking that incomplete SMB credentials fail closed\n'
+expect_smb_preflight_failure 'missing SMB username' 'TORRENTFS_USERNAME is required when SMB is enabled' \
+	--env "TORRENTFS_PASSWORD=$smb_preflight_secret"
+expect_smb_preflight_failure 'missing SMB password' 'TORRENTFS_PASSWORD is required when SMB is enabled' \
+	--env "TORRENTFS_USERNAME=$runtime_user"
+expect_smb_preflight_failure 'invalid SMB username' 'TORRENTFS_USERNAME is not a valid Unix account name' \
+	--env TORRENTFS_USERNAME='invalid/username' --env "TORRENTFS_PASSWORD=$smb_preflight_secret"
+expect_smb_preflight_failure 'SMB username UID mismatch' 'TORRENTFS_USERNAME must resolve to the torrentfs runtime UID' \
+	--env TORRENTFS_USERNAME=root --env "TORRENTFS_PASSWORD=$smb_preflight_secret"
+printf 'docker config smoke: SMB credential failure was rejected before startup\n'
 
 printf 'docker config smoke: starting with environment overrides only\n'
 docker run --detach --name "$env_container" \
 	--publish 127.0.0.1::8080 \
 	--env 'TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080' \
 	--env 'TORRENTFS_HTTP_AUTH_ENABLED=true' \
-	--env 'TORRENTFS_HTTP_AUTH_USERNAME=alice' \
-	--env "TORRENTFS_HTTP_AUTH_PASSWORD_HASH=$password_hash" \
+	--env TORRENTFS_USERNAME=alice \
+	--env TORRENTFS_PASSWORD=password \
 	"$image" >/dev/null
 wait_running "$env_container"
 env_port="$(published_port "$env_container")"

@@ -390,7 +390,7 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 
 ### 环境变量与校验
 
-当前实际读取的 22 个受支持环境变量映射如下；未列出的 TOML key 没有自动生成的环境变量：
+当前实际读取的 21 个受支持环境变量包括 19 个普通 field binding，以及一组供 HTTP 与 SMB 共用的特殊凭据变量；未列出的 TOML key 没有自动生成的环境变量：
 
 | 环境变量 | TOML key | 格式 |
 | --- | --- | --- |
@@ -409,9 +409,8 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 | `TORRENTFS_HTTP_LISTEN_ADDR` | `http.listen_addr` | 字符串；空值关闭 HTTP |
 | `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 十进制整数 |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
-| `TORRENTFS_HTTP_AUTH_USERNAME` | `http.auth.username` | 字符串 |
-| `TORRENTFS_HTTP_AUTH_PASSWORD_HASH` | `http.auth.password_hash` | bcrypt 字符串 |
-| `TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` | `http.auth.password_hash_file` | 文件路径 |
+| `TORRENTFS_USERNAME` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的用户名 |
+| `TORRENTFS_PASSWORD` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的单行明文密码 |
 | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `http.auth.token_ttl` | Go duration，如 `30m` |
 | `TORRENTFS_LOG_LEVEL` | `log.level` | `debug`/`info`/`warn`/`error` |
 | `TORRENTFS_LOG_FORMAT` | `log.format` | `text`/`json` |
@@ -429,13 +428,15 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 加载规则和边界：
 
 - 配置按字段合并，优先级为环境变量 > TOML 文件 > 内置默认值。严格 TOML decoder 会拒绝未知字段；旧的 `[paths]` section（包括 `paths.data_dir`）不再支持，旧的 `TORRENTFS_PATHS_DATA_DIR` 会被忽略。
-- 环境变量存在但为空时，字符串字段可以被清空；数字、布尔值和 duration 的空值会报错。环境覆盖发生在交叉字段校验前，因此切换认证密码来源时要显式清空不再使用的 `TORRENTFS_HTTP_AUTH_PASSWORD_HASH`。
+- 普通环境变量存在但为空时，字符串字段可以被清空；数字、布尔值和 duration 的空值会报错。`TORRENTFS_USERNAME` 与 `TORRENTFS_PASSWORD` 是特殊共享凭据，不能只设置其中一个。
+- HTTP auth 启用且共享凭据完整时，pair 原子覆盖 TOML 中的 username、password hash 和 hash file；启动时生成 cost-10 bcrypt hash，最终配置不保存明文密码。HTTP 环境密码按 UTF-8 bytes 计数，最多 72 bytes，不能截断。
+- HTTP auth 关闭时，Go 配置层忽略共享凭据 pair，以便 SMB-only 启动；如果 TOML 本身仍含 credentials，仅把 auth 关闭不会自动清空，仍会按现有校验失败。
 - `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 `bootstrap_nodes` 项都必须是合法且端口在 `1..65535` 的 `host:port`。
 - `cache.capacity_bytes` 必须大于零；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
 - `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，日志 level/format 只能使用上表值。
 - HTTP listener 为空表示关闭；非空值必须是合法的 `host:port`。非 loopback listener 必须同时启用完整认证配置。
-- 认证关闭时 username、password hash 和 hash file 必须全为空；认证开启时 username 非空、token TTL 为 `>0` 且 `<=24h`，并且 `password_hash` 与 `password_hash_file` 必须恰好设置一个。
-- bcrypt hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost，不能把明文密码放入配置或环境变量。
+- 认证关闭时 TOML 中的 username、password hash 和 hash file 必须全为空；认证开启且未使用共享 pair 时，`password_hash` 与 `password_hash_file` 必须恰好设置一个。
+- TOML hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。共享密码位于进程环境中，容器 metadata 也可能可见，不应将 Docker environment 当作 secret store。
 
 `TORRENTFS_FUSE_REQUIRED` 不是 daemon 配置，而是测试门禁。`TORRENTFS_PATHS_DATA_DIR` 是已移除的历史变量，不会恢复旧的磁盘 payload 路径。
 
@@ -496,26 +497,36 @@ docker run --rm torrentfs
 ./scripts/docker-config-smoke.sh
 ```
 
-该脚本还需要 `awk` 和 `timeout`；外部 TOML 以只读方式挂载，但 `/torrents` 仍必须可写。
+该脚本还需要 `awk` 和 `timeout`；外部 TOML 以只读方式挂载，但 `/torrents` 仍必须可写。脚本同时检查 SMB 凭据缺失、非法用户名和 UID 不匹配时在启动 listener 前失败。
+
+SMB 与组合模式的真实协议检查使用：
+
+```sh
+./scripts/docker-smb-smoke.sh
+```
+
+它覆盖 SMB-only、HTTP+SMB 共用同一组明文凭据、错误密码、guest 拒绝、只读和日志不泄密。
 
 ### 构建并运行 HTTP 服务
 
-公开容器 listener 前必须配置认证。下面的命令使用 bind-mounted bcrypt hash 文件；请先创建该文件并将 `<bcrypt-hash>` 替换为真实 hash，不要把明文密码写入环境变量：
+公开容器 listener 前必须配置认证。下面的命令从交互式输入读取一组共享明文凭据；Docker `--env NAME` 形式只把已导出的变量传入容器，不把密码字面量放入命令行：
 
 ```sh
-mkdir -p /srv/torrents /srv/secrets
-# /srv/secrets/torrentfs-password-hash 只包含一行 bcrypt hash，权限应为 600
+mkdir -p /srv/torrents
+export TORRENTFS_USERNAME=alice
+read -r -s -p 'HTTP password: ' TORRENTFS_PASSWORD; printf '\n'
+export TORRENTFS_PASSWORD
 
 docker run --rm \
   --publish 8080:8080 \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
-  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/password-hash,readonly \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_HTTP_AUTH_USERNAME=alice \
-  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
-  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/password-hash \
+  --env TORRENTFS_USERNAME \
+  --env TORRENTFS_PASSWORD \
   torrentfs
+
+unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
 ```
 
 镜像内置的默认命令使用 `/torrents` 和 `/etc/torrentfs/torrentfs.toml`；环境变量会覆盖内置 TOML。`-p`/`--publish` 只发布端口，不会改变 daemon 实际监听的地址。
@@ -597,14 +608,14 @@ docker run --detach --name torrentfs \
 | 变量 | 说明 |
 | --- | --- |
 | `TORRENTFS_SMB_ENABLED` | `true`/`false`（默认 `false`）。只有严格为 `true`、`1` 时才进入 SMB 模式 |
-| `TORRENTFS_SMB_USERNAME` | 可选。默认使用镜像构建参数解析出的 torrentfs 运行账号；若覆盖，必须解析到同一个运行 UID |
-| `TORRENTFS_SMB_PASSWORD_FILE` | 启用 SMB 时必填。指向只读 secret 文件，密码只经 stdin 写入 Samba passdb |
+| `TORRENTFS_USERNAME` | 启用 SMB 时必填，必须是镜像内实际 torrentfs runtime Unix account，并解析到相同 runtime UID |
+| `TORRENTFS_PASSWORD` | 启用 SMB 时必填的非空单行明文密码；入口只通过 stdin 初始化 Samba passdb |
 
 share 名固定为 `torrentfs`，路径固定为 `/mnt/torrentfs`；`/torrents` 不会被共享，因为其中包含可写的 `.metadata`、peer identity 和锁文件。share 始终 `read only = yes`，`guest ok = no`，`map to guest = never`，只发布 TCP 445，不启动 `nmbd`，也不暴露 137/138/139。
 
-`/dev/fuse`、`SYS_ADMIN` 和 `CAP_NET_BIND_SERVICE` 是运行前提：SMB 模式下 torrentfs 和 smbd 都以镜像内解析出的专用非 root 身份运行，`CAP_NET_BIND_SERVICE` 让该身份可以绑定 445。权限方案是同 UID：Samba 用 `force user`/`force group` 映射到同一个运行身份，因此不需要 `allow_other`，FUSE 访问范围不会因为 SMB 而扩大。AppArmor/安全策略是否放行由宿主策略决定；缺少设备、capability 或 secret 时容器会在启动任何 listener 之前以非零状态失败，并输出诊断，不会退化成共享一个普通目录。
+`/dev/fuse`、`SYS_ADMIN` 和 `CAP_NET_BIND_SERVICE` 是运行前提：SMB 模式下 torrentfs 和 smbd 都以镜像内解析出的专用非 root 身份运行，`CAP_NET_BIND_SERVICE` 让该身份可以绑定 445。权限方案是同 UID：Samba 用 `force user`/`force group` 映射到同一个运行身份，因此不需要 `allow_other`，FUSE 访问范围不会因为 SMB 而扩大。AppArmor/安全策略是否放行由宿主策略决定；缺少设备、capability 或共享凭据时容器会在启动任何 listener 之前以非零状态失败，并输出诊断，不会退化成共享一个普通目录。
 
-secret 文件必须是普通、非符号链接、非空、单行、不超过 1024 字节，且不可被 group/other 读取（例如 `chmod 400`）。下面的示例同时发布 HTTP 和 SMB，因此准备了两个 secret：SMB 密码明文文件，以及 HTTP 认证用的单行 bcrypt hash 文件。两者都不提交到仓库：
+SMB 密码必须是非空单行值；入口会拒绝 CR/LF，并以明文通过 stdin 传给 `smbpasswd`，不把密码写入命令行参数、生成的 Samba 配置或日志。由于接口使用环境变量，密码会出现在容器进程环境和 Docker metadata 中，拥有 inspect 权限者可见；部署时应将 Docker environment 视为明文配置而不是 secret store。
 
 ```sh
 HOST_UID="$(id -u)"
@@ -620,29 +631,20 @@ else
 fi
 
 IMAGE=torrentfs:uid-$RUNTIME_UID
-# Use install through sudo so this also works when /srv is root:root 0755 and
-# the invoking user is not root. The runtime UID owns both bind sources.
-sudo install -d -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0755 /srv/torrents /srv/secrets
+# The runtime UID owns the bind-mounted torrents directory.
+sudo install -d -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0755 /srv/torrents
 
-# Create both files as 0400 before writing their contents. This avoids a
-# group/other-readable window, even briefly.
-sudo install -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0400 /dev/null /srv/secrets/smb-password
-sudo install -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0400 /dev/null /srv/secrets/torrentfs-password-hash
 
 docker build \
   --build-arg TORRENTFS_UID="$RUNTIME_UID" \
   --build-arg TORRENTFS_GID="$RUNTIME_GID" \
   -t "$IMAGE" .
-read -r -s -p 'SMB password: ' SMB_PASSWORD; printf '\n'
-printf '%s\n' "$SMB_PASSWORD" | sudo tee /srv/secrets/smb-password >/dev/null
-unset SMB_PASSWORD
-# Generate one bcrypt line from stdin with a throwaway helper image. The HTTP
-# password never appears in shell history or any process argv.
-read -r -s -p 'HTTP password: ' HTTP_PASSWORD; printf '\n'
-HTTP_HASH="$(printf '%s\n' "$HTTP_PASSWORD" | docker run --rm -i httpd:2.4 htpasswd -nBiC 10 '' | tr -d ':\r\n')"
-unset HTTP_PASSWORD
-printf '%s\n' "$HTTP_HASH" | sudo tee /srv/secrets/torrentfs-password-hash >/dev/null
-unset HTTP_HASH
+RUNTIME_USER="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+  'grep ^user= /etc/torrentfs/runtime-identity | cut -d= -f2')"
+[ -n "$RUNTIME_USER" ]
+export TORRENTFS_USERNAME="$RUNTIME_USER"
+read -r -s -p 'Shared HTTP/SMB password: ' TORRENTFS_PASSWORD; printf '\n'
+export TORRENTFS_PASSWORD
 
 docker run --rm \
   --device /dev/fuse \
@@ -653,26 +655,23 @@ docker run --rm \
   --publish 8080:8080 \
   --publish 6881:6881/tcp --publish 6881:6881/udp \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
-  --mount type=bind,src=/srv/secrets/smb-password,dst=/run/secrets/smb-password,readonly \
-  --mount type=bind,src=/srv/secrets/torrentfs-password-hash,dst=/run/secrets/torrentfs-password-hash,readonly \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_HTTP_AUTH_USERNAME=alice \
-  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH= \
-  --env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE=/run/secrets/torrentfs-password-hash \
   --env TORRENTFS_SMB_ENABLED=true \
-  --env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/smb-password \
+  --env TORRENTFS_USERNAME \
+  --env TORRENTFS_PASSWORD \
   "$IMAGE"
+
+unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
 ```
 
-The `sudo chown` steps are intentional: torrentfs writes `/torrents/.metadata`
-with the image runtime UID, while the HTTP hash is read after torrentfs drops
-privileges. If the host user is not root, they must be able to run these
-ownership commands (or pre-create the directories/files with the same numeric
+The `sudo install` step is intentional: torrentfs writes `/torrents/.metadata`
+with the image runtime UID. If the host user is not root, they must be able to
+run this ownership command (or pre-create the directory with the same numeric
 UID/GID). The root-host example deliberately uses UID/GID 1500; SMB mode rejects
 runtime UID 0.
 
-如果只需要 SMB，可以省略 `--publish 8080`、`--env TORRENTFS_HTTP_*` 和 `--env TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE` 三组 HTTP 参数：镜像内置的 HTTP listener 保持 container-local `127.0.0.1:8080`，不发布即可。
+如果只需要 SMB，可以省略 `--publish 8080` 以及 HTTP listener/auth 相关参数；仍必须传入同一组 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`，而 Go 配置层会忽略这组 pair。镜像内置的 HTTP listener 保持 container-local `127.0.0.1:8080`，不发布即可。
 
 身份与退出语义：
 
