@@ -629,10 +629,10 @@ func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
 		}
 		st.tor.Drop()
 	}
-	if err := s.removeFinalMetainfo(hash); err != nil {
+	if err := s.removeFinalMetainfoForDelete(hash); err != nil {
 		errs = append(errs, err)
 	}
-	if err := s.removePendingMagnet(hash); err != nil {
+	if err := s.removePendingMagnetForDelete(hash); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

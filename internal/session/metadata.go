@@ -17,6 +17,7 @@ import (
 
 var (
 	errInvalidPendingMagnet  = errors.New("session: invalid pending magnet")
+	errForeignOwnedPath      = errors.New("session: registry path contains a different torrent")
 	pendingMagnetCleanupHook func(metainfo.Hash) error
 )
 
@@ -256,6 +257,66 @@ func (s *Session) removeFinalMetainfo(hash metainfo.Hash) error {
 		return fmt.Errorf("session: validate metainfo %s: %w", hash, err)
 	}
 	return removeRegularFile(path)
+}
+
+func (s *Session) removeFinalMetainfoForDelete(hash metainfo.Hash) error {
+	path := s.finalMetainfoPath(hash)
+	if _, err := requireRegularFile(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := finalMetainfoDeleteStatus(path, hash); err != nil {
+		return err
+	}
+	return removeRegularFile(path)
+}
+
+func finalMetainfoDeleteStatus(path string, expected metainfo.Hash) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	mi, err := metainfo.Load(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
+	if err != nil {
+		return nil
+	}
+	if spec.InfoHash != expected {
+		return fmt.Errorf("%w: %s contains %s, expected %s", errForeignOwnedPath, path, spec.InfoHash, expected)
+	}
+	return nil
+}
+
+func (s *Session) removePendingMagnetForDelete(hash metainfo.Hash) error {
+	path := s.pendingMagnetPath(hash)
+	if _, err := requireRegularFile(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := pendingMagnetDeleteStatus(path, hash); err != nil {
+		return err
+	}
+	return removeRegularFile(path)
+}
+
+func pendingMagnetDeleteStatus(path string, expected metainfo.Hash) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	spec, err := specFromSource(Source{MagnetURI: strings.TrimSpace(string(data))})
+	if err != nil {
+		return nil
+	}
+	if spec.InfoHash != expected {
+		return fmt.Errorf("%w: %s contains %s, expected %s", errForeignOwnedPath, path, spec.InfoHash, expected)
+	}
+	return nil
 }
 
 func (s *Session) updateReadyState(hash metainfo.Hash, name string) error {

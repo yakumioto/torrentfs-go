@@ -441,6 +441,89 @@ func TestDeleteFailedRetrySucceedsAfterUnknownFinalIsRemoved(t *testing.T) {
 	}
 }
 
+func TestDeleteCleansCorruptRegistryOwnedFiles(t *testing.T) {
+	ctx := testTimeout(t)
+	t.Run("final metainfo", func(t *testing.T) {
+		work := t.TempDir()
+		torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+		torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("corrupt final"), nil)
+		sess := newManageSession(t, torrentsDir)
+		if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		finalPath := filepath.Join(torrentsDir, hash.HexString()+".torrent")
+		if err := os.WriteFile(finalPath, []byte("not bencoded metainfo"), 0o644); err != nil {
+			t.Fatalf("corrupt final: %v", err)
+		}
+		op, err := sess.DeleteTorrent(ctx, hash.HexString())
+		if err != nil {
+			t.Fatalf("delete corrupt final: %v", err)
+		}
+		if result := waitOperation(t, sess, op.ID); result.State != session.StateDeleted {
+			t.Fatalf("delete corrupt final state = %s (%s), want deleted", result.State, result.Error)
+		}
+		if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("corrupt final survived deletion: %v", err)
+		}
+	})
+
+	t.Run("pending magnet", func(t *testing.T) {
+		work := t.TempDir()
+		torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+		hexHash := strings.Repeat("e", 40)
+		hash := metainfo.NewHashFromHex(hexHash)
+		sess := newManageSession(t, torrentsDir)
+		magnet := "magnet:?xt=urn:btih:" + hexHash
+		if _, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: magnet}); err != nil {
+			t.Fatalf("add magnet: %v", err)
+		}
+		pendingPath := filepath.Join(torrentsDir, ".metadata", "pending", hexHash+".magnet")
+		if err := os.WriteFile(pendingPath, []byte("not a magnet"), 0o644); err != nil {
+			t.Fatalf("corrupt pending magnet: %v", err)
+		}
+		op, err := sess.DeleteTorrent(ctx, hash.HexString())
+		if err != nil {
+			t.Fatalf("delete corrupt pending: %v", err)
+		}
+		if result := waitOperation(t, sess, op.ID); result.State != session.StateDeleted {
+			t.Fatalf("delete corrupt pending state = %s (%s), want deleted", result.State, result.Error)
+		}
+		if _, err := os.Stat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("corrupt pending magnet survived deletion: %v", err)
+		}
+	})
+}
+
+func TestDeletePreservesValidDifferentHashReplacement(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("owned final"), nil)
+	foreignBytes, foreignHash := buildSingleFileTorrentBytes(t, "foreign.bin", []byte("foreign final"), nil)
+	sess := newManageSession(t, torrentsDir)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	finalPath := filepath.Join(torrentsDir, hash.HexString()+".torrent")
+	if err := os.WriteFile(finalPath, foreignBytes, 0o644); err != nil {
+		t.Fatalf("replace final: %v", err)
+	}
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
+	if err != nil {
+		t.Fatalf("delete replacement: %v", err)
+	}
+	result := waitOperation(t, sess, op.ID)
+	if result.State != session.StateDeleteFailed {
+		t.Fatalf("delete replacement state = %s (%s), want delete_failed", result.State, result.Error)
+	}
+	if _, err := os.Stat(finalPath); err != nil {
+		t.Fatalf("different-hash replacement was removed: %v", err)
+	}
+	if foreignHash == hash {
+		t.Fatal("test fixture hashes unexpectedly match")
+	}
+}
+
 func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
