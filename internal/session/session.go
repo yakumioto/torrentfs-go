@@ -55,6 +55,7 @@ type Session struct {
 	logger *slog.Logger
 
 	pieceCache     *cache.Cache
+	pieceStore     *piecestore.Store
 	prefetchBudget *prefetchBudget
 	mu             sync.RWMutex
 	state          lifecycle
@@ -231,6 +232,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cfg:             cfg,
 		logger:          logger,
 		pieceCache:      pieceCache,
+		pieceStore:      pieceStore,
 		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),
 		closeDone:       make(chan struct{}),
 		torrents:        make(map[metainfo.Hash]*Torrent),

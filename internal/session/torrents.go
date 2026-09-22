@@ -301,6 +301,9 @@ func (t *Torrent) close() error {
 			errs = append(errs, fmt.Errorf("close torrent reader: %w", err))
 		}
 	}
+	if t.session != nil && t.session.pieceStore != nil {
+		t.session.pieceStore.CloseTorrent(t.InfoHash().HexString())
+	}
 	if t.cache != nil {
 		t.cache.InvalidateTorrent(t.InfoHash().HexString())
 	}

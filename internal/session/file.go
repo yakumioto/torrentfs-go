@@ -64,6 +64,8 @@ type pieceFetcher struct {
 	rootContext context.Context
 	rootCancel  context.CancelFunc
 	inflight    map[int]*pieceFlight
+	flights     map[*pieceFlight]struct{}
+	runFlightFn func(*pieceFlight, int64, int64)
 	closed      bool
 }
 
@@ -94,6 +96,7 @@ func newPieceFetcher(t *torrent.Torrent, c *cache.Cache) *pieceFetcher {
 		rootContext: ctx,
 		rootCancel:  cancel,
 		inflight:    make(map[int]*pieceFlight),
+		flights:     make(map[*pieceFlight]struct{}),
 	}
 }
 
@@ -161,7 +164,15 @@ func (f *pieceFetcher) joinFlight(index int, start, length int64) (*pieceFlight,
 		waiters: 1,
 	}
 	f.inflight[index] = flight
-	go f.runFlight(flight, start, length)
+	if f.flights == nil {
+		f.flights = make(map[*pieceFlight]struct{})
+	}
+	f.flights[flight] = struct{}{}
+	runFlight := f.runFlightFn
+	if runFlight == nil {
+		runFlight = f.runFlight
+	}
+	go runFlight(flight, start, length)
 	return flight, nil
 }
 
@@ -195,6 +206,7 @@ func (f *pieceFetcher) runFlight(flight *pieceFlight, start, length int64) {
 	if current, ok := f.inflight[flight.index]; ok && current == flight {
 		delete(f.inflight, flight.index)
 	}
+	delete(f.flights, flight)
 	close(flight.done)
 	f.mu.Unlock()
 	flight.cancel()
@@ -206,6 +218,9 @@ func (f *pieceFetcher) detachFlight(flight *pieceFlight) {
 		flight.waiters--
 	}
 	if flight.waiters == 0 && !flight.finished {
+		if current, ok := f.inflight[flight.index]; ok && current == flight {
+			delete(f.inflight, flight.index)
+		}
 		flight.cancel()
 	}
 	f.mu.Unlock()
@@ -219,8 +234,8 @@ func (f *pieceFetcher) Close() error {
 	}
 	f.closed = true
 	f.rootCancel()
-	flights := make([]*pieceFlight, 0, len(f.inflight))
-	for _, flight := range f.inflight {
+	flights := make([]*pieceFlight, 0, len(f.flights))
+	for flight := range f.flights {
 		flight.cancel()
 		flights = append(flights, flight)
 	}

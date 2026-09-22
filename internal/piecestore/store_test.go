@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
@@ -487,6 +488,42 @@ func TestCloseDropsStaging(t *testing.T) {
 // TestStorePerTorrentCloseDropsStaging proves a dropped torrent leaves no
 // staging bookkeeping behind, while another torrent's staging is untouched and
 // verified resident data survives in the cache.
+// TestCloseTorrentDrainsConcurrentPromotion ensures cache invalidation cannot
+// race a verified promotion from the torrent lifetime being torn down.
+func TestCloseTorrentDrainsConcurrentPromotion(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{15}
+	_, piece := openPiece(t, store, hash, pieceLength)
+	if _, err := piece.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	hashPiece(t, piece, pieceLength)
+
+	completeDone := make(chan error, 1)
+	go func() { completeDone <- piece.MarkComplete() }()
+	closedDone := make(chan struct{})
+	go func() {
+		store.CloseTorrent(hash.HexString())
+		c.InvalidateTorrent(hash.HexString())
+		close(closedDone)
+	}()
+	select {
+	case <-closedDone:
+	case <-time.After(time.Second):
+		t.Fatal("CloseTorrent did not drain the concurrent promotion")
+	}
+	if err := <-completeDone; err != nil && !errors.Is(err, errTorrentClosed) {
+		t.Fatalf("concurrent MarkComplete: %v", err)
+	}
+	if c.Has(cache.Key{Torrent: hash.HexString(), Piece: 0}) {
+		t.Fatal("late promotion repopulated the invalidated torrent cache")
+	}
+	if err := piece.MarkComplete(); !errors.Is(err, errTorrentClosed) {
+		t.Fatalf("MarkComplete after CloseTorrent = %v, want errTorrentClosed", err)
+	}
+}
+
 func TestStorePerTorrentCloseDropsStaging(t *testing.T) {
 	const pieceLength = 16
 	store, c := testStore(t, 1<<20)

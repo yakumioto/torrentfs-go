@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"io"
 	"sync"
 
 	"github.com/anacrolix/missinggo/v2/pubsub"
@@ -132,12 +133,13 @@ type prefetchCoordinator struct {
 	wake   chan struct{}
 	done   chan struct{}
 
-	mu         sync.Mutex
-	closed     bool
-	anchor     prefetchAnchor
-	hasAnchor  bool
-	generation uint64
-	nextTicket uint64
+	mu           sync.Mutex
+	closed       bool
+	anchor       prefetchAnchor
+	hasAnchor    bool
+	generation   uint64
+	nextTicket   uint64
+	anchorTicket uint64
 
 	foreground map[uint64][]int
 	refs       map[int]int
@@ -251,6 +253,8 @@ func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, 
 		c.mu.Unlock()
 		return nil
 	}
+	c.nextTicket++
+	ticketID := c.nextTicket
 	if c.shouldAdvanceGenerationLocked(f, req.FileOffset) {
 		c.generation++
 		c.anchor = prefetchAnchor{
@@ -263,11 +267,11 @@ func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, 
 		}
 		c.hasAnchor = true
 		c.cancelStaleLocked(keys)
-	} else if c.hasAnchor {
-		c.anchor.cursor = clampCursor(req.FileOffset, c.anchor.fileSize)
 	}
-	c.nextTicket++
-	ticket := &foregroundTicket{coordinator: c, id: c.nextTicket, generation: c.generation, file: f}
+	if c.hasAnchor {
+		c.anchorTicket = ticketID
+	}
+	ticket := &foregroundTicket{coordinator: c, id: ticketID, generation: c.generation, file: f}
 	for _, index := range keys {
 		if c.retainLocked(index) {
 			ticket.keys = append(ticket.keys, index)
@@ -285,7 +289,7 @@ func (c *prefetchCoordinator) finishForeground(ticket *foregroundTicket, off int
 		c.mu.Unlock()
 		return
 	}
-	if err == nil && n > 0 && ticket.generation == c.generation && c.hasAnchor && c.anchor.file == ticket.file {
+	if n > 0 && (err == nil || err == io.EOF) && ticket.generation == c.generation && ticket.id == c.anchorTicket && c.hasAnchor && c.anchor.file == ticket.file {
 		c.anchor.cursor = clampCursor(off+int64(n), c.anchor.fileSize)
 	}
 	for _, index := range c.foreground[ticket.id] {

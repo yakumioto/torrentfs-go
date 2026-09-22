@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
@@ -291,6 +292,7 @@ func TestPrefetchForegroundTicketIsIdempotent(t *testing.T) {
 		t.Fatal("test pin was refused")
 	}
 	c.nextTicket = 1
+	c.anchorTicket = 1
 	c.foreground[1] = []int{0}
 	ticket := &foregroundTicket{coordinator: c, id: 1, generation: 0}
 	ticket.finish(0, 8, nil)
@@ -303,6 +305,44 @@ func TestPrefetchForegroundTicketIsIdempotent(t *testing.T) {
 	}
 	if got := c.anchor.cursor; got != 8 {
 		t.Fatalf("cursor = %d after a successful finish, want 8", got)
+	}
+}
+
+// TestPrefetchForegroundEOFCommitsProgress treats a positive short read at the
+// file end as successful cursor progress, matching io.ReaderAt callers.
+func TestPrefetchForegroundEOFCommitsProgress(t *testing.T) {
+	c := newTestCoordinator(cache.New(1 << 20))
+	c.hasAnchor = true
+	c.anchor = prefetchAnchor{fileSize: 100, pieceLength: 32, torrentSize: 100}
+	c.generation = 3
+	c.anchorTicket = 1
+	c.foreground[1] = nil
+
+	ticket := &foregroundTicket{coordinator: c, id: 1, generation: 3}
+	ticket.finish(90, 10, io.EOF)
+	if c.anchor.cursor != 100 {
+		t.Fatalf("cursor = %d after a positive EOF read, want 100", c.anchor.cursor)
+	}
+}
+
+// TestPrefetchForegroundCompletionOrderDoesNotRewindCursor makes a newer
+// same-generation foreground request the only completion allowed to advance
+// the shared anchor.
+func TestPrefetchForegroundCompletionOrderDoesNotRewindCursor(t *testing.T) {
+	c := newTestCoordinator(cache.New(1 << 20))
+	c.hasAnchor = true
+	c.anchor = prefetchAnchor{fileSize: 1024, pieceLength: 32, torrentSize: 1024, cursor: 10}
+	c.generation = 4
+	c.anchorTicket = 2
+	c.foreground[1] = nil
+	c.foreground[2] = nil
+
+	newer := &foregroundTicket{coordinator: c, id: 2, generation: 4}
+	older := &foregroundTicket{coordinator: c, id: 1, generation: 4}
+	newer.finish(200, 20, nil)
+	older.finish(10, 10, nil)
+	if c.anchor.cursor != 220 {
+		t.Fatalf("cursor = %d after out-of-order completion, want 220", c.anchor.cursor)
 	}
 }
 
