@@ -15,7 +15,10 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-var errInvalidPendingMagnet = errors.New("session: invalid pending magnet")
+var (
+	errInvalidPendingMagnet  = errors.New("session: invalid pending magnet")
+	pendingMagnetCleanupHook func(metainfo.Hash) error
+)
 
 type managedMagnet struct {
 	uri string
@@ -233,6 +236,11 @@ func (s *Session) removePendingMagnet(hash metainfo.Hash) error {
 	}
 	if _, _, err := readPendingMagnet(path, hash); err != nil {
 		return fmt.Errorf("%w %s: %v", errInvalidPendingMagnet, hash, err)
+	}
+	if pendingMagnetCleanupHook != nil {
+		if err := pendingMagnetCleanupHook(hash); err != nil {
+			return err
+		}
 	}
 	return removeRegularFile(path)
 }

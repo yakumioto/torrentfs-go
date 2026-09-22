@@ -46,10 +46,11 @@ directory tree. The mount is data only and every path in it is read-only:
 there is no metadata/ or stats/ control directory.
 
 Managing torrents happens over the HTTP API: add by upload or magnet, list,
-delete, and query per-torrent piece status. Durable metainfo, pending magnet
-intents, and registry state live in <torrents-dir>/.metadata and the canonical
-metainfo files in <torrents-dir>, all of which are implementation details and
-are never mounted.
+delete, and query per-torrent piece status. Canonical metainfo is stored only
+at <torrents-dir>/<infohash>.torrent. The .metadata directory stores pending
+magnet intents, registry state, peer identity, the layout marker, and the
+instance lock; all of these paths are implementation details and are never
+mounted.
 
 When http.listen_addr is set the management API is served; an enabled
 http.auth configuration is required for non-loopback listeners. Omitting

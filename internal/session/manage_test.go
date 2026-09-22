@@ -392,6 +392,55 @@ func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
 	}
 }
 
+func TestDeleteFailedRetrySucceedsAfterUnknownFinalIsRemoved(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("delete retry"), nil)
+	sess := newManageSession(t, torrentsDir)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	finalPath := filepath.Join(torrentsDir, hash.HexString()+".torrent")
+	if err := os.Remove(finalPath); err != nil {
+		t.Fatalf("remove final before failure: %v", err)
+	}
+	if err := os.Mkdir(finalPath, 0o755); err != nil {
+		t.Fatalf("create unknown final path: %v", err)
+	}
+
+	first, err := sess.DeleteTorrent(ctx, hash.HexString())
+	if err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	failed := waitOperation(t, sess, first.ID)
+	if failed.State != session.StateDeleteFailed {
+		t.Fatalf("first delete state = %s (%s), want delete_failed", failed.State, failed.Error)
+	}
+	view, err := sess.TorrentViewFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("view after failed delete: %v", err)
+	}
+	if view.State != session.StateDeleteFailed {
+		t.Fatalf("registry state = %s, want delete_failed", view.State)
+	}
+	if err := os.Remove(finalPath); err != nil {
+		t.Fatalf("remove unknown final path: %v", err)
+	}
+
+	second, err := sess.DeleteTorrent(ctx, hash.HexString())
+	if err != nil {
+		t.Fatalf("retry delete: %v", err)
+	}
+	deleted := waitOperation(t, sess, second.ID)
+	if deleted.State != session.StateDeleted {
+		t.Fatalf("retry delete state = %s (%s), want deleted", deleted.State, deleted.Error)
+	}
+	if _, err := sess.TorrentViewFor(hash.HexString()); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("view after successful retry = %v, want unknown torrent", err)
+	}
+}
+
 func TestLateMetadataFetchDoesNotResurrectDeletedTorrent(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()

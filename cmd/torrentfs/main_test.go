@@ -490,9 +490,12 @@ func TestUsageDescribesAPIOnlyTorrentManagement(t *testing.T) {
 	if strings.Contains(usageText, "scanned "+"at startup") || strings.Contains(usageText, "while "+"running") {
 		t.Fatalf("usage still describes directory scanning: %q", usageText)
 	}
-	for _, want := range []string{"HTTP API", "root .torrent files", "ignored"} {
+	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage = %q, want %q", usageText, want)
 		}
+	}
+	if strings.Contains(usageText, "Durable metainfo") {
+		t.Fatalf("usage still ambiguously places metainfo in .metadata: %q", usageText)
 	}
 }

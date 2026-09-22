@@ -276,6 +276,7 @@ canonical_torrent="$torrents_dir/$torrent_hash.torrent"
 mv -- "$work_dir/build.torrent" "$canonical_torrent"
 cp -- "$canonical_torrent" "$torrents_dir/manual-copy.torrent"
 mkdir -p "$torrents_dir/.metadata/state" "$torrents_dir/.metadata/pending"
+chmod 0777 "$torrents_dir/.metadata" "$torrents_dir/.metadata/state" "$torrents_dir/.metadata/pending"
 printf '2\n' > "$torrents_dir/.metadata/layout_version"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$torrents_dir/.metadata/state/$torrent_hash.json" <<EOF
