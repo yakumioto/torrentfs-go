@@ -109,9 +109,20 @@ printf 'docker config smoke: building %s\n' "$image"
 timeout 1800 docker build --tag "$image" . >/dev/null
 
 timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
-	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents' \
-	|| fail 'image is missing its readable default configuration or runtime directories'
-printf 'docker config smoke: image default configuration is readable\n'
+	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && \
+	 test -r /etc/torrentfs/runtime-identity && \
+	 command -v smbd >/dev/null && command -v smbpasswd >/dev/null && command -v testparm >/dev/null && \
+	 testparm -s /etc/samba/torrentfs-smb.conf >/dev/null' \
+	|| fail 'image is missing its readable configuration, runtime identity, or Samba tools'
+[[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Entrypoint}}')" == \
+	'["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]' ]] ||
+	fail 'image entrypoint is not the tini-wrapped torrentfs entrypoint'
+[[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Cmd}}')" == \
+	'["-config","/etc/torrentfs/torrentfs.toml","/torrents"]' ]] ||
+	fail 'image CMD changed from the documented default'
+timeout 30 docker image inspect "$image" --format '{{json .Config.ExposedPorts}}' |
+	grep -F '"445/tcp"' >/dev/null || fail 'image does not expose 445/tcp'
+printf 'docker config smoke: image default configuration and Samba contract are readable\n'
 
 # Debian bookworm already has UID 0 and GID 100; this catches regressions that
 # unconditionally run useradd/groupadd for the requested numeric IDs.
@@ -129,12 +140,24 @@ printf 'docker config smoke: starting with the image default CMD\n'
 docker run --detach --name "$default_container" "$image" >/dev/null
 wait_running "$default_container"
 timeout 10 docker exec "$default_container" /bin/sh -c \
-	'test -d /torrents && test -r /etc/torrentfs/torrentfs.toml' \
-	|| fail 'default container cannot access its configured runtime paths'
+	'test -d /torrents && test -r /etc/torrentfs/torrentfs.toml && \
+	 test ! -e /run/samba/smbd.pid && test ! -e /var/lib/samba/private/passdb.tdb' \
+	|| fail 'default container changed its HTTP-only behavior or started Samba implicitly'
 stop_clean "$default_container"
 printf 'docker config smoke: default CMD stayed running and stopped cleanly\n'
 
 default_container=''
+printf 'docker config smoke: checking that incomplete SMB prerequisites fail closed\n'
+smb_preflight_status=0
+smb_preflight_output="$(timeout 30 docker run --rm \
+	--env TORRENTFS_SMB_ENABLED=true \
+	--env TORRENTFS_SMB_PASSWORD_FILE=/run/secrets/missing \
+	"$image" 2>&1)" || smb_preflight_status=$?
+[[ "$smb_preflight_status" != 0 ]] || fail 'SMB mode unexpectedly started without /dev/fuse or its secret'
+[[ "$smb_preflight_output" == *'/dev/fuse'* || "$smb_preflight_output" == *'password file'* ]] ||
+	fail "SMB preflight failure lacked a stable diagnostic: $smb_preflight_output"
+printf 'docker config smoke: SMB prerequisite failure was rejected before startup\n'
+
 printf 'docker config smoke: starting with environment overrides only\n'
 docker run --detach --name "$env_container" \
 	--publish 127.0.0.1::8080 \

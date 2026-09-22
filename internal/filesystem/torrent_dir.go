@@ -27,6 +27,7 @@ func (n *torrentDirNode) entries() []fsEntry {
 
 func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o555
+	out.Nlink = 2
 	return 0
 }
 

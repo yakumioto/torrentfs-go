@@ -23,6 +23,7 @@ type torrentFileNode struct {
 func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o444
 	out.Size = uint64(n.size)
+	out.Nlink = 1
 	return 0
 }
 
@@ -76,6 +77,15 @@ func (h *readHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	}
 	if err != nil && err != io.EOF {
 		return nil, errnoFor(err)
+	}
+	if n < len(dest) && off+int64(n) < h.size {
+		// A short read that stops before the end of the file is a failed read,
+		// not end of file: the data exists, it just was not produced. Reporting
+		// it as a successful short read makes the kernel zero-fill the rest of
+		// the page and mark it up to date, so every later read of that page
+		// returns those zeros. An error leaves the page uncached so a retry can
+		// still produce the real bytes.
+		return nil, errnoFor(io.ErrUnexpectedEOF)
 	}
 	return fuse.ReadResultData(dest[:n]), 0
 }

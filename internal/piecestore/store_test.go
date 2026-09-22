@@ -37,6 +37,19 @@ func openPiece(t *testing.T, store *Store, hash metainfo.Hash, pieceLength int64
 
 // singlePieceInfo returns a one-piece, single-file v1 info. The zero-value
 // Info cannot be used directly: its length helpers walk the file list.
+func hashPiece(t *testing.T, piece storage.PieceImpl, want int64) {
+	t.Helper()
+	writer, ok := piece.(io.WriterTo)
+	if !ok {
+		t.Fatal("piece does not expose the hash WriteTo path")
+	}
+	var sink bytes.Buffer
+	n, err := writer.WriteTo(&sink)
+	if err != nil || n != want {
+		t.Fatalf("hash WriteTo = (%d, %v), want (%d, nil)", n, err, want)
+	}
+}
+
 func singlePieceInfo(pieceLength int64) *metainfo.Info {
 	return &metainfo.Info{
 		Name:        "t",
@@ -94,6 +107,7 @@ func TestPieceWriteReadCompleteLifecycle(t *testing.T) {
 	if n, err := piece.ReadAt(got, 4); n != 4 || err != nil || string(got) != "efgh" {
 		t.Fatalf("staging read = (%d, %v, %q), want (4, nil, efgh)", n, err, got)
 	}
+	hashPiece(t, piece, int64(pieceLength))
 
 	if err := piece.MarkComplete(); err != nil {
 		t.Fatalf("MarkComplete: %v", err)
@@ -244,6 +258,208 @@ func TestReadAtConcurrentWithWriteAt(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestStagingReadRejectsUnreceivedWindows pins the contract that keeps a
+// streaming read honest: a window that includes bytes a peer has not delivered
+// yet reports the piece as missing. Returning the zero fill instead let
+// anacrolix's reader copy unwritten bytes into the file.
+func TestMarkCompleteCannotPromoteAStaleStagingGeneration(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{12}
+	key, first := openPiece(t, store, hash, pieceLength)
+	_, second := openPiece(t, store, hash, pieceLength)
+
+	if _, err := first.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("first WriteAt: %v", err)
+	}
+	hashPiece(t, first, int64(pieceLength))
+	if err := first.MarkComplete(); err != nil {
+		t.Fatalf("first MarkComplete: %v", err)
+	}
+	if _, ok := c.Get(key); !ok {
+		t.Fatal("first generation was not promoted")
+	}
+
+	// A new PieceImpl starts a new download generation and invalidates the old
+	// resident value before its replacement arrives.
+	if _, err := second.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("second WriteAt: %v", err)
+	}
+	hashPiece(t, second, int64(pieceLength))
+	completeDone := make(chan error, 1)
+	go func() { completeDone <- first.MarkComplete() }()
+	if err := <-completeDone; err == nil {
+		t.Fatal("stale PieceImpl promoted a newer staging generation")
+	}
+	if c.Has(key) {
+		t.Fatal("stale completion restored the old resident value")
+	}
+	if err := second.MarkComplete(); err != nil {
+		t.Fatalf("second MarkComplete: %v", err)
+	}
+	got, ok := c.Get(key)
+	if !ok || string(got) != "corrupt!" {
+		t.Fatalf("resident generation = (%q, %t), want corrupt!", got, ok)
+	}
+}
+
+func TestFreshPieceImplsKeepObservedEpoch(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{14}
+	info := singlePieceInfo(pieceLength)
+	impl, err := store.OpenTorrent(context.Background(), info, hash)
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	newPiece := func() storage.PieceImpl {
+		return impl.PieceWithHash(info.Piece(0), g.None[[]byte]())
+	}
+
+	// A arrives in chunks; the mark is deliberately delayed until after the
+	// stale reader and replacement sequence below.
+	writerA := newPiece()
+	if _, err := writerA.WriteAt([]byte("veri"), 0); err != nil {
+		t.Fatalf("writer A prefix: %v", err)
+	}
+	stale := newPiece() // observes epoch A before the hash completion
+	if _, err := writerA.WriteAt([]byte("fied"), 4); err != nil {
+		t.Fatalf("writer A suffix: %v", err)
+	}
+	hashA := newPiece()
+	hashPiece(t, hashA, int64(pieceLength)) // the only verified token for A
+
+	// The stale reader removes A. A new corrupt generation arrives, and an
+	// ordinary streaming read observes B. That read must not manufacture a hash
+	// token for B.
+	if err := stale.MarkNotComplete(); err != nil {
+		t.Fatalf("stale MarkNotComplete: %v", err)
+	}
+	writerB := newPiece()
+	if _, err := writerB.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("writer B: %v", err)
+	}
+	ordinaryB := newPiece()
+	readB := make([]byte, pieceLength)
+	if n, err := ordinaryB.ReadAt(readB, 0); n != pieceLength || err != nil || string(readB) != "corrupt!" {
+		t.Fatalf("ordinary B read = (%d, %v, %q)", n, err, readB)
+	}
+	// This is the same fresh storage object creation point used by
+	// pieceHashed immediately before it calls MarkComplete.
+	freshCompleteA := newPiece()
+	if err := freshCompleteA.MarkComplete(); err == nil {
+		t.Fatal("fresh MarkComplete for A promoted ordinary-read B")
+	}
+	if c.Has(cache.Key{Torrent: hash.HexString(), Piece: 0}) {
+		t.Fatal("unverified B generation entered the cache")
+	}
+
+	// B can only become resident after its own actual hash WriteTo issues a new
+	// token.
+	freshHashB := newPiece()
+	hashPiece(t, freshHashB, int64(pieceLength))
+	if err := newPiece().MarkComplete(); err != nil {
+		t.Fatalf("fresh MarkComplete B: %v", err)
+	}
+	got, ok := c.Get(cache.Key{Torrent: hash.HexString(), Piece: 0})
+	if !ok || string(got) != "corrupt!" {
+		t.Fatalf("verified B resident = (%q, %t), want corrupt!", got, ok)
+	}
+}
+
+func TestResidentReadCannotAuthorizeDifferentStagingGeneration(t *testing.T) {
+	const pieceLength = 8
+	store, c := testStore(t, 1<<20)
+	hash := metainfo.Hash{13}
+	key, piece := openPiece(t, store, hash, pieceLength)
+	if _, err := piece.WriteAt([]byte("verified"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	hashPiece(t, piece, int64(pieceLength))
+	if err := piece.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete: %v", err)
+	}
+
+	// A normal resident read happens before a replacement staging generation
+	// starts. It must not authorize that replacement's MarkComplete.
+	resident := make([]byte, pieceLength)
+	if n, err := piece.ReadAt(resident, 0); n != pieceLength || err != nil || string(resident) != "verified" {
+		t.Fatalf("resident read = (%d, %v, %q)", n, err, resident)
+	}
+	if _, err := piece.WriteAt([]byte("corrupt!"), 0); err != nil {
+		t.Fatalf("replacement WriteAt: %v", err)
+	}
+	if err := piece.MarkComplete(); err == nil {
+		t.Fatal("replacement was completed without a hash read of its generation")
+	}
+	if c.Has(key) {
+		t.Fatal("replacement failure restored a resident value")
+	}
+}
+
+func TestStagingReadRejectsUnreceivedWindows(t *testing.T) {
+	const pieceLength = 8
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{10}, pieceLength)
+
+	// Only the second half has arrived.
+	if _, err := piece.WriteAt([]byte("efgh"), 4); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		off  int64
+		size int64
+	}{
+		{name: "window covering the gap", off: 0, size: pieceLength},
+		{name: "window ending in the gap", off: 0, size: 6},
+		{name: "window straddling the boundary", off: 2, size: 4},
+	} {
+		buf := bytes.Repeat([]byte{'?'}, int(tc.size))
+		n, err := piece.ReadAt(buf, tc.off)
+		if n != 0 || !errors.Is(err, io.EOF) {
+			t.Fatalf("%s: ReadAt(%d, %d) = (%d, %v, %q), want (0, io.EOF)",
+				tc.name, tc.off, tc.size, n, err, buf[:n])
+		}
+	}
+
+	// A window fully inside the received range is still served before the hash
+	// check promotes the piece.
+	buf := make([]byte, 4)
+	n, err := piece.ReadAt(buf, 4)
+	if n != 4 || err != nil || string(buf[:n]) != "efgh" {
+		t.Fatalf("received window = (%d, %v, %q), want (4, nil, efgh)", n, err, buf[:n])
+	}
+}
+
+// TestStagingCoverageMergesChunks checks that out-of-order chunk arrival builds
+// a coverage map a read can trust, including adjacent and overlapping writes.
+func TestStagingCoverageMergesChunks(t *testing.T) {
+	const pieceLength = 16
+	store, _ := testStore(t, 1<<20)
+	_, piece := openPiece(t, store, metainfo.Hash{11}, pieceLength)
+
+	writes := []struct {
+		off  int64
+		data string
+	}{
+		{off: 8, data: "ijklmnop"}, // the tail arrives first
+		{off: 0, data: "abcdefgh"}, // then the head, adjacent to the tail
+	}
+	for _, w := range writes {
+		if _, err := piece.WriteAt([]byte(w.data), w.off); err != nil {
+			t.Fatalf("WriteAt(%d): %v", w.off, err)
+		}
+	}
+
+	buf := make([]byte, pieceLength)
+	n, err := piece.ReadAt(buf, 0)
+	if n != pieceLength || err != nil || string(buf[:n]) != "abcdefghijklmnop" {
+		t.Fatalf("merged coverage read = (%d, %v, %q), want the whole piece", n, err, buf[:n])
+	}
 }
 
 func TestWriteAtOutsidePieceIsRejected(t *testing.T) {

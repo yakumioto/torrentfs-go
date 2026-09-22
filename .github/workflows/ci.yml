@@ -51,6 +51,22 @@ jobs:
       - name: Run Docker configuration smoke
         run: ./scripts/docker-config-smoke.sh
 
+  # SMB mode is optional and off by default, so this job exercises the real
+  # single-container path: FUSE mount, authenticated read-only share, guest and
+  # write denial, bounded SIGTERM order, and failure propagation. The script
+  # reports it explicitly when the host kernel cannot mount CIFS at all; the
+  # FUSE large-offset test above remains the required random-read gate there,
+  # and a host that can mount CIFS must also pass the ranged comparison.
+  docker-smb:
+    name: Docker single-container SMB smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run single-container SMB smoke
+        run: ./scripts/docker-smb-smoke.sh
+
   # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
   # skipping every real-mount test.

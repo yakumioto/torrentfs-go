@@ -30,9 +30,79 @@ type Store struct {
 	cache    *cache.Cache
 	logger   *slog.Logger
 
-	mu      sync.Mutex
-	staging map[cache.Key][]byte
-	closed  bool
+	mu             sync.Mutex
+	staging        map[cache.Key]*stagingBuffer
+	lastRead       map[cache.Key]uint64
+	epochs         map[cache.Key]uint64
+	verifiedEpoch  map[cache.Key]uint64
+	nextGeneration uint64
+	closed         bool
+}
+
+// byteRange is a half-open [start, end) span of a piece that has been received.
+type byteRange struct {
+	start int64
+	end   int64
+}
+
+// stagingBuffer accumulates the chunks of one piece that a peer has delivered.
+// received tracks which byte ranges actually arrived, so a read can never be
+// served the zero fill of a region that is still in flight.
+type stagingBuffer struct {
+	generation uint64
+	data       []byte
+	received   []byteRange
+}
+
+// write copies a received chunk and records the range it covers.
+func (b *stagingBuffer) write(off int64, src []byte) {
+	n := copy(b.data[off:], src)
+	if n > 0 {
+		b.cover(off, off+int64(n))
+	}
+}
+
+// cover merges [start, end) into the received ranges, which stay sorted and
+// disjoint.
+func (b *stagingBuffer) cover(start, end int64) {
+	if start >= end {
+		return
+	}
+	merged := make([]byteRange, 0, len(b.received)+1)
+	placed := false
+	for _, span := range b.received {
+		switch {
+		case span.end < start: // strictly before the new range
+			merged = append(merged, span)
+		case end < span.start: // strictly after it
+			if !placed {
+				merged = append(merged, byteRange{start: start, end: end})
+				placed = true
+			}
+			merged = append(merged, span)
+		default: // overlapping or adjacent: absorb into the new range
+			if span.start < start {
+				start = span.start
+			}
+			if span.end > end {
+				end = span.end
+			}
+		}
+	}
+	if !placed {
+		merged = append(merged, byteRange{start: start, end: end})
+	}
+	b.received = merged
+}
+
+// covers reports whether every byte of [start, end) has been received.
+func (b *stagingBuffer) covers(start, end int64) bool {
+	for _, span := range b.received {
+		if span.start <= start && end <= span.end {
+			return true
+		}
+	}
+	return false
 }
 
 var _ storage.ClientImplCloser = (*Store)(nil)
@@ -43,10 +113,13 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 		logger = logging.Discard()
 	}
 	return &Store{
-		capacity: c.Capacity(),
-		cache:    c,
-		logger:   logger,
-		staging:  make(map[cache.Key][]byte),
+		capacity:      c.Capacity(),
+		cache:         c,
+		logger:        logger,
+		staging:       make(map[cache.Key]*stagingBuffer),
+		lastRead:      make(map[cache.Key]uint64),
+		epochs:        make(map[cache.Key]uint64),
+		verifiedEpoch: make(map[cache.Key]uint64),
 	}
 }
 
@@ -75,10 +148,36 @@ func (s *Store) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash met
 	}
 	return storage.TorrentImpl{
 		PieceWithHash: func(p metainfo.Piece, _ g.Option[[]byte]) storage.PieceImpl {
-			return &piece{store: s, key: cache.Key{Torrent: key, Piece: p.Index()}, length: p.Length()}
+			pieceKey := cache.Key{Torrent: key, Piece: p.Index()}
+			return &piece{store: s, key: pieceKey, length: p.Length(), generation: s.epoch(pieceKey)}
 		},
 		Close: func() error { return nil },
 	}, nil
+}
+
+func (s *Store) epoch(key cache.Key) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epochs[key]
+}
+
+// markVerified records the token produced by the actual hash WriteTo operation.
+// Ordinary ReaderAt calls never update it.
+func (s *Store) markVerified(key cache.Key, generation uint64, length int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation == 0 || s.epochs[key] != generation {
+		return fmt.Errorf("piecestore: hash observed stale epoch %d for current %d", generation, s.epochs[key])
+	}
+	if buf := s.staging[key]; buf != nil {
+		if buf.generation != generation || !buf.covers(0, length) || s.lastRead[key] != generation {
+			return io.ErrUnexpectedEOF
+		}
+	} else if !s.cache.Has(key) {
+		return io.EOF
+	}
+	s.verifiedEpoch[key] = generation
+	return nil
 }
 
 // Close drops every staging buffer. Pieces already promoted to the cache are
@@ -87,46 +186,66 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.staging = make(map[cache.Key][]byte)
+	s.staging = make(map[cache.Key]*stagingBuffer)
+	s.lastRead = make(map[cache.Key]uint64)
+	s.epochs = make(map[cache.Key]uint64)
+	s.verifiedEpoch = make(map[cache.Key]uint64)
 	return nil
 }
 
-// readStaging copies the [off, off+len(dst)) window of key's staging buffer
-// into dst. The copy happens under the store lock so a concurrent WriteAt for
-// the same piece cannot mutate the bytes while they are being read; handing out
-// the buffer itself would leave the copy racing against the writer.
+// read copies one window under the store lock. The lock serializes choosing a
+// resident value with starting a new staging generation, so a hash cannot finish
+// reading the old resident value after a replacement download has begun.
 //
-// The bool reports whether a staging buffer exists at all; the int is how many
-// bytes it supplied. An offset past the buffer yields zero bytes, not a panic.
-func (s *Store) readStaging(key cache.Key, dst []byte, off int64) (int, bool) {
+// A window that is not fully received reports the piece as missing instead of
+// returning the zero fill of a region a peer has not delivered yet. A successful
+// staging read records its generation for MarkComplete's binding check.
+func (s *Store) read(key cache.Key, dst []byte, off int64) (int, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	buf, ok := s.staging[key]
+	if buf, ok := s.staging[key]; ok {
+		if off < 0 || !buf.covers(off, off+int64(len(dst))) {
+			return 0, false, nil
+		}
+		n := copy(dst, buf.data[off:])
+		s.lastRead[key] = buf.generation
+		return n, true, nil
+	}
+	data, ok := s.cache.Get(key)
 	if !ok {
-		return 0, false
+		return 0, false, nil
 	}
-	if off < 0 || off > int64(len(buf)) {
-		return 0, true
-	}
-	return copy(dst, buf[off:]), true
-}
-
-func (s *Store) dropStaging(key cache.Key) []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	buf := s.staging[key]
-	delete(s.staging, key)
-	return buf
+	n, err := copyResident(dst, data, off)
+	return n, true, err
 }
 
 // piece is the PieceImpl for one piece of one torrent.
 type piece struct {
-	store  *Store
-	key    cache.Key
-	length int64
+	store      *Store
+	key        cache.Key
+	length     int64
+	generation uint64
 }
 
 var _ storage.PieceImpl = (*piece)(nil)
+var _ io.WriterTo = (*piece)(nil)
+
+// WriteTo is the hash path used by anacrolix's Piece.WriteTo wrapper. It is the
+// only operation that issues a verified token; ordinary streaming ReaderAt calls
+// can read bytes but cannot authorize MarkComplete.
+func (p *piece) WriteTo(w io.Writer) (int64, error) {
+	n, err := io.Copy(w, io.NewSectionReader(p, 0, p.length))
+	if err != nil {
+		return n, err
+	}
+	if n != p.length {
+		return n, io.ErrUnexpectedEOF
+	}
+	if err := p.store.markVerified(p.key, p.generation, p.length); err != nil {
+		return n, err
+	}
+	return n, nil
+}
 
 // ReadAt serves the piece from the LRU, then from the staging buffer of an
 // in-progress download. A resident piece is always served in full: a short read
@@ -151,12 +270,8 @@ func (p *piece) ReadAt(b []byte, off int64) (int, error) {
 		return 0, nil
 	}
 
-	if data, ok := p.store.cache.Get(p.key); ok {
-		n, err := copyResident(b, data, off)
+	if n, served, err := p.store.read(p.key, b, off); served {
 		return shortRead(n, requested, err)
-	}
-	if n, ok := p.store.readStaging(p.key, b, off); ok {
-		return shortRead(n, requested, nil)
 	}
 	return 0, io.EOF
 }
@@ -201,32 +316,69 @@ func (p *piece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	buf := s.staging[p.key]
 	if buf == nil {
-		buf = make([]byte, p.length)
+		s.nextGeneration++
+		s.epochs[p.key] = s.nextGeneration
+		buf = &stagingBuffer{generation: s.nextGeneration, data: make([]byte, p.length)}
+		// A new staging generation invalidates any previously verified resident
+		// value. A hash must never verify the old value while MarkComplete later
+		// promotes this new generation.
+		s.cache.Remove(p.key)
+		delete(s.lastRead, p.key)
 		s.staging[p.key] = buf
 	}
-	if off < 0 || off+int64(len(b)) > int64(len(buf)) {
+	p.generation = buf.generation
+	if off < 0 || off+int64(len(b)) > int64(len(buf.data)) {
 		return 0, fmt.Errorf("piecestore: write [%d,%d) outside piece length %d", off, off+int64(len(b)), p.length)
 	}
-	n := copy(buf[off:], b)
-	return n, nil
+	buf.write(off, b)
+	return len(b), nil
 }
 
 // MarkComplete promotes a verified piece into the cache and drops its staging
-// buffer. A piece that never got a full staging buffer (for example a
-// re-verification of data the cache already holds) is left alone.
+// buffer. Completion is bound to the staging generation that was actually read:
+// an older PieceImpl cannot promote a newer download over the value it hashed,
+// and a generation that was never read cannot be promoted. An incomplete
+// staging buffer is also rejected rather than cached.
 func (p *piece) MarkComplete() error {
-	buf := p.store.dropStaging(p.key)
-	if buf != nil {
-		p.store.cache.Put(p.key, buf)
+	s := p.store
+	s.mu.Lock()
+	buf := s.staging[p.key]
+	if buf == nil {
+		s.mu.Unlock()
+		return nil
 	}
+	if p.generation == 0 || buf.generation != p.generation {
+		s.mu.Unlock()
+		return fmt.Errorf("piecestore: stale staging generation %d for %s (current %d)", p.generation, p.key.Torrent, buf.generation)
+	}
+	if s.verifiedEpoch[p.key] != buf.generation {
+		s.mu.Unlock()
+		return fmt.Errorf("piecestore: staging generation %d was not verified by its hash", buf.generation)
+	}
+	if !buf.covers(0, p.length) {
+		s.mu.Unlock()
+		return io.ErrUnexpectedEOF
+	}
+	delete(s.staging, p.key)
+	delete(s.lastRead, p.key)
+	delete(s.verifiedEpoch, p.key)
+	s.mu.Unlock()
+	s.cache.Put(p.key, buf.data)
 	return nil
 }
 
 // MarkNotComplete drops the piece from both the staging buffer and the cache, so
-// the next read reports it as missing and anacrolix downloads it again.
+// the next read reports the piece as missing and anacrolix downloads it again.
+// A stale PieceImpl must not discard a newer staging generation.
 func (p *piece) MarkNotComplete() error {
-	p.store.dropStaging(p.key)
-	p.store.cache.Remove(p.key)
+	s := p.store
+	s.mu.Lock()
+	if buf := s.staging[p.key]; buf != nil && p.generation != 0 && buf.generation == p.generation {
+		delete(s.staging, p.key)
+		delete(s.lastRead, p.key)
+	}
+	s.mu.Unlock()
+	s.cache.Remove(p.key)
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/anacrolix/torrent"
 
@@ -355,12 +356,8 @@ func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]by
 		return nil, io.EOF
 	}
 	data := make([]byte, int(length))
-	n, err := loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
-	if err != nil && !(err == io.EOF && n == len(data)) {
+	if err := f.readPiece(ctx, loader, data, start); err != nil {
 		return nil, err
-	}
-	if n != len(data) {
-		return nil, io.ErrUnexpectedEOF
 	}
 	f.mu.RLock()
 	if f.closed {
@@ -370,6 +367,50 @@ func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]by
 	f.cache.Put(key, data)
 	f.mu.RUnlock()
 	return data, nil
+}
+
+// readPiece fills data from loader at the torrent-global offset start.
+//
+// A reader that already had the piece can answer the next read with EOF once an
+// eviction took it away: the data is not absent, it has to be fetched again. The
+// attempt is repeated a bounded number of times so the piece is re-requested
+// instead of handing the caller a short piece, which the FUSE layer would report
+// as a failed mid-file read. A piece that never arrives still ends as an error.
+func (f *raFile) readPiece(ctx context.Context, loader pieceSource, data []byte, start int64) error {
+	const (
+		attempts = 5
+		delay    = 200 * time.Millisecond
+	)
+	var (
+		n   int
+		err error
+	)
+	for attempt := 1; ; attempt++ {
+		n, err = loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
+		if err == nil && n == len(data) {
+			return nil
+		}
+		if err == io.EOF && n == len(data) {
+			// A complete read reported as EOF still carries the whole piece.
+			return nil
+		}
+		short := n < len(data) && (err == nil || errors.Is(err, io.EOF))
+		if !short || attempt == attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 func (f *raFile) Close() error {
@@ -416,7 +457,24 @@ func (f *raFile) protectWindow(window []cache.Key) {
 	for _, key := range previous {
 		f.cache.Unpin(key)
 	}
-	for _, key := range window {
-		f.cache.Pin(key)
+	if len(window) == 0 {
+		return
 	}
+	if !f.cache.PinSize(window[0], f.pieceSize(window[0].Piece)) && !f.cache.Has(window[0]) {
+		// The target is absent and cannot be reserved. Do not pin any future
+		// read-ahead key: even a short tail could otherwise consume the last
+		// evictable bytes and make the target insertion roll back forever.
+		return
+	}
+	for _, key := range window[1:] {
+		f.cache.PinSize(key, f.pieceSize(key.Piece))
+	}
+}
+
+func (f *raFile) pieceSize(index int) int64 {
+	start := int64(index) * f.pieceLength
+	if remaining := f.torrentSize - start; remaining < f.pieceLength {
+		return remaining
+	}
+	return f.pieceLength
 }

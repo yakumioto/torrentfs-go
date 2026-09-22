@@ -61,3 +61,60 @@ func TestPlanRejectsZeroAndEOFRequests(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanPreservesMultiGiBOffsets(t *testing.T) {
+	const pieceLength = int64(1 << 20)
+	const fileSize = int64(5<<30 + 3*pieceLength)
+
+	cases := []struct {
+		name       string
+		offset     int64
+		length     int64
+		wantIndex  int
+		wantOffset int64
+	}{
+		{name: "two-gib", offset: 2<<30 + 17, length: 31, wantIndex: 2048, wantOffset: 17},
+		{name: "four-gib", offset: 4<<30 + pieceLength + 23, length: 19, wantIndex: 4097, wantOffset: 23},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Plan(ReadRequest{
+				FileOffset:    tc.offset,
+				Length:        tc.length,
+				FileSize:      fileSize,
+				PieceLength:   pieceLength,
+				TorrentLength: fileSize,
+			})
+			want := []PieceSpan{{Index: tc.wantIndex, Offset: tc.wantOffset, Length: tc.length}}
+			if !reflect.DeepEqual(got.Spans, want) {
+				t.Fatalf("Spans = %+v, want %+v", got.Spans, want)
+			}
+		})
+	}
+}
+
+func TestPlanRejectsOffsetArithmeticOverflow(t *testing.T) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+
+	cases := []ReadRequest{
+		{
+			FileOffset:    1,
+			Length:        1,
+			FileStart:     maxInt64,
+			FileSize:      2,
+			PieceLength:   1,
+			TorrentLength: maxInt64,
+		},
+		{
+			Length:      2,
+			FileSize:    2,
+			FileStart:   maxInt64 - 1,
+			PieceLength: 1,
+		},
+	}
+	for i, request := range cases {
+		if got := Plan(request); len(got.Spans) != 0 {
+			t.Fatalf("case %d: Spans = %+v, want none", i, got.Spans)
+		}
+	}
+}

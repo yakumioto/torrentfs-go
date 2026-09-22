@@ -119,6 +119,44 @@ func TestCachePinBudgetRejectsOversizedPin(t *testing.T) {
 	}
 }
 
+func TestCachePinSizeReservesAbsentPieceBudget(t *testing.T) {
+	const pieceSize = int64(4)
+	c := New(16)
+	first := Key{Torrent: "a", Piece: 1}
+	second := Key{Torrent: "a", Piece: 2}
+	if !c.PinSize(first, pieceSize) {
+		t.Fatal("first sized pin should fit the pin budget")
+	}
+	if c.PinSize(second, pieceSize) {
+		t.Fatal("second sized absent pin should be rejected once the budget is full")
+	}
+	if got := c.PinnedBytes(); got != pieceSize {
+		t.Fatalf("PinnedBytes = %d, want %d", got, pieceSize)
+	}
+	c.Put(second, []byte("2222"))
+	if !c.Has(second) {
+		t.Fatal("an unpinned target piece should remain insertable")
+	}
+}
+
+func TestCachePinSizeReservationSurvivesRemoveUntilUnpin(t *testing.T) {
+	c := New(16)
+	first := Key{Torrent: "a", Piece: 1}
+	second := Key{Torrent: "a", Piece: 2}
+	if !c.PinSize(first, 4) {
+		t.Fatal("first sized pin should fit")
+	}
+	c.Put(first, []byte("1111"))
+	c.Remove(first)
+	if c.PinSize(second, 4) {
+		t.Fatal("removing a resident must not release its reservation before Unpin")
+	}
+	c.Unpin(first)
+	if !c.PinSize(second, 4) {
+		t.Fatal("Unpin should release the reservation")
+	}
+}
+
 func TestCacheRollsBackInsertItCannotFit(t *testing.T) {
 	// Two keys pinned while still absent cost nothing against the pin budget,
 	// so both may be pinned. When their data later arrives the pinned total can
