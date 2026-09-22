@@ -38,34 +38,6 @@ type Torrent struct {
 	loader  pieceSource
 }
 
-// AddTorrent registers a torrent from a .torrent file or a magnet link. It
-// returns once the torrent is registered with the client; for magnet sources
-// the metainfo (and thus Info, Name and Files) may still be pending.
-func (s *Session) AddTorrent(ctx context.Context, src Source) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, _, err := s.addTorrentLockedResult(ctx, src)
-	if err != nil {
-		attrs := []any{"source", sourceKind(src), "err", err}
-		if src.MetainfoPath != "" {
-			attrs = append(attrs, "path", src.MetainfoPath)
-		}
-		s.logger.Error("torrent add failed", attrs...)
-		return err
-	}
-	hash := st.InfoHash()
-	s.manualRefs[hash] = struct{}{}
-	attrs := []any{"hash", hash.HexString(), "source", sourceKind(src)}
-	if src.MetainfoPath != "" {
-		attrs = append(attrs, "path", src.MetainfoPath)
-	}
-	s.logger.Info("torrent added", attrs...)
-	return nil
-}
-
 func sourceKind(src Source) string {
 	switch {
 	case src.MetainfoPath != "":
@@ -140,7 +112,7 @@ func specFromSource(src Source) (*torrent.TorrentSpec, error) {
 	return spec, nil
 }
 
-func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.TorrentSpec) (*Torrent, bool, error) {
+func (s *Session) prepareTorrentSpecLocked(ctx context.Context, spec *torrent.TorrentSpec) (*Torrent, bool, error) {
 	if err := s.ensureActiveLocked(); err != nil {
 		return nil, false, err
 	}
@@ -148,8 +120,6 @@ func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.Torren
 		return nil, false, fmt.Errorf("session: add torrent: %w", err)
 	}
 	if s.deletionPendingLocked(spec.InfoHash) {
-		// Refuse to (re-)register a hash that is being deleted or whose delete
-		// failed; only an explicit retry or a fresh add may revive it.
 		return nil, false, fmt.Errorf("%w: %s", ErrDeleting, spec.InfoHash)
 	}
 	if s.cfg.Proxy.Socks5URL != "" {
@@ -174,11 +144,23 @@ func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.Torren
 		}
 		return existing, false, nil
 	}
-	st := &Torrent{tor: t, readers: make(map[string]*raFile), cache: s.pieceCache}
+	return &Torrent{tor: t, readers: make(map[string]*raFile), cache: s.pieceCache}, true, nil
+}
+
+func (s *Session) publishTorrentLocked(hash metainfo.Hash, st *Torrent) {
 	s.torrents[hash] = st
-	// A newly registered task supersedes any completed deletion operation.
 	delete(s.lastOps, hash)
-	return st, true, nil
+}
+
+func (s *Session) addTorrentSpecLocked(ctx context.Context, spec *torrent.TorrentSpec) (*Torrent, bool, error) {
+	st, clientNew, err := s.prepareTorrentSpecLocked(ctx, spec)
+	if err != nil {
+		return nil, false, err
+	}
+	if clientNew {
+		s.publishTorrentLocked(st.InfoHash(), st)
+	}
+	return st, clientNew, nil
 }
 
 // Torrent returns the registered torrent with the given info hash.

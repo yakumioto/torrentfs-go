@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/sys/unix"
 )
+
+const layoutVersion = "2"
 
 // TorrentState is the lifecycle state exposed by the management API.
 type TorrentState string
@@ -75,8 +79,25 @@ type registryEntry struct {
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
+func cloneRegistryEntry(entry *registryEntry) *registryEntry {
+	if entry == nil {
+		return nil
+	}
+	clone := *entry
+	return &clone
+}
+
 func (s *Session) registryPath(hash metainfo.Hash) string {
 	return filepath.Join(s.stateDir, hash.HexString()+".json")
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 func writeFileAtomic(path string, data []byte) error {
@@ -104,7 +125,120 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync directory %q: %w", dir, err)
+	}
 	return nil
+}
+
+func renameNoReplace(oldPath, newPath string) error {
+	err := unix.Renameat2(unix.AT_FDCWD, oldPath, unix.AT_FDCWD, newPath, unix.RENAME_NOREPLACE)
+	if err == nil {
+		if err := syncDirectory(filepath.Dir(newPath)); err != nil {
+			return err
+		}
+		if filepath.Dir(oldPath) != filepath.Dir(newPath) {
+			if err := syncDirectory(filepath.Dir(oldPath)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EINVAL) {
+		return err
+	}
+	// Linux supplies renameat2 in supported deployments. The link fallback
+	// keeps the no-clobber property on filesystems or test kernels without it;
+	// a retry after a crash observes both names and completes the move.
+	if err := os.Link(oldPath, newPath); err != nil {
+		return err
+	}
+	if err := os.Remove(oldPath); err != nil {
+		return err
+	}
+	if err := syncDirectory(filepath.Dir(newPath)); err != nil {
+		return err
+	}
+	if filepath.Dir(oldPath) != filepath.Dir(newPath) {
+		if err := syncDirectory(filepath.Dir(oldPath)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publishNoClobber atomically publishes a new file without replacing an
+// existing path. The returned bool reports whether this call created it.
+func publishNoClobber(path string, data []byte) (bool, error) {
+	dir := filepath.Dir(path)
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return false, fmt.Errorf("path %q is not a regular file", path)
+		}
+		return false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+
+	f, err := os.CreateTemp(dir, ".torrentfs-publish-*.tmp")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if _, err := f.Write(data); err != nil {
+		cleanup()
+		return false, err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	if err := renameNoReplace(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		if errors.Is(err, unix.EEXIST) || errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func requireRegularFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("path %q must be a regular, non-symlink file", path)
+	}
+	return info, nil
+}
+
+func removeRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("path %q must be a regular, non-symlink file", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 // writeRegistryEntryLocked durably records one torrent's state. It must be
@@ -113,6 +247,15 @@ func (s *Session) writeRegistryEntryLocked(entry *registryEntry) error {
 	hash, err := parseInfoHash(entry.InfoHash)
 	if err != nil {
 		return err
+	}
+	if entry.ID != hash.HexString() || entry.InfoHash != hash.HexString() {
+		return fmt.Errorf("session: state identity does not match %s", hash)
+	}
+	if !validTorrentState(entry.State) || entry.State == StateDeleted {
+		return fmt.Errorf("session: invalid state %q for %s", entry.State, hash)
+	}
+	if entry.CreatedAt.IsZero() {
+		return fmt.Errorf("session: state %s has no created_at", hash)
 	}
 	entry.UpdatedAt = time.Now().UTC()
 	data, err := json.Marshal(entry)
@@ -126,11 +269,54 @@ func (s *Session) writeRegistryEntryLocked(entry *registryEntry) error {
 }
 
 func (s *Session) removeRegistryEntryLocked(hash metainfo.Hash) error {
-	if err := os.Remove(s.registryPath(hash)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("session: remove state %s: %w", hash, err)
+	path := s.registryPath(hash)
+	if _, err := requireRegularFile(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("session: remove state %s: %w", hash, err)
+		}
+	} else {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("session: remove state %s: %w", hash, err)
+		}
+		if err := syncDirectory(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("session: sync state directory: %w", err)
+		}
 	}
 	delete(s.states, hash)
 	return nil
+}
+
+func validTorrentState(state TorrentState) bool {
+	switch state {
+	case StateAdding, StateReady, StateError, StateDeleting, StateDeleteFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateRegistryEntry(name string, entry *registryEntry) (metainfo.Hash, error) {
+	if entry.ID == "" || entry.InfoHash == "" {
+		return metainfo.Hash{}, errors.New("missing id or info_hash")
+	}
+	hash, err := parseInfoHash(entry.InfoHash)
+	if err != nil {
+		return metainfo.Hash{}, err
+	}
+	canonical := hash.HexString()
+	if name != canonical+".json" {
+		return metainfo.Hash{}, fmt.Errorf("filename %q does not match info hash %s", name, canonical)
+	}
+	if entry.ID != canonical || entry.InfoHash != canonical {
+		return metainfo.Hash{}, fmt.Errorf("id/info_hash do not match %s", canonical)
+	}
+	if !validTorrentState(entry.State) || entry.State == StateDeleted {
+		return metainfo.Hash{}, fmt.Errorf("invalid state %q", entry.State)
+	}
+	if entry.CreatedAt.IsZero() || entry.UpdatedAt.IsZero() {
+		return metainfo.Hash{}, errors.New("created_at and updated_at are required")
+	}
+	return hash, nil
 }
 
 // loadRegistry restores durable per-torrent state from the state directory.
@@ -139,14 +325,21 @@ func (s *Session) loadRegistry() error {
 	if err != nil {
 		return fmt.Errorf("session: scan state dir: %w", err)
 	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, dirEntry := range entries {
-		name := dirEntry.Name()
-		if !strings.HasSuffix(name, ".json") || dirEntry.Type()&os.ModeSymlink != 0 {
-			continue
-		}
+	for _, name := range names {
 		path := filepath.Join(s.stateDir, name)
+		if _, err := requireRegularFile(path); err != nil {
+			return fmt.Errorf("session: inspect state %q: %w", name, err)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("session: read state %q: %w", name, err)
@@ -155,9 +348,19 @@ func (s *Session) loadRegistry() error {
 		if err := json.Unmarshal(data, &entry); err != nil {
 			return fmt.Errorf("session: decode state %q: %w", name, err)
 		}
-		hash, err := parseInfoHash(entry.InfoHash)
+		hash, err := validateRegistryEntry(name, &entry)
 		if err != nil {
 			return fmt.Errorf("session: state %q: %w", name, err)
+		}
+		if entry.State == StateDeleting && entry.OperationID == "" {
+			opID, err := newOperationID()
+			if err != nil {
+				return fmt.Errorf("session: generate delete operation for %s: %w", hash, err)
+			}
+			entry.OperationID = opID
+			if err := s.writeRegistryEntryLocked(&entry); err != nil {
+				return err
+			}
 		}
 		s.states[hash] = &entry
 	}

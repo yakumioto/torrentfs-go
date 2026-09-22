@@ -54,22 +54,14 @@ type Session struct {
 	cfg    config.Config
 	logger *slog.Logger
 
-	pieceCache      *cache.Cache
-	mu              sync.RWMutex
-	state           lifecycle
-	closeDone       chan struct{}
-	closeErr        error
-	torrents        map[metainfo.Hash]*Torrent
-	metadata        map[string]metainfo.Hash
-	metadataRefs    map[metainfo.Hash]int
-	directoryRefs   map[metainfo.Hash]int
-	directorySource map[string]torrentDirSource
-	manualRefs      map[metainfo.Hash]struct{}
-	pendingMagnets  map[metainfo.Hash]managedMagnet
-	torrentsDir     string
-	metadataDir     string
-	scanCancel      context.CancelFunc
-	scanDone        chan struct{}
+	pieceCache  *cache.Cache
+	mu          sync.RWMutex
+	state       lifecycle
+	closeDone   chan struct{}
+	closeErr    error
+	torrents    map[metainfo.Hash]*Torrent
+	torrentsDir string
+	metadataDir string
 
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.
@@ -96,6 +88,7 @@ type Session struct {
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
+	bgMu     sync.Mutex
 	bgWg     sync.WaitGroup
 
 	// metadataFetches tracks the per-hash magnet metadata-persist workers so a
@@ -111,12 +104,13 @@ type Session struct {
 type metadataFetch struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	retry  bool
 }
 
 // New creates a session and its anacrolix client. The torrents directory must
 // already exist; the session creates only its .metadata directory. The client
-// is configured to seed, existing metadata is restored, and the torrents
-// directory is watched before the session is returned.
+// is configured to seed, registry-backed tasks are restored, and persisted
+// layout checks complete before the session is returned.
 func New(cfg config.Config, torrentsDir string, opts ...Option) (*Session, error) {
 	return newWithClientConfig(cfg, torrentsDir, nil, opts...)
 }
@@ -148,13 +142,19 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		return nil, err
 	}
 	metadataDir := metadataRoot(torrentsDir)
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+	if err := ensureDirectory(metadataDir); err != nil {
 		err = fmt.Errorf("session: create metadata dir: %w", err)
 		logInitFailure("create-metadata-dir", err)
 		return nil, err
 	}
+	pendingDir := filepath.Join(metadataDir, "pending")
+	if err := ensureDirectory(pendingDir); err != nil {
+		err = fmt.Errorf("session: create pending dir: %w", err)
+		logInitFailure("create-pending-dir", err)
+		return nil, err
+	}
 	stateDir := filepath.Join(metadataDir, "state")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := ensureDirectory(stateDir); err != nil {
 		err = fmt.Errorf("session: create state dir: %w", err)
 		logInitFailure("create-state-dir", err)
 		return nil, err
@@ -232,12 +232,6 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		pieceCache:      pieceCache,
 		closeDone:       make(chan struct{}),
 		torrents:        make(map[metainfo.Hash]*Torrent),
-		metadata:        make(map[string]metainfo.Hash),
-		metadataRefs:    make(map[metainfo.Hash]int),
-		directoryRefs:   make(map[metainfo.Hash]int),
-		directorySource: make(map[string]torrentDirSource),
-		manualRefs:      make(map[metainfo.Hash]struct{}),
-		pendingMagnets:  make(map[metainfo.Hash]managedMagnet),
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
 		storageCloser:   pieceStore,
@@ -252,50 +246,27 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
-	if err := s.rescanMetadata(); err != nil {
-		initErr := err
-		if closeErr := s.Close(context.Background()); closeErr != nil {
-			initErr = errors.Join(err, fmt.Errorf("session: close client after metadata restore: %w", closeErr))
-		}
-		logInitFailure("metadata-restore", initErr)
-		return nil, initErr
+	startup := []struct {
+		stage string
+		fn    func() error
+	}{
+		{stage: "state-restore", fn: s.loadRegistry},
+		{stage: "legacy-migration", fn: s.migrateLegacyLayoutOnce},
+		{stage: "delete-resume", fn: s.resumeDeletions},
+		{stage: "torrent-restore", fn: func() error {
+			return s.restoreRegistryEntries(context.Background())
+		}},
 	}
-	if err := s.scanTorrentDir(context.Background(), true); err != nil {
-		initErr := err
-		if closeErr := s.Close(context.Background()); closeErr != nil {
-			initErr = errors.Join(err, fmt.Errorf("session: close client after torrent scan: %w", closeErr))
+	for _, step := range startup {
+		if err := step.fn(); err != nil {
+			initErr := err
+			if closeErr := s.Close(context.Background()); closeErr != nil {
+				initErr = errors.Join(err, fmt.Errorf("session: close client after %s: %w", step.stage, closeErr))
+			}
+			logInitFailure(step.stage, initErr)
+			return nil, initErr
 		}
-		logInitFailure("torrent-scan", initErr)
-		return nil, initErr
 	}
-	if err := s.loadRegistry(); err != nil {
-		initErr := err
-		if closeErr := s.Close(context.Background()); closeErr != nil {
-			initErr = errors.Join(err, fmt.Errorf("session: close client after state restore: %w", closeErr))
-		}
-		logInitFailure("state-restore", initErr)
-		return nil, initErr
-	}
-	if err := s.resumeDeletions(); err != nil {
-		initErr := err
-		if closeErr := s.Close(context.Background()); closeErr != nil {
-			initErr = errors.Join(err, fmt.Errorf("session: close client after delete resume: %w", closeErr))
-		}
-		logInitFailure("delete-resume", initErr)
-		return nil, initErr
-	}
-	if err := s.restorePendingMagnets(context.Background()); err != nil {
-		initErr := err
-		if closeErr := s.Close(context.Background()); closeErr != nil {
-			initErr = errors.Join(err, fmt.Errorf("session: close client after pending magnet restore: %w", closeErr))
-		}
-		logInitFailure("magnet-restore", initErr)
-		return nil, initErr
-	}
-	scanCtx, scanCancel := context.WithCancel(context.Background())
-	s.scanCancel = scanCancel
-	s.scanDone = make(chan struct{})
-	go s.watchTorrentDir(scanCtx, s.scanDone)
 	s.logger.Info("session ready",
 		"torrents_dir", s.torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
@@ -345,25 +316,19 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 
 	s.state = stateClosing
-	scanCancel := s.scanCancel
-	scanDone := s.scanDone
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
 	s.mu.Unlock()
 	s.logger.Info("session closing")
 
-	if scanCancel != nil {
-		scanCancel()
-		if scanDone != nil {
-			<-scanDone
-		}
-	}
 	// Deletion and metadata-fetch workers must finish before the torrents are
 	// dropped so they never touch a torrent the teardown is closing.
+	s.bgMu.Lock()
 	if bgCancel != nil {
 		bgCancel()
 	}
+	s.bgMu.Unlock()
 	s.bgWg.Wait()
 
 	s.mu.Lock()
@@ -405,19 +370,11 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.torrents = make(map[metainfo.Hash]*Torrent)
-	s.metadata = make(map[string]metainfo.Hash)
-	s.metadataRefs = make(map[metainfo.Hash]int)
-	s.directoryRefs = make(map[metainfo.Hash]int)
-	s.directorySource = make(map[string]torrentDirSource)
-	s.manualRefs = make(map[metainfo.Hash]struct{})
-	s.pendingMagnets = make(map[metainfo.Hash]managedMagnet)
 	s.states = make(map[metainfo.Hash]*registryEntry)
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)
 	s.lastOps = make(map[metainfo.Hash]string)
 	s.metadataFetches = make(map[metainfo.Hash]*metadataFetch)
-	s.scanCancel = nil
-	s.scanDone = nil
 	s.storageCloser = nil
 	s.instanceLock = nil
 	s.state = stateClosed

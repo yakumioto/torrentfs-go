@@ -38,17 +38,19 @@ Configuration precedence is TORRENTFS_* environment variables, then the TOML
 file, then built-in defaults. See the README for the complete environment
 variable list.
 
-<torrents-dir> must be an existing directory. Its direct regular, non-symlink
-files whose names end in .torrent are scanned at startup and while running.
-A single-file torrent is exposed under the mount point as a regular file
-directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
+<torrents-dir> must be an existing directory. Torrent tasks are created only
+through the HTTP API; root .torrent files that are not registry-managed are
+ignored. A single-file torrent is exposed under the mount point as a regular
+file directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
 directory tree. The mount is data only and every path in it is read-only:
 there is no metadata/ or stats/ control directory.
 
 Managing torrents happens over the HTTP API: add by upload or magnet, list,
-delete, and query per-torrent piece status. Durable managed metainfo and
-pending magnet intents live in <torrents-dir>/.metadata, which is an
-implementation detail and is never mounted.
+delete, and query per-torrent piece status. Canonical metainfo is stored only
+at <torrents-dir>/<infohash>.torrent. The .metadata directory stores pending
+magnet intents, registry state, peer identity, the layout marker, and the
+instance lock; all of these paths are implementation details and are never
+mounted.
 
 When http.listen_addr is set the management API is served; an enabled
 http.auth configuration is required for non-loopback listeners. Omitting

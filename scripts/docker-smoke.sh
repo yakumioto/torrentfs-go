@@ -149,6 +149,16 @@ build_seeded_torrent() {
 	{ head -c -1 -- "$src"; printf '8:url-list%d:%se' "${#url}" "$url"; } > "$dst"
 }
 
+write_registry_fixture() {
+	local torrents_dir="$1" now
+	now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	mkdir -p "$torrents_dir/.metadata/state" "$torrents_dir/.metadata/pending"
+	printf '2\n' > "$torrents_dir/.metadata/layout_version"
+	cat >"$torrents_dir/.metadata/state/$FIXTURE_INFO_HASH.json" <<EOF
+{"id":"$FIXTURE_INFO_HASH","info_hash":"$FIXTURE_INFO_HASH","name":"payload.txt","state":"ready","created_at":"$now","updated_at":"$now"}
+EOF
+}
+
 # webseed_fetch fetches a path under the running web seed and prints it, so
 # readiness and the served bytes are checked through the same HTTP path
 # anacrolix will use.
@@ -235,9 +245,11 @@ mkdir -p "$SEEDED_TORRENT_HOST_DIR" "$WEBSEED_DIR"
 HOST_PROPAGATION="$(findmnt -T "$MOUNT_HOST_DIR" -n -o PROPAGATION 2>/dev/null || true)"
 [[ "$HOST_PROPAGATION" == *shared* ]] || \
 	fail "host mount containing $MOUNT_HOST_DIR must use shared propagation (current: ${HOST_PROPAGATION:-unknown})"
-# The plain fixture (no web seed) feeds the scenarios that need a torrent with
-# no reachable data source: blocked-read and the single-file input check.
+# Registry fixtures feed the FUSE-only scenarios. Root files with arbitrary
+# names are deliberate orphans and must be ignored by registry-only startup.
+cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/$FIXTURE_INFO_HASH.torrent"
 cp -- "$FIXTURE_TORRENT" "$TORRENT_HOST_DIR/example.torrent"
+write_registry_fixture "$TORRENT_HOST_DIR"
 EXPECTED_HASH="$(sha256sum "$FIXTURE_PAYLOAD")"
 EXPECTED_HASH="${EXPECTED_HASH%% *}"
 
@@ -247,6 +259,7 @@ cp -- "$FIXTURE_PAYLOAD" "$WEBSEED_DIR/payload.txt"
 # .stats marker it asserts on must exist there too.
 mkdir -p "$SEEDED_TORRENT_HOST_DIR/.stats"
 printf 'legacy\n' > "$SEEDED_TORRENT_HOST_DIR/.stats/leftover.txt"
+write_registry_fixture "$SEEDED_TORRENT_HOST_DIR"
 WEBSEED_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 [[ -n "$WEBSEED_PORT" ]] || fail "could not allocate a web seed port"
 python3 -m http.server "$WEBSEED_PORT" --bind 127.0.0.1 --directory "$WEBSEED_DIR" \
@@ -261,7 +274,7 @@ while ((SECONDS < webseed_deadline)); do
 done
 [[ "$(webseed_fetch payload.txt 2>/dev/null || true)" == "$(cat "$WEBSEED_DIR/payload.txt")" ]] || \
 	fail "web seed never served $WEBSEED_DIR/payload.txt (see $TMP_DIR/webseed.log)"
-build_seeded_torrent "$FIXTURE_TORRENT" "$SEEDED_TORRENT_HOST_DIR/example.torrent" "http://127.0.0.1:$WEBSEED_PORT/"
+build_seeded_torrent "$FIXTURE_TORRENT" "$SEEDED_TORRENT_HOST_DIR/$FIXTURE_INFO_HASH.torrent" "http://127.0.0.1:$WEBSEED_PORT/"
 printf 'docker smoke: web seed serving the fixture on 127.0.0.1:%s\n' "$WEBSEED_PORT"
 
 # A legacy empty .stats directory must survive startup untouched: the new

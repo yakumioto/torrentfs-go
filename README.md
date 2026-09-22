@@ -2,12 +2,12 @@
 
 `torrentfs` 将 BitTorrent 内容挂载为只读的 FUSE 文件系统，并提供一个用于管理 torrent 的 HTTP API 和嵌入式 Web UI。
 
-它管理一个已有的、可读写的 `torrents` 目录：目录中的直接 `.torrent` 文件会被扫描，API 也可以添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
+它管理一个已有的、可读写的 `torrents` 目录；torrent 任务只能通过 HTTP API 添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
 
 ## 项目定位与设计原则
 
 - **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除和状态查询都通过 HTTP API 完成。
-- **管理状态与缓存分离**：由 API 管理的 metainfo、未完成的磁力链接意图和 peer identity 持久化在 `torrents-dir/.metadata`，piece 内容只存在于内存。
+- **管理状态与缓存分离**：由 API 管理的 metainfo 持久化在 `torrents-dir/<infohash>.torrent`，未完成的磁力链接意图、registry 和 peer identity 保存在 `torrents-dir/.metadata`，piece 内容只存在于内存。
 - **缓存不是下载进度**：`cached_bytes` 表示当前仍驻留在内存中的字节数。piece 会被淘汰，因此这个数值可能下降；进程重启后缓存为空。
 - **显式的网络边界**：HTTP 默认只监听 loopback。绑定非 loopback 地址时必须启用认证；服务本身不终止 TLS，应放在 TLS reverse proxy 后面。
 - **API 与 UI 分层**：API 的 status 快照包含 piece、文件范围以及 `network`/DHT 诊断字段；当前 Web UI 展示文件和 piece 缓存视图，但不展示 peer/DHT 统计。
@@ -23,11 +23,13 @@ cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
         └── web                   React UI；构建后由 Go embed 到二进制
 
 <torrents-dir>
-├── *.torrent            直接扫描的用户源文件（只扫描目录顶层）
-└── .metadata/           API 管理的 metainfo、磁力意图和运行状态
+├── <infohash>.torrent  API 创建的 canonical metainfo
+└── .metadata/
+    ├── pending/<infohash>.magnet
+    └── state/<infohash>.json
 ```
 
-启动时会恢复 `.metadata`，并只检查目录顶层名称以小写 `.torrent` 结尾的条目，不递归子目录。只有普通、非符号链接文件会被接受为有效源；匹配后缀的符号链接和目录会被识别为 invalid source，不会被加载为 torrent。文件写入方应先写入临时名称，再在同一目录中原子重命名为 `.torrent`。同一个 info hash 的多个源文件共享一个 torrent；同一个 `torrents` 目录同时只能由一个进程管理。
+启动时只从 `.metadata/state` 恢复任务；完整 metainfo 从根目录的 canonical `<infohash>.torrent` 读取，未完成 magnet 从 `.metadata/pending` 恢复。根目录中手工放入的任意 `.torrent` 文件会被忽略，不会创建任务、进入 FUSE 或阻止 API 删除。同一个 `torrents` 目录同时只能由一个进程管理。
 
 ## 快速开始
 
@@ -90,14 +92,9 @@ TORRENTFS_HTTP_LISTEN_ADDR= \
 ./torrentfs -config ./torrentfs.example.toml "$PWD/torrents"
 ```
 
-将本地 `.torrent` 文件放入目录时，先使用临时名称，再在同一文件系统中原子重命名：
+本地 `.torrent` 文件必须通过 `POST /api/v1/torrents` 上传；服务会解析并校验 info hash，再以 `<infohash>.torrent` 原子保存，上传文件名不会参与存储命名。磁力链接也通过同一 API 添加。
 
-```sh
-cp /path/to/input.torrent "$PWD/torrents/input.torrent.part"
-mv "$PWD/torrents/input.torrent.part" "$PWD/torrents/input.torrent"
-```
-
-文件被识别并解析后，内容会出现在 `mnt` 下。单文件 torrent 直接是一个文件，多文件 torrent 是一个目录树；挂载点中的写入、删除和重命名都会返回只读错误。也可以通过 HTTP API 添加磁力链接或上传文件，见后文 curl 流程。
+任务被 API 接受并解析后，内容会出现在 `mnt` 下。单文件 torrent 直接是一个文件，多文件 torrent 是一个目录树；挂载点中的写入、删除和重命名都会返回只读错误。具体 curl 流程见后文。
 
 按 `Ctrl-C` 或向进程发送 `SIGTERM` 可停止服务。关闭时会先停止 HTTP 服务和 session，再卸载 FUSE，以便取消仍在等待 piece 的读取。
 
@@ -295,7 +292,7 @@ token_ttl = "30m"
      --header "Authorization: Bearer $TOKEN"
    ```
 
-   删除响应为 `202`，初始 operation 状态通常为 `deleting`；随后轮询到 `deleted` 或 `delete_failed`。如果用户目录中仍有顶层 `.torrent` 文件引用该 info hash，删除会返回 `409`。
+   删除响应为 `202`，初始 operation 状态通常为 `deleting`；随后轮询到 `deleted` 或 `delete_failed`。根目录中的非 registry `.torrent` 文件不会参与删除保护。
 
 7. 登出：
 
@@ -328,7 +325,7 @@ token_ttl = "30m"
 | `400` | JSON/multipart body、`Content-Type`、磁力链接或文件名无效 |
 | `401` | 认证缺失、格式错误、过期或已撤销；登录凭据错误也返回 `401` |
 | `404` | 未知 torrent/operation；认证关闭时 login/logout 也不可用；不存在的静态 asset |
-| `409` | torrent 正在删除（包括 `delete_failed` 状态下重新添加同一 info hash），或仍被用户拥有的 `.torrent` 文件引用 |
+| `409` | torrent 正在删除（包括 `delete_failed` 状态下重新添加同一 info hash） |
 | `413` | body 超过限制；登录 body 上限固定为 8 KiB，上传上限由 `http.max_upload_bytes` 控制 |
 | `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type |
 | `500` | 未分类的内部 session/API 错误 |
@@ -448,19 +445,20 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 
 ```text
 <torrents-dir>/
-├── input.torrent
+├── <info-hash>.torrent          # API 管理的 canonical metainfo
 └── .metadata/
-    ├── <info-hash>.torrent       # API 管理的 canonical metainfo
-    ├── <info-hash>.magnet        # 尚未解析完成的磁力意图
-    ├── peer_id                   # 该 torrents 目录的 20 字节 peer identity
-    ├── state/<info-hash>.json    # 中断删除的 sidecar（如有）
-    └── instance.lock             # 进程运行期间的独占锁
+    ├── pending/<info-hash>.magnet # 尚未解析完成的磁力意图
+    ├── state/<info-hash>.json      # 每个任务的 registry entry
+    ├── layout_version              # 一次性旧布局迁移标记
+    ├── peer_id                     # 该 torrents 目录的 20 字节 peer identity
+    └── instance.lock               # 进程运行期间的独占锁
 ```
 
 - piece 数据、piece completion、cache hit 计数和临时读取优先级都只在内存中；重启不会从磁盘 rehash 或恢复 piece。
-- 顶层用户源只按大小写敏感的 `.torrent` 后缀选择，不递归子目录；`.torrent.part`、`.TORRENT` 和 torrent 命名的目录不会成为源。匹配后缀的符号链接会被识别为 invalid source，不会被跟随加载；使用普通文件并采用临时文件后 atomic rename。
+- registry 是任务集合的唯一事实来源；启动不会扫描根目录猜测任务。根目录中手工放置的 `.torrent` 文件会被忽略，不会进入 API/FUSE，也不会阻止删除。
+- 上传内容会先校验 info hash，再以 `<info-hash>.torrent` 原子发布；磁力链接先写入 `.metadata/pending/<info-hash>.magnet`，metadata 完成后发布最终文件并清理 pending。
+- 首次启动会把当前版本可识别的旧 flat metainfo 和 magnet intent 文件一次性迁移到新布局；目标 hash 冲突、损坏或非 canonical 历史文件会使启动明确失败。写入 `layout_version` 后不再读取旧位置。
 - 配置只在启动时读取，修改 TOML 或环境变量后需要重启进程。
-- 磁力链接会先持久化为 `.metadata/<info-hash>.magnet`，解析到 metainfo 后再保存 canonical `.torrent`；删除会清理该 hash 的内部来源，但不会删除用户拥有的顶层 `.torrent` 文件。
 - 一个 `torrents` 目录同时只能由一个 torrentfs 进程使用。
 
 ## Docker

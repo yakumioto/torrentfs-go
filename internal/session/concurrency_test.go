@@ -287,6 +287,67 @@ func TestFuseConcurrentNamespaceChurn(t *testing.T) {
 	drainErrors(t, errs)
 }
 
+func TestConcurrentManagedAddDeleteSameHash(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("same hash add delete"), nil)
+	sess := newManageSession(t, torrentsDir)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("initial add: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
+			if err != nil && !errors.Is(err, session.ErrDeleting) {
+				errs <- fmt.Errorf("concurrent add: %w", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			op, err := sess.DeleteTorrent(ctx, hash.HexString())
+			if errors.Is(err, session.ErrUnknownTorrent) {
+				return
+			}
+			if err != nil {
+				errs <- fmt.Errorf("concurrent delete: %w", err)
+				return
+			}
+			for {
+				current, ok := sess.Operation(op.ID)
+				if ok && current.State != session.StateDeleting {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					errs <- fmt.Errorf("concurrent delete operation: %w", ctx.Err())
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}()
+	}
+	close(start)
+	waitGroupWithin(t, ctx, &wg, "same-hash add/delete")
+	drainErrors(t, errs)
+
+	seen := make(map[string]struct{})
+	for _, view := range sess.ListTorrents() {
+		if _, ok := seen[view.ID]; ok {
+			t.Fatalf("duplicate registry view for %s", view.ID)
+		}
+		seen[view.ID] = struct{}{}
+	}
+}
+
 // unmountServer unmounts server and fails the test if the mount survives: a
 // silent unmount error would let the next test or job run into a live mount.
 // A mount that cannot be released gracefully is force-detached so it does not

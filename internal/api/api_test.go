@@ -374,15 +374,6 @@ func TestDeleteReturnsAcceptedOperation(t *testing.T) {
 	}
 }
 
-func TestDeleteConflictOnExternalReference(t *testing.T) {
-	backend := &fakeBackend{deleteErr: session.ErrExternalReference}
-	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc", nil))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", rec.Code)
-	}
-}
-
 func TestDeleteUnknownTorrent(t *testing.T) {
 	backend := &fakeBackend{deleteErr: session.ErrUnknownTorrent}
 	srv := newTestServer(t, backend, nil)
