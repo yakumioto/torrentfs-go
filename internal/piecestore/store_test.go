@@ -483,3 +483,59 @@ func TestCloseDropsStaging(t *testing.T) {
 		t.Fatal("WriteAt after Close succeeded")
 	}
 }
+
+// TestStorePerTorrentCloseDropsStaging proves a dropped torrent leaves no
+// staging bookkeeping behind, while another torrent's staging is untouched and
+// verified resident data survives in the cache.
+func TestStorePerTorrentCloseDropsStaging(t *testing.T) {
+	const pieceLength = 16
+	store, c := testStore(t, 1<<20)
+
+	firstInfo := singlePieceInfo(pieceLength)
+	firstHash := metainfo.Hash{9}
+	first, err := store.OpenTorrent(context.Background(), firstInfo, firstHash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(first): %v", err)
+	}
+	firstPiece := first.PieceWithHash(firstInfo.Piece(0), g.None[[]byte]())
+
+	secondInfo := singlePieceInfo(pieceLength)
+	secondHash := metainfo.Hash{10}
+	second, err := store.OpenTorrent(context.Background(), secondInfo, secondHash)
+	if err != nil {
+		t.Fatalf("OpenTorrent(second): %v", err)
+	}
+	if n, err := second.PieceWithHash(secondInfo.Piece(0), g.None[[]byte]()).WriteAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("WriteAt(second) = (%d, %v), want (%d, nil)", n, err, pieceLength)
+	}
+	if n, err := firstPiece.WriteAt(make([]byte, pieceLength), 0); n != pieceLength || err != nil {
+		t.Fatalf("WriteAt(first) = (%d, %v), want (%d, nil)", n, err, pieceLength)
+	}
+
+	pieces, bytes := store.StagingStats()
+	if pieces != 2 || bytes != 2*pieceLength {
+		t.Fatalf("StagingStats = (%d pieces, %d bytes), want (2, %d)", pieces, bytes, 2*pieceLength)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first torrent: %v", err)
+	}
+	pieces, bytes = store.StagingStats()
+	if pieces != 1 || bytes != pieceLength {
+		t.Fatalf("StagingStats after closing one torrent = (%d pieces, %d bytes), want (1, %d)", pieces, bytes, pieceLength)
+	}
+	// Closing one torrent must not disturb another torrent's cache residency.
+	c.Put(cache.Key{Torrent: firstHash.HexString(), Piece: 0}, make([]byte, pieceLength))
+	if err := first.Close(); err != nil {
+		t.Fatalf("second close of an already closed torrent: %v", err)
+	}
+	if !c.Has(cache.Key{Torrent: firstHash.HexString(), Piece: 0}) {
+		t.Fatal("closing a torrent dropped verified resident data")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store close: %v", err)
+	}
+	if pieces, bytes := store.StagingStats(); pieces != 0 || bytes != 0 {
+		t.Fatalf("StagingStats after store close = (%d, %d), want (0, 0)", pieces, bytes)
+	}
+}

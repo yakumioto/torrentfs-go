@@ -395,3 +395,39 @@ func TestCacheConcurrentAccess(t *testing.T) {
 		t.Fatal("concurrent access produced no cache hits")
 	}
 }
+
+func TestCacheContiguousRun(t *testing.T) {
+	const step = int64(10)
+	c := New(1 << 20)
+	// start 0: pieces 0 and 1 resident, piece 2 missing, so the run is 20 bytes.
+	c.Put(Key{Torrent: "t", Piece: 0}, make([]byte, step))
+	c.Put(Key{Torrent: "t", Piece: 1}, make([]byte, step))
+	c.Put(Key{Torrent: "t", Piece: 3}, make([]byte, step))
+	if got := c.ContiguousRun("t", 0, step, 100); got != 20 {
+		t.Fatalf("ContiguousRun from 0 = %d, want 20 (stops at the gap)", got)
+	}
+	// Starting mid-piece counts only the bytes from the cursor.
+	if got := c.ContiguousRun("t", 5, step, 100); got != 15 {
+		t.Fatalf("ContiguousRun from 5 = %d, want 15", got)
+	}
+	// A limit clamps the run.
+	if got := c.ContiguousRun("t", 0, step, 7); got != 7 {
+		t.Fatalf("ContiguousRun with limit 7 = %d, want 7", got)
+	}
+	// Missing start, zero step and zero limit report nothing.
+	if got := c.ContiguousRun("t", 20, step, 100); got != 0 {
+		t.Fatalf("ContiguousRun from a missing piece = %d, want 0", got)
+	}
+	if got := c.ContiguousRun("t", 0, 0, 100); got != 0 {
+		t.Fatalf("ContiguousRun with step 0 = %d, want 0", got)
+	}
+	if got := c.ContiguousRun("t", 0, step, 0); got != 0 {
+		t.Fatalf("ContiguousRun with limit 0 = %d, want 0", got)
+	}
+	// A resident short tail ends the run at its real length.
+	c.Put(Key{Torrent: "s", Piece: 0}, make([]byte, step))
+	c.Put(Key{Torrent: "s", Piece: 1}, make([]byte, 4))
+	if got := c.ContiguousRun("s", 0, step, 100); got != step+4 {
+		t.Fatalf("ContiguousRun over a short tail = %d, want %d", got, step+4)
+	}
+}

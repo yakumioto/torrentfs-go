@@ -151,8 +151,51 @@ func (s *Store) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash met
 			pieceKey := cache.Key{Torrent: key, Piece: p.Index()}
 			return &piece{store: s, key: pieceKey, length: p.Length(), generation: s.epoch(pieceKey)}
 		},
-		Close: func() error { return nil },
+		Close: func() error { s.closeTorrent(key); return nil },
 	}, nil
+}
+
+// closeTorrent drops the per-piece bookkeeping of a torrent that is being
+// dropped. Only the staging generation counters are removed; verified pieces
+// already promoted into the cache are owned by the cache and are cleared by the
+// session's own invalidation. Nothing is deleted while a read may still be in
+// flight, because anacrolix calls this once the torrent is being torn down.
+func (s *Store) closeTorrent(torrent string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.staging {
+		if key.Torrent == torrent {
+			delete(s.staging, key)
+		}
+	}
+	for key := range s.lastRead {
+		if key.Torrent == torrent {
+			delete(s.lastRead, key)
+		}
+	}
+	for key := range s.epochs {
+		if key.Torrent == torrent {
+			delete(s.epochs, key)
+		}
+	}
+	for key := range s.verifiedEpoch {
+		if key.Torrent == torrent {
+			delete(s.verifiedEpoch, key)
+		}
+	}
+}
+
+// StagingStats reports how many pieces currently have a staging buffer and how
+// many bytes those buffers occupy. It is an internal observation point for
+// tests: staging is intentionally outside the cache's hard capacity accounting.
+func (s *Store) StagingStats() (pieces int, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, buf := range s.staging {
+		pieces++
+		bytes += int64(len(buf.data))
+	}
+	return pieces, bytes
 }
 
 func (s *Store) epoch(key cache.Key) uint64 {

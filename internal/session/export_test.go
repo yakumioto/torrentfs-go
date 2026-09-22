@@ -143,11 +143,22 @@ func (s *Session) DhtServerFamiliesForTest() []string {
 	return families
 }
 
+func unwrapRAFile(reader io.ReaderAt) *raFile {
+	switch value := reader.(type) {
+	case *raFile:
+		return value
+	case *openedFile:
+		return value.file
+	default:
+		return nil
+	}
+}
+
 // SetReadaheadForTest changes the session reader's byte window for a cold-read
 // integration test. It is not part of the public API.
 func SetReadaheadForTest(reader io.ReaderAt, readahead int64) bool {
-	file, ok := reader.(*raFile)
-	if !ok {
+	file := unwrapRAFile(reader)
+	if file == nil {
 		return false
 	}
 	file.mu.Lock()
@@ -199,15 +210,100 @@ func UnderlyingClientForTest(s *Session) *torrent.Client {
 	return s.cl
 }
 
+// PrefetchSnapshot is the test-visible copy of the coordinator's state.
+type PrefetchSnapshot = prefetchSnapshot
+
+// EvictPiecesForTest drops every piece of the torrent except the ones in keep
+// from the session's cache, simulating the LRU reclaiming a read window. It
+// syncs anacrolix's completion view so the pieces read as missing again.
+// Test-only.
+func (s *Session) EvictPiecesForTest(hash metainfo.Hash, keep ...int) error {
+	s.mu.RLock()
+	st, ok := s.torrents[hash]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session: evict: unknown torrent %s", hash)
+	}
+	info := st.tor.Info()
+	if info == nil {
+		return fmt.Errorf("session: evict: torrent %s has no info", hash)
+	}
+	kept := make(map[int]struct{}, len(keep))
+	for _, index := range keep {
+		kept[index] = struct{}{}
+	}
+	for index := 0; index < info.NumPieces(); index++ {
+		if _, ok := kept[index]; ok {
+			continue
+		}
+		s.pieceCache.Remove(cache.Key{Torrent: hash.HexString(), Piece: index})
+		st.tor.Piece(index).UpdateCompletion()
+	}
+	return nil
+}
+
+// PrefetchDefaultPiecesForTest returns the compiled-in background-piece limit
+// so a test can assert against the implementation's own default. Test-only.
+func PrefetchDefaultPiecesForTest() int { return defaultPrefetchPieces }
+
+// SeedPieceForTest loads one verified piece into the session's cache and syncs
+// anacrolix's completion view for it, leaving every other piece missing. A test
+// uses it to make one foreground read a cache hit while the window ahead stays
+// empty. Test-only.
+func (s *Session) SeedPieceForTest(hash metainfo.Hash, index int, content []byte) error {
+	s.mu.RLock()
+	st, ok := s.torrents[hash]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session: seed piece: unknown torrent %s", hash)
+	}
+	info := st.tor.Info()
+	if info == nil || info.PieceLength <= 0 {
+		return fmt.Errorf("session: seed piece: torrent %s has no usable info", hash)
+	}
+	start := int64(index) * info.PieceLength
+	end := start + info.PieceLength
+	if end > int64(len(content)) {
+		end = int64(len(content))
+	}
+	if index < 0 || start >= end {
+		return fmt.Errorf("session: seed piece: piece %d is outside the content", index)
+	}
+	s.pieceCache.Put(cache.Key{Torrent: hash.HexString(), Piece: index}, content[start:end])
+	st.tor.Piece(index).UpdateCompletion()
+	return nil
+}
+
+// PrefetchSnapshotForTest reports the torrent's prefetch coordinator state, or
+// a zero snapshot when no coordinator was created yet. Test-only.
+func PrefetchSnapshotForTest(st *Torrent) PrefetchSnapshot {
+	st.mu.Lock()
+	coordinator := st.coordinator
+	st.mu.Unlock()
+	if coordinator == nil {
+		return PrefetchSnapshot{}
+	}
+	return coordinator.snapshot()
+}
+
+// SetPrefetchBudgetLimitForTest changes the session's global background-piece
+// limit and returns a restore function. Test-only.
+func SetPrefetchBudgetLimitForTest(s *Session, limit int) func() {
+	return s.prefetchBudget.setLimit(limit)
+}
+
+// PrefetchBudgetUsageForTest reports the session's (limit, used) token counts.
+// Test-only.
+func PrefetchBudgetUsageForTest(s *Session) (limit, used int) {
+	return s.prefetchBudget.snapshot()
+}
+
 // SameRAFile reports whether two reader handles are the same session raFile,
 // and whether they share one pieceLoader. Test-only.
 func SameRAFile(a, b io.ReaderAt) (sameFile, sameLoader bool) {
-	first, ok := a.(*raFile)
-	if !ok {
-		return false, false
-	}
-	second, ok := b.(*raFile)
-	if !ok {
+	first := unwrapRAFile(a)
+	second := unwrapRAFile(b)
+	if first == nil || second == nil {
 		return false, false
 	}
 	return first == second, first.loader == second.loader

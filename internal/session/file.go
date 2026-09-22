@@ -50,6 +50,187 @@ type pieceSource interface {
 
 const defaultStreamingReadahead int64 = 8 << 20
 
+// pieceFetcher owns one Reader per missing Piece. A flight is shared by all
+// foreground waiters for that Piece, while different Pieces use independent
+// Readers and can make progress concurrently.
+type pieceFetcher struct {
+	torrent     *torrent.Torrent
+	cache       *cache.Cache
+	torrentKey  string
+	pieceLength int64
+	torrentSize int64
+
+	mu          sync.Mutex
+	rootContext context.Context
+	rootCancel  context.CancelFunc
+	inflight    map[int]*pieceFlight
+	closed      bool
+}
+
+type pieceFlight struct {
+	index    int
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan struct{}
+	data     []byte
+	err      error
+	waiters  int
+	finished bool
+}
+
+func newPieceFetcher(t *torrent.Torrent, c *cache.Cache) *pieceFetcher {
+	ctx, cancel := context.WithCancel(context.Background())
+	info := t.Info()
+	var pieceLength int64
+	if info != nil {
+		pieceLength = info.PieceLength
+	}
+	return &pieceFetcher{
+		torrent:     t,
+		cache:       c,
+		torrentKey:  t.InfoHash().HexString(),
+		pieceLength: pieceLength,
+		torrentSize: t.Length(),
+		rootContext: ctx,
+		rootCancel:  cancel,
+		inflight:    make(map[int]*pieceFlight),
+	}
+}
+
+func (f *pieceFetcher) ReadAtContext(requestCtx context.Context, p []byte, off, _ int64) (int, error) {
+	if off < 0 || f.pieceLength <= 0 {
+		return 0, filesystem.ErrInvalidName
+	}
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	if err := requestCtx.Err(); err != nil {
+		return 0, err
+	}
+	index := int(off / f.pieceLength)
+	start := int64(index) * f.pieceLength
+	length := f.pieceLength
+	if remaining := f.torrentSize - start; remaining < length {
+		length = remaining
+	}
+	if start < 0 || length <= 0 || off >= start+length {
+		return 0, io.EOF
+	}
+	emitReadProbe(readProbeEvent{Kind: "admission-attempt", Offset: start})
+	flight, err := f.joinFlight(index, start, length)
+	if err != nil {
+		return 0, err
+	}
+	select {
+	case <-flight.done:
+		f.detachFlight(flight)
+	case <-requestCtx.Done():
+		f.detachFlight(flight)
+		return 0, requestCtx.Err()
+	}
+	if flight.err != nil {
+		return 0, flight.err
+	}
+	from := off - start
+	if from < 0 || from >= int64(len(flight.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, flight.data[from:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (f *pieceFetcher) joinFlight(index int, start, length int64) (*pieceFlight, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil, filesystem.ErrClosed
+	}
+	if flight, ok := f.inflight[index]; ok {
+		flight.waiters++
+		return flight, nil
+	}
+	ctx, cancel := context.WithCancel(f.rootContext)
+	flight := &pieceFlight{
+		index:   index,
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
+	f.inflight[index] = flight
+	go f.runFlight(flight, start, length)
+	return flight, nil
+}
+
+func (f *pieceFetcher) runFlight(flight *pieceFlight, start, length int64) {
+	data := make([]byte, int(length))
+	reader := f.torrent.NewReader()
+	reader.SetContext(flight.ctx)
+	reader.SetReadahead(0)
+	var err error
+	if _, err = reader.Seek(start, io.SeekStart); err == nil {
+		emitReadProbe(readProbeEvent{Kind: "reader-started", Offset: start, Done: flight.ctx.Done()})
+		var n int
+		n, err = io.ReadFull(reader, data)
+		if err == io.ErrUnexpectedEOF {
+			err = io.EOF
+		}
+		if err == nil && n != len(data) {
+			err = io.ErrUnexpectedEOF
+		}
+	}
+	if closeErr := reader.Close(); err == nil && closeErr != nil && !errors.Is(closeErr, filesystem.ErrClosed) {
+		err = closeErr
+	}
+	if err == nil && f.cache != nil {
+		f.cache.Put(cache.Key{Torrent: f.torrentKey, Piece: flight.index}, data)
+	}
+	f.mu.Lock()
+	flight.data = data
+	flight.err = err
+	flight.finished = true
+	if current, ok := f.inflight[flight.index]; ok && current == flight {
+		delete(f.inflight, flight.index)
+	}
+	close(flight.done)
+	f.mu.Unlock()
+	flight.cancel()
+}
+
+func (f *pieceFetcher) detachFlight(flight *pieceFlight) {
+	f.mu.Lock()
+	if flight.waiters > 0 {
+		flight.waiters--
+	}
+	if flight.waiters == 0 && !flight.finished {
+		flight.cancel()
+	}
+	f.mu.Unlock()
+}
+
+func (f *pieceFetcher) Close() error {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil
+	}
+	f.closed = true
+	f.rootCancel()
+	flights := make([]*pieceFlight, 0, len(f.inflight))
+	for _, flight := range f.inflight {
+		flight.cancel()
+		flights = append(flights, flight)
+	}
+	f.mu.Unlock()
+	for _, flight := range flights {
+		<-flight.done
+	}
+	return nil
+}
+
 // pieceLoader serializes access to one whole-torrent anacrolix reader.
 type pieceLoader struct {
 	mu sync.Mutex
@@ -233,6 +414,7 @@ type raFile struct {
 
 	loader      pieceSource
 	cache       *cache.Cache
+	coordinator *prefetchCoordinator
 	torrentKey  string
 	fileOffset  int64
 	fileSize    int64
@@ -240,6 +422,7 @@ type raFile struct {
 	torrentSize int64
 	readahead   int64
 	closed      bool
+	handles     int
 	// window holds the pieces pinned by the most recent read: the requested
 	// range plus its readahead. Replacing it lets the previous region fall back
 	// to the LRU tail, so a seek keeps the new region and lets the old one go.
@@ -248,6 +431,50 @@ type raFile struct {
 
 var _ io.ReaderAt = (*raFile)(nil)
 var _ io.Closer = (*raFile)(nil)
+
+type openedFile struct {
+	file *raFile
+	once sync.Once
+}
+
+var _ io.ReaderAt = (*openedFile)(nil)
+var _ io.Closer = (*openedFile)(nil)
+
+func (f *openedFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.file.ReadAt(p, off)
+}
+
+func (f *openedFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	return f.file.ReadAtContext(ctx, p, off)
+}
+
+func (f *openedFile) Close() error {
+	f.once.Do(func() { f.file.releaseHandle() })
+	return nil
+}
+
+func (f *raFile) acquireHandle() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return false
+	}
+	f.handles++
+	return true
+}
+
+func (f *raFile) releaseHandle() {
+	f.mu.Lock()
+	if f.handles > 0 {
+		f.handles--
+	}
+	last := f.handles == 0
+	coordinator := f.coordinator
+	f.mu.Unlock()
+	if last && coordinator != nil {
+		coordinator.releaseFile(f)
+	}
+}
 
 func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 	return f.ReadAtContext(context.Background(), p, off)
@@ -272,6 +499,7 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 		return 0, filesystem.ErrClosed
 	}
 	loader := f.loader
+	coordinator := f.coordinator
 	request := cache.ReadRequest{
 		FileOffset:    off,
 		Length:        int64(len(p)),
@@ -289,23 +517,34 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 	if len(plan.Spans) == 0 {
 		return 0, io.EOF
 	}
-	f.protectWindow(f.windowKeys(request, int64(len(p))+f.readaheadBytes()))
+	var ticket *foregroundTicket
+	if coordinator != nil {
+		ticket = coordinator.beginForeground(f, request, plan)
+	} else {
+		f.protectWindow(f.windowKeys(request, int64(len(p))+f.readaheadBytes()))
+	}
 
 	written := 0
+	finish := func(err error) (int, error) {
+		if ticket != nil {
+			ticket.finish(off, written, err)
+		}
+		return written, err
+	}
 	for _, span := range plan.Spans {
 		if err := ctx.Err(); err != nil {
-			return written, err
+			return finish(err)
 		}
 		data, err := f.span(ctx, loader, span)
 		if err != nil {
-			return written, err
+			return finish(err)
 		}
 		written += copy(p[written:], data)
 	}
 	if written < len(p) {
-		return written, io.EOF
+		return finish(io.EOF)
 	}
-	return written, nil
+	return finish(nil)
 }
 
 func (f *raFile) readaheadBytes() int64 {
@@ -415,12 +654,22 @@ func (f *raFile) readPiece(ctx context.Context, loader pieceSource, data []byte,
 
 func (f *raFile) Close() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil
+	}
 	f.closed = true
-	for _, key := range f.window {
+	window := f.window
+	f.window = nil
+	coordinator := f.coordinator
+	f.mu.Unlock()
+	if coordinator != nil {
+		coordinator.releaseFile(f)
+		return nil
+	}
+	for _, key := range window {
 		f.cache.Unpin(key)
 	}
-	f.window = nil
 	return nil
 }
 
