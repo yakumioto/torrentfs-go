@@ -240,7 +240,7 @@ done
 [[ -s "$work_dir/webseed.port" ]] || fail "web seed did not start: $(sed -n '1,20p' "$work_dir/webseed.log")"
 webseed_port="$(<"$work_dir/webseed.port")"
 
-python3 "$work_dir/build.torrent" "$webseed_dir/payload.bin" "http://host.docker.internal:$webseed_port/payload.bin" "$work_dir/infohash" <<'PY'
+python3 - "$work_dir/build.torrent" "$webseed_dir/payload.bin" "http://host.docker.internal:$webseed_port/payload.bin" "$work_dir/infohash" <<'PY'
 import hashlib
 import sys
 
