@@ -116,11 +116,13 @@ func do(t *testing.T, srv *api.Server, req *http.Request) *httptest.ResponseReco
 
 func TestAddMagnetJSON(t *testing.T) {
 	view := session.TorrentView{
-		ID:        "abc",
-		InfoHash:  "abc",
-		Name:      "magnet task",
-		State:     session.StateAdding,
-		CreatedAt: time.Now().UTC(),
+		ID:              "abc",
+		InfoHash:        "abc",
+		Name:            "magnet task",
+		State:           session.StateAdding,
+		DownloadedBytes: 2048,
+		UploadedBytes:   1024,
+		CreatedAt:       time.Now().UTC(),
 	}
 	backend := &fakeBackend{addView: &view}
 	srv := newTestServer(t, backend, nil)
@@ -142,6 +144,9 @@ func TestAddMagnetJSON(t *testing.T) {
 	}
 	if got["id"] != "abc" || got["info_hash"] != "abc" || got["state"] != "adding" {
 		t.Fatalf("response = %v, want id/info_hash abc and state adding", got)
+	}
+	if got["downloaded_bytes"] != float64(2048) || got["uploaded_bytes"] != float64(1024) {
+		t.Fatalf("transfer counters = %v/%v, want 2048/1024", got["downloaded_bytes"], got["uploaded_bytes"])
 	}
 }
 
@@ -257,14 +262,16 @@ func TestRuntimeStatsReturnsSessionSnapshot(t *testing.T) {
 
 func TestListTorrentsReturnsFields(t *testing.T) {
 	backend := &fakeBackend{views: []session.TorrentView{{
-		ID:          "abc",
-		InfoHash:    "abc",
-		Name:        "task",
-		State:       session.StateReady,
-		TotalBytes:  100,
-		CachedBytes: 100,
-		CreatedAt:   time.Now().UTC(),
-		Error:       "",
+		ID:              "abc",
+		InfoHash:        "abc",
+		Name:            "task",
+		State:           session.StateReady,
+		TotalBytes:      100,
+		DownloadedBytes: 2048,
+		UploadedBytes:   1024,
+		CachedBytes:     100,
+		CreatedAt:       time.Now().UTC(),
+		Error:           "",
 	}}}
 	srv := newTestServer(t, backend, nil)
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents", nil))
@@ -278,10 +285,13 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("list length = %d, want 1", len(got))
 	}
-	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "cached_bytes", "created_at"} {
+	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "downloaded_bytes", "uploaded_bytes", "cached_bytes", "created_at"} {
 		if _, ok := got[0][key]; !ok {
 			t.Fatalf("list entry missing %q: %v", key, got[0])
 		}
+	}
+	if got[0]["downloaded_bytes"] != float64(2048) || got[0]["uploaded_bytes"] != float64(1024) {
+		t.Fatalf("list transfer counters = %v/%v, want 2048/1024", got[0]["downloaded_bytes"], got[0]["uploaded_bytes"])
 	}
 	// The removed completion fields must not reappear: they reported anacrolix's
 	// lagging completion view, which a memory-only cache cannot honour.
@@ -294,13 +304,15 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 
 func TestTorrentDetailAndStatus(t *testing.T) {
 	view := session.TorrentView{
-		ID:          strings.Repeat("a", 40),
-		InfoHash:    strings.Repeat("a", 40),
-		Name:        "payload",
-		State:       session.StateReady,
-		TotalBytes:  100,
-		CachedBytes: 42,
-		CreatedAt:   time.Now().UTC(),
+		ID:              strings.Repeat("a", 40),
+		InfoHash:        strings.Repeat("a", 40),
+		Name:            "payload",
+		State:           session.StateReady,
+		TotalBytes:      100,
+		DownloadedBytes: 4096,
+		UploadedBytes:   512,
+		CachedBytes:     42,
+		CreatedAt:       time.Now().UTC(),
 	}
 	backend := &fakeBackend{
 		detailView: view,
@@ -333,12 +345,19 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 	if detail["cached_bytes"] != float64(42) {
 		t.Fatalf("detail cached_bytes = %v, want 42", detail["cached_bytes"])
 	}
+	if detail["downloaded_bytes"] != float64(4096) || detail["uploaded_bytes"] != float64(512) {
+		t.Fatalf("detail transfer counters = %v/%v, want 4096/512", detail["downloaded_bytes"], detail["uploaded_bytes"])
+	}
 
 	rec = do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+view.ID+"/status", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
 	var got struct {
+		Torrent struct {
+			DownloadedBytes int64 `json:"downloaded_bytes"`
+			UploadedBytes   int64 `json:"uploaded_bytes"`
+		} `json:"torrent"`
 		MetainfoReady bool  `json:"metainfo_ready"`
 		PieceLength   int64 `json:"piece_length"`
 		Pieces        []struct {
@@ -355,6 +374,9 @@ func TestTorrentDetailAndStatus(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode status: %v", err)
+	}
+	if got.Torrent.DownloadedBytes != 4096 || got.Torrent.UploadedBytes != 512 {
+		t.Fatalf("status transfer counters = %d/%d, want 4096/512", got.Torrent.DownloadedBytes, got.Torrent.UploadedBytes)
 	}
 	if !got.MetainfoReady || got.PieceLength != 64 || len(got.Pieces) != 1 ||
 		got.Pieces[0].Index != 0 || !got.Pieces[0].Cached || got.Pieces[0].CachedBytes != 64 || !got.Pieces[0].Pinned {

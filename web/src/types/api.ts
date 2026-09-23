@@ -4,6 +4,8 @@ export interface Torrent {
   name: string;
   state: string;
   total_bytes: number;
+  downloaded_bytes: number;
+  uploaded_bytes: number;
   cached_bytes: number;
   created_at: string;
   error?: string;

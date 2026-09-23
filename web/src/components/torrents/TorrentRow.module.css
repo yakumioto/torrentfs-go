@@ -18,7 +18,7 @@
 
 .main {
   display: grid;
-  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr);
+  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(7.5rem, 0.8fr) minmax(7.5rem, 0.8fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr);
   align-items: center;
   gap: 1rem;
   min-width: 0;
@@ -29,6 +29,8 @@
 
 .name,
 .size,
+.download,
+.upload,
 .state {
   min-width: 0;
 }
@@ -70,7 +72,7 @@
 
 @media (max-width: 1100px) {
   .main {
-    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(7rem, 0.8fr) minmax(7rem, 0.8fr);
+    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(6rem, 0.75fr) minmax(6rem, 0.75fr) minmax(7rem, 0.8fr);
   }
 
   .added {
@@ -89,19 +91,35 @@
     grid-column: 1 / -1;
   }
 
-  .size {
+  .size,
+  .download,
+  .upload,
+  .state {
     display: grid;
     gap: 0.18rem;
+  }
+
+  .size {
     grid-column: 1;
+    grid-row: 2;
   }
 
   .state {
-    display: grid;
     justify-items: end;
-    gap: 0.18rem;
     grid-column: 2;
     grid-row: 2;
     align-self: center;
+  }
+
+  .download {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .upload {
+    justify-items: end;
+    grid-column: 2;
+    grid-row: 3;
   }
 
   .mobileLabel {

@@ -80,7 +80,18 @@ export function TorrentList({
   return (
     <div className={`panel ${styles.list}`} role="list" aria-label={`任务列表${totalCount > 0 ? `，共 ${totalCount} 个任务` : ''}`}>
       <div className={styles.header} role="row">
-        {SORT_FIELDS.map((field) => (
+        {SORT_FIELDS.slice(0, 2).map((field) => (
+          <SortHeader
+            key={field.key}
+            label={field.label}
+            sortKey={field.key}
+            sort={sort}
+            onSortKeyChange={onSortKeyChange}
+          />
+        ))}
+        <div className={styles.headerCell} role="columnheader"><span>下载量</span></div>
+        <div className={styles.headerCell} role="columnheader"><span>上传量</span></div>
+        {SORT_FIELDS.slice(2).map((field) => (
           <SortHeader
             key={field.key}
             label={field.label}

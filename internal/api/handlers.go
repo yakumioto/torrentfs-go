@@ -13,14 +13,16 @@ import (
 )
 
 type torrentResponse struct {
-	ID          string    `json:"id"`
-	InfoHash    string    `json:"info_hash"`
-	Name        string    `json:"name"`
-	State       string    `json:"state"`
-	TotalBytes  int64     `json:"total_bytes"`
-	CachedBytes int64     `json:"cached_bytes"`
-	CreatedAt   time.Time `json:"created_at"`
-	Error       string    `json:"error,omitempty"`
+	ID              string    `json:"id"`
+	InfoHash        string    `json:"info_hash"`
+	Name            string    `json:"name"`
+	State           string    `json:"state"`
+	TotalBytes      int64     `json:"total_bytes"`
+	DownloadedBytes int64     `json:"downloaded_bytes"`
+	UploadedBytes   int64     `json:"uploaded_bytes"`
+	CachedBytes     int64     `json:"cached_bytes"`
+	CreatedAt       time.Time `json:"created_at"`
+	Error           string    `json:"error,omitempty"`
 }
 
 type operationResponse struct {
@@ -94,14 +96,16 @@ type dhtFamilyStatusResponse struct {
 
 func newTorrentResponse(view session.TorrentView) torrentResponse {
 	return torrentResponse{
-		ID:          view.ID,
-		InfoHash:    view.InfoHash,
-		Name:        view.Name,
-		State:       string(view.State),
-		TotalBytes:  view.TotalBytes,
-		CachedBytes: view.CachedBytes,
-		CreatedAt:   view.CreatedAt,
-		Error:       view.Error,
+		ID:              view.ID,
+		InfoHash:        view.InfoHash,
+		Name:            view.Name,
+		State:           string(view.State),
+		TotalBytes:      view.TotalBytes,
+		DownloadedBytes: view.DownloadedBytes,
+		UploadedBytes:   view.UploadedBytes,
+		CachedBytes:     view.CachedBytes,
+		CreatedAt:       view.CreatedAt,
+		Error:           view.Error,
 	}
 }
 

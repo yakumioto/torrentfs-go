@@ -9,6 +9,7 @@
 - **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除和状态查询都通过 HTTP API 完成。
 - **管理状态与缓存分离**：由 API 管理的 metainfo 持久化在 `torrents-dir/<infohash>.torrent`，未完成的磁力链接意图、registry 和 peer identity 保存在 `torrents-dir/.metadata`，piece 内容只存在于内存。
 - **缓存不是下载进度**：`cached_bytes` 表示当前仍驻留在内存中的字节数。piece 会被淘汰，因此这个数值可能下降；进程重启后缓存为空。
+- **种子传输累计独立于缓存**：每个任务的 `downloaded_bytes` / `uploaded_bytes` 分别统计 useful payload 和实际发送的 data payload；两者在当前后端 Session 的运行时句柄生命周期内累计，不持久化。
 - **显式的网络边界**：HTTP 默认只监听 loopback。绑定非 loopback 地址时必须启用认证；服务本身不终止 TLS，应放在 TLS reverse proxy 后面。
 - **API 与 UI 分层**：API 的 status 快照包含 piece、文件范围以及 `network`/DHT 诊断字段；当前 Web UI 展示文件和 piece 缓存视图，但不展示 peer/DHT 统计。
 
@@ -259,6 +260,8 @@ token_ttl = "30m"
        "name": "example",
        "state": "ready",
        "total_bytes": 262144,
+       "downloaded_bytes": 262144,
+       "uploaded_bytes": 0,
        "cached_bytes": 262144,
        "created_at": "2026-01-01T00:00:00Z"
      },
@@ -322,6 +325,8 @@ token_ttl = "30m"
 
 `cached_bytes` 是内存 cache 当前的占用量，而不是已经下载过的字节数；piece 被淘汰后该值会下降，重启后从零开始。`ready` 不表示整个 torrent 已经下载完成，也不表示所有 piece 都在内存中。
 
+每个 torrent 的 `downloaded_bytes` 是 `BytesReadUsefulData`（有效内容 payload），`uploaded_bytes` 是 `BytesWrittenData`（实际发送的内容 payload），都不包含 wire overhead。它们从当前 Session 注册该 torrent 的运行时句柄开始累计；页面刷新、多前端读取不会清零，后端重启重建句柄后归零，也不会写入 registry 或其他持久化状态。删除中的行在运行时句柄移除后回落为零。
+
 `GET /api/v1/stats` 返回统一的 Session 运行时快照：`cache.used_bytes` / `cache.capacity_bytes` 分别是已经校验并驻留在共享 piece LRU 中的当前占用和配置硬上限，不包含 staging、临时副本、协议缓冲区或进程 RSS；`transfer.downloaded_bytes` 使用 useful torrent payload，`transfer.uploaded_bytes` 使用实际发送的 torrent data payload，均不包含 wire overhead。统计从后端 Session 创建时开始，后端重启后归零，浏览器刷新或删除任务不会清零/回退，多前端读取同一个累计值。
 
 常见 HTTP 状态：
@@ -343,7 +348,7 @@ token_ttl = "30m"
 HTTP 服务启用时，同一个 listener 同时提供嵌入式 Web UI 和 `/api/v1`：
 
 - Dashboard 支持按名称或 info hash 搜索、按全部/就绪/错误筛选，显示全局缓存、本次启动下载/上传统计和任务摘要，并提供磁力/文件添加入口。
-- Dashboard 任务列表不显示逐任务缓存列；任务、大小、状态和添加时间均可在前端排序，默认按添加时间倒序。
+- Dashboard 任务列表显示逐任务下载量和上传量；任务、大小、状态和添加时间均可在前端排序，传输量仅展示不参与排序，默认按添加时间倒序。
 - 任务详情页提供概览、文件和数据块三个 tab；文件视图显示 piece 范围和缓存覆盖，piece map 区分 cached、pinned 和 uncached。
 - 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。
 - 查询默认每 5 秒刷新；浏览器页面不可见时不会在后台继续刷新。

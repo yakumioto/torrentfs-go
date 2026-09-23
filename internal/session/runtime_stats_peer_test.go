@@ -69,7 +69,21 @@ func TestRuntimeStatsLoopbackPeerPayloadAndRestart(t *testing.T) {
 		t.Fatalf("leecher stats = %+v, want positive download and no upload", beforeRestart)
 	}
 	seederStats := seeder.RuntimeStats()
-	t.Logf("loopback peer payload: downloaded=%d uploaded_by_seeder=%d started_at=%s", beforeRestart.DownloadedBytes, seederStats.UploadedBytes, beforeRestart.StartedAt.Format(time.RFC3339Nano))
+	leecherView, err := leecher.TorrentViewFor(hashHex)
+	if err != nil {
+		t.Fatalf("leecher TorrentViewFor: %v", err)
+	}
+	if leecherView.DownloadedBytes <= 0 || leecherView.UploadedBytes != 0 {
+		t.Fatalf("leecher torrent view = %+v, want positive download and no upload", leecherView)
+	}
+	seederView, err := seeder.TorrentViewFor(hashHex)
+	if err != nil {
+		t.Fatalf("seeder TorrentViewFor: %v", err)
+	}
+	if seederView.DownloadedBytes != 0 || seederView.UploadedBytes <= 0 {
+		t.Fatalf("seeder torrent view = %+v, want no download and positive upload", seederView)
+	}
+	t.Logf("loopback peer payload: downloaded=%d uploaded_by_seeder=%d torrent_downloaded=%d torrent_uploaded=%d started_at=%s", beforeRestart.DownloadedBytes, seederStats.UploadedBytes, leecherView.DownloadedBytes, seederView.UploadedBytes, beforeRestart.StartedAt.Format(time.RFC3339Nano))
 
 	closeSession(t, leecher)
 	restarted := newLivingSession(t, cfg, leecherDir, nil)
@@ -82,4 +96,34 @@ func TestRuntimeStatsLoopbackPeerPayloadAndRestart(t *testing.T) {
 		t.Fatalf("restarted started_at = %s, want a new Session boundary", afterRestart.StartedAt.Format(time.RFC3339Nano))
 	}
 	t.Logf("after restart: downloaded=%d uploaded=%d started_at=%s", afterRestart.DownloadedBytes, afterRestart.UploadedBytes, afterRestart.StartedAt.Format(time.RFC3339Nano))
+}
+
+func TestTorrentViewStatsResetAfterRestartWithoutPeers(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := filepath.Join(work, "data")
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("no peer payload"), nil)
+	cfg := testConfig()
+
+	sess := newLivingSession(t, cfg, torrentsDir, nil)
+	if _, err := sess.AddTorrentAndPersist(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	before, err := sess.TorrentViewFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentViewFor before restart: %v", err)
+	}
+	if before.DownloadedBytes != 0 || before.UploadedBytes != 0 {
+		t.Fatalf("before restart transfer counters = %d/%d, want zero", before.DownloadedBytes, before.UploadedBytes)
+	}
+	closeSession(t, sess)
+
+	restarted := newLivingSession(t, cfg, torrentsDir, nil)
+	defer closeSession(t, restarted)
+	after, err := restarted.TorrentViewFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentViewFor after restart: %v", err)
+	}
+	if after.DownloadedBytes != 0 || after.UploadedBytes != 0 {
+		t.Fatalf("after restart transfer counters = %d/%d, want zero", after.DownloadedBytes, after.UploadedBytes)
+	}
 }

@@ -29,6 +29,8 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
     name: 'Example torrent',
     state: 'ready',
     total_bytes: 100,
+    downloaded_bytes: 0,
+    uploaded_bytes: 0,
     cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
     ...overrides,
@@ -92,7 +94,7 @@ afterEach(() => {
 
 describe('background refresh resilience', () => {
   it('keeps the last valid torrent list when a background refresh fails', async () => {
-    const torrent = makeTorrent({ name: 'Ubuntu Desktop ISO' });
+    const torrent = makeTorrent({ name: 'Ubuntu Desktop ISO', downloaded_bytes: 2048, uploaded_bytes: 1024 });
     let listRequests = 0;
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -113,6 +115,8 @@ describe('background refresh resilience', () => {
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('当前显示上一次有效快照'));
     expect(screen.getByText('Ubuntu Desktop ISO')).toBeInTheDocument();
+    expect(screen.getByRole('listitem')).toHaveTextContent('2.0 KiB');
+    expect(screen.getByRole('listitem')).toHaveTextContent('1.0 KiB');
     expect(screen.queryByText('任务列表暂不可用')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('正在加载任务列表')).not.toBeInTheDocument();
     expect(queryClient.getQueryData(queryKeys.torrents)).toHaveLength(1);
