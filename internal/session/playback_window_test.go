@@ -130,6 +130,79 @@ func TestPlaybackWindowSparseReadsDoNotChaseAnchor(t *testing.T) {
 	}
 }
 
+func TestPlaybackWindowCrossFileCandidateConfirmsAndCleansOldWindow(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(128 << 20)
+		torrentSize = 2 * fileSize
+	)
+	store := cache.New(512 << 20)
+	coordinator := newTestCoordinator(store)
+	oldFile := playbackTestFile(fileSize, pieceLength, store, coordinator)
+	oldFile.torrentSize = torrentSize
+	newFile := playbackTestFile(fileSize, pieceLength, store, coordinator)
+	newFile.fileOffset = fileSize
+	newFile.torrentSize = torrentSize
+
+	initialRequest, initialPlan := playbackReadPlan(oldFile, 0, 64)
+	initial := coordinator.beginForeground(oldFile, initialRequest, initialPlan, context.Background())
+	initial.finish(0, 64, nil)
+
+	coordinator.mu.Lock()
+	if !coordinator.retainLocked(0) {
+		coordinator.mu.Unlock()
+		t.Fatal("could not retain the old window piece")
+	}
+	coordinator.windowPins[0] = struct{}{}
+	if !coordinator.budget.tryAcquire() {
+		coordinator.mu.Unlock()
+		t.Fatal("could not reserve the old window lease")
+	}
+	coordinator.active[0] = struct{}{}
+	coordinator.mu.Unlock()
+
+	firstRequest, firstPlan := playbackReadPlan(newFile, 64<<20, 64)
+	first := coordinator.beginForeground(newFile, firstRequest, firstPlan, context.Background())
+	first.finish(firstRequest.FileOffset, 64, nil)
+	before := coordinator.snapshot()
+	if before.Generation != 1 || before.CandidateReads != 1 || before.CandidateStart != 64<<20 {
+		t.Fatalf("cross-file candidate before confirmation = generation %d reads %d start %d; want 1, 1, %d", before.Generation, before.CandidateReads, before.CandidateStart, 64<<20)
+	}
+
+	secondRequest, secondPlan := playbackReadPlan(newFile, (64<<20)+64, 64)
+	second := coordinator.beginForeground(newFile, secondRequest, secondPlan, context.Background())
+	second.finish(secondRequest.FileOffset, 64, nil)
+	after := coordinator.snapshot()
+	if after.Generation != 2 {
+		t.Fatalf("cross-file generation = %d, want 2", after.Generation)
+	}
+	if after.CandidatePresent {
+		t.Fatal("cross-file candidate remained after confirmation")
+	}
+	if after.Cursor != (64<<20)+128 {
+		t.Fatalf("cross-file anchor cursor = %d, want %d", after.Cursor, (64<<20)+128)
+	}
+	if after.ActivePieces != 0 || after.PinnedPieces != 0 {
+		t.Fatalf("old resources after cross-file confirmation = active %d pins %d, want 0, 0", after.ActivePieces, after.PinnedPieces)
+	}
+	if _, used := coordinator.budget.snapshot(); used != 0 {
+		t.Fatalf("background budget after cross-file confirmation = %d, want 0", used)
+	}
+
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.anchor.file != newFile {
+		t.Fatal("cross-file confirmation did not install the candidate file as anchor")
+	}
+	if got := playbackWindowEnd(coordinator.anchor.cursor, coordinator.anchor.fileSize); got != (64<<20)+128+defaultPlaybackWindow {
+		t.Fatalf("new cross-file playback window ends at %d, want %d", got, (64<<20)+128+defaultPlaybackWindow)
+	}
+	desired := coordinator.desiredPiecesLocked()
+	if len(desired) == 0 || desired[0] != 192 {
+		t.Fatalf("new cross-file desired window starts at %v, want piece 192", desired)
+	}
+}
+
 func TestPlaybackWindowCandidateRequiresUniqueSecondRead(t *testing.T) {
 	const (
 		pieceLength = int64(1 << 20)

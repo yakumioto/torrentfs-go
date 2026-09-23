@@ -419,12 +419,14 @@ func (c *prefetchCoordinator) finishForeground(ticket *foregroundTicket, off int
 	var cancels []context.CancelFunc
 	c.mu.Lock()
 	if current, ok := c.foreground[ticket.id]; ok && current == ticket {
-		sameGeneration := ticket.generation == c.generation && c.hasAnchor && c.anchor.file == ticket.file
+		sameGeneration := ticket.generation == c.generation && c.hasAnchor
 		successful := n > 0 && (err == nil || err == io.EOF) && sameGeneration
 		if successful {
 			switch ticket.kind {
 			case foregroundCurrentWindow:
-				c.recordConsumedLocked(off, n)
+				if c.anchor.file == ticket.file {
+					c.recordConsumedLocked(off, n)
+				}
 			case foregroundOnly, foregroundCandidate:
 				if c.recordCandidateLocked(ticket, off, n) {
 					cancels = append(cancels, c.confirmCandidateLocked(ticket)...)
