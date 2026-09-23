@@ -21,8 +21,8 @@ export function TorrentOverview({ torrent, summary, meta }: {
       <dl className={styles.grid}>
         <div><dt>信息哈希</dt><dd className={`text-mono ${styles.gridBreak}`}>{torrent.info_hash || '等待生成'}</dd></div>
         <div><dt>状态</dt><dd><StateBadge state={summary?.state ?? torrent.state} /></dd></div>
-        <div><dt>总大小</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>
-        <div><dt>缓存占用</dt><dd>{formatBytes(summary?.cachedBytes ?? torrent.cached_bytes)}</dd></div>
+        <div><dt>Torrent 总大小</dt><dd>{formatBytes(summary?.totalBytes ?? torrent.total_bytes)}</dd></div>
+        <div><dt>Torrent 缓存占用</dt><dd>{formatBytes(summary?.cachedBytes ?? torrent.cached_bytes)}</dd></div>
         <div><dt>添加时间</dt><dd>{formatDate(torrent.created_at)}</dd></div>
         <div><dt>数据块大小</dt><dd>{meta === undefined ? '—' : `${formatBytes(meta.pieceLength)}`}</dd></div>
         <div><dt>数据块数量</dt><dd>{meta?.pieceCount.toLocaleString() ?? '—'}</dd></div>

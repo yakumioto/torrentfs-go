@@ -24,8 +24,10 @@ const (
 )
 
 type rapidSeekCase struct {
-	name      string
-	positions []int
+	name                 string
+	positions            []int
+	wantStableGeneration bool
+	wantConfirmedSeek    bool
 }
 
 func TestSessionRapidSeekPlaybackWindowMatrix(t *testing.T) {
@@ -53,8 +55,9 @@ func TestSessionRapidSeekPlaybackWindowMatrix(t *testing.T) {
 	waitCached(t, ctx, seederHandle)
 
 	cases := []rapidSeekCase{
-		{name: "window slides", positions: []int{8, 16, 32, 64}},
-		{name: "rapid far seeks", positions: []int{8, 200, 350, 480}},
+		{name: "window stays bounded", positions: []int{8, 16, 32, 64}, wantStableGeneration: true},
+		{name: "sparse probes do not chase", positions: []int{8, 200, 350, 480}, wantStableGeneration: true},
+		{name: "confirmed seek", positions: []int{8, 200, 201}, wantConfirmedSeek: true},
 	}
 	for _, seekCase := range cases {
 		seekCase := seekCase
@@ -109,9 +112,25 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 		if snapshot.MaxActivePieces > session.PrefetchDefaultPiecesForTest() {
 			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, session.PrefetchDefaultPiecesForTest())
 		}
-		t.Logf("seek=%d piece=%d elapsed=%s generation=%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
+		t.Logf("seek=%d piece=%d elapsed=%s generation=%d anchor=%d candidate=%v/%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.PlaybackAnchor, snapshot.CandidatePresent, snapshot.CandidateReads, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
 		if index > 0 && snapshot.Generation < previous.Generation {
 			t.Fatalf("generation moved backwards: %d -> %d", previous.Generation, snapshot.Generation)
+		}
+		if index > 0 && seekCase.wantStableGeneration {
+			if snapshot.Generation != previous.Generation {
+				t.Fatalf("sparse read changed generation from %d to %d", previous.Generation, snapshot.Generation)
+			}
+			if snapshot.PlaybackAnchor != previous.PlaybackAnchor || snapshot.WindowStart != previous.WindowStart {
+				t.Fatalf("sparse read moved anchor/window from %d/%d to %d/%d", previous.PlaybackAnchor, previous.WindowStart, snapshot.PlaybackAnchor, snapshot.WindowStart)
+			}
+		}
+		if index == len(seekCase.positions)-1 && seekCase.wantConfirmedSeek {
+			if snapshot.Generation != previous.Generation+1 {
+				t.Fatalf("confirmed seek generation = %d, want %d", snapshot.Generation, previous.Generation+1)
+			}
+			if snapshot.CandidatePresent {
+				t.Fatal("confirmed seek left a candidate installed")
+			}
 		}
 		previous = snapshot
 	}

@@ -16,11 +16,11 @@ export function TorrentLiveSummary({ summary }: { summary?: TorrentLiveSummaryDa
   }
 
   return (
-    <section className={`${styles.summary} panel panel--padding`} aria-label="实时缓存状态">
+    <section className={`${styles.summary} panel panel--padding`} aria-label="Torrent 实时缓存状态">
       <div className={styles.heading}>
         <div>
           <p className="eyebrow">实时状态</p>
-          <h2>缓存占用</h2>
+          <h2>Torrent 缓存占用</h2>
         </div>
         <StateBadge state={summary.state} />
       </div>

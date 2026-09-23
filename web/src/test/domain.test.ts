@@ -3,7 +3,7 @@ import type { FileStatus, PieceStatus, Torrent } from '../types/api';
 import { fileCoverage } from '../components/detail/file-coverage';
 import { pieceVisualState } from '../components/detail/piece-state';
 import { DEFAULT_TORRENT_SORT, sortTorrents, type TorrentSort } from '../queries/sort';
-import { formatDate } from '../utils/format';
+import { formatBytes, formatDate } from '../utils/format';
 
 const piece = (overrides: Partial<PieceStatus> = {}): PieceStatus => ({ index: 0, cached: false, cached_bytes: 0, pinned: false, ...overrides });
 
@@ -70,6 +70,13 @@ describe('torrent sorting', () => {
     const original = [...items];
     sortTorrents(items, { key: 'name', direction: 'asc' });
     expect(items).toEqual(original);
+  });
+});
+
+describe('byte formatting', () => {
+  it('keeps the file and Torrent geometry readable at the detail-page thresholds', () => {
+    expect(formatBytes(344 * 4 * 1024 * 1024)).toBe('1.3 GiB');
+    expect(formatBytes(8131 * 4 * 1024 * 1024)).toBe('32 GiB');
   });
 });
 
