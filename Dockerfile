@@ -38,7 +38,7 @@ RUN set -eux; \
         useradd --uid "$TORRENTFS_UID" --gid "$runtime_group" --no-create-home --shell /usr/sbin/nologin "$runtime_user"; \
     fi; \
     runtime_user="$(getent passwd "$TORRENTFS_UID" | cut -d: -f1)"; \
-    install -d -o "$TORRENTFS_UID" -g "$TORRENTFS_GID" -m 0755 /etc/torrentfs /torrents /mnt/torrentfs; \
+    install -d -o "$TORRENTFS_UID" -g "$TORRENTFS_GID" -m 0755 /etc/torrentfs /torrents /share; \
     install -d -o "$TORRENTFS_UID" -g "$TORRENTFS_GID" -m 0755 \
         /run/samba /run/samba/lock /run/samba/state /run/samba/cache; \
     install -d -o "$TORRENTFS_UID" -g "$TORRENTFS_GID" -m 0755 /var/log/samba; \

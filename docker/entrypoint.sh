@@ -6,7 +6,7 @@ IFS=$'\n\t'
 # which may have a different UID than the container runtime identity.
 umask 022
 
-readonly MOUNTPOINT=/mnt/torrentfs
+readonly MOUNTPOINT=/share
 readonly IDENTITY_FILE=/etc/torrentfs/runtime-identity
 readonly SMB_TEMPLATE=/etc/samba/torrentfs-smb.conf
 readonly SMB_CONFIG=/run/samba/smb.conf
@@ -101,7 +101,7 @@ validate_user_args() {
 	for arg in "$@"; do
 		case "$arg" in
 		-mountpoint|--mountpoint|-mountpoint=*|--mountpoint=*)
-			fail 'SMB mode owns the fixed /mnt/torrentfs mountpoint; do not pass -mountpoint'
+			fail 'SMB mode owns the fixed /share mountpoint; do not pass -mountpoint'
 			;;
 		esac
 	done
