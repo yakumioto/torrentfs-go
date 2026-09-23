@@ -453,6 +453,9 @@ func (s *Session) buildViewWithCached(hash metainfo.Hash, st *Torrent, entry *re
 	}
 	view.Name = firstNonEmpty(view.Name, st.Name())
 	view.TotalBytes = st.Length()
+	stats := st.tor.Stats()
+	view.DownloadedBytes = stats.ConnStats.BytesReadUsefulData.Int64()
+	view.UploadedBytes = stats.ConnStats.BytesWrittenData.Int64()
 	view.CachedBytes = cachedBytes
 	if entry == nil {
 		if st.Info() != nil {

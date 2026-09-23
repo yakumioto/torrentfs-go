@@ -43,6 +43,12 @@ type TorrentView struct {
 	Name       string
 	State      TorrentState
 	TotalBytes int64
+	// DownloadedBytes is useful torrent payload read since this torrent's
+	// runtime handle was registered in the current Session. It is not persisted.
+	DownloadedBytes int64
+	// UploadedBytes is torrent data payload sent since this torrent's runtime
+	// handle was registered in the current Session. It is not persisted.
+	UploadedBytes int64
 	// CachedBytes is how many of the torrent's bytes are resident in the piece
 	// cache right now. It falls as pieces are evicted; it is not a download
 	// counter.

@@ -4,7 +4,7 @@
 
 .header {
   display: grid;
-  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr) auto;
+  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(7.5rem, 0.8fr) minmax(7.5rem, 0.8fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr) auto;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 1.25rem;
@@ -50,10 +50,10 @@
 
 @media (max-width: 1100px) {
   .header {
-    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(7rem, 0.8fr) auto;
+    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(6rem, 0.75fr) minmax(6rem, 0.75fr) minmax(7rem, 0.8fr) auto;
   }
 
-  .headerCell:nth-child(4) {
+  .headerCell:nth-child(6) {
     display: none;
   }
 }

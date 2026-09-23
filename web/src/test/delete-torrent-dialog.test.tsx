@@ -19,6 +19,8 @@ function makeTorrent(): Torrent {
     name: 'Example torrent',
     state: 'ready',
     total_bytes: 100,
+    downloaded_bytes: 0,
+    uploaded_bytes: 0,
     cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
   };

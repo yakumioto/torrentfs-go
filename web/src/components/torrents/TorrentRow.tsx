@@ -27,6 +27,14 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
           <span className={styles.mobileLabel}>大小</span>
           <span>{formatBytes(torrent.total_bytes)}</span>
         </div>
+        <div className={`${styles.download} text-mono`}>
+          <span className={styles.mobileLabel}>下载量</span>
+          <span>{formatBytes(torrent.downloaded_bytes)}</span>
+        </div>
+        <div className={`${styles.upload} text-mono`}>
+          <span className={styles.mobileLabel}>上传量</span>
+          <span>{formatBytes(torrent.uploaded_bytes)}</span>
+        </div>
         <div className={styles.state}>
           <span className={styles.mobileLabel}>状态</span>
           <StateBadge state={torrent.state} />
