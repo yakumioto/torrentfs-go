@@ -587,6 +587,116 @@ func TestPlaybackWindowFailedColdStartDoesNotConfirmAnchor(t *testing.T) {
 	next.finish(nextRequest.FileOffset, 64, nil)
 }
 
+func TestPlaybackWindowColdStartHoleCleanupAfterLastTicket(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(64 << 20)
+	)
+	store := cache.New(128 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+
+	firstRequest, firstPlan := playbackReadPlan(file, 0, 64)
+	first := coordinator.beginForeground(file, firstRequest, firstPlan, context.Background())
+	secondRequest, secondPlan := playbackReadPlan(file, pieceLength, 64)
+	second := coordinator.beginForeground(file, secondRequest, secondPlan, context.Background())
+	if first == nil || second == nil || first.generation != second.generation {
+		t.Fatalf("cold-start tickets = %v, %v; want same generation", first, second)
+	}
+
+	coordinator.mu.Lock()
+	if !coordinator.retainLocked(0) {
+		coordinator.mu.Unlock()
+		t.Fatal("could not retain the synthetic old window pin")
+	}
+	coordinator.windowPins[0] = struct{}{}
+	if !coordinator.budget.tryAcquire() {
+		coordinator.mu.Unlock()
+		t.Fatal("could not reserve the synthetic old window lease")
+	}
+	coordinator.active[0] = struct{}{}
+	coordinator.nextCandidate = 1
+	coordinator.candidate = &seekCandidate{
+		id:         1,
+		generation: coordinator.generation,
+		file:       file,
+		start:      4 * pieceLength,
+	}
+	coordinator.mu.Unlock()
+
+	first.finish(firstRequest.FileOffset, 0, context.Canceled)
+	if snapshot := coordinator.snapshot(); snapshot.ForegroundTickets != 1 || snapshot.ActivePieces != 1 {
+		t.Fatalf("state after failed first ticket = tickets %d active %d; want 1, 1", snapshot.ForegroundTickets, snapshot.ActivePieces)
+	}
+
+	second.finish(secondRequest.FileOffset, 64, nil)
+	snapshot := coordinator.snapshot()
+	if snapshot.AnchorConfirmed || snapshot.PlaybackAnchor != 0 || snapshot.CandidatePresent || snapshot.ForegroundTickets != 0 {
+		t.Fatalf("hole-only cold start state = confirmed %v anchor %d candidate %v tickets %d", snapshot.AnchorConfirmed, snapshot.PlaybackAnchor, snapshot.CandidatePresent, snapshot.ForegroundTickets)
+	}
+	if snapshot.ActivePieces != 0 || snapshot.PinnedPieces != 0 {
+		t.Fatalf("hole-only cold start resources = active %d pins %d; want 0, 0", snapshot.ActivePieces, snapshot.PinnedPieces)
+	}
+	if _, used := coordinator.budget.snapshot(); used != 0 {
+		t.Fatalf("hole-only cold start budget = %d, want 0", used)
+	}
+	coordinator.mu.Lock()
+	hasAnchor := coordinator.hasAnchor
+	desired := coordinator.desiredPiecesLocked()
+	consumed := len(coordinator.consumed)
+	windowPins := len(coordinator.windowPins)
+	active := len(coordinator.active)
+	coordinator.mu.Unlock()
+	if hasAnchor || len(desired) != 0 || consumed != 0 || windowPins != 0 || active != 0 {
+		t.Fatalf("hole-only coordinator residue = anchor %v desired %v consumed %d pins %d active %d", hasAnchor, desired, consumed, windowPins, active)
+	}
+
+	nextRequest, nextPlan := playbackReadPlan(file, 0, 64)
+	next := coordinator.beginForeground(file, nextRequest, nextPlan, context.Background())
+	if next == nil || next.generation != first.generation+1 {
+		t.Fatalf("next cold-start ticket generation = %v, want %d", next, first.generation+1)
+	}
+	next.finish(0, 64, nil)
+}
+
+func TestPlaybackWindowColdStartPrefixCompletionRetainsAnchor(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(64 << 20)
+	)
+	store := cache.New(128 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+
+	firstRequest, firstPlan := playbackReadPlan(file, 0, 64)
+	first := coordinator.beginForeground(file, firstRequest, firstPlan, context.Background())
+	highRequest, highPlan := playbackReadPlan(file, pieceLength, 64)
+	high := coordinator.beginForeground(file, highRequest, highPlan, context.Background())
+	prefixRequest, prefixPlan := playbackReadPlan(file, 0, 64)
+	prefix := coordinator.beginForeground(file, prefixRequest, prefixPlan, context.Background())
+	if first == nil || high == nil || prefix == nil {
+		t.Fatal("one of the concurrent cold-start tickets is nil")
+	}
+
+	first.finish(firstRequest.FileOffset, 0, context.Canceled)
+	high.finish(highRequest.FileOffset, 64, nil)
+	if snapshot := coordinator.snapshot(); snapshot.AnchorConfirmed || snapshot.ForegroundTickets != 1 {
+		t.Fatalf("state before prefix completion = confirmed %v tickets %d; want false, 1", snapshot.AnchorConfirmed, snapshot.ForegroundTickets)
+	}
+	prefix.finish(prefixRequest.FileOffset, 64, nil)
+	snapshot := coordinator.snapshot()
+	if !snapshot.AnchorConfirmed || snapshot.PlaybackAnchor != 64 || snapshot.Generation != 1 || snapshot.ForegroundTickets != 0 {
+		t.Fatalf("prefix-completed cold start state = confirmed %v anchor %d generation %d tickets %d; want true, 64, 1, 0", snapshot.AnchorConfirmed, snapshot.PlaybackAnchor, snapshot.Generation, snapshot.ForegroundTickets)
+	}
+	coordinator.mu.Lock()
+	hasAnchor := coordinator.hasAnchor
+	desired := coordinator.desiredPiecesLocked()
+	coordinator.mu.Unlock()
+	if !hasAnchor || len(desired) == 0 {
+		t.Fatalf("prefix completion lost anchor/window: hasAnchor=%v desired=%v", hasAnchor, desired)
+	}
+}
+
 func TestPlaybackWindowFailedAdmissionDoesNotMoveCursor(t *testing.T) {
 	const (
 		pieceLength = int64(1 << 20)

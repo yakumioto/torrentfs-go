@@ -436,7 +436,7 @@ func (c *prefetchCoordinator) finishForeground(ticket *foregroundTicket, off int
 		if cancel := c.removeForegroundLocked(ticket); cancel != nil {
 			cancels = append(cancels, cancel)
 		}
-		if !successful && ticket.kind == foregroundCurrentWindow && !c.anchorConfirmed {
+		if ticket.kind == foregroundCurrentWindow && !c.anchorConfirmed {
 			c.dropUnconfirmedAnchorLocked()
 		}
 	}
