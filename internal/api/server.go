@@ -29,6 +29,7 @@ type Backend interface {
 	TorrentStatusFor(id string) (session.TorrentStatusView, error)
 	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
 	Operation(id string) (session.Operation, bool)
+	RuntimeStats() session.RuntimeStatsView
 }
 
 // Server is the torrent management HTTP service.
@@ -89,6 +90,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/torrents", s.handleAdd)
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
+	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)

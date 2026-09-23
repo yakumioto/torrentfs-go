@@ -4,7 +4,7 @@
 
 .header {
   display: grid;
-  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(13rem, 1.35fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr) auto;
+  grid-template-columns: minmax(13rem, 2fr) minmax(6rem, 0.7fr) minmax(7.5rem, 0.8fr) minmax(9rem, 0.9fr) auto;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 1.25rem;
@@ -15,12 +15,45 @@
   letter-spacing: 0.04em;
 }
 
+.headerCell {
+  min-width: 0;
+}
+
+.sortButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+}
+
+.sortButton:hover,
+.sortButton:focus-visible,
+.sortButtonActive {
+  color: var(--text-primary);
+}
+
+.sortButton svg {
+  flex: 0 0 auto;
+}
+
+.mobileSort {
+  display: none;
+}
+
 @media (max-width: 1100px) {
   .header {
-    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(10rem, 1.25fr) minmax(7rem, 0.8fr) auto;
+    grid-template-columns: minmax(11rem, 1.8fr) minmax(5rem, 0.7fr) minmax(7rem, 0.8fr) auto;
   }
 
-  .header span:nth-child(5) {
+  .headerCell:nth-child(4) {
     display: none;
   }
 }
@@ -28,5 +61,45 @@
 @media (max-width: 760px) {
   .header {
     display: none;
+  }
+
+  .mobileSort {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+  }
+
+  .mobileSort select {
+    min-width: 0;
+    flex: 1;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    background: var(--surface-1);
+  }
+
+  .directionButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    flex: 0 0 auto;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    background: var(--surface-1);
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .directionButton:hover,
+  .directionButton:focus-visible {
+    border-color: var(--focus);
+    color: var(--text-primary);
   }
 }

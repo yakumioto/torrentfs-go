@@ -7,7 +7,6 @@ import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
 import { StateBadge } from './StateBadge';
-import { TorrentProgress } from './TorrentProgress';
 
 export function TorrentRow({ torrent }: { torrent: Torrent }) {
   const navigate = useNavigate();
@@ -28,7 +27,6 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
           <span className={styles.mobileLabel}>大小</span>
           <span>{formatBytes(torrent.total_bytes)}</span>
         </div>
-        <TorrentProgress className={styles.cache} cachedBytes={torrent.cached_bytes} totalBytes={torrent.total_bytes} state={torrent.state} />
         <div className={styles.state}>
           <span className={styles.mobileLabel}>状态</span>
           <StateBadge state={torrent.state} />

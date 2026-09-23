@@ -1,10 +1,30 @@
 import { Button, Skeleton } from '@mantine/core';
-import { IconInbox, IconRefresh, IconSearch } from '@tabler/icons-react';
+import { IconChevronDown, IconChevronUp, IconInbox, IconRefresh, IconSearch } from '@tabler/icons-react';
 import type { Torrent } from '../../types/api';
+import type { SortDirection, TorrentSort, TorrentSortKey } from '../../queries/sort';
 import styles from './TorrentList.module.css';
 import { TorrentRow } from './TorrentRow';
 
-export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCount = 0, hasFilters, onClearFilters }: {
+const SORT_FIELDS: Array<{ key: TorrentSortKey; label: string }> = [
+  { key: 'name', label: '任务' },
+  { key: 'total_bytes', label: '大小' },
+  { key: 'state', label: '状态' },
+  { key: 'created_at', label: '添加时间' },
+];
+
+export function TorrentList({
+  torrents,
+  loading,
+  error,
+  onRetry,
+  onAdd,
+  totalCount = 0,
+  hasFilters,
+  onClearFilters,
+  sort,
+  onSortKeyChange,
+  onSortDirectionToggle,
+}: {
   torrents?: Torrent[];
   loading: boolean;
   error: unknown;
@@ -13,6 +33,9 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
   totalCount?: number;
   hasFilters?: boolean;
   onClearFilters?: () => void;
+  sort: TorrentSort;
+  onSortKeyChange: (key: TorrentSortKey) => void;
+  onSortDirectionToggle: () => void;
 }) {
   if (loading && torrents === undefined) {
     return (
@@ -56,15 +79,71 @@ export function TorrentList({ torrents, loading, error, onRetry, onAdd, totalCou
 
   return (
     <div className={`panel ${styles.list}`} role="list" aria-label={`任务列表${totalCount > 0 ? `，共 ${totalCount} 个任务` : ''}`}>
-      <div className={styles.header} aria-hidden="true">
-        <span>任务</span>
-        <span>大小</span>
-        <span>缓存占用</span>
-        <span>状态</span>
-        <span>添加时间</span>
-        <span>操作</span>
+      <div className={styles.header} role="row">
+        {SORT_FIELDS.map((field) => (
+          <SortHeader
+            key={field.key}
+            label={field.label}
+            sortKey={field.key}
+            sort={sort}
+            onSortKeyChange={onSortKeyChange}
+          />
+        ))}
+        <div className={styles.headerCell} role="columnheader"><span>操作</span></div>
+      </div>
+      <div className={styles.mobileSort} role="group" aria-label="任务列表排序">
+        <label htmlFor="torrent-mobile-sort">排序字段</label>
+        <select
+          id="torrent-mobile-sort"
+          value={sort.key}
+          aria-label="移动端排序字段"
+          onChange={(event) => onSortKeyChange(event.currentTarget.value as TorrentSortKey)}
+        >
+          {SORT_FIELDS.map((field) => <option key={field.key} value={field.key}>{field.label}</option>)}
+        </select>
+        <button
+          type="button"
+          className={styles.directionButton}
+          aria-label={`切换为${sort.direction === 'asc' ? '降序' : '升序'}`}
+          onClick={onSortDirectionToggle}
+        >
+          {sort.direction === 'asc' ? <IconChevronUp size={15} aria-hidden="true" /> : <IconChevronDown size={15} aria-hidden="true" />}
+          <span>{sort.direction === 'asc' ? '升序' : '降序'}</span>
+        </button>
       </div>
       {torrents?.map((torrent) => <TorrentRow key={torrent.id} torrent={torrent} />)}
+    </div>
+  );
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSortKeyChange,
+}: {
+  label: string;
+  sortKey: TorrentSortKey;
+  sort: TorrentSort;
+  onSortKeyChange: (key: TorrentSortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const direction: SortDirection = active ? sort.direction : 'asc';
+  return (
+    <div
+      className={styles.headerCell}
+      role="columnheader"
+      aria-sort={active ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}
+    >
+      <button
+        type="button"
+        className={`${styles.sortButton} ${active ? styles.sortButtonActive : ''}`}
+        aria-label={`按${label}排序${active ? `，当前${direction === 'asc' ? '升序' : '降序'}` : ''}`}
+        onClick={() => onSortKeyChange(sortKey)}
+      >
+        <span>{label}</span>
+        {active && (direction === 'asc' ? <IconChevronUp size={14} aria-hidden="true" /> : <IconChevronDown size={14} aria-hidden="true" />)}
+      </button>
     </div>
   );
 }

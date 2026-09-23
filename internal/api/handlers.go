@@ -30,6 +30,22 @@ type operationResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type runtimeStatsResponse struct {
+	StartedAt time.Time               `json:"started_at"`
+	Cache     runtimeCacheResponse    `json:"cache"`
+	Transfer  runtimeTransferResponse `json:"transfer"`
+}
+
+type runtimeCacheResponse struct {
+	UsedBytes     int64 `json:"used_bytes"`
+	CapacityBytes int64 `json:"capacity_bytes"`
+}
+
+type runtimeTransferResponse struct {
+	DownloadedBytes int64 `json:"downloaded_bytes"`
+	UploadedBytes   int64 `json:"uploaded_bytes"`
+}
+
 type pieceStatusResponse struct {
 	Index       int   `json:"index"`
 	Cached      bool  `json:"cached"`
@@ -86,6 +102,20 @@ func newTorrentResponse(view session.TorrentView) torrentResponse {
 		CachedBytes: view.CachedBytes,
 		CreatedAt:   view.CreatedAt,
 		Error:       view.Error,
+	}
+}
+
+func newRuntimeStatsResponse(view session.RuntimeStatsView) runtimeStatsResponse {
+	return runtimeStatsResponse{
+		StartedAt: view.StartedAt,
+		Cache: runtimeCacheResponse{
+			UsedBytes:     view.CacheUsedBytes,
+			CapacityBytes: view.CacheCapacityBytes,
+		},
+		Transfer: runtimeTransferResponse{
+			DownloadedBytes: view.DownloadedBytes,
+			UploadedBytes:   view.UploadedBytes,
+		},
 	}
 }
 
@@ -209,6 +239,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, newTorrentResponse(view))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, newRuntimeStatsResponse(s.backend.RuntimeStats()))
 }
 
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {

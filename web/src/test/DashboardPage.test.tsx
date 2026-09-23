@@ -8,10 +8,10 @@ import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { AppLayout } from '../components/layout/AppLayout';
 import { DashboardPage } from '../pages/DashboardPage';
 import { theme } from '../styles/theme';
-import type { Torrent } from '../types/api';
+import type { RuntimeStats, Torrent } from '../types/api';
 
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
 function torrent(overrides: Partial<Torrent> = {}): Torrent {
@@ -27,7 +27,16 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
   };
 }
 
-function renderDashboard(torrents: Torrent[]) {
+function runtimeStats(overrides: Partial<RuntimeStats> = {}): RuntimeStats {
+  return {
+    started_at: '2026-09-23T09:00:00Z',
+    cache: { used_bytes: 1024, capacity_bytes: 4096 },
+    transfer: { downloaded_bytes: 2048, uploaded_bytes: 1024 },
+    ...overrides,
+  };
+}
+
+function renderDashboard(torrents: Torrent[], statsBody: unknown = runtimeStats(), statsStatus = 200) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
     api,
@@ -42,7 +51,9 @@ function renderDashboard(torrents: Torrent[]) {
     retryProbe: () => undefined,
   };
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(torrents)));
+  const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/stats')
+    ? Promise.resolve(jsonResponse(statsBody, statsStatus))
+    : Promise.resolve(jsonResponse(torrents)));
   vi.stubGlobal('fetch', fetchMock);
   render(
     <MantineProvider theme={theme} defaultColorScheme="light">
@@ -92,6 +103,37 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '全部' }));
     fireEvent.change(screen.getByRole('textbox', { name: '搜索任务' }), { target: { value: 'does-not-exist' } });
     expect(screen.getByRole('heading', { name: '没有匹配的任务' })).toBeInTheDocument();
+  });
+
+  it('shows runtime stats, removes the list cache column, and sorts the visible fields', async () => {
+    renderDashboard([
+      torrent({ id: 'older', name: 'Zulu', created_at: '2026-09-16T00:00:00Z' }),
+      torrent({ id: 'newer', name: 'Alpha', created_at: '2026-09-17T00:00:00Z' }),
+    ]);
+
+    await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument());
+    expect(screen.getByText('全局缓存')).toBeInTheDocument();
+    expect(screen.getByText('本次启动下载')).toBeInTheDocument();
+    expect(screen.getByText('本次启动上传')).toBeInTheDocument();
+    expect(screen.queryByText('缓存占用')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '按大小排序' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '按状态排序' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '按添加时间排序，当前降序' })).toBeInTheDocument();
+
+    const rows = () => screen.getAllByRole('listitem').map((item) => item.textContent);
+    expect(rows()[0]).toContain('Alpha');
+    fireEvent.click(screen.getByRole('button', { name: '按任务排序' }));
+    expect(rows()[0]).toContain('Alpha');
+    expect(rows()[1]).toContain('Zulu');
+    expect(screen.getByLabelText('移动端排序字段')).toHaveValue('name');
+  });
+
+  it('keeps the task list usable when runtime stats are unavailable', async () => {
+    renderDashboard([torrent()], { error: 'not found' }, 404);
+
+    await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('运行时统计暂不可用');
+    expect(screen.queryByText('任务列表暂不可用')).not.toBeInTheDocument();
   });
 
   it('shows distinct empty states for no tasks and no matches', async () => {

@@ -40,7 +40,8 @@ type fakeBackend struct {
 	deleteOp  *session.Operation
 	deleteErr error
 
-	ops map[string]session.Operation
+	runtimeStats session.RuntimeStatsView
+	ops          map[string]session.Operation
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -85,6 +86,12 @@ func (f *fakeBackend) Operation(id string) (session.Operation, bool) {
 	defer f.mu.Unlock()
 	op, ok := f.ops[id]
 	return op, ok
+}
+
+func (f *fakeBackend) RuntimeStats() session.RuntimeStatsView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runtimeStats
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {
@@ -210,6 +217,41 @@ func TestAddRejectsOversizedUpload(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	if rec := do(t, srv, req); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRuntimeStatsReturnsSessionSnapshot(t *testing.T) {
+	startedAt := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	backend := &fakeBackend{runtimeStats: session.RuntimeStatsView{
+		StartedAt:          startedAt,
+		CacheUsedBytes:     123,
+		CacheCapacityBytes: 456,
+		DownloadedBytes:    789,
+		UploadedBytes:      321,
+	}}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		StartedAt time.Time `json:"started_at"`
+		Cache     struct {
+			UsedBytes     int64 `json:"used_bytes"`
+			CapacityBytes int64 `json:"capacity_bytes"`
+		} `json:"cache"`
+		Transfer struct {
+			DownloadedBytes int64 `json:"downloaded_bytes"`
+			UploadedBytes   int64 `json:"uploaded_bytes"`
+		} `json:"transfer"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if !got.StartedAt.Equal(startedAt) || got.Cache.UsedBytes != 123 || got.Cache.CapacityBytes != 456 ||
+		got.Transfer.DownloadedBytes != 789 || got.Transfer.UploadedBytes != 321 {
+		t.Fatalf("stats = %+v, want session snapshot", got)
 	}
 }
 
