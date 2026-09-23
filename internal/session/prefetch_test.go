@@ -43,13 +43,14 @@ func TestPrefetchBudgetIsSessionGlobal(t *testing.T) {
 // the cache-facing and anchor-facing helpers may be called on it.
 func newTestCoordinator(c *cache.Cache) *prefetchCoordinator {
 	return &prefetchCoordinator{
-		cache:      c,
-		budget:     newPrefetchBudget(defaultPrefetchPieces),
-		torrentKey: "prefetch-test",
-		refs:       make(map[int]int),
-		windowPins: make(map[int]struct{}),
-		active:     make(map[int]struct{}),
-		foreground: make(map[uint64][]int),
+		cache:            c,
+		budget:           newPrefetchBudget(defaultPrefetchPieces),
+		torrentKey:       "prefetch-test",
+		refs:             make(map[int]int),
+		windowPins:       make(map[int]struct{}),
+		active:           make(map[int]struct{}),
+		foreground:       make(map[uint64]*foregroundTicket),
+		foregroundPieces: make(map[int]int),
 	}
 }
 
@@ -150,10 +151,10 @@ func TestPrefetchWatermarksShrinkWithFileAndBudget(t *testing.T) {
 			wantLow:    defaultPrefetchLow,
 		},
 		{
-			name:       "short tail shrinks the window and keeps 1:4 hysteresis",
+			name:       "short tail shrinks the window and keeps 1:2 hysteresis",
 			bytesToEOF: 40 * miB,
 			wantHigh:   40 * miB,
-			wantLow:    10 * miB,
+			wantLow:    20 * miB,
 		},
 		{
 			name:               "tight pin budget clamps to the admitted prefix",
@@ -161,7 +162,7 @@ func TestPrefetchWatermarksShrinkWithFileAndBudget(t *testing.T) {
 			reservedPrefix:     8 * miB,
 			reservationBlocked: true,
 			wantHigh:           8 * miB,
-			wantLow:            2 * miB,
+			wantLow:            4 * miB,
 		},
 		{
 			name:               "exhausted budget collapses the window",
@@ -293,8 +294,16 @@ func TestPrefetchForegroundTicketIsIdempotent(t *testing.T) {
 	}
 	c.nextTicket = 1
 	c.anchorTicket = 1
-	c.foreground[1] = []int{0}
-	ticket := &foregroundTicket{coordinator: c, id: 1, generation: 0}
+	ticket := &foregroundTicket{
+		coordinator: c,
+		id:          1,
+		generation:  0,
+		wanted:      []int{0},
+		pinned:      []int{0},
+		active:      map[int]int{0: 1},
+	}
+	c.foreground[1] = ticket
+	c.foregroundPieces[0] = 1
 	ticket.finish(0, 8, nil)
 	if store.PinnedBytes() != 0 {
 		t.Fatalf("PinnedBytes = %d after finish, want 0", store.PinnedBytes())
@@ -316,9 +325,9 @@ func TestPrefetchForegroundEOFCommitsProgress(t *testing.T) {
 	c.anchor = prefetchAnchor{fileSize: 100, pieceLength: 32, torrentSize: 100}
 	c.generation = 3
 	c.anchorTicket = 1
-	c.foreground[1] = nil
 
 	ticket := &foregroundTicket{coordinator: c, id: 1, generation: 3}
+	c.foreground[1] = ticket
 	ticket.finish(90, 10, io.EOF)
 	if c.anchor.cursor != 100 {
 		t.Fatalf("cursor = %d after a positive EOF read, want 100", c.anchor.cursor)
@@ -334,11 +343,11 @@ func TestPrefetchForegroundCompletionOrderDoesNotRewindCursor(t *testing.T) {
 	c.anchor = prefetchAnchor{fileSize: 1024, pieceLength: 32, torrentSize: 1024, cursor: 10}
 	c.generation = 4
 	c.anchorTicket = 2
-	c.foreground[1] = nil
-	c.foreground[2] = nil
 
 	newer := &foregroundTicket{coordinator: c, id: 2, generation: 4}
 	older := &foregroundTicket{coordinator: c, id: 1, generation: 4}
+	c.foreground[1] = older
+	c.foreground[2] = newer
 	newer.finish(200, 20, nil)
 	older.finish(10, 10, nil)
 	if c.anchor.cursor != 220 {
@@ -355,8 +364,8 @@ func TestPrefetchStaleTicketDoesNotMoveCursor(t *testing.T) {
 	c.anchor = prefetchAnchor{fileSize: 1 << 20, pieceLength: 1 << 10, torrentSize: 1 << 20}
 	c.generation = 5
 	c.nextTicket = 1
-	c.foreground[1] = nil
 	stale := &foregroundTicket{coordinator: c, id: 1, generation: 4}
+	c.foreground[1] = stale
 	stale.finish(0, 4096, nil)
 	if c.anchor.cursor != 0 {
 		t.Fatalf("cursor = %d after a stale ticket finished, want 0", c.anchor.cursor)

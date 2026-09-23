@@ -17,23 +17,18 @@ import (
 )
 
 const (
-	matrixPieceCount  = 192
+	matrixPieceCount  = 512
 	matrixTargetPiece = 8
 	matrixRate        = 1 << 20
 	matrixBurst       = 128 << 10
 )
 
-type readaheadCandidate struct {
-	name  string
-	bytes int64
+type rapidSeekCase struct {
+	name      string
+	positions []int
 }
 
-type seekPosition struct {
-	name   string
-	offset int64
-}
-
-func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
+func TestSessionRapidSeekPlaybackWindowMatrix(t *testing.T) {
 	content := make([]byte, matrixPieceCount*testPieceLength)
 	for i := range content {
 		content[i] = byte(i*31 + i/251 + 1)
@@ -45,7 +40,7 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 
 	seederDir := filepath.Join(t.TempDir(), "seeder-data")
 	seeder := newLoopbackSession(t, testConfig(), seederDir)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if err := seeder.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("seeder AddTorrent: %v", err)
@@ -57,37 +52,26 @@ func TestSessionColdSeekReadaheadMatrix(t *testing.T) {
 	seedPieces(t, seeder, hash, content)
 	waitCached(t, ctx, seederHandle)
 
-	pieceLength := int64(testPieceLength)
-	candidates := []readaheadCandidate{
-		{name: "piece-length baseline", bytes: pieceLength},
-		{name: "8 MiB", bytes: 8 << 20},
-		{name: "16 MiB", bytes: 16 << 20},
-		{name: "32 MiB", bytes: 32 << 20},
+	cases := []rapidSeekCase{
+		{name: "window slides", positions: []int{8, 16, 32, 64}},
+		{name: "rapid far seeks", positions: []int{8, 200, 350, 480}},
 	}
-	positions := []seekPosition{
-		{name: "piece boundary", offset: 0},
-		{name: "piece middle", offset: pieceLength / 2},
-	}
-	caseNumber := 0
-	for _, position := range positions {
-		position := position
-		for _, candidate := range candidates {
-			candidate := candidate
-			caseNumber++
-			t.Run(position.name+"/"+candidate.name, func(t *testing.T) {
-				runColdSeekCandidate(t, tracker, hashHex, hash, torrentBytes, content, pieceLength, position.offset, candidate, caseNumber)
-			})
-		}
+	for _, seekCase := range cases {
+		seekCase := seekCase
+		t.Run(seekCase.name, func(t *testing.T) {
+			runRapidSeekCase(t, tracker, hashHex, hash, torrentBytes, content, seekCase)
+		})
 	}
 }
 
-func runColdSeekCandidate(t *testing.T, tracker *loopbackTracker, hashHex string, hash metainfo.Hash, torrentBytes, content []byte, pieceLength, positionOffset int64, candidate readaheadCandidate, caseNumber int) {
+func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, hash metainfo.Hash, torrentBytes, content []byte, seekCase rapidSeekCase) {
 	t.Helper()
+	pieceLength := int64(testPieceLength)
 	dataDir := filepath.Join(t.TempDir(), "leecher-data")
 	leecher := newLoopbackSessionWithCustomize(t, testConfig(), dataDir, func(cc *session.TorrentClientConfig) {
 		cc.DownloadRateLimiter = newMatrixLimiter()
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("leecher AddTorrent: %v", err)
@@ -107,77 +91,33 @@ func runColdSeekCandidate(t *testing.T, tracker *loopbackTracker, hashHex string
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
-	if !session.SetReadaheadForTest(reader, candidate.bytes) {
-		t.Fatal("OpenFile did not return a session raFile")
-	}
+	defer func() { _ = reader.(io.Closer).Close() }()
 
-	targetOffset := int64(matrixTargetPiece)*pieceLength + positionOffset
-	firstRead := make([]byte, 64)
-	seekStarted := time.Now()
-	readDone := make(chan struct {
-		n    int
-		err  error
-		data []byte
-	}, 1)
-	go func() {
-		n, err := reader.ReadAt(firstRead, targetOffset)
-		readDone <- struct {
-			n    int
-			err  error
-			data []byte
-		}{n: n, err: err, data: append([]byte(nil), firstRead...)}
-	}()
-
-	priorityAt, err := waitForPiecePriority(ctx, leecherHandle, matrixTargetPiece, torrent.PiecePriorityNow)
-	if err != nil {
-		t.Fatalf("target priority was not established: %v", err)
-	}
-	var result struct {
-		n    int
-		err  error
-		data []byte
-	}
-	select {
-	case result = <-readDone:
-	case <-ctx.Done():
-		t.Fatalf("first cold read: %v", ctx.Err())
-	}
-	firstDataAt := time.Now()
-	if result.err != nil || result.n != len(firstRead) {
-		t.Fatalf("first cold read = %d bytes, %v; want %d, nil", result.n, result.err, len(firstRead))
-	}
-	if want := content[int(targetOffset) : int(targetOffset)+len(firstRead)]; !bytes.Equal(result.data, want) {
-		t.Fatal("first cold read data differs from source")
-	}
-
-	readPosition := targetOffset + int64(result.n)
-	windowEnd := int((readPosition + candidate.bytes + pieceLength - 1) / pieceLength)
-	forwardCompleted := completedPiecesInRange(session.PieceStateRunsForTest(leecherHandle), matrixTargetPiece+1, windowEnd)
-	completedAtFirst := leecherHandle.CachedBytes()
-	t.Logf("case=%d priority=%s first_data=%s priority_to_first=%s completed_at_first=%d forward_completed=%d forward_bytes=%d", caseNumber, priorityAt.Sub(seekStarted), firstDataAt.Sub(seekStarted), firstDataAt.Sub(priorityAt), completedAtFirst, forwardCompleted, int64(forwardCompleted)*pieceLength)
-
-	const playbackPieces = 6
-	const stallThreshold = 100 * time.Millisecond
-	stalls := 0
-	var playback time.Duration
-	for piece := matrixTargetPiece + 1; piece <= matrixTargetPiece+playbackPieces; piece++ {
-		off := int64(piece) * pieceLength
+	var previous session.PrefetchSnapshot
+	for index, piece := range seekCase.positions {
+		offset := int64(piece) * pieceLength
 		buf := make([]byte, 64)
 		started := time.Now()
-		n, err := reader.ReadAt(buf, off)
-		duration := time.Since(started)
-		playback += duration
-		if duration >= stallThreshold {
-			stalls++
-		}
+		n, err := reader.ReadAt(buf, offset)
 		if err != nil || n != len(buf) {
-			t.Fatalf("sequential piece %d read = %d bytes, %v; want %d, nil", piece, n, err, len(buf))
+			t.Fatalf("seek %d at piece %d = %d bytes, %v; want %d, nil", index, piece, n, err, len(buf))
 		}
-		if !bytes.Equal(buf, content[int(off):int(off)+len(buf)]) {
-			t.Fatalf("sequential piece %d data differs from source", piece)
+		if !bytes.Equal(buf, content[int(offset):int(offset)+len(buf)]) {
+			t.Fatalf("seek %d at piece %d returned different data", index, piece)
 		}
+		snapshot := session.PrefetchSnapshotForTest(leecherHandle)
+		if snapshot.MaxActivePieces > session.PrefetchDefaultPiecesForTest() {
+			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, session.PrefetchDefaultPiecesForTest())
+		}
+		t.Logf("seek=%d piece=%d elapsed=%s generation=%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
+		if index > 0 && snapshot.Generation < previous.Generation {
+			t.Fatalf("generation moved backwards: %d -> %d", previous.Generation, snapshot.Generation)
+		}
+		previous = snapshot
 	}
-	t.Logf("playback_duration=%s stalls_ge_%s=%d/%d", playback, stallThreshold, stalls, playbackPieces)
+	if previous.ForegroundTickets != 0 {
+		t.Fatalf("foreground tickets after final read = %d, want 0", previous.ForegroundTickets)
+	}
 }
 
 // TestSessionPrefetchBudgetMatrix measures the same cold-start/seek path for
@@ -314,25 +254,4 @@ func piecePriorityAt(runs torrent.PieceStateRuns, piece int) torrent.PiecePriori
 		start += run.Length
 	}
 	return torrent.PiecePriorityNone
-}
-
-func completedPiecesInRange(runs torrent.PieceStateRuns, begin, end int) int {
-	if end <= begin {
-		return 0
-	}
-	start := 0
-	completed := 0
-	for _, run := range runs {
-		runEnd := start + run.Length
-		overlapStart := max(start, begin)
-		overlapEnd := min(runEnd, end)
-		if overlapStart < overlapEnd && run.Completion.Ok {
-			completed += overlapEnd - overlapStart
-		}
-		start = runEnd
-		if start >= end {
-			break
-		}
-	}
-	return completed
 }

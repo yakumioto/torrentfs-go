@@ -28,13 +28,13 @@ const (
 	overlapReadTimeout = 60 * time.Second
 )
 
-// TestFuseIncompleteOverlapReadsShareOneLoader drives two overlapping reads of
+// TestFuseIncompleteOverlapReadsShareOneFetcher drives two overlapping reads of
 // two still-missing pieces through a real FUSE mount while a throttled swarm
 // keeps them outstanding. It proves the whole chain at once: the FUSE bridge
-// hands both requests to one shared raFile/loader, the second request does not
+// hands both requests to one shared raFile/piece fetcher, the second request does not
 // cancel the first, both eventually return their own bytes, and the playback
 // phase produces no anacrolix cancellation logs.
-func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
+func TestFuseIncompleteOverlapReadsShareOneFetcher(t *testing.T) {
 	requireFuse(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -118,14 +118,14 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	defer func() { _ = secondFile.Close() }()
 
 	// Both FUSE opens must have landed on one session reader sharing one
-	// loader: that shared state is what the cancellation bug was about.
+	// piece fetcher: that shared state is what the cancellation bug was about.
 	opened := waitOpenedReaders(t, recorder, 2)
 	sameFile, sameLoader := session.SameRAFile(opened[0], opened[1])
 	if !sameFile {
 		t.Fatal("the two FUSE opens did not share one session reader")
 	}
 	if !sameLoader {
-		t.Fatal("the two FUSE opens did not share one piece loader")
+		t.Fatal("the two FUSE opens did not share one piece fetcher")
 	}
 
 	status, err := leecher.TorrentStatusFor(hashHex)
@@ -169,7 +169,7 @@ func TestFuseIncompleteOverlapReadsShareOneLoader(t *testing.T) {
 	requireNoReadOutcome(t, secondDone, "second read")
 
 	// The throttled swarm delivers the missing pieces and both reads finish on
-	// their own, still sharing the one loader that neither cancelled.
+	// their own, still sharing the one piece fetcher that neither cancelled.
 	firstOutcome := waitReadOutcomeWithin(t, firstDone, "first read", overlapReadTimeout)
 	if firstOutcome.err != nil {
 		t.Fatalf("first read: %v", firstOutcome.err)
