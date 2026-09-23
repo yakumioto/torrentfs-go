@@ -154,19 +154,6 @@ func unwrapRAFile(reader io.ReaderAt) *raFile {
 	}
 }
 
-// SetReadaheadForTest changes the session reader's byte window for a cold-read
-// integration test. It is not part of the public API.
-func SetReadaheadForTest(reader io.ReaderAt, readahead int64) bool {
-	file := unwrapRAFile(reader)
-	if file == nil {
-		return false
-	}
-	file.mu.Lock()
-	file.readahead = readahead
-	file.mu.Unlock()
-	return true
-}
-
 // PieceStateRunsForTest exposes the underlying torrent priority/completion
 // snapshot to session integration tests. It is not part of the public API.
 func PieceStateRunsForTest(st *Torrent) torrent.PieceStateRuns {

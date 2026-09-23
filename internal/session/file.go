@@ -496,7 +496,8 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 // ReadAtContext serves one file-local read on behalf of ctx. Cancelling ctx
-// ends this read only: it never cancels another read's operation.
+// ends this read only; a true playback-window seek may also end stale reads from
+// an older generation.
 func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
@@ -533,8 +534,12 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 		return 0, io.EOF
 	}
 	var ticket *foregroundTicket
+	readCtx := ctx
 	if coordinator != nil {
-		ticket = coordinator.beginForeground(f, request, plan)
+		ticket = coordinator.beginForeground(f, request, plan, ctx)
+		if ticket != nil && ticket.ctx != nil {
+			readCtx = ticket.ctx
+		}
 	} else {
 		f.protectWindow(f.windowKeys(request, int64(len(p))+f.readaheadBytes()))
 	}
@@ -547,11 +552,28 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 		return written, err
 	}
 	for _, span := range plan.Spans {
-		if err := ctx.Err(); err != nil {
+		if err := readCtx.Err(); err != nil {
+			if ticket != nil {
+				ticket.recordStaleSpan()
+			}
 			return finish(err)
 		}
-		data, err := f.span(ctx, loader, span)
+		pieceMiss := false
+		if ticket != nil {
+			_, cached := f.cache.Get(cache.Key{Torrent: f.torrentKey, Piece: span.Index})
+			pieceMiss = !cached
+			if pieceMiss {
+				ticket.startPiece(span.Index)
+			}
+		}
+		data, err := f.span(readCtx, loader, span)
+		if pieceMiss {
+			ticket.finishPiece(span.Index)
+		}
 		if err != nil {
+			if ticket != nil && readCtx.Err() != nil {
+				ticket.recordStaleSpan()
+			}
 			return finish(err)
 		}
 		written += copy(p[written:], data)

@@ -459,7 +459,7 @@ printf 'docker smoke: FUSE container stopped and host mount disappeared cleanly\
 # instrumented pre-fix build logged exactly one loader entry and zero
 # cancellations for two overlapping readers, so this layer cannot discriminate
 # the cancellation fix. Runtime cancellation evidence therefore comes from the
-# Go/FUSE suite (TestFuseIncompleteOverlapReadsShareOneLoader, which reads two
+# Go/FUSE suite (TestFuseIncompleteOverlapReadsShareOneFetcher, which reads two
 # pieces in different pages and asserts a zero playback-phase cancellation
 # count); this scenario covers the shutdown and EBUSY half.
 printf 'docker smoke: starting blocked-read shutdown scenario\n'

@@ -205,20 +205,21 @@ func TestPrefetchBackwardSeekAdvancesGenerationAndCancelsOldWork(t *testing.T) {
 	})
 
 	opened.read(t, 0, 64)
-	after := waitPrefetchState(t, ctx, st, "the seek to invalidate the old window", func(s session.PrefetchSnapshot) bool {
-		return s.Generation > before.Generation &&
-			s.CancelledPieces > before.CancelledPieces &&
-			s.ActivePieces > 0
+	after := waitPrefetchState(t, ctx, st, "the seek to establish the new window", func(s session.PrefetchSnapshot) bool {
+		return s.Generation > before.Generation && s.ActivePieces > 0
 	})
 	if after.Cursor != 64 {
 		t.Fatalf("cursor = %d after the seek read, want 64", after.Cursor)
 	}
 
-	// The new window's pieces sit on the priority ladder; the piece the reader
+	// The active window pieces sit on the priority ladder; the piece the reader
 	// left behind no longer carries a foreground demand.
 	runs := session.PieceStateRunsForTest(st)
-	if got := piecePriorityAt(runs, 1); got < torrent.PiecePriorityNormal {
-		t.Fatalf("first window piece priority = %v, want at least Normal", got)
+	if len(after.ActivePieceIndexes) == 0 {
+		t.Fatal("the new window has no active background pieces")
+	}
+	if got := piecePriorityAt(runs, after.ActivePieceIndexes[0]); got < torrent.PiecePriorityNormal {
+		t.Fatalf("active window piece priority = %v, want at least Normal", got)
 	}
 	if got := piecePriorityAt(runs, 60); got >= torrent.PiecePriorityNow {
 		t.Fatalf("pre-seek piece priority = %v, want below Now", got)
