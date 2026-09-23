@@ -349,8 +349,8 @@ start_app() {
 		fi
 		if [[ "$state" == running ]]; then
 			output="$(logs "$app")"
-			if [[ "$output" == *'fuse ready: /mnt/torrentfs'* && "$output" == *'starting smbd on TCP 445'* ]]; then
-				printf '%s\n' "$output" | grep -q 'fuse ready: /mnt/torrentfs' || fail "$app did not log FUSE readiness"
+			if [[ "$output" == *'fuse ready: /share'* && "$output" == *'starting smbd on TCP 445'* ]]; then
+				printf '%s\n' "$output" | grep -q 'fuse ready: /share' || fail "$app did not log FUSE readiness"
 				return 0
 			fi
 		fi
@@ -403,6 +403,13 @@ smb_client() {
 printf 'docker SMB smoke: starting HTTP+SMB authenticated share\n'
 app_normal="${APP_PREFIX}-normal"
 start_app "$app_normal" "$torrents_dir" true
+share_fstype="$(probe 'inspect FUSE share mount' docker exec "$app_normal" findmnt -T /share -n -o FSTYPE)"
+[[ "$share_fstype" == fuse.* ]] ||
+	fail "SMB backend at /share is not a FUSE mount: $share_fstype"
+smb_path="$(probe 'inspect effective Samba share path' docker exec "$app_normal" /bin/sh -c \
+	'testparm -s /run/samba/smb.conf 2>/dev/null | sed -n "/^\[torrentfs\]/,\$p" | grep -E "^[[:space:]]*path[[:space:]]*=[[:space:]]*/share[[:space:]]*$"')"
+[[ "$smb_path" == *'path = /share'* ]] ||
+	fail "Samba torrentfs share does not export /share: $smb_path"
 http_client_authenticate "$app_normal"
 printf 'docker SMB smoke: combined HTTP authentication passed\n'
 
@@ -415,6 +422,7 @@ listing_output=''
 if ! listing_output="$(smb_client "$app_normal" -c 'ls' 2>&1)"; then
 	fail "authenticated SMB directory listing failed: $listing_output\napp logs:\n$(logs "$app_normal")"
 fi
+[[ "$listing_output" == *'payload.bin'* ]] || fail "SMB share root did not list payload.bin: $listing_output"
 wrong_credentials="$work_dir/wrong-credentials"
 printf 'username=%s\npassword=definitely-wrong\n' "$smb_user" >"$wrong_credentials"
 chmod 0400 "$wrong_credentials"
@@ -491,10 +499,10 @@ else
 		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
 		"$CLIENT_IMAGE" sh -ceu '
 		command -v mount.cifs >/dev/null || { echo "mount.cifs is missing"; exit 3; }
-		mkdir -p /mnt/share
-		mount.cifs "//$APP_HOST/torrentfs" /mnt/share -o "credentials=/run/secrets/smb-credentials,vers=3.0,ro"
-		trap "umount /mnt/share" EXIT
-		dd if=/mnt/share/payload.bin bs=1 skip='"$RANDOM_OFFSET"' count='"$RANDOM_LENGTH"' status=none | sha256sum
+		mkdir -p /mnt/torrentfs-client
+		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,ro"
+		trap "umount /mnt/torrentfs-client" EXIT
+		dd if=/mnt/torrentfs-client/payload.bin bs=1 skip='"$RANDOM_OFFSET"' count='"$RANDOM_LENGTH"' status=none | sha256sum
 	' >"$range_output" 2>&1 || range_status=$?
 	if (( range_status != 0 )); then
 		if grep -Eq "$CIFS_UNAVAILABLE_PATTERN" "$range_output"; then

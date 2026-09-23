@@ -603,7 +603,7 @@ docker run --detach --name torrentfs \
 
 ### 可选的单容器 SMB 只读共享
 
-默认关闭。设置 `TORRENTFS_SMB_ENABLED=true` 后，容器入口在同一个 mount namespace 内先让 torrentfs 挂载只读 FUSE 到固定的内部路径 `/mnt/torrentfs`，确认该路径的 fstype 为 `fuse.*` 之后才启动 `smbd`，仅监听 TCP 445。宿主机不需要看到 `/mnt/torrentfs`，也不需要 `rshared` 或跨容器 mount propagation。
+默认关闭。设置 `TORRENTFS_SMB_ENABLED=true` 后，容器入口在同一个 mount namespace 内先让 torrentfs 挂载只读 FUSE 到固定的内部路径 `/share`，确认该路径的 fstype 为 `fuse.*` 之后才启动 `smbd`，仅监听 TCP 445。宿主机不需要看到 `/share`，也不需要 `rshared` 或跨容器 mount propagation。
 
 | 变量 | 说明 |
 | --- | --- |
@@ -611,7 +611,32 @@ docker run --detach --name torrentfs \
 | `TORRENTFS_USERNAME` | 启用 SMB 时必填，必须是镜像内实际 torrentfs runtime Unix account，并解析到相同 runtime UID |
 | `TORRENTFS_PASSWORD` | 启用 SMB 时必填的非空单行明文密码；入口只通过 stdin 初始化 Samba passdb |
 
-share 名固定为 `torrentfs`，路径固定为 `/mnt/torrentfs`；`/torrents` 不会被共享，因为其中包含可写的 `.metadata`、peer identity 和锁文件。share 始终 `read only = yes`，`guest ok = no`，`map to guest = never`，只发布 TCP 445，不启动 `nmbd`，也不暴露 137/138/139。
+share 名固定为 `torrentfs`，路径固定为 `/share`；`/torrents` 不会被共享，因为其中包含可写的 `.metadata`、peer identity 和锁文件。share 始终 `read only = yes`，`guest ok = no`，`map to guest = never`，只发布 TCP 445，不启动 `nmbd`，也不暴露 137/138/139。
+
+`/share`、SMB endpoint 和客户端本地路径分别属于不同命名空间：
+
+1. 服务端容器后端是 `/share`，由入口在 SMB 模式下独占并挂载 FUSE；Samba `[torrentfs]` 的 `path` 指向它。
+2. SMB endpoint 的 share 名仍是 `torrentfs`：Linux 使用 `//SERVER/torrentfs`，Windows 使用 `\\server\torrentfs`。进入 share 后，内部根目录直接列出 `payload.bin`，路径是 `payload.bin`（Windows 可表示为 `\payload.bin`），不会多一层 `share` 或 `torrentfs`。
+3. 客户端自行选择本地 mountpoint，例如 `/mnt/torrentfs-client`；因此挂载后的本地路径是 `/mnt/torrentfs-client/payload.bin`。这个本地前缀属于客户端，服务端 `path` 无法也不应消除它。
+
+可以用 `smbclient` 验证 share 内根目录：
+
+```sh
+smbclient //SERVER/torrentfs -A /path/to/credentials -m SMB3 \
+  -c 'ls; get payload.bin /tmp/payload.bin'
+```
+
+如果需要内核 CIFS 挂载，客户端可以使用自己的目录：
+
+```sh
+mkdir -p /mnt/torrentfs-client
+mount.cifs //SERVER/torrentfs /mnt/torrentfs-client \
+  -o credentials=/path/to/credentials,vers=3.0,ro
+ls -l /mnt/torrentfs-client/payload.bin
+umount /mnt/torrentfs-client
+```
+
+不要把 CIFS mountpoint 设为 `/`，也不要把容器或宿主机的 `/` 作为 Samba `path`；SMB 服务端容器中的 `/share` 由入口管理，不能同时作为客户端 CIFS 挂载点或非空 bind mount 目标。
 
 `/dev/fuse`、`SYS_ADMIN` 和 `CAP_NET_BIND_SERVICE` 是运行前提：SMB 模式下 torrentfs 和 smbd 都以镜像内解析出的专用非 root 身份运行，`CAP_NET_BIND_SERVICE` 让该身份可以绑定 445。权限方案是同 UID：Samba 用 `force user`/`force group` 映射到同一个运行身份，因此不需要 `allow_other`，FUSE 访问范围不会因为 SMB 而扩大。AppArmor/安全策略是否放行由宿主策略决定；缺少设备、capability 或共享凭据时容器会在启动任何 listener 之前以非零状态失败，并输出诊断，不会退化成共享一个普通目录。
 

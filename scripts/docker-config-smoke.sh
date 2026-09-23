@@ -109,11 +109,13 @@ printf 'docker config smoke: building %s\n' "$image"
 timeout 1800 docker build --tag "$image" . >/dev/null
 
 timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
-	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && \
+	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && test -d /share && \
 	 test -r /etc/torrentfs/runtime-identity && \
 	 command -v smbd >/dev/null && command -v smbpasswd >/dev/null && command -v testparm >/dev/null && \
-	 testparm -s /etc/samba/torrentfs-smb.conf >/dev/null' \
-	|| fail 'image is missing its readable configuration, runtime identity, or Samba tools'
+	 testparm -s /etc/samba/torrentfs-smb.conf | \
+	 sed -n "/^\[torrentfs\]/,\$p" | \
+	 grep -Eq "^[[:space:]]*path[[:space:]]*=[[:space:]]*/share[[:space:]]*$"' \
+	|| fail 'image is missing its readable configuration, /share mountpoint, runtime identity, or Samba tools'
 [[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Entrypoint}}')" == \
 	'["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]' ]] ||
 	fail 'image entrypoint is not the tini-wrapped torrentfs entrypoint'
