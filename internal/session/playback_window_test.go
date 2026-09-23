@@ -96,6 +96,79 @@ func TestPlaybackWindowClassifiesForegroundReads(t *testing.T) {
 	coordinator.mu.Unlock()
 }
 
+func TestPlaybackWindowSparseReadsDoNotChaseAnchor(t *testing.T) {
+	const (
+		pieceLength = int64(256 << 10)
+		fileSize    = int64(256 << 20)
+	)
+	store := cache.New(512 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+
+	initialRequest, initialPlan := playbackReadPlan(file, 0, 64)
+	initial := coordinator.beginForeground(file, initialRequest, initialPlan, context.Background())
+	initial.finish(0, 64, nil)
+	baseline := coordinator.snapshot()
+	if baseline.Generation != 1 || baseline.Cursor != 64 {
+		t.Fatalf("initial state = generation %d cursor %d; want 1 and 64", baseline.Generation, baseline.Cursor)
+	}
+
+	for _, offset := range []int64{2 << 20, 50 << 20, (87 << 20) + (512 << 10), 120 << 20} {
+		request, plan := playbackReadPlan(file, offset, 64)
+		ticket := coordinator.beginForeground(file, request, plan, context.Background())
+		if ticket == nil {
+			t.Fatalf("sparse read at %d returned a nil ticket", offset)
+		}
+		ticket.finish(offset, 64, nil)
+		snapshot := coordinator.snapshot()
+		if snapshot.Generation != baseline.Generation || snapshot.Cursor != baseline.Cursor {
+			t.Fatalf("sparse read at %d moved generation/cursor to %d/%d, want %d/%d", offset, snapshot.Generation, snapshot.Cursor, baseline.Generation, baseline.Cursor)
+		}
+	}
+	if snapshot := coordinator.snapshot(); !snapshot.CandidatePresent {
+		t.Fatal("the final out-of-window probe did not remain foreground-only as a candidate")
+	}
+}
+
+func TestPlaybackWindowCandidateRequiresUniqueSecondRead(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(256 << 20)
+	)
+	store := cache.New(512 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+
+	initialRequest, initialPlan := playbackReadPlan(file, 0, 64)
+	initial := coordinator.beginForeground(file, initialRequest, initialPlan, context.Background())
+	initial.finish(0, 64, nil)
+
+	firstRequest, firstPlan := playbackReadPlan(file, 100<<20, 64)
+	first := coordinator.beginForeground(file, firstRequest, firstPlan, context.Background())
+	first.finish(firstRequest.FileOffset, 64, nil)
+	duplicateRequest, duplicatePlan := playbackReadPlan(file, 100<<20, 64)
+	duplicate := coordinator.beginForeground(file, duplicateRequest, duplicatePlan, context.Background())
+	duplicate.finish(duplicateRequest.FileOffset, 64, nil)
+	before := coordinator.snapshot()
+	if before.Generation != 1 || before.CandidateReads != 1 || before.CandidateUniqueBytes != 64 {
+		t.Fatalf("duplicate candidate evidence = generation %d reads %d bytes %d; want 1, 1, 64", before.Generation, before.CandidateReads, before.CandidateUniqueBytes)
+	}
+
+	secondRequest, secondPlan := playbackReadPlan(file, (100<<20)+64, 64)
+	second := coordinator.beginForeground(file, secondRequest, secondPlan, context.Background())
+	second.finish(secondRequest.FileOffset, 64, nil)
+	after := coordinator.snapshot()
+	if after.Generation != 2 {
+		t.Fatalf("generation after unique local read = %d, want 2", after.Generation)
+	}
+	if after.Cursor != (100<<20)+128 {
+		t.Fatalf("cursor after confirmed local read = %d, want %d", after.Cursor, (100<<20)+128)
+	}
+	if after.CandidatePresent {
+		t.Fatal("candidate remained installed after confirmation")
+	}
+}
+
 func TestPlaybackWindowKeepsAdjacentForegroundFlights(t *testing.T) {
 	const (
 		pieceLength = int64(1 << 20)
@@ -149,34 +222,53 @@ func TestPlaybackWindowSeekCancelsOnlyStaleForegroundFlights(t *testing.T) {
 	if old == nil {
 		t.Fatal("old foreground ticket is nil")
 	}
-	newRequest, newPlan := playbackReadPlan(file, 128<<20, 64)
-	latest := coordinator.beginForeground(file, newRequest, newPlan, context.Background())
-	if latest == nil {
-		t.Fatal("latest foreground ticket is nil")
+	firstRequest, firstPlan := playbackReadPlan(file, 128<<20, 64)
+	firstCandidate := coordinator.beginForeground(file, firstRequest, firstPlan, context.Background())
+	if firstCandidate == nil {
+		t.Fatal("first candidate ticket is nil")
 	}
 	select {
 	case <-old.ctx.Done():
+		t.Fatal("a single far probe cancelled the stale foreground ticket")
 	default:
-		t.Fatal("a far seek did not cancel the stale foreground ticket")
+	}
+
+	secondRequest, secondPlan := playbackReadPlan(file, (128<<20)+64, 64)
+	secondCandidate := coordinator.beginForeground(file, secondRequest, secondPlan, context.Background())
+	if secondCandidate == nil {
+		t.Fatal("second candidate ticket is nil")
 	}
 	select {
-	case <-latest.ctx.Done():
-		t.Fatal("a far seek cancelled the latest foreground ticket")
+	case <-secondCandidate.ctx.Done():
+		t.Fatal("candidate confirmation cancelled the latest foreground ticket")
 	default:
 	}
+	secondCandidate.startPiece(secondPlan.Spans[0].Index)
 	snapshot := coordinator.snapshot()
-	if snapshot.Generation != 2 {
-		t.Fatalf("generation = %d after far seek, want 2", snapshot.Generation)
+	if snapshot.Generation != 1 || !snapshot.CandidatePresent {
+		t.Fatalf("candidate state before completion = generation %d, present %v; want generation 1 and candidate", snapshot.Generation, snapshot.CandidatePresent)
 	}
-	latest.startPiece(newPlan.Spans[0].Index)
+	if snapshot.ForegroundTickets != 3 || snapshot.ForegroundPieces != 1 {
+		t.Fatalf("foreground state before completion = tickets %d, pieces %d; want 3, 1", snapshot.ForegroundTickets, snapshot.ForegroundPieces)
+	}
+	firstCandidate.finish(firstRequest.FileOffset, 64, nil)
+	secondCandidate.finish(secondRequest.FileOffset, 64, nil)
+	select {
+	case <-old.ctx.Done():
+	default:
+		t.Fatal("confirmed seek did not cancel the stale foreground ticket")
+	}
 	snapshot = coordinator.snapshot()
-	if snapshot.ForegroundTickets != 1 || snapshot.ForegroundPieces != 1 {
-		t.Fatalf("latest foreground state = tickets %d, pieces %d; want 1, 1", snapshot.ForegroundTickets, snapshot.ForegroundPieces)
+	if snapshot.Generation != 2 {
+		t.Fatalf("generation = %d after confirmed seek, want 2", snapshot.Generation)
+	}
+	if snapshot.ForegroundTickets != 0 {
+		t.Fatalf("foreground tickets after confirmed seek = %d, want 0", snapshot.ForegroundTickets)
 	}
 	if snapshot.ForegroundCancels != 1 {
 		t.Fatalf("foreground cancellations = %d, want 1", snapshot.ForegroundCancels)
 	}
-	latest.finish(newRequest.FileOffset, 64, nil)
+	secondCandidate.finishPiece(secondPlan.Spans[0].Index)
 }
 
 func TestPieceFetcherSharedFlightSurvivesOneWaiterCancellation(t *testing.T) {
@@ -323,9 +415,13 @@ func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
 	}
 
 	store.Put(cache.Key{Torrent: file.torrentKey, Piece: 128}, bytes.Repeat([]byte{7}, int(pieceLength)))
-	latest := make([]byte, 64)
-	if n, err := file.ReadAtContext(context.Background(), latest, 128*pieceLength); err != nil || n != len(latest) {
-		t.Fatalf("latest cache-hit read = %d, %v; want %d, nil", n, err, len(latest))
+	firstCandidate := make([]byte, 64)
+	if n, err := file.ReadAtContext(context.Background(), firstCandidate, 128*pieceLength); err != nil || n != len(firstCandidate) {
+		t.Fatalf("first candidate cache-hit read = %d, %v; want %d, nil", n, err, len(firstCandidate))
+	}
+	secondCandidate := make([]byte, 64)
+	if n, err := file.ReadAtContext(context.Background(), secondCandidate, 128*pieceLength+64); err != nil || n != len(secondCandidate) {
+		t.Fatalf("second candidate cache-hit read = %d, %v; want %d, nil", n, err, len(secondCandidate))
 	}
 	select {
 	case err := <-oldDone:
@@ -333,7 +429,7 @@ func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
 			t.Fatalf("stale multi-piece read error = %v, want context.Canceled", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("stale multi-piece read did not stop")
+		t.Fatal("confirmed seek did not stop the stale multi-piece read")
 	}
 
 	closeCalls := false
@@ -389,6 +485,33 @@ func TestPlaybackWindowToleratesHighFirstAdjacentRead(t *testing.T) {
 	if got {
 		t.Fatal("a lower adjacent read arrived after a higher one and was classified as a seek")
 	}
+}
+
+func TestPlaybackWindowFailedColdStartDoesNotConfirmAnchor(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(256 << 20)
+	)
+	store := cache.New(512 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+	request, plan := playbackReadPlan(file, 8<<20, 64)
+	ticket := coordinator.beginForeground(file, request, plan, context.Background())
+	if ticket == nil {
+		t.Fatal("cold-start ticket is nil")
+	}
+	ticket.finish(request.FileOffset, 0, context.Canceled)
+	snapshot := coordinator.snapshot()
+	if snapshot.AnchorConfirmed || snapshot.PlaybackAnchor != 0 || snapshot.PinnedPieces != 0 || snapshot.CandidatePresent {
+		t.Fatalf("failed cold start state = confirmed %v anchor %d pins %d candidate %v", snapshot.AnchorConfirmed, snapshot.PlaybackAnchor, snapshot.PinnedPieces, snapshot.CandidatePresent)
+	}
+
+	nextRequest, nextPlan := playbackReadPlan(file, 16<<20, 64)
+	next := coordinator.beginForeground(file, nextRequest, nextPlan, context.Background())
+	if next == nil || next.generation != 2 {
+		t.Fatalf("next cold-start generation = %v, want 2", next)
+	}
+	next.finish(nextRequest.FileOffset, 64, nil)
 }
 
 func TestPlaybackWindowFailedAdmissionDoesNotMoveCursor(t *testing.T) {
@@ -508,23 +631,32 @@ func TestPlaybackWindowBackwardSeekWhileHigherReadOutstanding(t *testing.T) {
 	}
 	old.startPiece(oldPlan.Spans[0].Index)
 
-	latestRequest, latestPlan := playbackReadPlan(file, 10<<20, 64)
-	latest := coordinator.beginForeground(file, latestRequest, latestPlan, context.Background())
-	if latest == nil {
-		t.Fatal("backward seek ticket is nil")
+	firstRequest, firstPlan := playbackReadPlan(file, 10<<20, 64)
+	firstCandidate := coordinator.beginForeground(file, firstRequest, firstPlan, context.Background())
+	if firstCandidate == nil {
+		t.Fatal("first backward candidate ticket is nil")
 	}
-	if latest.generation != 2 {
-		t.Fatalf("backward out-of-window seek stayed in generation %d, want 2", latest.generation)
+	secondRequest, secondPlan := playbackReadPlan(file, (10<<20)+64, 64)
+	secondCandidate := coordinator.beginForeground(file, secondRequest, secondPlan, context.Background())
+	if secondCandidate == nil {
+		t.Fatal("second backward candidate ticket is nil")
+	}
+	if firstCandidate.generation != 1 || secondCandidate.generation != 1 {
+		t.Fatalf("backward candidate generations = %d, %d; want both 1", firstCandidate.generation, secondCandidate.generation)
 	}
 	select {
 	case <-old.ctx.Done():
+		t.Fatal("a single backward probe cancelled the higher outstanding ticket")
 	default:
-		t.Fatal("backward out-of-window seek did not cancel the higher outstanding ticket")
 	}
+	firstCandidate.finish(firstRequest.FileOffset, 64, nil)
+	secondCandidate.finish(secondRequest.FileOffset, 64, nil)
 	select {
-	case <-latest.ctx.Done():
-		t.Fatal("backward seek cancelled the latest ticket")
+	case <-old.ctx.Done():
 	default:
+		t.Fatal("confirmed backward seek did not cancel the higher outstanding ticket")
 	}
-	latest.finish(latestRequest.FileOffset, 64, nil)
+	if got := coordinator.snapshot().Generation; got != 2 {
+		t.Fatalf("generation after confirmed backward seek = %d, want 2", got)
+	}
 }

@@ -173,6 +173,70 @@ func TestTorrentStatusSharesBoundaryPieces(t *testing.T) {
 	}
 }
 
+func TestTorrentStatusSelectivePiecesKeepFileRanges(t *testing.T) {
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	files := map[string][]byte{
+		"first.bin":  []byte(strings.Repeat("A", 128<<10)),
+		"second.bin": []byte(strings.Repeat("B", 200<<10)),
+		"third.bin":  []byte("tail"),
+	}
+	torrentPath, hash, all := buildMultiFileTorrent(t, work, "multi", files)
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	if err := sess.SeedPieceForTest(hash, 1, all); err != nil {
+		t.Fatalf("SeedPieceForTest(1): %v", err)
+	}
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor after piece 1: %v", err)
+	}
+	if len(status.Pieces) != 2 || status.Pieces[0].Cached || !status.Pieces[1].Cached {
+		t.Fatalf("selective pieces = %+v, want only piece 1 cached", status.Pieces)
+	}
+	byPath := make(map[string]session.FileStatus, len(status.Files))
+	for _, file := range status.Files {
+		byPath[file.Path] = file
+	}
+	if first := byPath["first.bin"]; first.PieceStart != 0 || first.PieceEnd != 1 {
+		t.Fatalf("first.bin range = %+v, want [0,1)", first)
+	}
+	if second := byPath["second.bin"]; second.PieceStart != 0 || second.PieceEnd != 2 {
+		t.Fatalf("second.bin range = %+v, want [0,2)", second)
+	}
+	if third := byPath["third.bin"]; third.PieceStart != 1 || third.PieceEnd != 2 {
+		t.Fatalf("third.bin range = %+v, want [1,2)", third)
+	}
+	pieceOneBytes := int64(len(all)) - int64(testPieceLength)
+	if status.Torrent.CachedBytes != pieceOneBytes {
+		t.Fatalf("cached_bytes after piece 1 = %d, want %d", status.Torrent.CachedBytes, pieceOneBytes)
+	}
+
+	if err := sess.SeedPieceForTest(hash, 0, all); err != nil {
+		t.Fatalf("SeedPieceForTest(0): %v", err)
+	}
+	status, err = sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor after piece 0: %v", err)
+	}
+	if status.Torrent.CachedBytes != int64(testPieceLength)+pieceOneBytes {
+		t.Fatalf("cached_bytes after both pieces = %d, want %d", status.Torrent.CachedBytes, int64(testPieceLength)+pieceOneBytes)
+	}
+}
+
 func TestTorrentStatusUnknownTorrent(t *testing.T) {
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")

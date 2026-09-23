@@ -205,11 +205,18 @@ func TestPrefetchBackwardSeekAdvancesGenerationAndCancelsOldWork(t *testing.T) {
 	})
 
 	opened.read(t, 0, 64)
+	candidate := waitPrefetchState(t, ctx, st, "the first backward probe", func(s session.PrefetchSnapshot) bool {
+		return s.Generation == before.Generation && s.CandidatePresent
+	})
+	if candidate.Generation != before.Generation {
+		t.Fatalf("generation = %d after the first seek probe, want %d", candidate.Generation, before.Generation)
+	}
+	opened.read(t, 64, 64)
 	after := waitPrefetchState(t, ctx, st, "the seek to establish the new window", func(s session.PrefetchSnapshot) bool {
 		return s.Generation > before.Generation && s.ActivePieces > 0
 	})
-	if after.Cursor != 64 {
-		t.Fatalf("cursor = %d after the seek read, want 64", after.Cursor)
+	if after.Cursor != 128 {
+		t.Fatalf("cursor = %d after the confirmed seek read, want 128", after.Cursor)
 	}
 
 	// The active window pieces sit on the priority ladder; the piece the reader

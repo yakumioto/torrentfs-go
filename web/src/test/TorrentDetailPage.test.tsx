@@ -91,4 +91,66 @@ describe('TorrentDetailPage', () => {
     expect(screen.getAllByText('错误')).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('keeps Torrent, file, and absolute piece scopes explicit', async () => {
+    const pieceLength = 4 * 1024 * 1024;
+    const totalBytes = 8131 * pieceLength;
+    const fileBytes = 344 * pieceLength;
+    const torrent = makeTorrent({
+      name: 'Geometric fixture',
+      state: 'ready',
+      total_bytes: totalBytes,
+      cached_bytes: Math.floor(1.1 * 1024 * 1024 * 1024),
+    });
+    const status: TorrentStatus = {
+      torrent,
+      metainfo_ready: true,
+      piece_length: pieceLength,
+      pieces: Array.from({ length: 8131 }, (_, index) => ({ index, cached: index < 344, cached_bytes: index < 344 ? pieceLength : 0, pinned: false })),
+      files: [{ path: 'video.mkv', size: fileBytes, piece_start: 0, piece_end: 344 }],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/status')) {
+        return Promise.resolve(jsonResponse(status));
+      }
+      return Promise.resolve(jsonResponse(torrent));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api = new ApiClient();
+    const auth: AuthContextValue = {
+      api,
+      phase: 'anonymous',
+      isReady: true,
+      isAuthenticated: false,
+      loginError: '',
+      sessionNotice: '',
+      connectionError: '',
+      login: async () => false,
+      logout: async () => undefined,
+      retryProbe: () => undefined,
+    };
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MantineProvider theme={theme} defaultColorScheme="light">
+          <AuthContext.Provider value={auth}>
+            <MemoryRouter initialEntries={['/torrents/torrent-1']}>
+              <Routes><Route path="/torrents/:id" element={<TorrentDetailPage />} /></Routes>
+            </MemoryRouter>
+          </AuthContext.Provider>
+        </MantineProvider>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Geometric fixture' })).toBeInTheDocument());
+    expect(screen.getByText('Torrent 总大小')).toBeInTheDocument();
+    expect(screen.getAllByText('Torrent 缓存占用').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('1.3 GiB').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('32 GiB').length).toBeGreaterThan(0);
+    expect(screen.getByText('文件涉及的数据块范围（Torrent 绝对 piece 索引）')).toBeInTheDocument();
+    expect(screen.getByText('所涉 piece 当前驻留内存缓存')).toBeInTheDocument();
+    expect(screen.getByText(/不是文件下载百分比或播放进度/)).toBeInTheDocument();
+  });
 });

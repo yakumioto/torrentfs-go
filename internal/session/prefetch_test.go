@@ -153,8 +153,8 @@ func TestPrefetchWatermarksShrinkWithFileAndBudget(t *testing.T) {
 		{
 			name:       "short tail shrinks the window and keeps 1:2 hysteresis",
 			bytesToEOF: 40 * miB,
-			wantHigh:   40 * miB,
-			wantLow:    20 * miB,
+			wantHigh:   32 * miB,
+			wantLow:    16 * miB,
 		},
 		{
 			name:               "tight pin budget clamps to the admitted prefix",
@@ -322,7 +322,7 @@ func TestPrefetchForegroundTicketIsIdempotent(t *testing.T) {
 func TestPrefetchForegroundEOFCommitsProgress(t *testing.T) {
 	c := newTestCoordinator(cache.New(1 << 20))
 	c.hasAnchor = true
-	c.anchor = prefetchAnchor{fileSize: 100, pieceLength: 32, torrentSize: 100}
+	c.anchor = prefetchAnchor{fileSize: 100, pieceLength: 32, torrentSize: 100, cursor: 90, committedCursor: 90}
 	c.generation = 3
 	c.anchorTicket = 1
 
@@ -334,9 +334,8 @@ func TestPrefetchForegroundEOFCommitsProgress(t *testing.T) {
 	}
 }
 
-// TestPrefetchForegroundCompletionOrderDoesNotRewindCursor makes a newer
-// same-generation foreground request the only completion allowed to advance
-// the shared anchor.
+// TestPrefetchForegroundCompletionOrderDoesNotRewindCursor makes a high
+// same-generation completion wait behind the missing lower span.
 func TestPrefetchForegroundCompletionOrderDoesNotRewindCursor(t *testing.T) {
 	c := newTestCoordinator(cache.New(1 << 20))
 	c.hasAnchor = true
@@ -348,10 +347,13 @@ func TestPrefetchForegroundCompletionOrderDoesNotRewindCursor(t *testing.T) {
 	older := &foregroundTicket{coordinator: c, id: 1, generation: 4}
 	c.foreground[1] = older
 	c.foreground[2] = newer
-	newer.finish(200, 20, nil)
+	newer.finish(20, 200, nil)
+	if c.anchor.cursor != 10 {
+		t.Fatalf("cursor = %d after a high span completed first, want 10", c.anchor.cursor)
+	}
 	older.finish(10, 10, nil)
 	if c.anchor.cursor != 220 {
-		t.Fatalf("cursor = %d after out-of-order completion, want 220", c.anchor.cursor)
+		t.Fatalf("cursor = %d after the gap closed, want 220", c.anchor.cursor)
 	}
 }
 
