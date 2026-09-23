@@ -1,4 +1,4 @@
-import { Button, TextInput } from '@mantine/core';
+import { Button, Skeleton, TextInput } from '@mantine/core';
 import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
@@ -6,8 +6,16 @@ import { useAuth } from '../app/auth-context';
 import { userFacingError } from '../utils/user-facing-error';
 import type { AppOutletContext } from '../components/layout/AppLayout';
 import { TorrentList } from '../components/torrents/TorrentList';
-import { useTorrentList } from '../queries/hooks';
+import { useRuntimeStats, useTorrentList } from '../queries/hooks';
 import { filterTorrents, summarizeTorrents, type TorrentFilter } from '../queries/filter';
+import {
+  DEFAULT_TORRENT_SORT,
+  defaultSortDirection,
+  sortTorrents,
+  type TorrentSort,
+  type TorrentSortKey,
+} from '../queries/sort';
+import { formatBytes, formatDate, percent } from '../utils/format';
 import styles from './DashboardPage.module.css';
 import { usePageVisible } from '../utils/visibility';
 
@@ -23,9 +31,12 @@ export function DashboardPage() {
   const { openAddTorrent } = useOutletContext<AppOutletContext>();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<TorrentFilter>('all');
+  const [sort, setSort] = useState<TorrentSort>(DEFAULT_TORRENT_SORT);
   const query = useTorrentList(auth.api, auth.isReady && visible);
+  const statsQuery = useRuntimeStats(auth.api, auth.isReady && visible);
   const sourceTorrents = query.data;
-  const torrents = useMemo(() => filterTorrents(sourceTorrents ?? [], search, filter), [filter, search, sourceTorrents]);
+  const filteredTorrents = useMemo(() => filterTorrents(sourceTorrents ?? [], search, filter), [filter, search, sourceTorrents]);
+  const torrents = useMemo(() => sortTorrents(filteredTorrents, sort), [filteredTorrents, sort]);
   const summary = useMemo(() => summarizeTorrents(sourceTorrents ?? []), [sourceTorrents]);
   const hasFilters = search.trim() !== '' || filter !== 'all';
 
@@ -34,18 +45,68 @@ export function DashboardPage() {
     setFilter('all');
   };
 
+  const changeSortKey = (key: TorrentSortKey) => {
+    setSort((current) => current.key === key
+      ? { ...current, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { key, direction: defaultSortDirection(key) });
+  };
+
+  const toggleSortDirection = () => {
+    setSort((current) => ({ ...current, direction: current.direction === 'asc' ? 'desc' : 'asc' }));
+  };
+
   return (
     <div className={styles.page}>
       <section className={styles.heading} aria-labelledby="dashboard-title">
         <div>
           <p className="eyebrow">任务库</p>
           <h1 className={styles.title} id="dashboard-title">任务列表</h1>
-          <p className={styles.subtitle}>集中管理任务，并查看真实的缓存占用状态。</p>
+          <p className={styles.subtitle}>集中管理任务，查看全局缓存与本次后端启动以来的传输统计。</p>
         </div>
         <Button color="torrent" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
           添加任务
         </Button>
       </section>
+
+      <section aria-label="运行时统计" className={styles.runtimeStats}>
+        {statsQuery.data === undefined && statsQuery.isPending && (
+          <div className={styles.runtimeLoading} role="status" aria-busy="true" aria-label="正在加载运行时统计">
+            {[0, 1, 2].map((item) => <Skeleton key={item} height={94} radius="md" />)}
+          </div>
+        )}
+        {statsQuery.data !== undefined && (
+          <>
+            <RuntimeCard
+              label="全局缓存"
+              value={`${formatBytes(statsQuery.data.cache.used_bytes)} / ${formatBytes(statsQuery.data.cache.capacity_bytes)}`}
+              detail={`占用 ${cacheUsagePercent(statsQuery.data.cache.used_bytes, statsQuery.data.cache.capacity_bytes).toFixed(1)}% · 自 ${formatDate(statsQuery.data.started_at)}`}
+            />
+            <RuntimeCard
+              label="本次启动下载"
+              value={formatBytes(statsQuery.data.transfer.downloaded_bytes)}
+              detail={`有效下载 payload · 自 ${formatDate(statsQuery.data.started_at)}`}
+            />
+            <RuntimeCard
+              label="本次启动上传"
+              value={formatBytes(statsQuery.data.transfer.uploaded_bytes)}
+              detail={`上传 payload · 自 ${formatDate(statsQuery.data.started_at)}`}
+            />
+          </>
+        )}
+        {statsQuery.data === undefined && !statsQuery.isPending && (
+          <div className={styles.runtimeUnavailable} role="status">
+            <strong>运行时统计暂不可用</strong>
+            <span>{userFacingError(statsQuery.error, '统计接口不可用，任务列表仍可正常使用。')}</span>
+          </div>
+        )}
+      </section>
+
+      {statsQuery.error !== null && statsQuery.error !== undefined && statsQuery.data !== undefined && (
+        <div className="refresh-warning" role="alert">
+          <span aria-hidden="true">!</span>
+          <span>最新运行时统计刷新失败，当前显示上一次有效快照。{userFacingError(statsQuery.error, '请稍后重试。')}</span>
+        </div>
+      )}
 
       <section aria-label="任务摘要" className={styles.summary}>
         <div className={styles.summaryCard}>
@@ -104,7 +165,27 @@ export function DashboardPage() {
         onAdd={openAddTorrent}
         hasFilters={hasFilters}
         onClearFilters={clearFilters}
+        sort={sort}
+        onSortKeyChange={changeSortKey}
+        onSortDirectionToggle={toggleSortDirection}
       />
     </div>
   );
+}
+
+function RuntimeCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className={styles.runtimeCard}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
+function cacheUsagePercent(used: number, capacity: number): number {
+  if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) {
+    return 0;
+  }
+  return percent(used / capacity);
 }

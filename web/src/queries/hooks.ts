@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import type { Operation, Torrent, TorrentStatus } from '../types/api';
+import type { Operation, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
 import { sortTorrents } from './sort';
@@ -24,6 +24,18 @@ export function useTorrentList(api: ApiClient, enabled: boolean) {
     queryFn: ({ signal }) => api.listTorrents(signal),
     enabled,
     select: sortTorrents,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+export function useRuntimeStats(api: ApiClient, enabled: boolean) {
+  return useQuery<RuntimeStats>({
+    queryKey: queryKeys.runtimeStats,
+    queryFn: ({ signal }) => api.getRuntimeStats(signal),
+    enabled,
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
     retry: shouldRetry,

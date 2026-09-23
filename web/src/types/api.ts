@@ -9,6 +9,18 @@ export interface Torrent {
   error?: string;
 }
 
+export interface RuntimeStats {
+  started_at: string;
+  cache: {
+    used_bytes: number;
+    capacity_bytes: number;
+  };
+  transfer: {
+    downloaded_bytes: number;
+    uploaded_bytes: number;
+  };
+}
+
 export interface PieceStatus {
   index: number;
   cached: boolean;

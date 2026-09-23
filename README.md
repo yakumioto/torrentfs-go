@@ -153,6 +153,7 @@ HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0
 | `POST` | `/api/v1/auth/logout` | 撤销当前 Bearer token | `204` |
 | `POST` | `/api/v1/torrents` | 通过 JSON 磁力链接或 multipart 上传添加 torrent | `201` |
 | `GET` | `/api/v1/torrents` | 列出所有任务 | `200` |
+| `GET` | `/api/v1/stats` | 查询本次后端 Session 的全局缓存与传输统计 | `200` |
 | `GET` | `/api/v1/torrents/{id}` | 查询单个任务的汇总状态 | `200` |
 | `GET` | `/api/v1/torrents/{id}/status` | 查询 piece、文件范围和网络诊断快照 | `200` |
 | `DELETE` | `/api/v1/torrents/{id}` | 发起异步删除 | `202` |
@@ -234,9 +235,12 @@ token_ttl = "30m"
 
    不要手动设置 `Content-Type: multipart/form-data`。`curl` 必须自动生成包含 boundary 的 header；手动覆盖它会使服务无法解析表单。上传请求默认最多 10 MiB，可通过 `http.max_upload_bytes` 调整。
 
-5. 查看汇总和详细 status。把 `<torrent-id>` 替换为添加响应中的 `id`：
+5. 查看运行时统计、汇总和详细 status。把 `<torrent-id>` 替换为添加响应中的 `id`：
 
    ```sh
+   curl --fail "$BASE_URL/api/v1/stats" \
+     --header "Authorization: Bearer $TOKEN"
+
    TORRENT_ID='<torrent-id>'
    curl --fail "$BASE_URL/api/v1/torrents/$TORRENT_ID" \
      --header "Authorization: Bearer $TOKEN"
@@ -318,6 +322,8 @@ token_ttl = "30m"
 
 `cached_bytes` 是内存 cache 当前的占用量，而不是已经下载过的字节数；piece 被淘汰后该值会下降，重启后从零开始。`ready` 不表示整个 torrent 已经下载完成，也不表示所有 piece 都在内存中。
 
+`GET /api/v1/stats` 返回统一的 Session 运行时快照：`cache.used_bytes` / `cache.capacity_bytes` 分别是已经校验并驻留在共享 piece LRU 中的当前占用和配置硬上限，不包含 staging、临时副本、协议缓冲区或进程 RSS；`transfer.downloaded_bytes` 使用 useful torrent payload，`transfer.uploaded_bytes` 使用实际发送的 torrent data payload，均不包含 wire overhead。统计从后端 Session 创建时开始，后端重启后归零，浏览器刷新或删除任务不会清零/回退，多前端读取同一个累计值。
+
 常见 HTTP 状态：
 
 | 状态 | 典型原因 |
@@ -336,7 +342,8 @@ token_ttl = "30m"
 
 HTTP 服务启用时，同一个 listener 同时提供嵌入式 Web UI 和 `/api/v1`：
 
-- Dashboard 支持按名称或 info hash 搜索、按全部/就绪/错误筛选，显示任务摘要，并提供磁力/文件添加入口。
+- Dashboard 支持按名称或 info hash 搜索、按全部/就绪/错误筛选，显示全局缓存、本次启动下载/上传统计和任务摘要，并提供磁力/文件添加入口。
+- Dashboard 任务列表不显示逐任务缓存列；任务、大小、状态和添加时间均可在前端排序，默认按添加时间倒序。
 - 任务详情页提供概览、文件和数据块三个 tab；文件视图显示 piece 范围和缓存覆盖，piece map 区分 cached、pinned 和 uncached。
 - 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。
 - 查询默认每 5 秒刷新；浏览器页面不可见时不会在后台继续刷新。

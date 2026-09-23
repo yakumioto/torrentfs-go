@@ -45,6 +45,14 @@ function makeStatus(torrent: Torrent): TorrentStatus {
   };
 }
 
+function makeRuntimeStats() {
+  return {
+    started_at: '2026-09-23T09:00:00Z',
+    cache: { used_bytes: 1, capacity_bytes: 2 },
+    transfer: { downloaded_bytes: 3, uploaded_bytes: 4 },
+  };
+}
+
 function renderApp(path: string, fetchMock: FetchMock) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -85,10 +93,14 @@ afterEach(() => {
 describe('background refresh resilience', () => {
   it('keeps the last valid torrent list when a background refresh fails', async () => {
     const torrent = makeTorrent({ name: 'Ubuntu Desktop ISO' });
-    let requests = 0;
-    const fetchMock = vi.fn(() => {
-      requests += 1;
-      return Promise.resolve(requests === 1 ? jsonResponse([torrent]) : failingResponse());
+    let listRequests = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/stats')) {
+        return Promise.resolve(jsonResponse(makeRuntimeStats()));
+      }
+      listRequests += 1;
+      return Promise.resolve(listRequests === 1 ? jsonResponse([torrent]) : failingResponse());
     });
 
     const { queryClient } = renderApp('/', fetchMock);

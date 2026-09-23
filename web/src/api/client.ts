@@ -1,4 +1,4 @@
-import type { LoginResponse, Operation, Torrent, TorrentStatus } from '../types/api';
+import type { LoginResponse, Operation, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
 import { apiErrorFromResponse } from './errors';
 
 export interface ApiClientOptions {
@@ -47,6 +47,10 @@ export class ApiClient {
 
   listTorrents(signal?: AbortSignal): Promise<Torrent[]> {
     return this.request<Torrent[]>('/torrents', { signal });
+  }
+
+  getRuntimeStats(signal?: AbortSignal): Promise<RuntimeStats> {
+    return this.request<RuntimeStats>('/stats', { signal });
   }
 
   getTorrent(id: string, signal?: AbortSignal): Promise<Torrent> {

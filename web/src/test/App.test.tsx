@@ -23,6 +23,14 @@ function unauthorizedResponse(): Response {
   });
 }
 
+function runtimeStatsResponse(): Response {
+  return jsonResponse({
+    started_at: '2026-09-23T09:00:00Z',
+    cache: { used_bytes: 1, capacity_bytes: 2 },
+    transfer: { downloaded_bytes: 3, uploaded_bytes: 4 },
+  });
+}
+
 function renderApp() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -97,15 +105,17 @@ describe('App authentication flow', () => {
       unauthorizedResponse(),
       jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
       jsonResponse([]),
+      runtimeStatsResponse(),
       jsonResponse([]),
       jsonResponse([]),
+      runtimeStatsResponse(),
     );
     const firstMount = renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
 
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();
     expect(authorization(fetchMock.mock.calls[2][1])).toBe('Bearer opaque');
@@ -117,9 +127,9 @@ describe('App authentication flow', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     expect(screen.queryByText(/重新登录/)).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
+    expect(fetchMock).toHaveBeenCalledTimes(7);
     expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[5][1])).toBe('Bearer opaque');
   });
 
   it('returns to the login page and clears protected data when a session request expires', async () => {
@@ -127,6 +137,7 @@ describe('App authentication flow', () => {
       unauthorizedResponse(),
       jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
       jsonResponse([]),
+      runtimeStatsResponse(),
       unauthorizedResponse(),
     );
     const { queryClient } = renderApp();
@@ -134,7 +145,7 @@ describe('App authentication flow', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
 
     fireEvent.click(screen.getByRole('button', { name: '刷新数据' }));
 
@@ -143,7 +154,7 @@ describe('App authentication flow', () => {
     expect(screen.getByRole('status')).toHaveTextContent('需要登录或当前会话已过期，请重新登录后继续。');
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
-    expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
   });
 
   it('does not show a session notice after intentional logout and allows signing in again', async () => {
@@ -151,17 +162,19 @@ describe('App authentication flow', () => {
       unauthorizedResponse(),
       jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
       jsonResponse([]),
+      runtimeStatsResponse(),
       new Response(null, { status: 204 }),
       unauthorizedResponse(),
       jsonResponse({ token: 'opaque-new', token_type: 'Bearer', expires_in: 60 }),
       jsonResponse([]),
+      runtimeStatsResponse(),
     );
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
 
     fireEvent.click(screen.getByRole('button', { name: '退出登录' }));
 
@@ -169,14 +182,14 @@ describe('App authentication flow', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByText('需要登录或当前会话已过期，请重新登录后继续。')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
-    expect(authorization(fetchMock.mock.calls[3][1])).toBe('Bearer opaque');
-    expect(authorization(fetchMock.mock.calls[4][1])).toBeNull();
+    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
 
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
-    expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
-    expect(authorization(fetchMock.mock.calls[6][1])).toBe('Bearer opaque-new');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9));
+    expect(authorization(fetchMock.mock.calls[6][1])).toBeNull();
+    expect(authorization(fetchMock.mock.calls[7][1])).toBe('Bearer opaque-new');
   });
 
   it('keeps invalid credentials separate from the session notice', async () => {

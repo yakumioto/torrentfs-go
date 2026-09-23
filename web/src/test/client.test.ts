@@ -28,6 +28,18 @@ describe('ApiClient', () => {
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
   });
 
+  it('fetches runtime stats through the additive endpoint', async () => {
+    const stats = {
+      started_at: '2026-09-23T09:00:00Z',
+      cache: { used_bytes: 1, capacity_bytes: 2 },
+      transfer: { downloaded_bytes: 3, uploaded_bytes: 4 },
+    };
+    vi.mocked(fetch).mockResolvedValue(response(stats));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.getRuntimeStats()).resolves.toEqual(stats);
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('/api/v1/stats');
+  });
+
   it('lets fetch set multipart boundaries', async () => {
     vi.mocked(fetch).mockResolvedValue(response({ id: 'a' }));
     const api = new ApiClient({ getToken: () => 'opaque' });

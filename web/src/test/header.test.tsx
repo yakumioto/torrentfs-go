@@ -28,6 +28,14 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
   };
 }
 
+function makeRuntimeStats() {
+  return {
+    started_at: '2026-09-23T09:00:00Z',
+    cache: { used_bytes: 1, capacity_bytes: 2 },
+    transfer: { downloaded_bytes: 3, uploaded_bytes: 4 },
+  };
+}
+
 function makeStatus(torrent: Torrent): TorrentStatus {
   return {
     torrent,
@@ -80,13 +88,16 @@ afterEach(() => {
 describe('Header refresh control', () => {
   it('refreshes only the torrent list without navigation on the dashboard', async () => {
     const torrent = makeTorrent();
-    let requestCount = 0;
+    let listRequests = 0;
     let resolveRefresh: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      void input;
       void init;
-      requestCount += 1;
-      if (requestCount === 1) {
+      const url = String(input);
+      if (url.endsWith('/stats')) {
+        return Promise.resolve(jsonResponse(makeRuntimeStats()));
+      }
+      listRequests += 1;
+      if (listRequests === 1) {
         return Promise.resolve(jsonResponse([torrent]));
       }
       return new Promise<Response>((resolve) => {
@@ -96,7 +107,7 @@ describe('Header refresh control', () => {
     const navigationError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     renderApp('/', fetchMock);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     fetchMock.mockClear();
 
     const refreshButton = screen.getByRole('button', { name: '刷新数据' });

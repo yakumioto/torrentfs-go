@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
@@ -50,9 +51,10 @@ func WithLogger(l *slog.Logger) Option {
 
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
-	cl     *torrent.Client
-	cfg    config.Config
-	logger *slog.Logger
+	cl        *torrent.Client
+	cfg       config.Config
+	logger    *slog.Logger
+	startedAt time.Time
 
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
@@ -217,6 +219,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	cc.PeerID = peerID
 	dhtRecorder := newDhtRecorder()
 	configureDhtStartingNodes(cc, dhtRecorder, logger)
+	startedAt := time.Now().UTC()
 	cl, err := torrent.NewClient(cc)
 	if err != nil {
 		err = fmt.Errorf("session: new client: %w", err)
@@ -231,6 +234,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cl:              cl,
 		cfg:             cfg,
 		logger:          logger,
+		startedAt:       startedAt,
 		pieceCache:      pieceCache,
 		pieceStore:      pieceStore,
 		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),
