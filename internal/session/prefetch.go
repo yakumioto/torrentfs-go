@@ -97,14 +97,13 @@ func (b *prefetchBudget) snapshot() (limit, used int) {
 }
 
 type prefetchAnchor struct {
-	file                *raFile
-	fileStart           int64
-	fileSize            int64
-	pieceLength         int64
-	torrentSize         int64
-	cursor              int64
-	committedCursor     int64
-	classificationFloor int64
+	file            *raFile
+	fileStart       int64
+	fileSize        int64
+	pieceLength     int64
+	torrentSize     int64
+	cursor          int64
+	committedCursor int64
 }
 
 type foregroundTicket struct {
@@ -307,14 +306,13 @@ func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, 
 	if advances {
 		c.generation++
 		c.anchor = prefetchAnchor{
-			file:                f,
-			fileStart:           req.FileStart,
-			fileSize:            req.FileSize,
-			pieceLength:         req.PieceLength,
-			torrentSize:         req.TorrentLength,
-			cursor:              clampCursor(requestStart, req.FileSize),
-			committedCursor:     clampCursor(requestStart, req.FileSize),
-			classificationFloor: clampCursor(requestStart, req.FileSize),
+			file:            f,
+			fileStart:       req.FileStart,
+			fileSize:        req.FileSize,
+			pieceLength:     req.PieceLength,
+			torrentSize:     req.TorrentLength,
+			cursor:          clampCursor(requestStart, req.FileSize),
+			committedCursor: clampCursor(requestStart, req.FileSize),
 		}
 		c.hasAnchor = true
 	} else if c.hasAnchor && requestStart > c.anchor.cursor {
@@ -454,24 +452,24 @@ func (c *prefetchCoordinator) shouldAdvanceGenerationLocked(f *raFile, requestSt
 }
 
 func (c *prefetchCoordinator) classificationFloorLocked(f *raFile) int64 {
-	floor := c.anchor.cursor
-	found := false
+	outstanding := false
 	for _, ticket := range c.foreground {
-		if ticket.generation != c.generation || ticket.file != f {
-			continue
-		}
-		if !found || ticket.requestStart < floor {
-			floor = ticket.requestStart
-			found = true
+		if ticket.generation == c.generation && ticket.file == f {
+			outstanding = true
+			break
 		}
 	}
-	if !found {
+	if !outstanding {
 		return c.anchor.cursor
 	}
-	if c.anchor.classificationFloor < floor {
-		floor = c.anchor.classificationFloor
+	backtrack := defaultPlaybackWindow
+	if c.anchor.pieceLength > 0 && c.anchor.pieceLength <= defaultPlaybackWindow/2 {
+		backtrack = c.anchor.pieceLength * 2
 	}
-	return floor
+	if c.anchor.cursor <= backtrack {
+		return 0
+	}
+	return c.anchor.cursor - backtrack
 }
 
 func (c *prefetchCoordinator) foregroundPieceForRequestLocked(f *raFile, requestStart int64) bool {

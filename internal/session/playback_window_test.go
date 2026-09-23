@@ -366,13 +366,12 @@ func TestPlaybackWindowToleratesHighFirstAdjacentRead(t *testing.T) {
 	coordinator.hasAnchor = true
 	coordinator.generation = 1
 	coordinator.anchor = prefetchAnchor{
-		file:                file,
-		fileSize:            fileSize,
-		pieceLength:         pieceLength,
-		torrentSize:         fileSize,
-		cursor:              102 << 20,
-		committedCursor:     100 << 20,
-		classificationFloor: 100 << 20,
+		file:            file,
+		fileSize:        fileSize,
+		pieceLength:     pieceLength,
+		torrentSize:     fileSize,
+		cursor:          102 << 20,
+		committedCursor: 100 << 20,
 	}
 	ticket := &foregroundTicket{
 		coordinator:  coordinator,
@@ -403,11 +402,10 @@ func TestPlaybackWindowFailedAdmissionDoesNotMoveCursor(t *testing.T) {
 	coordinator.hasAnchor = true
 	coordinator.generation = 1
 	coordinator.anchor = prefetchAnchor{
-		file:                file,
-		fileSize:            fileSize,
-		pieceLength:         pieceLength,
-		torrentSize:         fileSize,
-		classificationFloor: 0,
+		file:        file,
+		fileSize:    fileSize,
+		pieceLength: pieceLength,
+		torrentSize: fileSize,
 	}
 	request, plan := playbackReadPlan(file, 32<<20, 64)
 	ticket := coordinator.beginForeground(file, request, plan, context.Background())
@@ -481,4 +479,52 @@ func TestPlaybackWindowForegroundStartReleasesNormalLease(t *testing.T) {
 		t.Fatalf("Normal budget after foreground start = %d, want 0", used)
 	}
 	ticket.finishPiece(0)
+}
+
+func TestPlaybackWindowBackwardSeekWhileHigherReadOutstanding(t *testing.T) {
+	const (
+		pieceLength = int64(1 << 20)
+		fileSize    = int64(256 << 20)
+	)
+	store := cache.New(512 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
+	coordinator.hasAnchor = true
+	coordinator.generation = 1
+	coordinator.anchor = prefetchAnchor{
+		file:            file,
+		fileSize:        fileSize,
+		pieceLength:     pieceLength,
+		torrentSize:     fileSize,
+		cursor:          120 << 20,
+		committedCursor: 120 << 20,
+	}
+	oldContext, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	oldRequest, oldPlan := playbackReadPlan(file, 120<<20, 64)
+	old := coordinator.beginForeground(file, oldRequest, oldPlan, oldContext)
+	if old == nil {
+		t.Fatal("old high foreground ticket is nil")
+	}
+	old.startPiece(oldPlan.Spans[0].Index)
+
+	latestRequest, latestPlan := playbackReadPlan(file, 10<<20, 64)
+	latest := coordinator.beginForeground(file, latestRequest, latestPlan, context.Background())
+	if latest == nil {
+		t.Fatal("backward seek ticket is nil")
+	}
+	if latest.generation != 2 {
+		t.Fatalf("backward out-of-window seek stayed in generation %d, want 2", latest.generation)
+	}
+	select {
+	case <-old.ctx.Done():
+	default:
+		t.Fatal("backward out-of-window seek did not cancel the higher outstanding ticket")
+	}
+	select {
+	case <-latest.ctx.Done():
+		t.Fatal("backward seek cancelled the latest ticket")
+	default:
+	}
+	latest.finish(latestRequest.FileOffset, 64, nil)
 }
