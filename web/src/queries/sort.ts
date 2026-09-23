@@ -39,7 +39,7 @@ export function sortTorrents(torrents: Torrent[], sort: TorrentSort = DEFAULT_TO
 function compareTorrents(left: Torrent, right: Torrent, sort: TorrentSort): number {
   switch (sort.key) {
     case 'name':
-      return compareName(left, right);
+      return compareName(left, right, sort.direction);
     case 'total_bytes':
       return compareNumber(left.total_bytes, right.total_bytes, sort.direction, left, right);
     case 'state':
@@ -49,10 +49,19 @@ function compareTorrents(left: Torrent, right: Torrent, sort: TorrentSort): numb
   }
 }
 
-function compareName(left: Torrent, right: Torrent): number {
-  const nameOrder = compareTextWithEmptyLast(left.name, right.name);
-  if (nameOrder !== 0) {
-    return nameOrder;
+function compareName(left: Torrent, right: Torrent, direction: SortDirection): number {
+  const leftName = left.name.trim();
+  const rightName = right.name.trim();
+  const leftEmpty = leftName === '';
+  const rightEmpty = rightName === '';
+  if (leftEmpty !== rightEmpty) {
+    return leftEmpty ? 1 : -1;
+  }
+  if (!leftEmpty) {
+    const nameOrder = collator.compare(leftName, rightName);
+    if (nameOrder !== 0) {
+      return nameOrder * directionSign(direction);
+    }
   }
   const hashOrder = collator.compare(left.info_hash, right.info_hash);
   return hashOrder !== 0 ? hashOrder : collator.compare(left.id, right.id);

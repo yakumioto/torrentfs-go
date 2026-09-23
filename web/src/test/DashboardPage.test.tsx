@@ -126,6 +126,11 @@ describe('DashboardPage', () => {
     expect(rows()[0]).toContain('Alpha');
     expect(rows()[1]).toContain('Zulu');
     expect(screen.getByLabelText('移动端排序字段')).toHaveValue('name');
+
+    fireEvent.click(screen.getByRole('button', { name: '按任务排序，当前升序' }));
+    expect(rows()[0]).toContain('Zulu');
+    expect(rows()[1]).toContain('Alpha');
+    expect(screen.getByRole('button', { name: '按任务排序，当前降序' })).toBeInTheDocument();
   });
 
   it('keeps the task list usable when runtime stats are unavailable', async () => {

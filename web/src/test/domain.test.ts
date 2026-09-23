@@ -41,7 +41,7 @@ describe('torrent sorting', () => {
     expect(DEFAULT_TORRENT_SORT).toEqual({ key: 'created_at', direction: 'desc' });
   });
 
-  it('sorts names with empty names last and hash/id tie-breakers', () => {
+  it('sorts names in both directions with empty names last and stable tie-breakers', () => {
     const items = [
       torrent({ id: 'empty', name: '   ', info_hash: 'z' }),
       torrent({ id: 'same-b', name: 'same', info_hash: 'b' }),
@@ -50,6 +50,7 @@ describe('torrent sorting', () => {
       torrent({ id: 'beta', name: 'alpha 10' }),
     ];
     expect(order(items, { key: 'name', direction: 'asc' })).toEqual(['alpha', 'beta', 'same-a', 'same-b', 'empty']);
+    expect(order(items, { key: 'name', direction: 'desc' })).toEqual(['same-a', 'same-b', 'beta', 'alpha', 'empty']);
   });
 
   it('sorts sizes in both directions while keeping invalid values last', () => {
