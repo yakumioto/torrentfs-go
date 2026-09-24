@@ -5,7 +5,6 @@ import (
 	"io"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/anacrolix/missinggo/v2/pubsub"
 	"github.com/anacrolix/torrent"
@@ -124,7 +123,6 @@ func (b *prefetchBudget) snapshot() (limit, used int) {
 	return b.limit, b.used
 }
 
-// prefetchAnchor is the degraded demand-only compatibility window.
 type prefetchAnchor struct {
 	file            *raFile
 	fileStart       int64
@@ -133,50 +131,6 @@ type prefetchAnchor struct {
 	torrentSize     int64
 	cursor          int64
 	committedCursor int64
-}
-
-type playbackStreamState struct {
-	id                    string
-	path                  string
-	file                  *raFile
-	fileStart             int64
-	fileSize              int64
-	pieceLength           int64
-	torrentSize           int64
-	cursor                int64
-	generation            uint64
-	lastSequence          uint64
-	lastEvent             string
-	lastPosition          int64
-	lastUpdate            time.Time
-	expiresAt             time.Time
-	playbackConsumedBytes int64
-	usefulDownloadBase    int64
-	bufferedBytes         int64
-	targetLow             int64
-	targetHigh            int64
-	effectiveLow          int64
-	effectiveHigh         int64
-	state                 prefetchState
-	owners                map[int]struct{}
-	pins                  map[int]struct{}
-	onExpire              func()
-}
-
-type demandState struct {
-	id            uint64
-	file          *raFile
-	fileStart     int64
-	fileSize      int64
-	pieceLength   int64
-	torrentSize   int64
-	cursor        int64
-	hasCursor     bool
-	generation    uint64
-	confirmed     bool
-	spans         []byteSpan
-	candidate     *seekCandidate
-	nextCandidate uint64
 }
 
 type foregroundTicket struct {
@@ -188,12 +142,8 @@ type foregroundTicket struct {
 	candidateID  uint64
 	requestStart int64
 	requestEnd   int64
-	demandID     uint64
-	demand       *demandState
-	legacy       bool
 	wanted       []int
 	pinned       []int
-	activePinned map[int]int
 	active       map[int]int
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -233,26 +183,17 @@ type prefetchCoordinator struct {
 	wake   chan struct{}
 	done   chan struct{}
 
-	mu                 sync.Mutex
-	closed             bool
-	demandOnly         bool
-	anchor             prefetchAnchor
-	hasAnchor          bool
-	anchorConfirmed    bool
-	generation         uint64
-	streams            map[string]*playbackStreamState
-	normalOwners       map[int]map[string]struct{}
-	activeNormalOwners map[int]map[string]struct{}
-	demands            map[uint64]*demandState
-	demandByFile       map[*raFile]*demandState
-	demandCursors      map[uint64]int64
-	expiredCallbacks   []func()
-	now                func() time.Time
-	nextTicket         uint64
-	anchorTicket       uint64
-	demandSpans        []byteSpan
-	candidate          *seekCandidate
-	nextCandidate      uint64
+	mu              sync.Mutex
+	closed          bool
+	anchor          prefetchAnchor
+	hasAnchor       bool
+	anchorConfirmed bool
+	generation      uint64
+	nextTicket      uint64
+	anchorTicket    uint64
+	consumed        []byteSpan
+	candidate       *seekCandidate
+	nextCandidate   uint64
 
 	foreground       map[uint64]*foregroundTicket
 	foregroundPieces map[int]int
@@ -280,9 +221,6 @@ type prefetchSnapshot struct {
 	Generation           uint64
 	State                string
 	Cursor               int64
-	DemandCursor         int64
-	PlaybackCursor       int64
-	PlaybackStreams      []PlaybackStreamSnapshot
 	PlaybackAnchor       int64
 	ConfirmedAnchor      int64
 	AnchorConfirmed      bool
@@ -326,27 +264,20 @@ func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *p
 		budget = s.prefetchBudget
 	}
 	coordinator := &prefetchCoordinator{
-		torrent:            tor,
-		cache:              c,
-		budget:             budget,
-		torrentKey:         tor.InfoHash().HexString(),
-		ctx:                ctx,
-		cancel:             cancel,
-		sub:                tor.SubscribePieceStateChanges(),
-		wake:               make(chan struct{}, 1),
-		done:               make(chan struct{}),
-		foreground:         make(map[uint64]*foregroundTicket),
-		foregroundPieces:   make(map[int]int),
-		refs:               make(map[int]int),
-		windowPins:         make(map[int]struct{}),
-		active:             make(map[int]struct{}),
-		streams:            make(map[string]*playbackStreamState),
-		normalOwners:       make(map[int]map[string]struct{}),
-		activeNormalOwners: make(map[int]map[string]struct{}),
-		demands:            make(map[uint64]*demandState),
-		demandByFile:       make(map[*raFile]*demandState),
-		demandCursors:      make(map[uint64]int64),
-		now:                time.Now,
+		torrent:          tor,
+		cache:            c,
+		budget:           budget,
+		torrentKey:       tor.InfoHash().HexString(),
+		ctx:              ctx,
+		cancel:           cancel,
+		sub:              tor.SubscribePieceStateChanges(),
+		wake:             make(chan struct{}, 1),
+		done:             make(chan struct{}),
+		foreground:       make(map[uint64]*foregroundTicket),
+		foregroundPieces: make(map[int]int),
+		refs:             make(map[int]int),
+		windowPins:       make(map[int]struct{}),
+		active:           make(map[int]struct{}),
 	}
 	if s != nil {
 		s.bgMu.Lock()
@@ -365,8 +296,6 @@ func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *p
 func (c *prefetchCoordinator) run() {
 	defer close(c.done)
 	defer c.sub.Close()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
 	for {
 		c.reconcile()
 		select {
@@ -374,7 +303,6 @@ func (c *prefetchCoordinator) run() {
 			c.cleanup()
 			return
 		case <-c.wake:
-		case <-ticker.C:
 		case _, ok := <-c.sub.Values:
 			if !ok {
 				c.cleanup()
@@ -391,441 +319,7 @@ func (c *prefetchCoordinator) signal() {
 	}
 }
 
-func (c *prefetchCoordinator) coordinatorNow() time.Time {
-	if c.now != nil {
-		return c.now()
-	}
-	return time.Now()
-}
-
-func (c *prefetchCoordinator) ensurePlaybackMapsLocked() {
-	if c.streams == nil {
-		c.streams = make(map[string]*playbackStreamState)
-	}
-	if c.normalOwners == nil {
-		c.normalOwners = make(map[int]map[string]struct{})
-	}
-	if c.activeNormalOwners == nil {
-		c.activeNormalOwners = make(map[int]map[string]struct{})
-	}
-}
-
-func (c *prefetchCoordinator) startPlaybackStream(id, path string, f *raFile, position int64, onExpire ...func()) (PlaybackStreamSnapshot, error) {
-	if f == nil || position < 0 || position > f.fileSize {
-		return PlaybackStreamSnapshot{}, ErrPlaybackPositionInvalid
-	}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return PlaybackStreamSnapshot{}, ErrPlaybackStreamNotFound
-	}
-	c.ensurePlaybackMapsLocked()
-	if _, exists := c.streams[id]; exists {
-		c.mu.Unlock()
-		return PlaybackStreamSnapshot{}, ErrPlaybackSequenceConflict
-	}
-	if len(c.streams) == 0 {
-		c.clearLegacyLocked()
-	}
-	var usefulDownloadBase int64
-	if c.torrent != nil {
-		stats := c.torrent.Stats()
-		usefulDownloadBase = stats.ConnStats.BytesReadUsefulData.Int64()
-	}
-	now := c.coordinatorNow()
-	stream := &playbackStreamState{
-		id:                 id,
-		path:               path,
-		file:               f,
-		fileStart:          f.fileOffset,
-		fileSize:           f.fileSize,
-		pieceLength:        f.pieceLength,
-		torrentSize:        f.torrentSize,
-		cursor:             clampCursor(position, f.fileSize),
-		generation:         1,
-		lastPosition:       clampCursor(position, f.fileSize),
-		lastUpdate:         now,
-		expiresAt:          now.Add(playbackLeaseDuration),
-		targetLow:          defaultPrefetchLow,
-		targetHigh:         defaultPrefetchHigh,
-		usefulDownloadBase: usefulDownloadBase,
-		state:              prefetchFilling,
-		owners:             make(map[int]struct{}),
-		pins:               make(map[int]struct{}),
-	}
-	stream.lastEvent = "start"
-	if len(onExpire) > 0 {
-		stream.onExpire = onExpire[0]
-	}
-	c.streams[id] = stream
-	c.reconcilePlaybackStreamLocked(stream)
-	snapshot := c.playbackSnapshotLocked(stream)
-	c.mu.Unlock()
-	c.signal()
-	return snapshot, nil
-}
-
-func (c *prefetchCoordinator) updatePlaybackStream(id string, request PlaybackStreamUpdate) (PlaybackStreamSnapshot, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	stream := c.streams[id]
-	if stream == nil {
-		return PlaybackStreamSnapshot{}, ErrPlaybackStreamNotFound
-	}
-	if request.Sequence == 0 {
-		return PlaybackStreamSnapshot{}, ErrPlaybackSequenceConflict
-	}
-	if request.Event != PlaybackEventProgress && request.Event != PlaybackEventSeek {
-		return PlaybackStreamSnapshot{}, ErrPlaybackEventInvalid
-	}
-	if request.PositionBytes < 0 || request.PositionBytes > stream.fileSize {
-		return PlaybackStreamSnapshot{}, ErrPlaybackPositionInvalid
-	}
-	if request.Sequence < stream.lastSequence {
-		return PlaybackStreamSnapshot{}, ErrPlaybackSequenceConflict
-	}
-	if request.Sequence == stream.lastSequence {
-		if stream.lastEvent == request.Event && stream.lastPosition == request.PositionBytes {
-			return c.playbackSnapshotLocked(stream), nil
-		}
-		return PlaybackStreamSnapshot{}, ErrPlaybackSequenceConflict
-	}
-	if request.Event == PlaybackEventProgress && request.PositionBytes < stream.cursor {
-		return PlaybackStreamSnapshot{}, ErrPlaybackPositionInvalid
-	}
-	if request.Event == PlaybackEventSeek {
-		c.releasePlaybackResourcesLocked(stream)
-		stream.generation++
-		stream.cursor = request.PositionBytes
-		stream.bufferedBytes = 0
-		stream.effectiveHigh = 0
-		stream.effectiveLow = 0
-		stream.state = prefetchFilling
-	} else {
-		stream.playbackConsumedBytes += request.PositionBytes - stream.cursor
-		stream.cursor = request.PositionBytes
-	}
-	now := c.coordinatorNow()
-	stream.lastSequence = request.Sequence
-	stream.lastEvent = request.Event
-	stream.lastPosition = request.PositionBytes
-	stream.lastUpdate = now
-	stream.expiresAt = now.Add(playbackLeaseDuration)
-	c.reconcilePlaybackStreamLocked(stream)
-	c.signal()
-	return c.playbackSnapshotLocked(stream), nil
-}
-
-func (c *prefetchCoordinator) stopPlaybackStream(id string) error {
-	c.mu.Lock()
-	stream := c.streams[id]
-	if stream == nil {
-		c.mu.Unlock()
-		return ErrPlaybackStreamNotFound
-	}
-	c.releasePlaybackResourcesLocked(stream)
-	delete(c.streams, id)
-	c.mu.Unlock()
-	c.signal()
-	return nil
-}
-
-func (c *prefetchCoordinator) playbackSnapshots() []PlaybackStreamSnapshot {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]PlaybackStreamSnapshot, 0, len(c.streams))
-	for _, stream := range c.streams {
-		out = append(out, c.playbackSnapshotLocked(stream))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
-}
-
-func (c *prefetchCoordinator) playbackSnapshotLocked(stream *playbackStreamState) PlaybackStreamSnapshot {
-	background := make([]int, 0, len(stream.owners))
-	for index := range stream.owners {
-		background = append(background, index)
-	}
-	pinned := make([]int, 0, len(stream.pins))
-	for index := range stream.pins {
-		pinned = append(pinned, index)
-	}
-	foregroundSet := make(map[int]struct{})
-	for _, ticket := range c.foreground {
-		if ticket.file != stream.file {
-			continue
-		}
-		for index := range ticket.active {
-			foregroundSet[index] = struct{}{}
-		}
-	}
-	foreground := make([]int, 0, len(foregroundSet))
-	for index := range foregroundSet {
-		foreground = append(foreground, index)
-	}
-	sort.Ints(background)
-	sort.Ints(pinned)
-	sort.Ints(foreground)
-	torrentID := ""
-	var usefulDownload int64
-	if c.torrent != nil {
-		torrentID = c.torrent.InfoHash().HexString()
-		stats := c.torrent.Stats()
-		usefulDownload = stats.ConnStats.BytesReadUsefulData.Int64() - stream.usefulDownloadBase
-		if usefulDownload < 0 {
-			usefulDownload = 0
-		}
-	}
-	cacheResident := int64(0)
-	if c.cache != nil {
-		cacheResident = c.cache.SizeOf(c.torrentKey)
-	}
-	return PlaybackStreamSnapshot{
-		ID:                    stream.id,
-		TorrentID:             torrentID,
-		Path:                  stream.path,
-		Generation:            stream.generation,
-		PlaybackCursor:        stream.cursor,
-		PlaybackConsumedBytes: stream.playbackConsumedBytes,
-		UsefulDownloadBytes:   usefulDownload,
-		CacheResidentBytes:    cacheResident,
-		BufferedBytes:         stream.bufferedBytes,
-		TargetLow:             stream.targetLow,
-		TargetHigh:            stream.targetHigh,
-		EffectiveLow:          stream.effectiveLow,
-		EffectiveHigh:         stream.effectiveHigh,
-		State:                 stream.state.String(),
-		LastSequence:          stream.lastSequence,
-		LastUpdate:            stream.lastUpdate,
-		ExpiresAt:             stream.expiresAt,
-		ForegroundPieces:      foreground,
-		BackgroundPieces:      background,
-		PinnedPieces:          pinned,
-	}
-}
-
-func (c *prefetchCoordinator) expirePlaybackStreamsLocked(now time.Time) {
-	for id, stream := range c.streams {
-		if now.Before(stream.expiresAt) {
-			continue
-		}
-		c.releasePlaybackResourcesLocked(stream)
-		delete(c.streams, id)
-		if stream.onExpire != nil {
-			c.expiredCallbacks = append(c.expiredCallbacks, stream.onExpire)
-		}
-	}
-}
-
-func (c *prefetchCoordinator) releasePlaybackResourcesLocked(stream *playbackStreamState) {
-	for index := range stream.owners {
-		c.removeNormalOwnerLocked(index, stream.id)
-	}
-	for index := range stream.pins {
-		delete(stream.pins, index)
-		c.releaseLocked(index)
-	}
-	stream.owners = make(map[int]struct{})
-	stream.pins = make(map[int]struct{})
-}
-
-func (c *prefetchCoordinator) addActiveNormalOwnerLocked(index int, streamID string) {
-	if c.activeNormalOwners == nil {
-		c.activeNormalOwners = make(map[int]map[string]struct{})
-	}
-	owners := c.activeNormalOwners[index]
-	if owners == nil {
-		owners = make(map[string]struct{})
-		c.activeNormalOwners[index] = owners
-	}
-	owners[streamID] = struct{}{}
-}
-
-func (c *prefetchCoordinator) removeActiveNormalOwnerLocked(index int, streamID string) {
-	owners := c.activeNormalOwners[index]
-	if len(owners) == 0 {
-		return
-	}
-	delete(owners, streamID)
-	if len(owners) == 0 {
-		delete(c.activeNormalOwners, index)
-	}
-}
-
-func (c *prefetchCoordinator) removeNormalOwnerLocked(index int, streamID string) {
-	owners := c.normalOwners[index]
-	if len(owners) > 0 {
-		delete(owners, streamID)
-		if len(owners) == 0 {
-			delete(c.normalOwners, index)
-		}
-	}
-	c.removeActiveNormalOwnerLocked(index, streamID)
-	if len(c.activeNormalOwners[index]) == 0 && c.foregroundPieces[index] == 0 {
-		c.cancelLeaseLocked(index)
-	}
-	c.restorePiecePriorityLocked(index)
-}
-
-func (c *prefetchCoordinator) clearLegacyLocked() {
-	for index := range c.active {
-		c.cancelLeaseLocked(index)
-	}
-	for index := range c.windowPins {
-		delete(c.windowPins, index)
-		c.releaseLocked(index)
-	}
-	c.hasAnchor = false
-	c.anchorConfirmed = false
-	c.candidate = nil
-	c.demandSpans = nil
-	c.state = prefetchIdle
-	c.bufferedBytes = 0
-}
-
-func (c *prefetchCoordinator) demandForLocked(f *raFile, id uint64) *demandState {
-	if c.demands == nil {
-		c.demands = make(map[uint64]*demandState)
-	}
-	if c.demandByFile == nil {
-		c.demandByFile = make(map[*raFile]*demandState)
-	}
-	if id == 0 {
-		if state := c.demandByFile[f]; state != nil {
-			return state
-		}
-	} else if state := c.demands[id]; state != nil {
-		return state
-	}
-	state := &demandState{id: id, file: f, generation: 1}
-	if f != nil {
-		state.fileStart = f.fileOffset
-		state.fileSize = f.fileSize
-		state.pieceLength = f.pieceLength
-		state.torrentSize = f.torrentSize
-	}
-	if id == 0 {
-		c.demandByFile[f] = state
-	} else {
-		c.demands[id] = state
-	}
-	return state
-}
-
-func demandCurrentWindowLocked(state *demandState, requestStart int64) bool {
-	if state == nil || !state.hasCursor || requestStart < 0 {
-		return false
-	}
-	lower := state.cursor - defaultSeekCandidateLocality
-	if lower < 0 {
-		lower = 0
-	}
-	return requestStart >= lower && requestStart < playbackWindowEnd(state.cursor, state.fileSize)
-}
-
-func (c *prefetchCoordinator) demandCandidateMatchesLocked(state *demandState, f *raFile, requestStart int64) bool {
-	if state == nil || state.candidate == nil || state.file != f {
-		return false
-	}
-	return absInt64(requestStart-state.candidate.start) <= defaultSeekCandidateLocality
-}
-
-func recordDemandForStateLocked(state *demandState, off int64, n int) {
-	if state == nil {
-		return
-	}
-	start, end := clampReadSpan(off, n, state.fileSize)
-	if end <= start {
-		return
-	}
-	state.spans, _ = mergeByteSpan(state.spans, byteSpan{start: start, end: end})
-	cursor := state.cursor
-	remaining := make([]byteSpan, 0, len(state.spans))
-	for _, span := range state.spans {
-		if span.end <= cursor {
-			continue
-		}
-		if span.start <= cursor {
-			cursor = span.end
-			continue
-		}
-		remaining = append(remaining, span)
-	}
-	state.spans = remaining
-	state.cursor = clampCursor(cursor, state.fileSize)
-	state.hasCursor = true
-	state.confirmed = true
-}
-
-func (c *prefetchCoordinator) recordDemandCandidateLocked(state *demandState, ticket *foregroundTicket, off int64, n int) bool {
-	candidate := state.candidate
-	if candidate == nil || ticket.demand != state || ticket.candidateID != candidate.id || ticket.generation != state.generation {
-		return false
-	}
-	start, end := clampReadSpan(off, n, state.fileSize)
-	if end <= start {
-		return false
-	}
-	if candidate.successfulTickets == nil {
-		candidate.successfulTickets = make(map[uint64]struct{})
-	}
-	if _, seen := candidate.successfulTickets[ticket.id]; seen {
-		return false
-	}
-	spans, added := mergeByteSpan(candidate.spans, byteSpan{start: start, end: end})
-	if added <= 0 {
-		return false
-	}
-	candidate.spans = spans
-	candidate.successfulTickets[ticket.id] = struct{}{}
-	candidate.uniqueBytes += added
-	candidate.successfulReadings++
-	return candidate.successfulReadings >= defaultSeekConfirmationReads
-}
-
-func (c *prefetchCoordinator) confirmDemandCandidateLocked(state *demandState, ticket *foregroundTicket) []context.CancelFunc {
-	candidate := state.candidate
-	if candidate == nil || ticket.demand != state || ticket.candidateID != candidate.id {
-		return nil
-	}
-	state.generation++
-	state.cursor = clampCursor(candidate.start, state.fileSize)
-	state.hasCursor = true
-	state.confirmed = true
-	state.spans = append([]byteSpan(nil), candidate.spans...)
-	state.candidate = nil
-	var cancels []context.CancelFunc
-	for id, old := range c.foreground {
-		if id == ticket.id || old.demand != state {
-			continue
-		}
-		if cancel := c.removeForegroundLocked(old); cancel != nil {
-			cancels = append(cancels, cancel)
-			c.foregroundCancels++
-		}
-	}
-	ticket.generation = state.generation
-	ticket.kind = foregroundCurrentWindow
-	ticket.candidateID = 0
-	return cancels
-}
-
-func (c *prefetchCoordinator) dropDemandLocked(state *demandState) {
-	if state == nil {
-		return
-	}
-	for _, ticket := range c.foreground {
-		if ticket.demand == state && ticket.kind == foregroundCurrentWindow {
-			return
-		}
-	}
-	state.candidate = nil
-	state.spans = nil
-	state.hasCursor = false
-	state.confirmed = false
-}
-
-func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, plan cache.ReadPlan, requestCtx context.Context, demandIDs ...uint64) *foregroundTicket {
+func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, plan cache.ReadPlan, requestCtx context.Context) *foregroundTicket {
 	if requestCtx == nil {
 		requestCtx = context.Background()
 	}
@@ -848,115 +342,68 @@ func (c *prefetchCoordinator) beginForeground(f *raFile, req cache.ReadRequest, 
 	if c.foregroundPieces == nil {
 		c.foregroundPieces = make(map[int]int)
 	}
-	if c.demandCursors == nil {
-		c.demandCursors = make(map[uint64]int64)
-	}
 
-	var demandID uint64
-	if len(demandIDs) > 0 {
-		demandID = demandIDs[0]
-	}
-	legacy := !c.demandOnly && c.torrent == nil && len(c.streams) == 0
 	kind := foregroundOnly
 	candidateID := uint64(0)
-	var demand *demandState
-	if legacy {
-		if !c.hasAnchor {
-			c.generation++
-			c.anchor = prefetchAnchor{
-				file:            f,
-				fileStart:       req.FileStart,
-				fileSize:        req.FileSize,
-				pieceLength:     req.PieceLength,
-				torrentSize:     req.TorrentLength,
-				cursor:          clampCursor(requestStart, req.FileSize),
-				committedCursor: clampCursor(requestStart, req.FileSize),
-			}
-			c.hasAnchor = true
-			c.anchorConfirmed = false
-			c.demandSpans = nil
-			c.candidate = nil
-			kind = foregroundCurrentWindow
-		} else if c.currentWindowRequestLocked(f, requestStart) {
-			kind = foregroundCurrentWindow
-		} else if c.candidate != nil && c.candidateMatchesLocked(f, requestStart) {
-			kind = foregroundCandidate
-			candidateID = c.candidate.id
-		} else {
-			c.nextCandidate++
-			c.candidate = &seekCandidate{
-				id:                c.nextCandidate,
-				generation:        c.generation,
-				file:              f,
-				start:             clampCursor(requestStart, req.FileSize),
-				successfulTickets: make(map[uint64]struct{}),
-			}
-			candidateID = c.candidate.id
+	if !c.hasAnchor {
+		c.generation++
+		c.anchor = prefetchAnchor{
+			file:            f,
+			fileStart:       req.FileStart,
+			fileSize:        req.FileSize,
+			pieceLength:     req.PieceLength,
+			torrentSize:     req.TorrentLength,
+			cursor:          clampCursor(requestStart, req.FileSize),
+			committedCursor: clampCursor(requestStart, req.FileSize),
 		}
+		c.hasAnchor = true
+		c.anchorConfirmed = false
+		c.consumed = nil
+		c.candidate = nil
+		kind = foregroundCurrentWindow
+	} else if c.currentWindowRequestLocked(f, requestStart) {
+		kind = foregroundCurrentWindow
+	} else if c.candidate != nil && c.candidateMatchesLocked(f, requestStart) {
+		kind = foregroundCandidate
+		candidateID = c.candidate.id
 	} else {
-		demand = c.demandForLocked(f, demandID)
-		if demandID != 0 {
-			c.demandCursors[demandID] = requestStart
+		c.nextCandidate++
+		c.candidate = &seekCandidate{
+			id:                c.nextCandidate,
+			generation:        c.generation,
+			file:              f,
+			start:             clampCursor(requestStart, req.FileSize),
+			successfulTickets: make(map[uint64]struct{}),
 		}
-		if !demand.hasCursor {
-			demand.cursor = clampCursor(requestStart, req.FileSize)
-			demand.hasCursor = true
-			kind = foregroundCurrentWindow
-		} else if demandCurrentWindowLocked(demand, requestStart) {
-			kind = foregroundCurrentWindow
-		} else if c.demandCandidateMatchesLocked(demand, f, requestStart) {
-			kind = foregroundCandidate
-			candidateID = demand.candidate.id
-		} else {
-			demand.nextCandidate++
-			demand.candidate = &seekCandidate{
-				id:                demand.nextCandidate,
-				generation:        demand.generation,
-				file:              f,
-				start:             clampCursor(requestStart, req.FileSize),
-				successfulTickets: make(map[uint64]struct{}),
-			}
-			candidateID = demand.candidate.id
-		}
+		candidateID = c.candidate.id
 	}
 
 	c.nextTicket++
-	generation := c.generation
-	if demand != nil {
-		generation = demand.generation
-	}
 	ticket := &foregroundTicket{
 		coordinator:  c,
 		id:           c.nextTicket,
-		generation:   generation,
+		generation:   c.generation,
 		file:         f,
-		demandID:     demandID,
-		demand:       demand,
-		legacy:       legacy,
 		kind:         kind,
 		candidateID:  candidateID,
 		requestStart: requestStart,
 		requestEnd:   requestEnd,
 		wanted:       append([]int(nil), keys...),
-		activePinned: make(map[int]int),
 		active:       make(map[int]int),
 		ctx:          ticketCtx,
 		cancel:       ticketCancel,
 	}
-	if legacy {
-		for _, index := range keys {
-			if c.retainLocked(index) {
-				ticket.pinned = append(ticket.pinned, index)
-			}
+	for _, index := range keys {
+		if c.retainLocked(index) {
+			ticket.pinned = append(ticket.pinned, index)
 		}
 	}
 	c.foreground[ticket.id] = ticket
-	if legacy {
-		c.anchorTicket = ticket.id
-		for _, index := range keys {
-			if _, ok := c.active[index]; ok {
-				c.cancelLeaseLocked(index)
-			}
+	c.anchorTicket = ticket.id
+
+	for _, index := range keys {
+		if _, ok := c.active[index]; ok {
+			c.cancelLeaseLocked(index)
 		}
 	}
 	c.mu.Unlock()
@@ -972,44 +419,25 @@ func (c *prefetchCoordinator) finishForeground(ticket *foregroundTicket, off int
 	var cancels []context.CancelFunc
 	c.mu.Lock()
 	if current, ok := c.foreground[ticket.id]; ok && current == ticket {
-		legacy := ticket.legacy || (ticket.demand == nil && c.torrent == nil)
-		sameGeneration := false
-		if legacy {
-			sameGeneration = ticket.generation == c.generation && c.hasAnchor
-		} else if ticket.demand != nil {
-			sameGeneration = ticket.generation == ticket.demand.generation
-		}
+		sameGeneration := ticket.generation == c.generation && c.hasAnchor
 		successful := n > 0 && (err == nil || err == io.EOF) && sameGeneration
 		if successful {
-			if legacy {
-				switch ticket.kind {
-				case foregroundCurrentWindow:
-					if c.anchor.file == ticket.file {
-						c.recordDemandLocked(off, n)
-					}
-				case foregroundOnly, foregroundCandidate:
-					if c.recordCandidateLocked(ticket, off, n) {
-						cancels = append(cancels, c.confirmCandidateLocked(ticket)...)
-					}
+			switch ticket.kind {
+			case foregroundCurrentWindow:
+				if c.anchor.file == ticket.file {
+					c.recordConsumedLocked(off, n)
 				}
-			} else if ticket.kind == foregroundCurrentWindow {
-				recordDemandForStateLocked(ticket.demand, off, n)
-			} else if c.recordDemandCandidateLocked(ticket.demand, ticket, off, n) {
-				cancels = append(cancels, c.confirmDemandCandidateLocked(ticket.demand, ticket)...)
-			}
-			if ticket.demandID != 0 {
-				c.demandCursors[ticket.demandID] = ticket.demand.cursor
+			case foregroundOnly, foregroundCandidate:
+				if c.recordCandidateLocked(ticket, off, n) {
+					cancels = append(cancels, c.confirmCandidateLocked(ticket)...)
+				}
 			}
 		}
 		if cancel := c.removeForegroundLocked(ticket); cancel != nil {
 			cancels = append(cancels, cancel)
 		}
-		if legacy {
-			if ticket.kind == foregroundCurrentWindow && !c.anchorConfirmed {
-				c.dropUnconfirmedAnchorLocked()
-			}
-		} else if ticket.kind == foregroundCurrentWindow && ticket.demand != nil && !ticket.demand.confirmed {
-			c.dropDemandLocked(ticket.demand)
+		if ticket.kind == foregroundCurrentWindow && !c.anchorConfirmed {
+			c.dropUnconfirmedAnchorLocked()
 		}
 	}
 	c.mu.Unlock()
@@ -1141,7 +569,7 @@ func mergeByteSpan(spans []byteSpan, added byteSpan) ([]byteSpan, int64) {
 	return merged, byteSpanBytes(merged) - before
 }
 
-func (c *prefetchCoordinator) recordDemandLocked(off int64, n int) {
+func (c *prefetchCoordinator) recordConsumedLocked(off int64, n int) {
 	if !c.hasAnchor {
 		return
 	}
@@ -1150,7 +578,7 @@ func (c *prefetchCoordinator) recordDemandLocked(off int64, n int) {
 		return
 	}
 	previous := c.anchor.cursor
-	c.demandSpans, _ = mergeByteSpan(c.demandSpans, byteSpan{start: start, end: end})
+	c.consumed, _ = mergeByteSpan(c.consumed, byteSpan{start: start, end: end})
 	c.advanceAnchorLocked()
 	if c.anchor.cursor > previous {
 		c.anchorConfirmed = true
@@ -1162,8 +590,8 @@ func (c *prefetchCoordinator) advanceAnchorLocked() {
 		return
 	}
 	cursor := c.anchor.cursor
-	remaining := make([]byteSpan, 0, len(c.demandSpans))
-	for _, span := range c.demandSpans {
+	remaining := make([]byteSpan, 0, len(c.consumed))
+	for _, span := range c.consumed {
 		if span.end <= cursor {
 			continue
 		}
@@ -1173,7 +601,7 @@ func (c *prefetchCoordinator) advanceAnchorLocked() {
 		}
 		remaining = append(remaining, span)
 	}
-	c.demandSpans = remaining
+	c.consumed = remaining
 	c.anchor.cursor = clampCursor(cursor, c.anchor.fileSize)
 	c.anchor.committedCursor = c.anchor.cursor
 	if c.candidate != nil && absInt64(c.anchor.cursor-c.candidate.start) > defaultSeekClearThreshold {
@@ -1225,7 +653,7 @@ func (c *prefetchCoordinator) confirmCandidateLocked(ticket *foregroundTicket) [
 	}
 	c.hasAnchor = true
 	c.anchorConfirmed = true
-	c.demandSpans = append([]byteSpan(nil), candidate.spans...)
+	c.consumed = append([]byteSpan(nil), candidate.spans...)
 	c.candidate = nil
 	c.advanceAnchorLocked()
 	c.state = prefetchIdle
@@ -1274,26 +702,13 @@ func (t *foregroundTicket) startPiece(index int) {
 	coordinator := t.coordinator
 	coordinator.mu.Lock()
 	if current := coordinator.foreground[t.id]; current == t {
-		if t.legacy || coordinator.torrent == nil {
-			if _, ok := coordinator.active[index]; ok {
-				coordinator.cancelLeaseLocked(index)
-			}
+		if _, ok := coordinator.active[index]; ok {
+			coordinator.cancelLeaseLocked(index)
 		}
 		if t.active == nil {
 			t.active = make(map[int]int)
 		}
 		t.active[index]++
-		if !t.legacy {
-			if coordinator.retainForFileLocked(t.file, index) {
-				if t.activePinned == nil {
-					t.activePinned = make(map[int]int)
-				}
-				t.activePinned[index]++
-			}
-		}
-		if coordinator.torrent != nil {
-			coordinator.torrent.Piece(index).SetPriority(torrent.PiecePriorityNow)
-		}
 		coordinator.foregroundPieces[index]++
 	}
 	coordinator.mu.Unlock()
@@ -1313,35 +728,6 @@ func (t *foregroundTicket) finishPiece(index int) {
 	coordinator.signal()
 }
 
-func (c *prefetchCoordinator) dropActiveLeaseLocked(index int) {
-	if _, active := c.active[index]; !active {
-		return
-	}
-	if c.torrent != nil {
-		c.torrent.CancelPieces(index, index+1)
-	}
-	c.priorityCancels++
-	c.cancelled++
-	delete(c.active, index)
-	delete(c.activeNormalOwners, index)
-	c.budget.release()
-}
-
-func (c *prefetchCoordinator) restorePiecePriorityLocked(index int) {
-	if c.torrent == nil || c.foregroundPieces[index] > 0 {
-		return
-	}
-	_, active := c.active[index]
-	if active && len(c.activeNormalOwners[index]) > 0 {
-		c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNormal)
-		return
-	}
-	if active {
-		c.dropActiveLeaseLocked(index)
-	}
-	c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNone)
-}
-
 func (c *prefetchCoordinator) releaseForegroundPieceLocked(ticket *foregroundTicket, index int) {
 	if ticket.active[index] <= 0 {
 		return
@@ -1351,20 +737,11 @@ func (c *prefetchCoordinator) releaseForegroundPieceLocked(ticket *foregroundTic
 	} else {
 		ticket.active[index]--
 	}
-	if ticket.activePinned[index] > 0 {
-		if ticket.activePinned[index] == 1 {
-			delete(ticket.activePinned, index)
-		} else {
-			ticket.activePinned[index]--
-		}
-		c.releaseLocked(index)
-	}
 	if count := c.foregroundPieces[index]; count > 1 {
 		c.foregroundPieces[index] = count - 1
 	} else {
 		delete(c.foregroundPieces, index)
 	}
-	c.restorePiecePriorityLocked(index)
 }
 
 func (c *prefetchCoordinator) removeForegroundLocked(ticket *foregroundTicket) context.CancelFunc {
@@ -1408,7 +785,7 @@ func (c *prefetchCoordinator) dropUnconfirmedAnchorLocked() {
 	}
 	c.hasAnchor = false
 	c.anchorConfirmed = false
-	c.demandSpans = nil
+	c.consumed = nil
 	c.candidate = nil
 	c.state = prefetchIdle
 	c.bufferedBytes = 0
@@ -1451,53 +828,52 @@ func makePieceSet(indexes []int) map[int]struct{} {
 	return set
 }
 
-func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStreamState) {
-	if stream.fileSize <= stream.cursor || stream.pieceLength <= 0 {
-		stream.bufferedBytes = 0
-		stream.effectiveHigh = 0
-		stream.effectiveLow = 0
-		stream.state = prefetchPaused
-		c.releasePlaybackResourcesLocked(stream)
+func (c *prefetchCoordinator) reconcile() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || !c.hasAnchor {
 		return
 	}
-	c.updatePlaybackBufferedLocked(stream)
-	desired := c.desiredPlaybackPiecesLocked(stream)
+	c.updateBufferedLocked()
+	desired := c.desiredPiecesLocked()
 	wanted := make(map[int]struct{}, len(desired))
 	for _, index := range desired {
 		wanted[index] = struct{}{}
 	}
-	for index := range stream.pins {
-		if _, ok := wanted[index]; ok {
-			continue
+	for index := range c.windowPins {
+		if _, ok := wanted[index]; !ok {
+			delete(c.windowPins, index)
+			c.releaseLocked(index)
 		}
-		delete(stream.pins, index)
-		c.releaseLocked(index)
 	}
+	// A forward move within the window can push earlier pieces out of it without
+	// changing the generation, so the active set is pruned on every pass rather
+	// than only when the window is full.
+	c.cancelUnneededActiveLocked(wanted)
+
 	reservedPrefix := int64(0)
 	reservationBlocked := false
 	for _, index := range desired {
-		if _, ok := stream.pins[index]; !ok {
-			if !c.retainForFileLocked(stream.file, index) {
+		if _, ok := c.windowPins[index]; !ok {
+			if !c.retainLocked(index) {
 				reservationBlocked = true
 				break
 			}
-			stream.pins[index] = struct{}{}
+			c.windowPins[index] = struct{}{}
 		}
-		reservedPrefix += c.playbackPieceOverlapLocked(stream, index)
+		reservedPrefix += c.pieceOverlapLocked(index)
 	}
-	stream.effectiveHigh = min64(stream.targetHigh, stream.fileSize-stream.cursor)
-	if reservationBlocked && reservedPrefix < stream.effectiveHigh {
-		stream.effectiveHigh = reservedPrefix
+	if reservationBlocked {
+		c.budgetBlocks++
 	}
-	if stream.effectiveHigh < 0 {
-		stream.effectiveHigh = 0
-	}
-	stream.effectiveLow = min64(stream.targetLow, stream.effectiveHigh/2)
-	if reservationBlocked && reservedPrefix == 0 {
-		stream.state = prefetchBudgetBlocked
-		c.releasePlaybackOwnersLocked(stream)
-		return
-	}
+
+	c.computeWatermarksLocked(reservedPrefix, reservationBlocked)
+
+	// Consumption keeps the byte count a little below the high water, so the
+	// window is also "paused" when every piece it wants is already resident:
+	// there is nothing left to prefetch even though the count is short of the
+	// mark. Without this the state would report filling forever after the first
+	// read of a fully buffered window.
 	work := false
 	for _, index := range desired {
 		if !c.cache.Has(c.key(index)) {
@@ -1505,171 +881,46 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			break
 		}
 	}
-	if !work || stream.bufferedBytes >= stream.effectiveHigh {
-		stream.state = prefetchPaused
-		c.releasePlaybackOwnersLocked(stream)
+	if c.effectiveHigh == 0 || c.bufferedBytes >= c.effectiveHigh || !work {
+		c.state = prefetchPaused
+		c.completeActiveLocked()
 		return
 	}
-	if stream.state == prefetchPaused && stream.bufferedBytes > stream.effectiveLow {
-		c.releasePlaybackOwnersLocked(stream)
+	if c.bufferedBytes < c.effectiveLow || c.state == prefetchIdle || c.state == prefetchPaused || c.state == prefetchBudgetBlocked {
+		c.state = prefetchFilling
+	}
+	if c.state != prefetchFilling || reservationBlocked {
+		if reservationBlocked {
+			c.state = prefetchBudgetBlocked
+		}
 		return
 	}
-	stream.state = prefetchFilling
+
 	for _, index := range desired {
-		if stream.bufferedBytes >= stream.effectiveHigh {
+		if c.bufferedBytes >= c.effectiveHigh || len(c.active) >= c.currentLimit() {
 			break
 		}
-		if c.cache.Has(c.key(index)) {
-			if _, owned := stream.owners[index]; owned {
-				c.removeNormalOwnerLocked(index, stream.id)
-				delete(stream.owners, index)
-			}
+		if c.cache.Has(c.key(index)) || c.foregroundPieces[index] > 0 {
 			continue
-		}
-		owners := c.normalOwners[index]
-		if owners == nil {
-			owners = make(map[string]struct{})
-			c.normalOwners[index] = owners
-		}
-		if _, ok := owners[stream.id]; !ok {
-			owners[stream.id] = struct{}{}
-			stream.owners[index] = struct{}{}
 		}
 		if _, ok := c.active[index]; ok {
-			c.addActiveNormalOwnerLocked(index, stream.id)
-			c.restorePiecePriorityLocked(index)
 			c.dedupe++
-			continue
-		}
-		if c.foregroundPieces[index] > 0 {
-			continue
-		}
-		if len(c.active) >= c.currentLimit() {
 			continue
 		}
 		if !c.budget.tryAcquire() {
 			c.budgetBlocks++
-			stream.state = prefetchBudgetBlocked
-			c.restorePiecePriorityLocked(index)
-			continue
+			c.state = prefetchBudgetBlocked
+			break
 		}
-		if c.torrent != nil {
-			c.torrent.Piece(index).UpdateCompletion()
-			c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNormal)
-		}
+		c.torrent.Piece(index).UpdateCompletion()
+		c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNormal)
 		c.active[index] = struct{}{}
-		c.addActiveNormalOwnerLocked(index, stream.id)
 		c.priorityAdds++
 		if len(c.active) > c.maxActive {
 			c.maxActive = len(c.active)
 		}
 	}
 	c.completeActiveLocked()
-}
-
-func (c *prefetchCoordinator) releasePlaybackOwnersLocked(stream *playbackStreamState) {
-	for index := range stream.owners {
-		c.removeNormalOwnerLocked(index, stream.id)
-	}
-	stream.owners = make(map[int]struct{})
-}
-
-func (c *prefetchCoordinator) desiredPlaybackPiecesLocked(stream *playbackStreamState) []int {
-	start := stream.fileStart + stream.cursor
-	end := start + stream.targetHigh
-	fileEnd := stream.fileStart + stream.fileSize
-	if end > fileEnd {
-		end = fileEnd
-	}
-	if stream.torrentSize > 0 && end > stream.torrentSize {
-		end = stream.torrentSize
-	}
-	if end <= start {
-		return nil
-	}
-	first := int(start / stream.pieceLength)
-	last := int((end-1)/stream.pieceLength) + 1
-	out := make([]int, 0, last-first)
-	for index := first; index < last; index++ {
-		out = append(out, index)
-	}
-	return out
-}
-
-func (c *prefetchCoordinator) updatePlaybackBufferedLocked(stream *playbackStreamState) {
-	end := stream.fileStart + stream.fileSize
-	if stream.torrentSize > 0 && end > stream.torrentSize {
-		end = stream.torrentSize
-	}
-	limit := stream.targetHigh
-	if remaining := end - (stream.fileStart + stream.cursor); remaining < limit {
-		limit = remaining
-	}
-	if limit <= 0 {
-		stream.bufferedBytes = 0
-		return
-	}
-	stream.bufferedBytes = c.cache.ContiguousRun(c.torrentKey, stream.fileStart+stream.cursor, stream.pieceLength, limit)
-}
-
-func (c *prefetchCoordinator) playbackPieceOverlapLocked(stream *playbackStreamState, index int) int64 {
-	start := int64(index) * stream.pieceLength
-	end := start + stream.pieceLength
-	fileStart := stream.fileStart + stream.cursor
-	fileEnd := stream.fileStart + stream.fileSize
-	if start < fileStart {
-		start = fileStart
-	}
-	if end > fileEnd {
-		end = fileEnd
-	}
-	if stream.torrentSize > 0 && end > stream.torrentSize {
-		end = stream.torrentSize
-	}
-	if end <= start {
-		return 0
-	}
-	return end - start
-}
-
-func (c *prefetchCoordinator) retainForFileLocked(f *raFile, index int) bool {
-	if f == nil || f.pieceLength <= 0 {
-		return false
-	}
-	if c.refs[index] == 0 && !c.cache.PinSize(cache.Key{Torrent: c.torrentKey, Piece: index}, pieceSizeForFile(f, index)) {
-		return false
-	}
-	c.refs[index]++
-	return true
-}
-
-func pieceSizeForFile(f *raFile, index int) int64 {
-	start := int64(index) * f.pieceLength
-	remaining := f.torrentSize - start
-	if remaining < f.pieceLength {
-		return remaining
-	}
-	return f.pieceLength
-}
-
-func (c *prefetchCoordinator) reconcile() {
-	c.mu.Lock()
-	if len(c.streams) == 0 {
-		c.mu.Unlock()
-		return
-	}
-	c.expirePlaybackStreamsLocked(c.coordinatorNow())
-	for _, stream := range c.streams {
-		c.reconcilePlaybackStreamLocked(stream)
-	}
-	callbacks := c.expiredCallbacks
-	c.expiredCallbacks = nil
-	c.mu.Unlock()
-	for _, callback := range callbacks {
-		callback()
-	}
-	return
-
 }
 
 // computeWatermarksLocked derives the effective low/high marks from the
@@ -1704,9 +955,7 @@ func (c *prefetchCoordinator) completeActiveLocked() {
 		}
 		c.priorityCancels++
 		delete(c.active, index)
-		delete(c.activeNormalOwners, index)
 		c.budget.release()
-		c.restorePiecePriorityLocked(index)
 	}
 }
 
@@ -1723,8 +972,13 @@ func (c *prefetchCoordinator) cancelLeaseLocked(index int) {
 	if _, ok := c.active[index]; !ok {
 		return
 	}
-	c.dropActiveLeaseLocked(index)
-	c.restorePiecePriorityLocked(index)
+	if c.torrent != nil {
+		c.torrent.CancelPieces(index, index+1)
+	}
+	c.priorityCancels++
+	c.cancelled++
+	delete(c.active, index)
+	c.budget.release()
 }
 
 func (c *prefetchCoordinator) desiredPiecesLocked() []int {
@@ -1835,50 +1089,10 @@ func (c *prefetchCoordinator) key(index int) cache.Key {
 	return cache.Key{Torrent: c.torrentKey, Piece: index}
 }
 
-func (c *prefetchCoordinator) releaseDemandLocked(id uint64) []context.CancelFunc {
-	if id == 0 {
-		return nil
-	}
-	state := c.demands[id]
-	var cancels []context.CancelFunc
-	for ticketID, ticket := range c.foreground {
-		if ticket.demandID != id && (state == nil || ticket.demand != state) {
-			continue
-		}
-		if cancel := c.removeForegroundLocked(ticket); cancel != nil {
-			cancels = append(cancels, cancel)
-		}
-		delete(c.foreground, ticketID)
-	}
-	delete(c.demands, id)
-	for file, candidate := range c.demandByFile {
-		if candidate == state {
-			delete(c.demandByFile, file)
-		}
-	}
-	delete(c.demandCursors, id)
-	return cancels
-}
-
-func (c *prefetchCoordinator) releaseDemand(id uint64) {
-	c.mu.Lock()
-	cancels := c.releaseDemandLocked(id)
-	c.mu.Unlock()
-	for _, cancel := range cancels {
-		cancel()
-	}
-	c.signal()
-}
-
 func (c *prefetchCoordinator) releaseFile(f *raFile) {
 	var cancels []context.CancelFunc
 	c.mu.Lock()
 	if !c.closed {
-		for id, state := range c.demands {
-			if state.file == f {
-				cancels = append(cancels, c.releaseDemandLocked(id)...)
-			}
-		}
 		for _, ticket := range c.foreground {
 			if ticket.file != f {
 				continue
@@ -1901,7 +1115,7 @@ func (c *prefetchCoordinator) releaseFile(f *raFile) {
 			}
 			c.hasAnchor = false
 			c.anchorConfirmed = false
-			c.demandSpans = nil
+			c.consumed = nil
 			c.state = prefetchIdle
 			c.bufferedBytes = 0
 			c.candidate = nil
@@ -1930,14 +1144,7 @@ func (c *prefetchCoordinator) snapshot() prefetchSnapshot {
 	var activeBytes int64
 	for index := range c.active {
 		activeIndexes = append(activeIndexes, index)
-		pieceSize := c.pieceSizeLocked(index)
-		if pieceSize == 0 {
-			for _, stream := range c.streams {
-				pieceSize = pieceSizeForFile(stream.file, index)
-				break
-			}
-		}
-		activeBytes += pieceSize
+		activeBytes += c.pieceSizeLocked(index)
 	}
 	foregroundIndexes := make([]int, 0, len(c.foregroundPieces))
 	for index := range c.foregroundPieces {
@@ -1949,8 +1156,6 @@ func (c *prefetchCoordinator) snapshot() prefetchSnapshot {
 		Generation:         c.generation,
 		State:              c.state.String(),
 		Cursor:             cursor,
-		DemandCursor:       cursor,
-		PlaybackCursor:     0,
 		PlaybackAnchor:     confirmedAnchor,
 		ConfirmedAnchor:    confirmedAnchor,
 		AnchorConfirmed:    c.anchorConfirmed,
@@ -1981,27 +1186,6 @@ func (c *prefetchCoordinator) snapshot() prefetchSnapshot {
 		snapshot.CandidateStart = c.candidate.start
 		snapshot.CandidateReads = c.candidate.successfulReadings
 		snapshot.CandidateUniqueBytes = c.candidate.uniqueBytes
-	}
-	if len(c.streams) > 0 {
-		snapshot.PlaybackStreams = make([]PlaybackStreamSnapshot, 0, len(c.streams))
-		for _, stream := range c.streams {
-			snapshot.PlaybackStreams = append(snapshot.PlaybackStreams, c.playbackSnapshotLocked(stream))
-		}
-		sort.Slice(snapshot.PlaybackStreams, func(i, j int) bool {
-			return snapshot.PlaybackStreams[i].ID < snapshot.PlaybackStreams[j].ID
-		})
-		first := snapshot.PlaybackStreams[0]
-		snapshot.Generation = first.Generation
-		snapshot.State = first.State
-		snapshot.Cursor = first.PlaybackCursor
-		snapshot.DemandCursor = 0
-		snapshot.PlaybackCursor = first.PlaybackCursor
-		snapshot.BufferedBytes = first.BufferedBytes
-		snapshot.EffectiveLow = first.EffectiveLow
-		snapshot.EffectiveHigh = first.EffectiveHigh
-		snapshot.PlaybackAnchor = first.PlaybackCursor
-		snapshot.ConfirmedAnchor = first.PlaybackCursor
-		snapshot.AnchorConfirmed = true
 	}
 	return snapshot
 }
@@ -2039,12 +1223,6 @@ func (c *prefetchCoordinator) cleanup() {
 		return
 	}
 	c.closed = true
-	for _, stream := range c.streams {
-		c.releasePlaybackResourcesLocked(stream)
-	}
-	c.streams = make(map[string]*playbackStreamState)
-	c.normalOwners = make(map[int]map[string]struct{})
-	c.activeNormalOwners = make(map[int]map[string]struct{})
 	for _, ticket := range c.foreground {
 		if cancel := c.removeForegroundLocked(ticket); cancel != nil {
 			cancels = append(cancels, cancel)
@@ -2065,11 +1243,7 @@ func (c *prefetchCoordinator) cleanup() {
 	c.windowPins = make(map[int]struct{})
 	c.foreground = make(map[uint64]*foregroundTicket)
 	c.foregroundPieces = make(map[int]int)
-	c.demands = make(map[uint64]*demandState)
-	c.demandByFile = make(map[*raFile]*demandState)
-	c.demandCursors = make(map[uint64]int64)
-	c.expiredCallbacks = nil
-	c.demandSpans = nil
+	c.consumed = nil
 	c.candidate = nil
 	c.hasAnchor = false
 	c.anchorConfirmed = false

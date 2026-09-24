@@ -716,18 +716,6 @@ when its numeric UID/GID is changed at startup.
 - 客户端随机 seek（例如播放器跳到文件中段）会经 Samba `pread` → FUSE `Read(off)` → piece planner/cache 拉取对应 pieces，读取链路与 HTTP/FUSE 模式完全一致。内存 cache 与 Samba 共享同一 cgroup，规划 cache 余量时要把两者算在一起。
 - 显式开启 `mount.allow_other=true` 会扩大同一 user namespace 内的访问面；SMB 模式本身不依赖它，也不由入口强制打开。
 
-## Playback buffer control
-
-FUSE `Read(off)` and SMB `pread` report bytes delivered to the kernel or caller; they do not report bytes decoded or played. The scheduler therefore exposes an explicit, authenticated playback stream control plane. Clients must create a stream before playback and send byte positions from the player or its adapter.
-
-- `POST /api/v1/torrents/{id}/playback-streams` with `{"path":"...","position_bytes":0}` creates a stream and returns a non-guessable `stream_id`.
-- `PATCH /api/v1/playback-streams/{stream_id}` accepts `{"sequence":1,"event":"progress","position_bytes":...}` or `event:"seek"`. Sequences must increase; an identical sequence and payload is idempotent, while a different replay or older sequence returns `409`.
-- `DELETE /api/v1/playback-streams/{stream_id}` releases the stream's background owners and pins. Updates are also heartbeats; an idle stream expires after 30 seconds.
-
-`progress` may only advance within the current generation. Rewinds and discontinuities must use `seek`; a seek starts a new generation and does not count the jump as playback consumption. The response and torrent status expose playback-consumed bytes, useful network download delta, cache-resident bytes, contiguous buffered bytes, effective watermarks, and foreground/background piece ownership separately.
-
-Without a playback stream, playback accounting remains demand-only and cannot provide pacing guarantees; clients that require bounded background buffering must create a stream before reading. A successful FUSE/SMB read, kernel readahead, DirectIO, or a wall-clock bitrate estimate is never treated as confirmed playback consumption. DirectIO is not required for this contract and does not provide consumption confirmation.
-
 ## 构建、测试与贡献
 
 前端构建产物被 Go embed，因此本地 quality 检查应先完成前端检查和构建，再执行 Go 命令。下面的顺序与 CI 可复用 action 一致：
