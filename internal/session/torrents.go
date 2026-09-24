@@ -233,10 +233,11 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
 	}
 	if r, ok := t.readers[displayPath]; ok {
-		if !r.acquireHandle() {
+		demandID, ok := r.acquireHandle()
+		if !ok {
 			return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
 		}
-		return &openedFile{file: r}, nil
+		return &openedFile{file: r, demandID: demandID}, nil
 	}
 	f := fileByDisplayPath(t.tor, displayPath)
 	if f == nil {
@@ -263,11 +264,12 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		torrentSize: t.tor.Length(),
 		readahead:   defaultStreamingReadahead,
 	}
-	if !r.acquireHandle() {
+	demandID, ok := r.acquireHandle()
+	if !ok {
 		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
 	}
 	t.readers[displayPath] = r
-	return &openedFile{file: r}, nil
+	return &openedFile{file: r, demandID: demandID}, nil
 }
 
 // close releases every open reader handle for this torrent.

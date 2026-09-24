@@ -90,6 +90,15 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 		t.Fatalf("leecher did not connect to seeder: %v", err)
 	}
 
+	startPosition := int64(seekCase.positions[0]) * pieceLength
+	stream, err := leecher.StartPlaybackStream(ctx, hash.HexString(), session.PlaybackStreamStart{
+		Path:          "payload.bin",
+		PositionBytes: startPosition,
+	})
+	if err != nil {
+		t.Fatalf("StartPlaybackStream: %v", err)
+	}
+	defer func() { _ = leecher.StopPlaybackStream(context.Background(), stream.ID) }()
 	reader, err := leecher.OpenFile(hash, "payload.bin")
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
@@ -97,8 +106,28 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 	defer func() { _ = reader.(io.Closer).Close() }()
 
 	var previous session.PrefetchSnapshot
+	var sequence uint64
 	for index, piece := range seekCase.positions {
 		offset := int64(piece) * pieceLength
+		if index > 0 {
+			sequence++
+			event := session.PlaybackEventProgress
+			if seekCase.wantConfirmedSeek {
+				event = session.PlaybackEventSeek
+			} else if seekCase.name == "sparse probes do not chase" {
+				sequence--
+				event = ""
+			}
+			if event != "" {
+				if _, err := leecher.UpdatePlaybackStream(ctx, stream.ID, session.PlaybackStreamUpdate{
+					Sequence:      sequence,
+					Event:         event,
+					PositionBytes: offset,
+				}); err != nil {
+					t.Fatalf("playback update at piece %d: %v", piece, err)
+				}
+			}
+		}
 		buf := make([]byte, 64)
 		started := time.Now()
 		n, err := reader.ReadAt(buf, offset)
@@ -112,24 +141,25 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 		if snapshot.MaxActivePieces > session.PrefetchDefaultPiecesForTest() {
 			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, session.PrefetchDefaultPiecesForTest())
 		}
-		t.Logf("seek=%d piece=%d elapsed=%s generation=%d anchor=%d candidate=%v/%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.PlaybackAnchor, snapshot.CandidatePresent, snapshot.CandidateReads, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
-		if index > 0 && snapshot.Generation < previous.Generation {
-			t.Fatalf("generation moved backwards: %d -> %d", previous.Generation, snapshot.Generation)
+		playback := snapshot.PlaybackStreams[0]
+		t.Logf("seek=%d piece=%d elapsed=%s generation=%d playback=%d foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), playback.Generation, playback.PlaybackCursor, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
+		if index > 0 && playback.Generation < previous.Generation {
+			t.Fatalf("generation moved backwards: %d -> %d", previous.Generation, playback.Generation)
 		}
 		if index > 0 && seekCase.wantStableGeneration {
-			if snapshot.Generation != previous.Generation {
-				t.Fatalf("sparse read changed generation from %d to %d", previous.Generation, snapshot.Generation)
+			if playback.Generation != previous.Generation {
+				t.Fatalf("stable playback generation changed from %d to %d", previous.Generation, playback.Generation)
 			}
-			if snapshot.PlaybackAnchor != previous.PlaybackAnchor || snapshot.WindowStart != previous.WindowStart {
-				t.Fatalf("sparse read moved anchor/window from %d/%d to %d/%d", previous.PlaybackAnchor, previous.WindowStart, snapshot.PlaybackAnchor, snapshot.WindowStart)
+			if seekCase.name == "sparse probes do not chase" && playback.PlaybackCursor != previous.PlaybackCursor {
+				t.Fatalf("sparse read moved playback cursor from %d to %d", previous.PlaybackCursor, playback.PlaybackCursor)
 			}
 		}
 		if index == len(seekCase.positions)-1 && seekCase.wantConfirmedSeek {
-			if snapshot.Generation != previous.Generation+1 {
-				t.Fatalf("confirmed seek generation = %d, want %d", snapshot.Generation, previous.Generation+1)
+			if playback.Generation != previous.Generation+1 {
+				t.Fatalf("confirmed seek generation = %d, want %d", playback.Generation, previous.Generation+1)
 			}
-			if snapshot.CandidatePresent {
-				t.Fatal("confirmed seek left a candidate installed")
+			if len(snapshot.PlaybackStreams) != 1 {
+				t.Fatal("confirmed seek lost playback stream")
 			}
 		}
 		previous = snapshot
@@ -200,13 +230,21 @@ func runPrefetchBudgetCandidate(t *testing.T, tracker *loopbackTracker, hashHex 
 	if err := waitFor(ctx, func() bool { return tracker.peerCount(hashHex) >= 2 }); err != nil {
 		t.Fatalf("leecher did not connect to seeder: %v", err)
 	}
+	targetOffset := int64(matrixTargetPiece) * pieceLength
+	stream, err := leecher.StartPlaybackStream(ctx, hash.HexString(), session.PlaybackStreamStart{
+		Path:          "payload.bin",
+		PositionBytes: targetOffset,
+	})
+	if err != nil {
+		t.Fatalf("StartPlaybackStream: %v", err)
+	}
+	defer func() { _ = leecher.StopPlaybackStream(context.Background(), stream.ID) }()
 	reader, err := leecher.OpenFile(hash, "payload.bin")
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
 	defer func() { _ = reader.(io.Closer).Close() }()
 
-	targetOffset := int64(matrixTargetPiece) * pieceLength
 	buf := make([]byte, 64)
 	started := time.Now()
 	if n, err := reader.ReadAt(buf, targetOffset); err != nil || n != len(buf) {

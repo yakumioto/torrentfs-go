@@ -30,6 +30,15 @@ type Backend interface {
 	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
+	PlaybackBackend
+}
+
+// PlaybackBackend is the control-plane surface for explicit playback position
+// reporting.
+type PlaybackBackend interface {
+	StartPlaybackStream(context.Context, string, session.PlaybackStreamStart) (session.PlaybackStreamSnapshot, error)
+	UpdatePlaybackStream(context.Context, string, session.PlaybackStreamUpdate) (session.PlaybackStreamSnapshot, error)
+	StopPlaybackStream(context.Context, string) error
 }
 
 // Server is the torrent management HTTP service.
@@ -92,6 +101,9 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
+	mux.HandleFunc("POST /api/v1/torrents/{id}/playback-streams", s.handlePlaybackStart)
+	mux.HandleFunc("PATCH /api/v1/playback-streams/{stream_id}", s.handlePlaybackUpdate)
+	mux.HandleFunc("DELETE /api/v1/playback-streams/{stream_id}", s.handlePlaybackStop)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
@@ -242,5 +254,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func decodeJSON(r io.Reader, value any) error {
-	return json.NewDecoder(r).Decode(value)
+	decoder := json.NewDecoder(r)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

@@ -94,6 +94,18 @@ func (f *fakeBackend) RuntimeStats() session.RuntimeStatsView {
 	return f.runtimeStats
 }
 
+func (f *fakeBackend) StartPlaybackStream(context.Context, string, session.PlaybackStreamStart) (session.PlaybackStreamSnapshot, error) {
+	return session.PlaybackStreamSnapshot{}, session.ErrPlaybackStreamNotFound
+}
+
+func (f *fakeBackend) UpdatePlaybackStream(context.Context, string, session.PlaybackStreamUpdate) (session.PlaybackStreamSnapshot, error) {
+	return session.PlaybackStreamSnapshot{}, session.ErrPlaybackStreamNotFound
+}
+
+func (f *fakeBackend) StopPlaybackStream(context.Context, string) error {
+	return session.ErrPlaybackStreamNotFound
+}
+
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {
 	t.Helper()
 	cfg := config.Default()

@@ -30,7 +30,10 @@ type readProbeEvent struct {
 // readProbe, when set, receives loader read events. It is a test-only seam:
 // production never installs one. Sends are non-blocking, so a full or stalled
 // probe channel can never hold up a reader.
-var readProbe atomic.Pointer[chan readProbeEvent]
+var (
+	readProbe    atomic.Pointer[chan readProbeEvent]
+	nextDemandID atomic.Uint64
+)
 
 func emitReadProbe(event readProbeEvent) {
 	probe := readProbe.Load()
@@ -448,34 +451,44 @@ var _ io.ReaderAt = (*raFile)(nil)
 var _ io.Closer = (*raFile)(nil)
 
 type openedFile struct {
-	file *raFile
-	once sync.Once
+	file     *raFile
+	demandID uint64
+	once     sync.Once
 }
 
 var _ io.ReaderAt = (*openedFile)(nil)
 var _ io.Closer = (*openedFile)(nil)
 
 func (f *openedFile) ReadAt(p []byte, off int64) (int, error) {
-	return f.file.ReadAt(p, off)
+	return f.file.readAtContext(context.Background(), p, off, f.demandID)
 }
 
 func (f *openedFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
-	return f.file.ReadAtContext(ctx, p, off)
+	return f.file.readAtContext(ctx, p, off, f.demandID)
 }
 
 func (f *openedFile) Close() error {
-	f.once.Do(func() { f.file.releaseHandle() })
+	f.once.Do(func() {
+		f.file.releaseDemand(f.demandID)
+		f.file.releaseHandle()
+	})
 	return nil
 }
 
-func (f *raFile) acquireHandle() bool {
+func (f *raFile) acquireHandle() (uint64, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
-		return false
+		return 0, false
 	}
 	f.handles++
-	return true
+	return nextDemandID.Add(1), true
+}
+
+func (f *raFile) releaseDemand(id uint64) {
+	if f.coordinator != nil {
+		f.coordinator.releaseDemand(id)
+	}
 }
 
 func (f *raFile) releaseHandle() {
@@ -499,6 +512,10 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 // ends this read only; a true playback-window seek may also end stale reads from
 // an older generation.
 func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	return f.readAtContext(ctx, p, off, 0)
+}
+
+func (f *raFile) readAtContext(ctx context.Context, p []byte, off int64, demandID uint64) (int, error) {
 	if off < 0 {
 		return 0, filesystem.ErrInvalidName
 	}
@@ -536,7 +553,7 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 	var ticket *foregroundTicket
 	readCtx := ctx
 	if coordinator != nil {
-		ticket = coordinator.beginForeground(f, request, plan, ctx)
+		ticket = coordinator.beginForeground(f, request, plan, ctx, demandID)
 		if ticket != nil && ticket.ctx != nil {
 			readCtx = ticket.ctx
 		}
