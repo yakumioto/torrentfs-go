@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"syscall"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -14,16 +15,18 @@ import (
 // on demand through the Backend; nothing is cached and nothing is written.
 type torrentFileNode struct {
 	fs.Inode
-	state *fsState
-	hash  metainfo.Hash
-	path  string // torrent-relative display path
-	size  int64
+	state     *fsState
+	hash      metainfo.Hash
+	path      string // torrent-relative display path
+	size      int64
+	createdAt time.Time
 }
 
 func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o444
 	out.Size = uint64(n.size)
 	out.Nlink = 1
+	setCreatedAt(&out.Attr, n.createdAt)
 	return 0
 }
 

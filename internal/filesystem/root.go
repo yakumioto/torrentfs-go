@@ -46,17 +46,26 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		if f, ok := mediaRoot(c.View); ok {
 			out.Mode = 0o444
 			out.Size = uint64(f.Size)
-			child := &torrentFileNode{state: n.state, hash: c.View.Hash, path: f.Path, size: f.Size}
+			setCreatedAt(&out.Attr, c.View.CreatedAt)
+			child := &torrentFileNode{
+				state:     n.state,
+				hash:      c.View.Hash,
+				path:      f.Path,
+				size:      f.Size,
+				createdAt: c.View.CreatedAt,
+			}
 			return n.NewInode(ctx, child, fs.StableAttr{
 				Mode: syscall.S_IFREG,
 				Ino:  n.state.inoFor(fileKey(c.View.Hash, f.Path)),
 			}), 0
 		}
 		out.Mode = 0o555
+		setCreatedAt(&out.Attr, c.View.CreatedAt)
 		child := &torrentDirNode{
-			state: n.state,
-			hash:  c.View.Hash,
-			files: c.View.Files,
+			state:     n.state,
+			hash:      c.View.Hash,
+			files:     c.View.Files,
+			createdAt: c.View.CreatedAt,
 		}
 		return n.NewInode(ctx, child, fs.StableAttr{
 			Mode: syscall.S_IFDIR,

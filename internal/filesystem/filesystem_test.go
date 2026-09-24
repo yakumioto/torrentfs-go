@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
@@ -51,6 +52,25 @@ func entryNames(entries []fsEntry) []string {
 		out[i] = entry.Name
 	}
 	return out
+}
+
+func assertAttrTimes(t *testing.T, attr *fuse.Attr, want time.Time) {
+	t.Helper()
+	if want.IsZero() {
+		if attr.Atime != 0 || attr.Mtime != 0 || attr.Ctime != 0 ||
+			attr.Atimensec != 0 || attr.Mtimensec != 0 || attr.Ctimensec != 0 {
+			t.Fatalf("zero CreatedAt produced non-zero attr times: %+v", *attr)
+		}
+		return
+	}
+	wantSec := uint64(want.Unix())
+	wantNsec := uint32(want.Nanosecond())
+	if attr.Atime != wantSec || attr.Mtime != wantSec || attr.Ctime != wantSec ||
+		attr.Atimensec != wantNsec || attr.Mtimensec != wantNsec || attr.Ctimensec != wantNsec {
+		t.Fatalf("attr times = %d.%09d/%d.%09d/%d.%09d, want %d.%09d",
+			attr.Atime, attr.Atimensec, attr.Mtime, attr.Mtimensec, attr.Ctime, attr.Ctimensec,
+			wantSec, wantNsec)
+	}
 }
 
 func TestChildrenOfNestedFiles(t *testing.T) {
@@ -121,6 +141,118 @@ func TestRootContainsOnlyTorrentDataAndIsReadOnly(t *testing.T) {
 	if _, errno := root.Mkdir(context.Background(), "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
 		t.Fatalf("root Mkdir errno = %v, want EROFS", errno)
 	}
+}
+
+func TestTorrentNodeTimesFollowCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	createdAt := time.Date(2026, 9, 24, 6, 30, 4, 123456789, time.UTC)
+	backend := &fakeBackend{views: []TorrentView{
+		{Name: "single", Hash: hashN(1), SingleFile: true, CreatedAt: createdAt},
+		{Name: "multi", Hash: hashN(2), CreatedAt: createdAt},
+		{Name: "zero", Hash: hashN(3), SingleFile: true},
+	}}
+	backend.addFile(&backend.views[0], "payload.bin", []byte("single"))
+	backend.addFile(&backend.views[1], "top.txt", []byte("top"))
+	backend.addFile(&backend.views[1], "sub/deep/payload.bin", []byte("nested"))
+	backend.addFile(&backend.views[2], "zero.bin", []byte("zero"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+
+	var singleOut fuse.EntryOut
+	singleInode, errno := root.Lookup(ctx, "single", &singleOut)
+	if errno != 0 {
+		t.Fatalf("single root Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &singleOut.Attr, createdAt)
+	singleNode, ok := singleInode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("single node = %T, want *torrentFileNode", singleInode.Operations())
+	}
+	var singleAttr fuse.AttrOut
+	if errno := singleNode.Getattr(ctx, nil, &singleAttr); errno != 0 {
+		t.Fatalf("single Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &singleAttr.Attr, createdAt)
+
+	var multiOut fuse.EntryOut
+	multiInode, errno := root.Lookup(ctx, "multi", &multiOut)
+	if errno != 0 {
+		t.Fatalf("multi root Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &multiOut.Attr, createdAt)
+	multiNode, ok := multiInode.Operations().(*torrentDirNode)
+	if !ok {
+		t.Fatalf("multi node = %T, want *torrentDirNode", multiInode.Operations())
+	}
+	var multiAttr fuse.AttrOut
+	if errno := multiNode.Getattr(ctx, nil, &multiAttr); errno != 0 {
+		t.Fatalf("multi Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &multiAttr.Attr, createdAt)
+
+	var subOut fuse.EntryOut
+	subInode, errno := multiNode.Lookup(ctx, "sub", &subOut)
+	if errno != 0 {
+		t.Fatalf("sub Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &subOut.Attr, createdAt)
+	subNode, ok := subInode.Operations().(*torrentDirNode)
+	if !ok {
+		t.Fatalf("sub node = %T, want *torrentDirNode", subInode.Operations())
+	}
+	var subAttr fuse.AttrOut
+	if errno := subNode.Getattr(ctx, nil, &subAttr); errno != 0 {
+		t.Fatalf("sub Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &subAttr.Attr, createdAt)
+
+	var deepOut fuse.EntryOut
+	deepInode, errno := subNode.Lookup(ctx, "deep", &deepOut)
+	if errno != 0 {
+		t.Fatalf("deep Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &deepOut.Attr, createdAt)
+	deepNode, ok := deepInode.Operations().(*torrentDirNode)
+	if !ok {
+		t.Fatalf("deep node = %T, want *torrentDirNode", deepInode.Operations())
+	}
+	var deepAttr fuse.AttrOut
+	if errno := deepNode.Getattr(ctx, nil, &deepAttr); errno != 0 {
+		t.Fatalf("deep Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &deepAttr.Attr, createdAt)
+
+	var leafOut fuse.EntryOut
+	leafInode, errno := deepNode.Lookup(ctx, "payload.bin", &leafOut)
+	if errno != 0 {
+		t.Fatalf("leaf Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &leafOut.Attr, createdAt)
+	leafNode, ok := leafInode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("leaf node = %T, want *torrentFileNode", leafInode.Operations())
+	}
+	var leafAttr fuse.AttrOut
+	if errno := leafNode.Getattr(ctx, nil, &leafAttr); errno != 0 {
+		t.Fatalf("leaf Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &leafAttr.Attr, createdAt)
+
+	var zeroOut fuse.EntryOut
+	zeroInode, errno := root.Lookup(ctx, "zero", &zeroOut)
+	if errno != 0 {
+		t.Fatalf("zero root Lookup errno = %v", errno)
+	}
+	assertAttrTimes(t, &zeroOut.Attr, time.Time{})
+	zeroNode, ok := zeroInode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("zero node = %T, want *torrentFileNode", zeroInode.Operations())
+	}
+	var zeroAttr fuse.AttrOut
+	if errno := zeroNode.Getattr(ctx, nil, &zeroAttr); errno != 0 {
+		t.Fatalf("zero Getattr errno = %v", errno)
+	}
+	assertAttrTimes(t, &zeroAttr.Attr, time.Time{})
 }
 
 // contextualFakeReader implements both io.ReaderAt and the optional

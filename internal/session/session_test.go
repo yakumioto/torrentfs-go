@@ -376,6 +376,14 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 	}
 	seedPieces(t, first, hash, content)
 	waitCached(t, ctx, st)
+	firstViews := first.Torrents()
+	if len(firstViews) != 1 || firstViews[0].Hash != hash {
+		t.Fatalf("first Torrents() = %+v, want torrent %s", firstViews, hash)
+	}
+	createdAt := firstViews[0].CreatedAt
+	if createdAt.IsZero() {
+		t.Fatal("first torrent CreatedAt is zero")
+	}
 	if err := first.Close(context.Background()); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
@@ -402,6 +410,9 @@ func TestSessionRestoresMetadataAfterRestart(t *testing.T) {
 	views := second.Torrents()
 	if len(views) != 1 || views[0].Hash != hash || views[0].Name != "payload.bin" {
 		t.Fatalf("Torrents after restart = %+v", views)
+	}
+	if !views[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt after restart = %v, want %v", views[0].CreatedAt, createdAt)
 	}
 
 	ra, err := second.OpenFile(hash, "payload.bin")

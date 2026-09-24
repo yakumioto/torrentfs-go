@@ -69,6 +69,26 @@ func fuseUsable(t *testing.T) bool {
 	return true
 }
 
+func assertFuseTimes(t *testing.T, info os.FileInfo, want time.Time) {
+	t.Helper()
+	if !info.ModTime().Equal(want) {
+		t.Fatalf("%s ModTime = %v, want %v", info.Name(), info.ModTime(), want)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("%s stat type = %T, want *syscall.Stat_t", info.Name(), info.Sys())
+	}
+	wantSec := want.Unix()
+	wantNsec := int64(want.Nanosecond())
+	if stat.Atim.Sec != wantSec || stat.Atim.Nsec != wantNsec ||
+		stat.Mtim.Sec != wantSec || stat.Mtim.Nsec != wantNsec ||
+		stat.Ctim.Sec != wantSec || stat.Ctim.Nsec != wantNsec {
+		t.Fatalf("%s times = atime %d.%09d, mtime %d.%09d, ctime %d.%09d; want %d.%09d",
+			info.Name(), stat.Atim.Sec, stat.Atim.Nsec, stat.Mtim.Sec, stat.Mtim.Nsec,
+			stat.Ctim.Sec, stat.Ctim.Nsec, wantSec, wantNsec)
+	}
+}
+
 // TestFuseSmokeMountsAndReads mounts a real torrent and reads its content
 // through the mounted tree, both a full read and a seeked read. It only runs
 // where FUSE is available; elsewhere it skips with a reason and is not a green
@@ -105,6 +125,14 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
+	managed := sess.ListTorrents()
+	if len(managed) != 1 || managed[0].InfoHash != hash.HexString() {
+		t.Fatalf("ListTorrents after add = %+v, want torrent %s", managed, hash)
+	}
+	createdAt := managed[0].CreatedAt
+	if createdAt.IsZero() {
+		t.Fatal("managed torrent CreatedAt is zero")
+	}
 	st, ok := sess.Torrent(hash)
 	if !ok {
 		t.Fatalf("torrent %s not registered", metainfo.Hash(hash))
@@ -137,6 +165,7 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s stat type = %T, want *syscall.Stat_t", path, info.Sys())
 	}
+	assertFuseTimes(t, info, createdAt)
 	if stat.Uid != uint32(os.Getuid()) || stat.Gid != uint32(os.Getgid()) {
 		t.Fatalf("%s ownership = %d:%d, want %d:%d", path, stat.Uid, stat.Gid, os.Getuid(), os.Getgid())
 	}
@@ -238,6 +267,14 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
+	managed := sess.ListTorrents()
+	if len(managed) != 1 || managed[0].InfoHash != hash.HexString() {
+		t.Fatalf("ListTorrents after add = %+v, want torrent %s", managed, hash)
+	}
+	createdAt := managed[0].CreatedAt
+	if createdAt.IsZero() {
+		t.Fatal("managed torrent CreatedAt is zero")
+	}
 	st, ok := sess.Torrent(hash)
 	if !ok {
 		t.Fatal("torrent not registered")
@@ -253,15 +290,23 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 
 	// The multi-file data tree is unchanged.
 	root := filepath.Join(mnt, "multi")
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		t.Fatalf("multi root = (%v, %v), want directory", info, err)
+	rootInfo, err := os.Stat(root)
+	if err != nil || !rootInfo.IsDir() {
+		t.Fatalf("multi root = (%v, %v), want directory", rootInfo, err)
 	}
+	assertFuseTimes(t, rootInfo, createdAt)
+	subInfo, err := os.Stat(filepath.Join(root, "sub"))
+	if err != nil || !subInfo.IsDir() {
+		t.Fatalf("multi/sub = (%v, %v), want directory", subInfo, err)
+	}
+	assertFuseTimes(t, subInfo, createdAt)
 	for path, want := range files {
 		full := filepath.Join(root, filepath.FromSlash(path))
 		info, err := os.Stat(full)
 		if err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("%s = (%v, %v), want regular file", path, info, err)
 		}
+		assertFuseTimes(t, info, createdAt)
 		got, err := os.ReadFile(full)
 		if err != nil || string(got) != string(want) {
 			t.Fatalf("read %s = (%q, %v), want %q", path, got, err, want)

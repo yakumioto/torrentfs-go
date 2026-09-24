@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"syscall"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -15,10 +16,11 @@ import (
 // layout is served.
 type torrentDirNode struct {
 	fs.Inode
-	state  *fsState
-	hash   metainfo.Hash
-	files  []FileView // display paths of every file in the torrent
-	prefix string     // torrent-relative prefix this directory represents
+	state     *fsState
+	hash      metainfo.Hash
+	files     []FileView // display paths of every file in the torrent
+	prefix    string     // torrent-relative prefix this directory represents
+	createdAt time.Time
 }
 
 func (n *torrentDirNode) entries() []fsEntry {
@@ -28,6 +30,7 @@ func (n *torrentDirNode) entries() []fsEntry {
 func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o555
 	out.Nlink = 2
+	setCreatedAt(&out.Attr, n.createdAt)
 	return 0
 }
 
@@ -38,8 +41,15 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	}
 	if e.IsDir {
 		out.Mode = 0o555
+		setCreatedAt(&out.Attr, n.createdAt)
 		prefix := joinRel(n.prefix, e.Name)
-		child := &torrentDirNode{state: n.state, hash: n.hash, files: n.files, prefix: prefix}
+		child := &torrentDirNode{
+			state:     n.state,
+			hash:      n.hash,
+			files:     n.files,
+			prefix:    prefix,
+			createdAt: n.createdAt,
+		}
 		return n.NewInode(ctx, child, fs.StableAttr{
 			Mode: syscall.S_IFDIR,
 			Ino:  n.state.inoFor(dirKey(n.hash, prefix)),
@@ -47,7 +57,14 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	}
 	out.Mode = 0o444
 	out.Size = uint64(e.Size)
-	child := &torrentFileNode{state: n.state, hash: n.hash, path: e.Path, size: e.Size}
+	setCreatedAt(&out.Attr, n.createdAt)
+	child := &torrentFileNode{
+		state:     n.state,
+		hash:      n.hash,
+		path:      e.Path,
+		size:      e.Size,
+		createdAt: n.createdAt,
+	}
 	return n.NewInode(ctx, child, fs.StableAttr{
 		Mode: syscall.S_IFREG,
 		Ino:  n.state.inoFor(fileKey(n.hash, e.Path)),
