@@ -1516,10 +1516,14 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 	}
 	stream.state = prefetchFilling
 	for _, index := range desired {
-		if stream.bufferedBytes >= stream.effectiveHigh || len(c.active) >= c.currentLimit() {
+		if stream.bufferedBytes >= stream.effectiveHigh {
 			break
 		}
-		if c.cache.Has(c.key(index)) || c.foregroundPieces[index] > 0 {
+		if c.cache.Has(c.key(index)) {
+			if _, owned := stream.owners[index]; owned {
+				c.removeNormalOwnerLocked(index, stream.id)
+				delete(stream.owners, index)
+			}
 			continue
 		}
 		owners := c.normalOwners[index]
@@ -1536,6 +1540,12 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			c.restorePiecePriorityLocked(index)
 			c.dedupe++
 			continue
+		}
+		if c.foregroundPieces[index] > 0 {
+			continue
+		}
+		if len(c.active) >= c.currentLimit() {
+			break
 		}
 		if !c.budget.tryAcquire() {
 			c.budgetBlocks++

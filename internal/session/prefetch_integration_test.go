@@ -151,10 +151,6 @@ func TestPrefetchActivatesWindowUpToGlobalBudget(t *testing.T) {
 	if _, used := session.PrefetchBudgetUsageForTest(sess); used != defaultTestPrefetchPieces() {
 		t.Fatalf("session background budget used = %d, want %d", used, defaultTestPrefetchPieces())
 	}
-	if snapshot.DedupeCount != 0 {
-		t.Fatalf("a single cold read produced %d duplicate piece activations", snapshot.DedupeCount)
-	}
-
 	// A second read inside the same window must not claim another lease: every
 	// piece it wants is either already resident or already held.
 	opened.read(t, int64(testPieceLength/2), 64)

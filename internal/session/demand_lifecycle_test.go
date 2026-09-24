@@ -129,6 +129,59 @@ func TestDemandFallbackPinsOnlyCurrentPiece(t *testing.T) {
 	}
 }
 
+func TestFullActiveWindowSharesOwnersAcrossStreams(t *testing.T) {
+	store := cache.New(16 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(16<<20, 1<<20, store, coordinator)
+	if _, err := coordinator.startPlaybackStream("stream-a", "payload.bin", file, 0); err != nil {
+		t.Fatalf("start stream A: %v", err)
+	}
+	activeBefore := make(map[int]struct{}, len(coordinator.active))
+	for index := range coordinator.active {
+		activeBefore[index] = struct{}{}
+	}
+	if len(activeBefore) != defaultPrefetchPieces {
+		t.Fatalf("stream A active pieces = %d, want %d", len(activeBefore), defaultPrefetchPieces)
+	}
+	_, budgetBefore := coordinator.budget.snapshot()
+	if _, err := coordinator.startPlaybackStream("stream-b", "payload.bin", file, 0); err != nil {
+		t.Fatalf("start stream B: %v", err)
+	}
+	if len(coordinator.active) != len(activeBefore) {
+		t.Fatalf("stream B duplicated active leases: got %d, want %d", len(coordinator.active), len(activeBefore))
+	}
+	for index := range activeBefore {
+		owners := coordinator.activeNormalOwners[index]
+		if len(owners) != 2 {
+			t.Fatalf("Piece %d active owners = %d, want 2", index, len(owners))
+		}
+	}
+	if err := coordinator.stopPlaybackStream("stream-a"); err != nil {
+		t.Fatalf("stop stream A: %v", err)
+	}
+	if len(coordinator.active) != len(activeBefore) {
+		t.Fatalf("stream A stop cancelled shared active leases: got %d, want %d", len(coordinator.active), len(activeBefore))
+	}
+	for index := range activeBefore {
+		owners := coordinator.activeNormalOwners[index]
+		if len(owners) != 1 {
+			t.Fatalf("Piece %d owners after stream A stop = %d, want 1", index, len(owners))
+		}
+	}
+	if _, budgetAfterA := coordinator.budget.snapshot(); budgetAfterA != budgetBefore {
+		t.Fatalf("budget after stream A stop = %d, want %d", budgetAfterA, budgetBefore)
+	}
+	if err := coordinator.stopPlaybackStream("stream-b"); err != nil {
+		t.Fatalf("stop stream B: %v", err)
+	}
+	if len(coordinator.active) != 0 || len(coordinator.activeNormalOwners) != 0 {
+		t.Fatalf("last stream stop left active=%d ownerSets=%d", len(coordinator.active), len(coordinator.activeNormalOwners))
+	}
+	if _, budgetAfterB := coordinator.budget.snapshot(); budgetAfterB != 0 {
+		t.Fatalf("budget after last stream stop = %d, want 0", budgetAfterB)
+	}
+}
+
 func TestNormalLeaseBookkeepingCoversCompletionBudgetAndStop(t *testing.T) {
 	store := cache.New(16 << 20)
 	coordinator := newTestCoordinator(store)
