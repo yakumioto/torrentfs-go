@@ -367,38 +367,43 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 ## M-Team userscript
 
-仓库提供一个不依赖构建步骤的 Tampermonkey userscript：[`userscript/torrentfs.user.js`](userscript/torrentfs.user.js)。它只支持 M-Team 详情页，不支持列表页、其他 PT 站点、LAN/公网 TorrentFS 地址或 qBittorrent/Transmission 选项。
+仓库提供一个不依赖构建步骤的 Tampermonkey userscript：[`userscript/torrentfs.user.js`](userscript/torrentfs.user.js)。它只支持 M-Team 详情页，不支持列表页、其他 PT 站点或 qBittorrent/Transmission 选项；TorrentFS 服务地址由用户在脚本配置界面输入，可为任意 HTTP 或 HTTPS 地址。
 
 ### 安装与绑定
 
-1. 使用启用了 HTTP auth 的 TorrentFS 实例，并通过内置 Web UI 在 `http://localhost:<port>/` 或 `http://127.0.0.1:<port>/` 登录。userscript 不支持匿名配对。
-2. 在 Tampermonkey 中导入 `userscript/torrentfs.user.js`。脚本没有远程 `@require`，也没有 `@connect *`；网络权限只列出 loopback 和 M-Team 域名。
-3. 保持 Web UI 登录页面打开，在 Tampermonkey 菜单执行 **绑定当前 TorrentFS**。脚本从当前 tab 的 `sessionStorage['torrentfs.access-token']` 读取短期 Bearer token，使用 `GET /api/v1/torrents` 验证后才保存绑定。
-4. 需要更换服务或清除 token 时，在同一 Web UI 页面执行 **解除 TorrentFS 绑定**，再重新绑定。
+1. 确保 TorrentFS 已启用 HTTP auth，并记住其服务根地址。地址可以包含 reverse-proxy path prefix，例如 `https://nas.example.com/torrentfs/`；不要输入 `/api/v1/...` 具体 API endpoint。
+2. 在 Tampermonkey 中导入 `userscript/torrentfs.user.js`。脚本使用已批准的 `@connect *` 以支持任意用户配置地址，但运行时只请求当前配置的 TorrentFS base 和允许的 M-Team 下载 host；没有远程 `@require`。
+3. 在 M-Team 详情页打开 Tampermonkey 菜单，选择 **配置 / 重新绑定 TorrentFS**，输入服务地址、用户名和密码。配置表单运行在 `sandbox="allow-scripts"` 且不含 `allow-same-origin` 的 iframe 中，通过一次性 `MessageChannel` 和 nonce 将字段交给 userscript sandbox；密码不会进入 M-Team page bridge、普通页面组件、URL、console 或 GM storage。
+4. HTTP 地址仍然允许，但每次输入密码绑定前必须勾选明文风险告知。HTTP 会明文传输用户名、密码、Bearer token、torrent 元数据和上传内容，可能被观察、窃取或篡改；勾选即表示理解并自行承担风险。脚本不会声称 HTTP 已加密，也没有忽略 HTTPS 证书错误或自动降级开关。
+5. 登录成功后只保存 normalized base URL、username、opaque Bearer token、`pairedAt`、`expiresAt` 和由地址派生的 `insecureHttp` 标志。旧版 loopback `{baseUrl, token, pairedAt}` 会迁移为 v2 profile；不保存密码。
+6. 更换服务时先完成新地址登录，再替换本地 profile；旧 token 会 best-effort logout。选择 **解除 TorrentFS 绑定** 会 best-effort logout，并无条件清理本地 token/profile。
 
-绑定状态只保存到 userscript 私有存储中的 loopback `baseUrl`、opaque token 和时间戳；TorrentFS 密码、M-Team cookie、Authorization、passkey 和签名下载 URL不会写入持久化存储、页面 DOM 或日志。
+登录只调用现有 `POST <base>/api/v1/auth/login`，随后用保存的 token 访问现有 API。login、logout、upload 都拒绝 3xx 重定向，不会把 credentials/token 跟随到其他 scheme、host、port 或 path；用户必须显式输入新地址。`401` 会清除 token 但保留地址和用户名，点击提交或菜单即可重新输入密码绑定。
 
 ### 使用方式与错误语义
 
-在 M-Team 详情页加载完成后，脚本会从详情请求提取候选信息并在下载操作区添加 **发送到 TorrentFS** 按钮；页面结构不匹配时使用右侧固定按钮。点击时才取得短期 `.torrent` URL，然后通过 userscript 网络 API下载并上传到现有 `POST /api/v1/torrents` multipart 接口。上传文件名是受控的 `mteam-<id>.torrent`，实际任务名称仍由 metainfo 决定。
+在 M-Team 详情页加载完成后，脚本会从详情请求提取候选信息并在下载操作区添加 **发送到 TorrentFS** 按钮；页面结构不匹配时使用右侧固定按钮。未绑定或 token 失效时，点击按钮会打开同一配置界面；绑定成功后若仍处于同一详情 route，会继续当前 candidate。点击时才取得短期 `.torrent` URL，然后通过 userscript 网络 API下载并上传到现有 `POST /api/v1/torrents` multipart 接口。上传文件名是受控的 `mteam-<id>.torrent`，实际任务名称仍由 metainfo 决定。
 
 - `201` 显示中性文案“任务已可用”；现有 API 对首次和重复上传都返回 `201`，因此脚本不会声称一定新建。
-- `401` 清除本地绑定并要求回到 Web UI 重新绑定。
-- `400`、`409`、`413`、`415` 和 `500` 分别提示种子无效、任务正在删除、超过上传限制、上传格式不兼容和服务端失败。
-- 下载超时、空响应、HTML 登录页或上传超时不会自动重放；上传结果未知时可手动重试，后端按 info hash 去重。
+- `401` 清除 token、保留地址/用户名并要求重新绑定；不会自动保存或重放密码。
+- 上传 `400`、`409`、`413`、`415` 和 `500` 分别提示种子无效、任务正在删除、超过上传限制、上传格式不兼容和服务端失败。
+- login 的 `401/404/413/5xx` 分别表示凭据错误、地址/path 或 auth 配置错误、登录输入过大和服务端失败；DNS、连接、TLS 或 timeout 显示连接错误。
+- login/logout/upload 的 3xx 会提示已拒绝重定向；上传 timeout 显示“结果未知，可重试”，不自动重放，后端按 info hash 去重。
 
 ### Source-based 假设与人工验收
 
-当前脚本按固定参考源码 `M-Team-to-qBittorrent` `download_to_qb.js` v5.9 的 source-based 行为实现：详情路径假设为 `/api/torrent/detail`，成功响应包含 `message: "SUCCESS"` 以及 `id`、`name`、`originFileName`、`smallDescr`；点击时在页面上下文向 `/torrent/genDlToken` 发送 URL-encoded `id`，并使用页面 `localStorage.apiHost` 与 `localStorage.auth`。inline selector 假设为 `.mt-4.app-content__inner`、`button.ant-btn.ant-btn-link.ant-btn-sm.ant-dropdown-trigger` 的祖先 `td`，fallback 为 `.mt-4>div`，再退回固定按钮。
+当前脚本按固定参考源码 `M-Team-to-qBittorrent` `download_to_qb.js` v5.9 的 source-based 行为实现：详情路径假设为 `/api/torrent/detail`，成功响应包含 `message: "SUCCESS"` 以及 `id`、`name`、`originFileName`、`smallDescr`；点击时在页面上下文向 `/torrent/genDlToken` 发送 URL-encoded `id`，并使用页面 `localStorage.apiHost` 与 `localStorage.auth`。inline selector 假设为 `.mt-4.app-content__inner`、`button.ant-btn.ant-btn-link.ant-btn-sm.ant-dropdown-trigger` 的祖先 `td`，fallback 为 `.mt-4>div`，再退回固定按钮。SPA detail response 会绑定请求发起时的 route，旧 route response 会被丢弃。
 
 以上 M-Team 生产 endpoint、字段、XHR/fetch 实现、DOM selector、cookie/Referer 要求和最终下载重定向 host 尚未完成真实站点验证。负责人交付后应人工检查：
 
-- Chromium/Tampermonkey 能识别脚本 metadata，并能在 loopback Web UI 完成绑定和解除绑定；
+- Chromium/Tampermonkey 能识别 metadata，并在 M-Team 页面通过 sandbox 配置界面绑定 HTTPS、loopback HTTP、LAN/public HTTP 和带 path prefix 的地址；验证 HTTP 未勾选时不会发 login 请求；
+- 配置 iframe 不允许 M-Team 页面脚本读取密码；GM storage 中无 password，状态对 HTTP 显示 `HTTP（不安全）`；
 - 详情页只出现一个按钮，正常提交和重复提交最终只有一个 info hash 任务，文案保持“任务已可用”；
-- Web UI logout、token 过期或 daemon 重启后，提交收到 `401`、清理绑定并要求重新配对；
-- M-Team token 失败、下载超时/空 body/HTML、未知 redirect host 以及 TorrentFS `400/409/413/415/500` 均显示安全的错误文案；
+- logout、token 过期或 daemon 重启后，提交收到 `401`、清理 token、保留 profile 并要求重新输入密码；解除绑定即使网络失败也清理 profile；
+- login/logout/upload 的 3xx、错误 host/path、TLS/DNS/timeout，以及 TorrentFS `400/409/413/415/500` 均显示安全错误文案，不发生跨地址重试；
+- M-Team token 失败、下载超时/空 body/HTML、未允许的下载 host 或 redirect 均不会上传；
 - 浏览器开发者工具和服务日志不出现 TorrentFS 密码、Bearer token、M-Team Authorization、passkey 或完整签名 URL；
-- 最终下载 host 能被 metadata 中的有限 `@connect` 条目覆盖。若必须使用 `@connect *`、非 loopback endpoint、站点凭据透传或新增公共 API，应停止并重新审批，而不是扩大当前脚本权限。
+- 不因 `@connect *` 把 userscript 变成任意 page-context 代理，runtime 请求只能命中用户配置的 TorrentFS base 或 M-Team 下载 host。
 
 本次实现只交付 userscript 源码和本节文档；未执行自动化测试、lint、typecheck、构建检查或真实 M-Team/Tampermonkey 验证。
 

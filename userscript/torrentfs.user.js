@@ -1,14 +1,12 @@
 // ==UserScript==
 // @name         TorrentFS M-Team bridge
 // @namespace    https://github.com/yakumioto/torrentfs-go
-// @version      0.1.0
-// @description  Send a torrent from an M-Team detail page to a local TorrentFS instance.
+// @version      0.2.0
+// @description  Send a torrent from an M-Team detail page to a configured TorrentFS instance.
 // @match        https://m-team.cc/detail/*
 // @match        https://*.m-team.cc/detail/*
 // @match        https://m-team.io/detail/*
 // @match        https://*.m-team.io/detail/*
-// @match        http://localhost/*
-// @match        http://127.0.0.1/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -16,10 +14,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @grant        unsafeWindow
-// @connect      localhost
-// @connect      127.0.0.1
-// @connect      m-team.cc
-// @connect      m-team.io
+// @connect      *
 // @run-at       document-start
 // @license      MPL-2.0
 // ==/UserScript==
@@ -28,7 +23,6 @@
     'use strict';
 
     const STORAGE_KEY = 'torrentfs.connection';
-    const SESSION_TOKEN_KEY = 'torrentfs.access-token';
     const MAX_TORRENT_BYTES = 10 * 1024 * 1024;
     const REQUEST_TIMEOUT = 30 * 1000;
     const BRIDGE_SOURCE = 'torrentfs-mteam-bridge';
@@ -64,6 +58,58 @@
         return error && (error.kind === 'aborted' || error.name === 'AbortError');
     }
 
+    function normalizeBaseUrl(value) {
+        if (typeof value !== 'string' || !value.trim()) {
+            throw makeError('config', 'TorrentFS 地址无效。');
+        }
+        const raw = value.trim();
+        let url;
+        try {
+            url = new URL(raw);
+        } catch {
+            throw makeError('config', 'TorrentFS 地址无效。');
+        }
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            throw makeError('config', 'TorrentFS 地址必须使用 HTTP 或 HTTPS。');
+        }
+        if (url.username || url.password || /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(raw) || raw.includes('?') || raw.includes('#')) {
+            throw makeError('config', '地址不能包含用户名、密码、query 或 fragment。');
+        }
+        const path = url.pathname.replace(/\/+/g, '/').replace(/\/$/, '');
+        if (/\/(?:api\/v1)(?:\/|$)/i.test(path)) {
+            throw makeError('config', '请输入 TorrentFS 服务根地址，不要填写具体 API 地址。');
+        }
+        url.pathname = path || '/';
+        url.search = '';
+        url.hash = '';
+        return `${url.origin}${url.pathname === '/' ? '' : url.pathname}`;
+    }
+
+    function joinApiUrl(baseUrl, suffix) {
+        const url = new URL(normalizeBaseUrl(baseUrl));
+        const prefix = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+        url.pathname = `${prefix}/${String(suffix).replace(/^\/+/, '')}`;
+        url.search = '';
+        url.hash = '';
+        return url.href;
+    }
+
+    function isBaseTarget(targetUrl, baseUrl) {
+        let target;
+        let base;
+        try {
+            target = new URL(targetUrl);
+            base = new URL(normalizeBaseUrl(baseUrl));
+        } catch {
+            return false;
+        }
+        if (target.protocol !== base.protocol || target.host !== base.host) {
+            return false;
+        }
+        const prefix = base.pathname === '/' ? '' : base.pathname.replace(/\/+$/, '');
+        return !prefix || target.pathname === prefix || target.pathname.indexOf(`${prefix}/`) === 0;
+    }
+
     function getConnection() {
         let value;
         try {
@@ -78,25 +124,47 @@
                 return null;
             }
         }
-        if (!value || typeof value !== 'object' || typeof value.baseUrl !== 'string' || typeof value.token !== 'string') {
+        if (!value || typeof value !== 'object' || typeof value.baseUrl !== 'string') {
             return null;
         }
-        if (!value.baseUrl || !value.token) {
+        let baseUrl;
+        try {
+            baseUrl = normalizeBaseUrl(value.baseUrl);
+        } catch {
             return null;
         }
-        return {
-            baseUrl: value.baseUrl,
-            token: value.token,
-            pairedAt: Number.isFinite(value.pairedAt) ? value.pairedAt : 0
+        const connection = {
+            version: 2,
+            baseUrl,
+            username: typeof value.username === 'string' ? value.username : '',
+            token: typeof value.token === 'string' ? value.token : '',
+            pairedAt: Number.isFinite(value.pairedAt) ? value.pairedAt : 0,
+            expiresAt: Number.isFinite(value.expiresAt) ? value.expiresAt : 0,
+            insecureHttp: new URL(baseUrl).protocol === 'http:'
         };
+        if (value.version !== 2 || value.baseUrl !== connection.baseUrl || value.insecureHttp !== connection.insecureHttp) {
+            try {
+                GM_setValue(STORAGE_KEY, connection);
+            } catch {
+                return connection;
+            }
+        }
+        return connection;
     }
 
-    function saveConnection(baseUrl, token) {
-        GM_setValue(STORAGE_KEY, {
+    function saveConnection(connection) {
+        const baseUrl = normalizeBaseUrl(connection.baseUrl);
+        const value = {
+            version: 2,
             baseUrl,
-            token,
-            pairedAt: Date.now()
-        });
+            username: typeof connection.username === 'string' ? connection.username : '',
+            token: typeof connection.token === 'string' ? connection.token : '',
+            pairedAt: Number.isFinite(connection.pairedAt) ? connection.pairedAt : Date.now(),
+            expiresAt: Number.isFinite(connection.expiresAt) ? connection.expiresAt : 0,
+            insecureHttp: new URL(baseUrl).protocol === 'http:'
+        };
+        GM_setValue(STORAGE_KEY, value);
+        return value;
     }
 
     function clearConnection() {
@@ -110,38 +178,8 @@
     function clearConnectionIfTokenMatches(token) {
         const connection = getConnection();
         if (connection && connection.token === token) {
-            clearConnection();
+            saveConnection({ ...connection, token: '', expiresAt: 0 });
         }
-    }
-
-    function readWebUIToken() {
-        try {
-            const token = pageWindow.sessionStorage.getItem(SESSION_TOKEN_KEY);
-            return token || '';
-        } catch {
-            return '';
-        }
-    }
-
-    function currentLoopbackOrigin() {
-        const location = pageWindow.location;
-        if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
-            throw makeError('pairing', '只能从 localhost 或 127.0.0.1 的 TorrentFS Web UI 绑定。');
-        }
-        return location.origin;
-    }
-
-    function normalizeBaseUrl(value) {
-        let url;
-        try {
-            url = new URL(value);
-        } catch {
-            throw makeError('pairing', 'TorrentFS 地址无效。');
-        }
-        if (url.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(url.hostname)) {
-            throw makeError('pairing', '只支持绑定本机 TorrentFS 服务。');
-        }
-        return url.origin;
     }
 
     // storage
@@ -150,17 +188,9 @@
         saveConnection,
         clearConnection,
         clearConnectionIfTokenMatches,
-        readWebUIToken,
-        currentLoopbackOrigin,
         normalizeBaseUrl,
-        isLoopbackPage() {
-            try {
-                currentLoopbackOrigin();
-                return true;
-            } catch {
-                return false;
-            }
-        }
+        joinApiUrl,
+        isBaseTarget
     };
 
     function getGMRequest() {
@@ -176,9 +206,11 @@
     function gmRequest(options) {
         return new Promise((resolve, reject) => {
             let request;
+            let timer;
             let settled = false;
             const signal = options.signal;
             const cleanup = () => {
+                clearTimeout(timer);
                 if (signal) {
                     signal.removeEventListener('abort', abort);
                 }
@@ -195,7 +227,7 @@
                 try {
                     request?.abort();
                 } catch {
-                    return;
+                    // The request may already have completed; still settle the caller.
                 }
                 finish(reject, makeError('aborted', '请求已取消。'));
             };
@@ -217,14 +249,51 @@
                     timeout: options.timeout,
                     responseType: options.responseType,
                     anonymous: options.anonymous,
+                    redirect: options.redirect,
                     onload: (response) => finish(resolve, response),
                     onerror: () => finish(reject, makeError('transport', '网络请求失败。')),
                     ontimeout: () => finish(reject, makeError('timeout', '请求超时。')),
                     onabort: () => finish(reject, makeError('aborted', '请求已取消。'))
                 });
+                if (settled) {
+                    request?.abort();
+                } else if (options.timeout) {
+                    timer = pageWindow.setTimeout(abort, options.timeout);
+                }
             } catch (error) {
                 finish(reject, error instanceof Error ? error : makeError('transport', '网络请求失败。'));
             }
+        });
+    }
+
+    function requestWithDeadline(options, externalSignal) {
+        const controller = new AbortController();
+        let deadlineExceeded = false;
+        const abortExternal = () => controller.abort();
+        if (externalSignal) {
+            if (externalSignal.aborted) {
+                controller.abort();
+            } else {
+                externalSignal.addEventListener('abort', abortExternal, { once: true });
+            }
+        }
+        const request = gmRequest({
+            ...options,
+            signal: controller.signal,
+            timeout: REQUEST_TIMEOUT
+        });
+        const timer = pageWindow.setTimeout(() => {
+            deadlineExceeded = true;
+            controller.abort();
+        }, REQUEST_TIMEOUT);
+        return request.catch((error) => {
+            if (deadlineExceeded && error.kind === 'aborted') {
+                throw makeError('timeout', '请求超时。');
+            }
+            throw error;
+        }).finally(() => {
+            pageWindow.clearTimeout(timer);
+            externalSignal?.removeEventListener('abort', abortExternal);
         });
     }
 
@@ -255,6 +324,8 @@
         switch (status) {
             case 400:
                 return '站点返回的种子文件无效。';
+            case 404:
+                return 'TorrentFS 地址或 API 路径错误。';
             case 409:
                 return '任务正在删除，请稍后重试。';
             case 413:
@@ -273,36 +344,163 @@
         return `mteam-${safeId}.torrent`;
     }
 
+    function assertResponseTarget(response, baseUrl) {
+        if (response.status >= 300 && response.status < 400) {
+            throw makeError('redirect', '服务返回重定向，出于凭据安全已拒绝。', response.status);
+        }
+        if (response.finalUrl && !storage.isBaseTarget(response.finalUrl, baseUrl)) {
+            throw makeError('redirect', '请求被重定向到配置地址之外，出于凭据安全已拒绝。');
+        }
+    }
+
     // torrentfsClient
     const torrentfsClient = {
-        async verifyPairing(baseUrl, token, signal) {
-            const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+        async login(credentials, signal) {
+            const baseUrl = storage.normalizeBaseUrl(credentials.baseUrl);
+            const username = typeof credentials.username === 'string' ? credentials.username.trim() : '';
+            const password = typeof credentials.password === 'string' ? credentials.password : '';
+            if (!username) {
+                throw makeError('config', '请输入 TorrentFS 用户名。');
+            }
+            if (!password) {
+                throw makeError('config', '请输入 TorrentFS 密码。');
+            }
             let response;
             try {
-                response = await gmRequest({
-                    method: 'GET',
-                    url: `${normalizedBaseUrl}/api/v1/torrents`,
+                response = await requestWithDeadline({
+                    method: 'POST',
+                    url: storage.joinApiUrl(baseUrl, '/api/v1/auth/login'),
                     headers: {
                         Accept: 'application/json',
-                        Authorization: `Bearer ${token}`
+                        'Cache-Control': 'no-store',
+                        'Content-Type': 'application/json'
                     },
-                    timeout: REQUEST_TIMEOUT,
-                    signal,
-                    anonymous: true
-                });
+                    data: JSON.stringify({ username, password }),
+                    anonymous: true,
+                    redirect: 'error'
+                }, signal);
             } catch (error) {
                 if (isAbortError(error)) {
                     throw error;
                 }
-                throw makeError('pairing', '无法连接 TorrentFS Web UI。');
+                if (error.kind === 'timeout') {
+                    throw makeError('connection', '无法连接 TorrentFS，请检查地址和网络。');
+                }
+                throw makeError('connection', '无法连接 TorrentFS，请检查地址和网络。');
             }
+            assertResponseTarget(response, baseUrl);
+            if (response.status === 401) {
+                throw makeError('login', '用户名或密码错误。', 401);
+            }
+            if (response.status === 404) {
+                throw makeError('login', 'TorrentFS 地址或路径错误，或目标未启用 auth。', 404);
+            }
+            if (response.status === 413) {
+                throw makeError('login', '登录输入超过服务限制。', 413);
+            }
+            if (response.status >= 500) {
+                throw makeError('login', 'TorrentFS 登录失败，请查看服务日志。', response.status);
+            }
+            if (response.status !== 200) {
+                throw makeError('login', '登录请求与 TorrentFS API 不兼容。', response.status);
+            }
+            const body = responseJson(response);
+            const expiresIn = Number(body && body.expires_in);
+            if (!body || typeof body.token !== 'string' || !body.token || typeof body.token_type !== 'string' || body.token_type.toLowerCase() !== 'bearer' || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+                throw makeError('protocol', 'TorrentFS 登录响应无效。');
+            }
+            return {
+                baseUrl,
+                username,
+                token: body.token,
+                pairedAt: Date.now(),
+                expiresAt: Date.now() + expiresIn * 1000
+            };
+        },
+
+        async verifyToken(connection, signal) {
+            let response;
+            try {
+                response = await requestWithDeadline({
+                    method: 'GET',
+                    url: storage.joinApiUrl(connection.baseUrl, '/api/v1/torrents'),
+                    headers: {
+                        Accept: 'application/json',
+                        Authorization: `Bearer ${connection.token}`
+                    },
+                    anonymous: true,
+                    redirect: 'error'
+                }, signal);
+            } catch (error) {
+                if (isAbortError(error)) {
+                    throw error;
+                }
+                if (error.kind === 'timeout') {
+                    throw makeError('connection', '无法连接 TorrentFS，请检查地址和网络。');
+                }
+                throw makeError('connection', '无法连接 TorrentFS，请检查地址和网络。');
+            }
+            assertResponseTarget(response, connection.baseUrl);
             if (response.status === 401) {
                 throw makeError('unauthorized', 'TorrentFS 会话已失效。', 401);
             }
-            if (response.status < 200 || response.status >= 300) {
-                throw makeError('pairing', `TorrentFS 配对检查失败（HTTP ${response.status}）。`, response.status);
+            if (response.status === 404) {
+                throw makeError('login', 'TorrentFS 地址或路径错误，或目标未启用 auth。', 404);
             }
-            return normalizedBaseUrl;
+            if (response.status >= 500) {
+                throw makeError('connection', 'TorrentFS 服务端失败，请稍后重试。', response.status);
+            }
+            if (response.status < 200 || response.status >= 300) {
+                throw makeError('connection', `TorrentFS 连接检查失败（HTTP ${response.status}）。`, response.status);
+            }
+        },
+
+        async logout(connection, signal) {
+            if (!connection || !connection.token) {
+                return;
+            }
+            let response;
+            try {
+                response = await requestWithDeadline({
+                    method: 'POST',
+                    url: storage.joinApiUrl(connection.baseUrl, '/api/v1/auth/logout'),
+                    headers: {
+                        Accept: 'application/json',
+                        Authorization: `Bearer ${connection.token}`
+                    },
+                    anonymous: true,
+                    redirect: 'error'
+                }, signal);
+            } catch (error) {
+                if (isAbortError(error)) {
+                    throw error;
+                }
+                throw makeError('connection', '无法连接 TorrentFS 完成解绑。');
+            }
+            assertResponseTarget(response, connection.baseUrl);
+            if (response.status !== 204 && response.status !== 401) {
+                throw makeError('connection', `TorrentFS 解绑失败（HTTP ${response.status}）。`, response.status);
+            }
+        },
+
+        async bind(credentials, signal) {
+            const baseUrl = storage.normalizeBaseUrl(credentials.baseUrl);
+            if (new URL(baseUrl).protocol === 'http:' && credentials.httpConsent !== true) {
+                throw makeError('insecure-consent', '请先确认 HTTP 明文传输风险。');
+            }
+            const previous = storage.getConnection();
+            const loggedIn = await this.login({ ...credentials, baseUrl }, signal);
+            try {
+                await this.verifyToken(loggedIn, signal);
+            } catch (error) {
+                await this.logout(loggedIn).catch(() => {});
+                throw error;
+            }
+            const saved = storage.saveConnection(loggedIn);
+            if (previous && previous.token && (previous.baseUrl !== saved.baseUrl || previous.token !== saved.token)) {
+                this.logout(previous).catch(() => {});
+            }
+            return saved;
         },
 
         async downloadTorrent(url, signal) {
@@ -317,14 +515,13 @@
             }
             let response;
             try {
-                response = await gmRequest({
+                response = await requestWithDeadline({
                     method: 'GET',
                     url: parsed.href,
-                    timeout: REQUEST_TIMEOUT,
                     responseType: 'arraybuffer',
-                    signal,
-                    anonymous: false
-                });
+                    anonymous: false,
+                    redirect: 'error'
+                }, signal);
             } catch (error) {
                 if (isAbortError(error)) {
                     throw error;
@@ -333,6 +530,20 @@
                     throw makeError('mteam-download', 'M-Team 下载超时，请重试。');
                 }
                 throw makeError('mteam-download', 'M-Team 种子下载失败，请刷新详情页或重新登录。');
+            }
+            if (response.status >= 300 && response.status < 400) {
+                throw makeError('mteam-download', 'M-Team 下载发生重定向，未自动跟随。');
+            }
+            if (response.finalUrl) {
+                let finalUrl;
+                try {
+                    finalUrl = new URL(response.finalUrl);
+                } catch {
+                    throw makeError('mteam-download', 'M-Team 下载地址无效。');
+                }
+                if (!MTEAM.isHost(finalUrl.hostname.toLowerCase())) {
+                    throw makeError('mteam-download', 'M-Team 下载重定向到不允许的地址。');
+                }
             }
             if (response.status < 200 || response.status >= 300) {
                 throw makeError('mteam-download', 'M-Team 种子下载失败，请刷新详情页或重新登录。', response.status);
@@ -351,47 +562,41 @@
         },
 
         async upload(connection, bytes, filename, signal) {
+            if (!connection || !connection.token) {
+                throw makeError('unauthorized', '尚未绑定 TorrentFS。');
+            }
+            const baseUrl = storage.normalizeBaseUrl(connection.baseUrl);
             const token = connection.token;
             const form = new FormData();
             form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), filename);
             let response;
             try {
-                response = await gmRequest({
+                response = await requestWithDeadline({
                     method: 'POST',
-                    url: `${normalizeBaseUrl(connection.baseUrl)}/api/v1/torrents`,
+                    url: storage.joinApiUrl(baseUrl, '/api/v1/torrents'),
                     headers: {
                         Accept: 'application/json',
                         Authorization: `Bearer ${token}`
                     },
                     data: form,
-                    timeout: REQUEST_TIMEOUT,
-                    signal,
-                    anonymous: true
-                });
+                    anonymous: true,
+                    redirect: 'error'
+                }, signal);
             } catch (error) {
                 if (isAbortError(error)) {
                     throw error;
                 }
-                throw makeError('upload-unknown', '上传结果未知，可重试。');
+                throw makeError('upload-unknown', error.kind === 'timeout' ? '上传结果未知，可重试。' : '上传结果未知，可重试。');
             }
+            assertResponseTarget(response, baseUrl);
             if (response.status === 401) {
                 storage.clearConnectionIfTokenMatches(token);
-                throw makeError('unauthorized', 'TorrentFS 会话已失效，请回到 Web UI 重新绑定。', 401);
+                throw makeError('unauthorized', 'TorrentFS 会话已失效，请重新绑定。', 401);
             }
             if (response.status !== 201) {
                 throw makeError('upload', statusMessage(response.status), response.status);
             }
             return responseJson(response);
-        },
-
-        async pairCurrentPage() {
-            const baseUrl = storage.currentLoopbackOrigin();
-            const token = storage.readWebUIToken();
-            if (!token) {
-                throw makeError('pairing', '请先在 TorrentFS Web UI 登录，并启用 HTTP auth。');
-            }
-            await this.verifyPairing(baseUrl, token);
-            storage.saveConnection(baseUrl, token);
         }
     };
 
@@ -620,6 +825,8 @@
                 .torrentfs-mteam-button:hover { background: #4096ff; }
                 .torrentfs-mteam-button:disabled { cursor: wait; opacity: .65; }
                 .torrentfs-mteam-button[data-fixed="true"] { bottom: 24px; position: fixed; right: 24px; z-index: 2147483646; }
+                #torrentfs-mteam-config-overlay { align-items: center; background: rgba(0,0,0,.45); display: flex; inset: 0; justify-content: center; padding: 16px; position: fixed; z-index: 2147483647; }
+                #torrentfs-mteam-config-overlay iframe { background: Canvas; border: 0; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.35); height: min(560px, calc(100vh - 32px)); max-width: 520px; width: min(520px, 100%); }
                 #torrentfs-mteam-status { background: #fff; border: 1px solid #d9d9d9; border-radius: 6px; bottom: 72px; box-shadow: 0 4px 12px rgba(0,0,0,.15); color: #262626; display: none; font: 14px/1.4 sans-serif; max-width: 360px; padding: 10px 12px; position: fixed; right: 24px; z-index: 2147483646; }
                 #torrentfs-mteam-status[data-state="error"] { border-color: #ff4d4f; color: #cf1322; }
                 #torrentfs-mteam-status[data-state="success"] { border-color: #52c41a; color: #389e0d; }
@@ -653,6 +860,226 @@
             }
         }
 
+        function randomNonce() {
+            const bytes = new Uint8Array(16);
+            if (pageWindow.crypto?.getRandomValues) {
+                pageWindow.crypto.getRandomValues(bytes);
+            } else {
+                for (let index = 0; index < bytes.length; index += 1) {
+                    bytes[index] = Math.floor(Math.random() * 256);
+                }
+            }
+            return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+        }
+
+        function credentialFrameHtml(nonce) {
+            return `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; font: 14px/1.4 sans-serif; }
+body { margin: 0; padding: 20px; background: Canvas; color: CanvasText; }
+form { display: grid; gap: 10px; }
+label { display: grid; gap: 4px; }
+input[type="url"], input[type="text"], input[type="password"] { box-sizing: border-box; border: 1px solid #888; border-radius: 4px; font: inherit; padding: 7px; width: 100%; }
+fieldset { border: 1px solid #b33; border-radius: 4px; color: #b33; display: grid; gap: 6px; padding: 8px; }
+fieldset[hidden] { display: none; }
+.actions { display: flex; gap: 8px; justify-content: flex-end; }
+button { border: 1px solid #1677ff; border-radius: 4px; background: #1677ff; color: #fff; cursor: pointer; font: inherit; padding: 7px 12px; }
+button.secondary { background: transparent; color: inherit; }
+button:disabled { cursor: wait; opacity: .65; }
+#status { min-height: 1.4em; }
+</style></head><body>
+<form id="form" hidden>
+<h2>配置 / 重新绑定 TorrentFS</h2>
+<label>服务地址<input id="base" type="url" autocomplete="url" required placeholder="https://torrentfs.example.com/base"></label>
+<label>用户名<input id="username" type="text" autocomplete="username" required></label>
+<label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+<fieldset id="risk" hidden><strong>HTTP 明文传输风险</strong><span>当前地址使用 HTTP。用户名、密码、Bearer token、torrent 元数据及上传内容可能被观察、窃取或篡改。继续表示你理解并自行承担该风险。</span><label><span><input id="consent" type="checkbox"> 我理解并承担此 HTTP 风险</span></label></fieldset>
+<div id="status" role="status"></div>
+<div class="actions"><button id="cancel" class="secondary" type="button">取消</button><button id="submit" type="submit">登录并绑定</button></div>
+</form>
+<script>
+(function () {
+    const nonce = ${JSON.stringify(nonce)};
+    let port;
+    const form = document.getElementById('form');
+    const base = document.getElementById('base');
+    const username = document.getElementById('username');
+    const password = document.getElementById('password');
+    const risk = document.getElementById('risk');
+    const consent = document.getElementById('consent');
+    const status = document.getElementById('status');
+    const submit = document.getElementById('submit');
+    const cancel = document.getElementById('cancel');
+    const setStatus = (message) => { status.textContent = message; };
+    const updateRisk = () => {
+        let isHttp = false;
+        try { isHttp = new URL(base.value.trim()).protocol === 'http:'; } catch { isHttp = false; }
+        risk.hidden = !isHttp;
+        consent.required = isHttp;
+        if (!isHttp) consent.checked = false;
+    };
+    base.addEventListener('input', updateRisk);
+    window.addEventListener('message', (event) => {
+        if (event.source !== window.parent || !event.data || event.data.type !== 'torrentfs-config-init' || event.data.nonce !== nonce || !event.ports[0]) return;
+        port = event.ports[0];
+        port.onmessage = (messageEvent) => {
+            const data = messageEvent.data;
+            if (!data || data.nonce !== nonce || data.type !== 'result') return;
+            setStatus(data.message || (data.ok ? '绑定成功。' : '绑定失败。'));
+            submit.disabled = false;
+            cancel.disabled = false;
+        };
+        port.start();
+        if (event.data.profile) {
+            base.value = event.data.profile.baseUrl || '';
+            username.value = event.data.profile.username || '';
+        }
+        form.hidden = false;
+        updateRisk();
+        base.focus();
+    });
+    form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        updateRisk();
+        let parsed;
+        try { parsed = new URL(base.value.trim()); } catch { parsed = null; }
+        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+            setStatus('请输入有效的 HTTP 或 HTTPS 地址。');
+            return;
+        }
+        if (parsed.protocol === 'http:' && !consent.checked) {
+            setStatus('请先确认 HTTP 明文传输风险。');
+            return;
+        }
+        if (!username.value.trim() || !password.value) {
+            setStatus('请输入用户名和密码。');
+            return;
+        }
+        if (!port) {
+            setStatus('配置界面尚未准备好，请重试。');
+            return;
+        }
+        port.postMessage({ nonce, type: 'submit', baseUrl: base.value, username: username.value, password: password.value, httpConsent: consent.checked });
+        password.value = '';
+        submit.disabled = true;
+        cancel.disabled = true;
+        setStatus('正在登录 TorrentFS…');
+    });
+    cancel.addEventListener('click', () => {
+        password.value = '';
+        port?.postMessage({ nonce, type: 'cancel' });
+    });
+})();
+</script></body></html>`;
+        }
+
+        function openCredentialForm(initialConnection, onSubmit, onCancel, onClose) {
+            ensureStyles();
+            if (typeof MessageChannel !== 'function') {
+                setStatus('error', '当前浏览器不支持安全配置界面。');
+                return { close() {} };
+            }
+            const nonce = randomNonce();
+            const channel = new MessageChannel();
+            const overlay = document.createElement('div');
+            overlay.id = 'torrentfs-mteam-config-overlay';
+            const frame = document.createElement('iframe');
+            frame.title = 'TorrentFS configuration';
+            frame.setAttribute('sandbox', 'allow-scripts');
+            frame.srcdoc = credentialFrameHtml(nonce);
+            overlay.appendChild(frame);
+            let closed = false;
+            let initialized = false;
+            let readyTimer;
+            let submitting = false;
+            const close = () => {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                pageWindow.clearTimeout(readyTimer);
+                channel.port1.onmessage = null;
+                channel.port1.close();
+                frame.remove();
+                overlay.remove();
+                onClose?.();
+            };
+            const sendResult = (result) => {
+                if (closed) {
+                    return;
+                }
+                channel.port1.postMessage({
+                    nonce,
+                    type: 'result',
+                    ok: result.ok === true,
+                    message: result.message || (result.ok ? '绑定成功。' : '绑定失败。')
+                });
+                pageWindow.setTimeout(close, result.ok ? 500 : 1200);
+            };
+            channel.port1.onmessage = (event) => {
+                const data = event.data;
+                if (closed || !data || data.nonce !== nonce) {
+                    return;
+                }
+                if (data.type === 'cancel') {
+                        onCancel?.();
+                    close();
+                    return;
+                }
+                if (data.type !== 'submit' || submitting) {
+                    return;
+                }
+                submitting = true;
+                let credentials;
+                try {
+                    credentials = {
+                        baseUrl: typeof data.baseUrl === 'string' ? data.baseUrl : '',
+                        username: typeof data.username === 'string' ? data.username : '',
+                        password: typeof data.password === 'string' ? data.password : '',
+                        httpConsent: data.httpConsent === true
+                    };
+                    data.password = '';
+                    Promise.resolve(onSubmit(credentials)).then((result) => {
+                        credentials.password = '';
+                                sendResult(result || { ok: false, message: '绑定失败，请重试。' });
+                    }).catch(() => {
+                        credentials.password = '';
+                                sendResult({ ok: false, message: '绑定失败，请重试。' });
+                    });
+                } catch {
+                        sendResult({ ok: false, message: '绑定失败，请重试。' });
+                }
+            };
+            channel.port1.start();
+            frame.addEventListener('load', () => {
+                if (closed || initialized) {
+                    return;
+                }
+                initialized = true;
+                try {
+                    frame.contentWindow.postMessage({
+                        type: 'torrentfs-config-init',
+                        nonce,
+                        profile: {
+                            baseUrl: initialConnection?.baseUrl || '',
+                            username: initialConnection?.username || ''
+                        }
+                    }, '*', [channel.port2]);
+                } catch {
+                    setStatus('error', '配置界面无法启动，请重试。');
+                    close();
+                }
+            }, { once: true });
+            readyTimer = pageWindow.setTimeout(() => {
+                if (!initialized && !closed) {
+                    setStatus('error', '配置界面无法启动，请检查浏览器对 sandbox iframe 的支持。');
+                    close();
+                }
+            }, 5000);
+            (document.body || document.documentElement).appendChild(overlay);
+            return { close };
+        }
+
         function createAction(onClick, fixed) {
             ensureStyles();
             const element = document.createElement('button');
@@ -678,18 +1105,28 @@
             };
         }
 
-        return { ensureStyles, setStatus, clearStatus, createAction };
+        return { ensureStyles, setStatus, clearStatus, createAction, openCredentialForm };
     })();
+
+    function connectionStatus(connection) {
+        if (!connection) {
+            return 'TorrentFS 未绑定，请先配置连接。';
+        }
+        if (!connection.token) {
+            return connection.insecureHttp ? 'TorrentFS 未绑定（HTTP 不安全），请重新绑定。' : 'TorrentFS 未绑定，请重新绑定。';
+        }
+        return connection.insecureHttp ? 'TorrentFS 已绑定（HTTP 不安全）。' : 'TorrentFS 已绑定（HTTPS）。';
+    }
 
     function userMessage(error) {
         if (!error) {
             return '提交失败，请重试。';
         }
-        if (error.kind === 'pairing') {
+        if (['config', 'insecure-consent', 'login', 'connection', 'redirect', 'protocol'].includes(error.kind)) {
             return error.message;
         }
         if (error.kind === 'unauthorized') {
-            return 'TorrentFS 会话已失效，请回到 Web UI 重新绑定。';
+            return 'TorrentFS 会话已失效，请重新绑定。';
         }
         if (error.kind === 'mteam-token') {
             return 'M-Team 下载地址获取失败，请刷新详情页或重新登录。';
@@ -718,6 +1155,8 @@
             let routeKey = '';
             let action;
             let activeController;
+            let credentialSession;
+            let bindingController;
             let lastHref = pageWindow.location.href;
             let mountTimer;
 
@@ -757,8 +1196,68 @@
                 return null;
             };
 
+            const closeCredentialSession = () => {
+                bindingController?.abort();
+                bindingController = undefined;
+                credentialSession?.close();
+                credentialSession = undefined;
+            };
+
+            const openConfig = (resumeCandidate) => {
+                closeCredentialSession();
+                const expectedRouteHref = pageWindow.location.href;
+                const resume = resumeCandidate ? { id: resumeCandidate.id } : undefined;
+                credentialSession = ui.openCredentialForm(storage.getConnection(), async (credentials) => {
+                    bindingController = new AbortController();
+                    try {
+                        const connection = await torrentfsClient.bind(credentials, bindingController.signal);
+                        ui.setStatus('success', connectionStatus(connection));
+                        if (resume && pageWindow.location.href === expectedRouteHref && candidateRouteHref === expectedRouteHref && candidate?.id === resume.id) {
+                            pageWindow.setTimeout(() => {
+                                if (pageWindow.location.href === expectedRouteHref && candidateRouteHref === expectedRouteHref && candidate?.id === resume.id && action) {
+                                    submit(candidate, action);
+                                }
+                            }, 650);
+                        }
+                        return { ok: true, message: 'TorrentFS 绑定成功。' };
+                    } catch (error) {
+                        if (isAbortError(error)) {
+                            return { ok: false, message: '绑定已取消。' };
+                        }
+                        return { ok: false, message: userMessage(error) };
+                    } finally {
+                        bindingController = undefined;
+                    }
+                }, () => {
+                    bindingController?.abort();
+                }, () => {
+                    credentialSession = undefined;
+                });
+                return credentialSession;
+            };
+
+            const unpair = async () => {
+                const connection = storage.getConnection();
+                try {
+                    await torrentfsClient.logout(connection);
+                } catch {
+                    // Local cleanup still wins when the daemon cannot revoke the token.
+                } finally {
+                    storage.clearConnection();
+                    ui.setStatus('unbound', 'TorrentFS 绑定已解除。');
+                }
+            };
+
+            registerPairingCommands(openConfig, unpair);
+
             const submit = async (selectedCandidate, selectedAction) => {
                 if (activeController) {
+                    return;
+                }
+                const connection = storage.getConnection();
+                if (!connection || !connection.token) {
+                    ui.setStatus('unbound', connectionStatus(connection));
+                    openConfig(selectedCandidate);
                     return;
                 }
                 const controller = new AbortController();
@@ -766,10 +1265,6 @@
                 selectedAction.setBusy(true);
                 ui.setStatus('busy', '正在获取 M-Team 种子并提交到 TorrentFS…');
                 try {
-                    const connection = storage.getConnection();
-                    if (!connection) {
-                        throw makeError('pairing', '尚未绑定 TorrentFS，请在 Web UI 菜单中绑定当前服务。');
-                    }
                     const downloadUrl = await pageBridge.requestDownloadUrl(selectedCandidate.id, controller.signal);
                     const bytes = await torrentfsClient.downloadTorrent(downloadUrl, controller.signal);
                     const response = await torrentfsClient.upload(connection, bytes, safeTorrentFilename(selectedCandidate.id), controller.signal);
@@ -780,6 +1275,9 @@
                 } catch (error) {
                     if (!isAbortError(error) && !controller.signal.aborted) {
                         ui.setStatus('error', userMessage(error));
+                        if (error.kind === 'unauthorized') {
+                            openConfig(selectedCandidate);
+                        }
                     }
                 } finally {
                     if (activeController === controller) {
@@ -801,11 +1299,8 @@
                 }
                 action = ui.createAction(() => submit(candidate, action), mount.fixed);
                 mount.element.appendChild(action.element);
-                if (storage.getConnection()) {
-                    ui.setStatus('ready', 'TorrentFS 已绑定，可提交当前详情。');
-                } else {
-                    ui.setStatus('unbound', 'TorrentFS 未绑定，请先在本机 Web UI 菜单中绑定。');
-                }
+                const connection = storage.getConnection();
+                ui.setStatus(connection?.token ? 'ready' : 'unbound', connectionStatus(connection));
             };
 
             const handleDetail = (value) => {
@@ -845,6 +1340,7 @@
                 if (candidateRouteHref === currentRouteHref) {
                     return;
                 }
+                closeCredentialSession();
                 disposeAction();
                 candidate = undefined;
                 candidateRouteHref = '';
@@ -876,37 +1372,21 @@
                 pageWindow.removeEventListener('hashchange', routeChanged);
                 pageWindow.clearTimeout(mountTimer);
                 observer.disconnect();
+                closeCredentialSession();
                 disposeAction();
             };
         }
     };
 
-    function registerPairingCommands() {
+    function registerPairingCommands(openConfig, unpair) {
         if (typeof GM_registerMenuCommand !== 'function') {
             return;
         }
-        GM_registerMenuCommand('绑定当前 TorrentFS', async () => {
-            try {
-                await torrentfsClient.pairCurrentPage();
-                pageWindow.alert('TorrentFS 绑定成功。');
-            } catch (error) {
-                if (error.kind === 'unauthorized') {
-                    storage.clearConnection();
-                }
-                pageWindow.alert(userMessage(error));
-            }
-        });
-        GM_registerMenuCommand('解除 TorrentFS 绑定', () => {
-            storage.clearConnection();
-            pageWindow.alert('TorrentFS 绑定已解除。');
-        });
+        GM_registerMenuCommand('配置 / 重新绑定 TorrentFS', () => openConfig());
+        GM_registerMenuCommand('解除 TorrentFS 绑定', () => { void unpair(); });
     }
 
     function bootstrap() {
-        if (storage.isLoopbackPage()) {
-            registerPairingCommands();
-            return;
-        }
         if (mteamProvider.matches()) {
             mteamProvider.start();
         }
