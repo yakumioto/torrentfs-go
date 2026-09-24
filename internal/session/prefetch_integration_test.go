@@ -18,7 +18,10 @@ import (
 // prefetchFile wraps one opened session handle so a test can drive reads at
 // torrent-global piece offsets through the real FUSE-facing reader.
 type prefetchFile struct {
-	ra interface {
+	sess     *session.Session
+	streamID string
+	sequence uint64
+	ra       interface {
 		ReadAt([]byte, int64) (int, error)
 	}
 	closer interface{ Close() error }
@@ -30,15 +33,24 @@ func openPrefetchFile(t *testing.T, sess *session.Session, hash metainfo.Hash, p
 	if !ok {
 		t.Fatalf("torrent %s is not registered", hash)
 	}
+	stream, err := sess.StartPlaybackStream(context.Background(), hash.HexString(), session.PlaybackStreamStart{
+		Path:          path,
+		PositionBytes: 0,
+	})
+	if err != nil {
+		t.Fatalf("StartPlaybackStream(%s): %v", path, err)
+	}
 	ra, err := sess.OpenFile(hash, path)
 	if err != nil {
+		_ = sess.StopPlaybackStream(context.Background(), stream.ID)
 		t.Fatalf("OpenFile(%s): %v", path, err)
 	}
 	closer, ok := ra.(interface{ Close() error })
 	if !ok {
+		_ = sess.StopPlaybackStream(context.Background(), stream.ID)
 		t.Fatal("OpenFile did not return a closable handle")
 	}
-	return &prefetchFile{ra: ra, closer: closer}, st
+	return &prefetchFile{sess: sess, streamID: stream.ID, ra: ra, closer: closer}, st
 }
 
 func (f *prefetchFile) read(t *testing.T, torrentOffset int64, n int) []byte {
@@ -50,9 +62,26 @@ func (f *prefetchFile) read(t *testing.T, torrentOffset int64, n int) []byte {
 	return buf
 }
 
+func (f *prefetchFile) seek(t *testing.T, position int64) session.PlaybackStreamSnapshot {
+	t.Helper()
+	f.sequence++
+	snapshot, err := f.sess.UpdatePlaybackStream(context.Background(), f.streamID, session.PlaybackStreamUpdate{
+		Sequence:      f.sequence,
+		Event:         session.PlaybackEventSeek,
+		PositionBytes: position,
+	})
+	if err != nil {
+		t.Fatalf("seek to %d: %v", position, err)
+	}
+	return snapshot
+}
+
 func (f *prefetchFile) close() {
 	if f.closer != nil {
 		_ = f.closer.Close()
+	}
+	if f.sess != nil && f.streamID != "" {
+		_ = f.sess.StopPlaybackStream(context.Background(), f.streamID)
 	}
 }
 
@@ -198,29 +227,22 @@ func TestPrefetchBackwardSeekAdvancesGenerationAndCancelsOldWork(t *testing.T) {
 	opened, st := openPrefetchFile(t, sess, hash, "payload.bin")
 	defer opened.close()
 
-	// Start deep in the file so the next read is a backward jump.
-	opened.read(t, 60*testPieceLength, 64)
+	started := opened.seek(t, 60*testPieceLength)
 	before := waitPrefetchState(t, ctx, st, "the forward window to activate", func(s session.PrefetchSnapshot) bool {
-		return s.ActivePieces > 0
+		return s.ActivePieces > 0 && len(s.PlaybackStreams) == 1
 	})
-
-	opened.read(t, 0, 64)
-	candidate := waitPrefetchState(t, ctx, st, "the first backward probe", func(s session.PrefetchSnapshot) bool {
-		return s.Generation == before.Generation && s.CandidatePresent
-	})
-	if candidate.Generation != before.Generation {
-		t.Fatalf("generation = %d after the first seek probe, want %d", candidate.Generation, before.Generation)
-	}
-	opened.read(t, 64, 64)
-	after := waitPrefetchState(t, ctx, st, "the seek to establish the new window", func(s session.PrefetchSnapshot) bool {
-		return s.Generation > before.Generation && s.ActivePieces > 0
-	})
-	if after.Cursor != 128 {
-		t.Fatalf("cursor = %d after the confirmed seek read, want 128", after.Cursor)
+	if started.Generation != 2 || before.PlaybackStreams[0].PlaybackCursor != 60*testPieceLength {
+		t.Fatalf("initial seek state = %+v", before.PlaybackStreams[0])
 	}
 
-	// The active window pieces sit on the priority ladder; the piece the reader
-	// left behind no longer carries a foreground demand.
+	latest := opened.seek(t, 0)
+	after := waitPrefetchState(t, ctx, st, "the latest seek to establish the new window", func(s session.PrefetchSnapshot) bool {
+		return len(s.PlaybackStreams) == 1 && s.PlaybackStreams[0].Generation > before.PlaybackStreams[0].Generation && s.ActivePieces > 0
+	})
+	if latest.Generation != after.PlaybackStreams[0].Generation || after.PlaybackStreams[0].PlaybackCursor != 0 {
+		t.Fatalf("latest seek state = %+v", after.PlaybackStreams[0])
+	}
+
 	runs := session.PieceStateRunsForTest(st)
 	if len(after.ActivePieceIndexes) == 0 {
 		t.Fatal("the new window has no active background pieces")
@@ -423,6 +445,9 @@ func TestPrefetchForegroundOutranksBackgroundLease(t *testing.T) {
 	snapshot := session.PrefetchSnapshotForTest(st)
 	if snapshot.MaxActivePieces > defaultTestPrefetchPieces() {
 		t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, defaultTestPrefetchPieces())
+	}
+	if got := piecePriorityAt(session.PieceStateRunsForTest(st), targetPiece); got >= torrent.PiecePriorityNow {
+		t.Fatalf("foreground piece priority after completion = %v, want below Now", got)
 	}
 }
 

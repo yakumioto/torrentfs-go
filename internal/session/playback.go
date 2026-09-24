@@ -216,10 +216,16 @@ func (t *Torrent) startPlaybackStream(id string, request PlaybackStreamStart) (*
 	if err != nil {
 		return nil, PlaybackStreamSnapshot{}, err
 	}
-	snapshot, err := t.coordinator.startPlaybackStream(id, request.Path, opened.file, request.PositionBytes)
+	stream := &playbackSessionStream{id: id, torrent: t, file: opened}
+	onExpire := func() {
+		if t.session != nil {
+			t.session.removeExpiredPlaybackStream(id, stream)
+		}
+	}
+	snapshot, err := t.coordinator.startPlaybackStream(id, request.Path, opened.file, request.PositionBytes, onExpire)
 	if err != nil {
 		_ = opened.Close()
 		return nil, PlaybackStreamSnapshot{}, err
 	}
-	return &playbackSessionStream{id: id, torrent: t, file: opened}, snapshot, nil
+	return stream, snapshot, nil
 }

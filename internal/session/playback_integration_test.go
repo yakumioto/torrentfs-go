@@ -25,7 +25,19 @@ func TestExplicitPlaybackStreamUsesReportedPosition(t *testing.T) {
 		t.Fatalf("start snapshot = %+v", stream)
 	}
 
-	opened, st := openPrefetchFile(t, sess, hash, "payload.bin")
+	ra, err := sess.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	closer, ok := ra.(interface{ Close() error })
+	if !ok {
+		t.Fatal("OpenFile did not return a closable handle")
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	opened := &prefetchFile{sess: sess, streamID: stream.ID, ra: ra, closer: closer}
 	defer opened.close()
 	opened.read(t, 0, 64)
 	before := session.PrefetchSnapshotForTest(st)

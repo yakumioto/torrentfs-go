@@ -30,7 +30,10 @@ type readProbeEvent struct {
 // readProbe, when set, receives loader read events. It is a test-only seam:
 // production never installs one. Sends are non-blocking, so a full or stalled
 // probe channel can never hold up a reader.
-var readProbe atomic.Pointer[chan readProbeEvent]
+var (
+	readProbe    atomic.Pointer[chan readProbeEvent]
+	nextDemandID atomic.Uint64
+)
 
 func emitReadProbe(event readProbeEvent) {
 	probe := readProbe.Load()
@@ -438,7 +441,6 @@ type raFile struct {
 	readahead   int64
 	closed      bool
 	handles     int
-	nextDemand  uint64
 	// window holds the pieces pinned by the most recent read: the requested
 	// range plus its readahead. Replacing it lets the previous region fall back
 	// to the LRU tail, so a seek keeps the new region and lets the old one go.
@@ -480,8 +482,7 @@ func (f *raFile) acquireHandle() (uint64, bool) {
 		return 0, false
 	}
 	f.handles++
-	f.nextDemand++
-	return f.nextDemand, true
+	return nextDemandID.Add(1), true
 }
 
 func (f *raFile) releaseDemand(id uint64) {
