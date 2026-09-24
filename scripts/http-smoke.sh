@@ -13,6 +13,9 @@ work_dir="$(mktemp -d)"
 container_name="torrentfs-http-smoke-$$"
 trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true; rm -rf -- "$work_dir" || true' EXIT
 mkdir -p "$work_dir/torrents"
+chmod 0777 "$work_dir/torrents"
+runtime_uid=1000
+runtime_gid=1000
 
 cat >"$work_dir/torrentfs.toml" <<'EOF'
 [http]
@@ -28,7 +31,7 @@ EOF
 
 image="torrentfs-http-smoke:local"
 docker build --tag "$image" .
-docker run --detach --user "$(id -u):$(id -g)" --name "$container_name" --publish 127.0.0.1::8080 --volume "$work_dir/torrents:/torrents" --volume "$work_dir/torrentfs.toml:/config.toml:ro" "$image" -config /config.toml /torrents >/dev/null
+docker run --detach --env "PUID=$runtime_uid" --env "PGID=$runtime_gid" --name "$container_name" --publish 127.0.0.1::8080 --volume "$work_dir/torrents:/torrents" --volume "$work_dir/torrentfs.toml:/config.toml:ro" "$image" -config /config.toml /torrents >/dev/null
 
 port=''
 for _ in {1..60}; do

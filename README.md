@@ -482,7 +482,7 @@ Dockerfile 使用 Node 22.23.2 构建 Web UI，再使用 Go 1.27 编译包含 `w
 
 ```sh
 docker build -t torrentfs .
-docker run --rm torrentfs
+docker run --rm --env PUID=1000 --env PGID=1000 torrentfs
 ```
 
 默认命令等价于：
@@ -492,6 +492,27 @@ docker run --rm torrentfs
 ```
 
 镜像会创建 `/torrents`，但 HTTP listener 仍默认绑定容器内的 `127.0.0.1:8080`；`-p 8080:8080` 不会改变 daemon 的监听地址。Docker 配置与本地默认值也不同：镜像把 peer `listen_port` 固定为 `6881`，并默认禁用 IPv6；本地默认 peer 端口为 `0`，地址族都启用。环境变量可以覆盖 `/etc/torrentfs/torrentfs.toml`。
+
+### 运行时 UID/GID
+
+容器镜像是通用镜像，不在构建阶段写入部署主机的 UID/GID。入口必须以 root 启动，用 root 在每次启动时准备账户和 Samba runtime，然后以配置身份运行 torrentfs 和 smbd。不要再使用 `docker run --user`；非 root 入口无法完成初始化，会明确失败。
+
+| 变量 | 默认值 | 约束 |
+| --- | --- | --- |
+| `PUID` | `1000`（变量未设置时） | 无符号十进制整数，范围 `1..4294967294` |
+| `PGID` | `1000`（变量未设置时） | 无符号十进制整数，范围 `1..4294967294` |
+
+显式设置的空值、非数字、负数、`0` 和超出范围的值都会在启动 listener、FUSE 或 Samba 之前失败。`PUID`/`PGID` 只在运行时生效，不需要也不支持 `TORRENTFS_UID`/`TORRENTFS_GID` build args。比如 Unraid/NAS 常见的 `99:100` 配置是：
+
+```sh
+docker build -t torrentfs .
+docker run --rm \
+  --env PUID=99 --env PGID=100 \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  torrentfs
+```
+
+入口不会自动 `chown` `/torrents`，因为它可能是 NAS 或宿主机的 bind mount。部署前必须让目标 `PUID:PGID` 对该目录具备读、写、遍历权限；权限检查使用目标数字身份执行，失败时会报告 `runtime identity UID:GID cannot read and write /torrents`。镜像内没有 bind mount 时自带的 `/torrents` 为 `0777`，仅用于保证默认容器可启动。
 
 ### HTTP-only 检查
 
@@ -531,6 +552,7 @@ export TORRENTFS_PASSWORD
 
 docker run --rm \
   --publish 8080:8080 \
+  --env PUID=1000 --env PGID=1000 \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
@@ -545,23 +567,30 @@ unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
 
 ### Docker FUSE 挂载
 
-Linux rootful Docker 需要把 FUSE 设备和挂载能力交给容器。Dockerfile 没有 `USER` 指令；如果省略 `--user`，daemon 会以 root 运行。默认 `mount.allow_other=false` 时，root 创建的挂载通常只对 root 的 uid/gid 可读，宿主机普通用户可能得到 `EACCES`。下面是仓库 smoke test 使用的 host-user 路径：
+Linux rootful Docker 需要把 FUSE 设备和挂载能力交给容器。入口必须以 root 启动，但只在初始化账户、准备 runtime 和启动 supervisor 时使用 root；实际 torrentfs 进程会通过 `PUID`/`PGID` 降权。不要传 `--user`，否则入口会在任何服务启动前明确失败。
+
+下面的例子把运行身份设为当前宿主机用户；如果当前用户是 root，示例改用专用的非 root `1500:1500`。构建只发生一次，之后可以为不同 NAS/宿主机传入不同运行身份：
 
 ```sh
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
+if [ "$HOST_UID" -eq 0 ] || [ "$HOST_GID" -eq 0 ]; then
+  PUID=1500
+  PGID=1500
+else
+  PUID="$HOST_UID"
+  PGID="$HOST_GID"
+fi
+export PUID PGID
 
-docker build \
-  --build-arg TORRENTFS_UID="$HOST_UID" \
-  --build-arg TORRENTFS_GID="$HOST_GID" \
-  -t torrentfs .
+docker build -t torrentfs .
 
 mkdir -p /srv/torrents /srv/mnt
-# 如果目录不属于当前用户，需要管理员执行此命令。
-chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
+# /torrents 不会被入口自动 chown；部署方必须预先准备权限。
+sudo chown "$PUID:$PGID" /srv/torrents /srv/mnt
 
 docker run --rm \
-  --user "$HOST_UID:$HOST_GID" \
+  --env PUID --env PGID \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined \
@@ -571,7 +600,7 @@ docker run --rm \
   torrentfs -config /etc/torrentfs/torrentfs.toml -mountpoint /mnt /torrents
 ```
 
-`TORRENTFS_UID/GID` build args 必须与运行时 `--user` 一致；两个 bind source 都必须对该用户可写。某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
+两个 bind source 都必须对 `PUID:PGID` 可读、可写、可遍历。某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
 
 `/srv/mnt` 所在的主机挂载点必须支持递归双向传播；可以先检查：
 
@@ -583,35 +612,7 @@ findmnt -T /srv/mnt -o TARGET,SOURCE,FSTYPE,PROPAGATION,OPTIONS
 
 要让容器接受入站 peer，应使用镜像配置中的固定 `listen_port = 6881`，并在上面的 `docker run` 中追加 `--publish 6881:6881/tcp --publish 6881:6881/udp`。只发布 HTTP 端口不会让 peer 端口可达；动态端口 `0` 也不能预先发布。
 
-### 以宿主机用户运行 FUSE
-
-镜像默认不声明 `USER`，可以用匹配宿主机 UID/GID 的构建参数和运行参数降低 daemon 身份：
-
-```sh
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
-
-docker build \
-  --build-arg TORRENTFS_UID="$HOST_UID" \
-  --build-arg TORRENTFS_GID="$HOST_GID" \
-  -t torrentfs .
-
-mkdir -p /srv/torrents /srv/mnt
-# 如果目录不属于当前用户，需要管理员执行此命令。
-chown "$HOST_UID:$HOST_GID" /srv/torrents /srv/mnt
-
-docker run --detach --name torrentfs \
-  --user "$HOST_UID:$HOST_GID" \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor=unconfined \
-  --env TORRENTFS_HTTP_LISTEN_ADDR= \
-  --mount type=bind,src=/srv/torrents,dst=/torrents \
-  --mount type=bind,src=/srv/mnt,dst=/mnt,bind-propagation=rshared \
-  torrentfs -mountpoint /mnt /torrents
-```
-
-两个 bind source 都必须对该用户可写：`/torrents` 要保存 `.metadata`，`/mnt` 要允许 FUSE 创建 submount。若 `/dev/fuse` 是 `root:fuse` 且用户不在 fuse 组，还需要按宿主机策略补充 `--group-add`。可以用 `docker exec torrentfs id`、`findmnt -T /srv/mnt` 和 `docker stop torrentfs` 检查身份、传播和清理结果。
+可以用 `/proc/<torrentfs-pid>/status` 检查服务身份；`docker exec torrentfs id` 默认执行的是 root shell，不代表实际 daemon 身份。入口会在启动前检查 `/torrents`，不会替宿主机或 NAS 改写其属主。
 
 ### 可选的单容器 SMB 只读共享
 
@@ -657,33 +658,28 @@ SMB 密码必须是非空单行值；入口会拒绝 CR/LF，并以明文通过 
 ```sh
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
-# The SMB runtime UID must be non-root. A root host user can choose a dedicated
-# numeric identity; a non-root host user can reuse their own UID/GID.
-if [ "$HOST_UID" -eq 0 ]; then
-  RUNTIME_UID=1500
-  RUNTIME_GID=1500
+# SMB requires a non-root runtime identity. A root host user can choose a
+# dedicated numeric identity; a non-root host user can reuse their own UID/GID.
+if [ "$HOST_UID" -eq 0 ] || [ "$HOST_GID" -eq 0 ]; then
+  PUID=1500
+  PGID=1500
 else
-  RUNTIME_UID="$HOST_UID"
-  RUNTIME_GID="$HOST_GID"
+  PUID="$HOST_UID"
+  PGID="$HOST_GID"
 fi
+export PUID PGID
 
-IMAGE=torrentfs:uid-$RUNTIME_UID
-# The runtime UID owns the bind-mounted torrents directory.
-sudo install -d -o "$RUNTIME_UID" -g "$RUNTIME_GID" -m 0755 /srv/torrents
+IMAGE=torrentfs
+# The runtime identity owns the bind-mounted torrents directory.
+sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
-
-docker build \
-  --build-arg TORRENTFS_UID="$RUNTIME_UID" \
-  --build-arg TORRENTFS_GID="$RUNTIME_GID" \
-  -t "$IMAGE" .
-RUNTIME_USER="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
-  'grep ^user= /etc/torrentfs/runtime-identity | cut -d= -f2')"
-[ -n "$RUNTIME_USER" ]
-export TORRENTFS_USERNAME="$RUNTIME_USER"
+docker build -t "$IMAGE" .
+export TORRENTFS_USERNAME=torrentfs
 read -r -s -p 'Shared HTTP/SMB password: ' TORRENTFS_PASSWORD; printf '\n'
 export TORRENTFS_PASSWORD
 
 docker run --rm \
+  --env PUID --env PGID \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --cap-add NET_BIND_SERVICE \
@@ -699,20 +695,21 @@ docker run --rm \
   --env TORRENTFS_PASSWORD \
   "$IMAGE"
 
-unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
+unset PUID PGID TORRENTFS_USERNAME TORRENTFS_PASSWORD
 ```
 
 The `sudo install` step is intentional: torrentfs writes `/torrents/.metadata`
-with the image runtime UID. If the host user is not root, they must be able to
-run this ownership command (or pre-create the directory with the same numeric
-UID/GID). The root-host example deliberately uses UID/GID 1500; SMB mode rejects
-runtime UID 0.
+with the configured runtime UID. The entrypoint never chowns `/torrents`, so
+NAS deployments must pre-create or adjust the directory for the same numeric
+`PUID:PGID`. The root-host example deliberately uses UID/GID 1500; SMB mode
+rejects runtime UID 0. The stable Samba Unix account name is `torrentfs` even
+when its numeric UID/GID is changed at startup.
 
 如果只需要 SMB，可以省略 `--publish 8080` 以及 HTTP listener/auth 相关参数；仍必须传入同一组 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`，而 Go 配置层会忽略这组 pair。镜像内置的 HTTP listener 保持 container-local `127.0.0.1:8080`，不发布即可。
 
 身份与退出语义：
 
-- 容器入口以 root 启动，仅为完成 passdb 初始化、运行身份切换和绑定 445；torrentfs、`smbd` 及其子进程都以专用非 root 身份运行，FUSE 与 SMB 文件访问身份一致。构建参数把运行 UID 设为 `0` 时，SMB 模式会明确拒绝启动。
+- 容器入口以 root 启动，仅为完成账户/runtime 初始化、passdb 初始化、运行身份切换和绑定 445；torrentfs、`smbd` 及其子进程都以 `PUID:PGID` 的非 root 数字身份运行，FUSE 与 SMB 文件访问身份一致。`PUID=0` 或 `PGID=0` 时会明确拒绝启动。
 - 用户传入自己的 `-mountpoint` 时入口会拒绝启动，避免 Samba path 与 FUSE path 分叉。
 - torrentfs 或 smbd 任一核心进程异常退出、或 FUSE mount 在运行期消失，容器都会停止另一个进程并以非零状态退出。
 - 收到 `SIGTERM`/`SIGINT` 时先有界停止并回收 Samba（超时才 `SIGKILL`），再通知 torrentfs 执行既有的 HTTP → session → FUSE unmount 关闭链；正常关闭返回 0，强制终止会记录日志并返回非零。
@@ -772,7 +769,7 @@ golangci-lint run ./...
 
   脚本还会在 client 容器内用 `mount.cifs` 只读挂载 share，并以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于内存 cache 的区间，与源文件对应切片比对，证明随机 seek 走的是现有 piece planner/cache，而不是顺序下载。这一步需要宿主机内核提供 CIFS 模块并允许 nested `mount.cifs`：脚本会区分「宿主不具备 CIFS 能力」和「挂载成功但数据错误」——前者打印明确的 `host cannot mount CIFS` 说明并继续（此时由 required 的 `TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./...`，含 `>4 GiB` 虚拟文件的大偏移用例，承担随机读取证据），后者直接失败。需要无条件跳过时设置 `TORRENTFS_SMB_SKIP_CIFS=1`。CI 与 nightly 都不设置该变量，因此在支持 CIFS 的 runner 上会自动执行完整比对。
 
-  宿主 UID 与镜像内运行身份相同时，容器写入的 `.metadata` 与清理路径恰好一致，容易掩盖权限问题；用 `TORRENTFS_SMOKE_UID`/`TORRENTFS_SMOKE_GID` 指定一个不同的构建期运行身份，即可在同一台机器上验证跨 UID 的 metadata 可遍历性与 scratch 目录清理（CI runner 的 UID 与镜像默认值本就不同）：
+  宿主 UID 与容器运行身份相同时，容器写入的 `.metadata` 与清理路径恰好一致，容易掩盖权限问题；用 `TORRENTFS_SMOKE_UID`/`TORRENTFS_SMOKE_GID` 指定一个不同的运行时身份，即可在同一台机器上验证跨 UID 的 metadata 可遍历性与 scratch 目录清理（这两个变量现在只覆盖 smoke 的运行时环境，不是镜像构建参数）：
 
   ```sh
   TORRENTFS_SMOKE_UID=1500 TORRENTFS_SMOKE_GID=1500 ./scripts/docker-smb-smoke.sh
