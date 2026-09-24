@@ -1551,7 +1551,7 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			c.budgetBlocks++
 			stream.state = prefetchBudgetBlocked
 			c.restorePiecePriorityLocked(index)
-			break
+			continue
 		}
 		if c.torrent != nil {
 			c.torrent.Piece(index).UpdateCompletion()

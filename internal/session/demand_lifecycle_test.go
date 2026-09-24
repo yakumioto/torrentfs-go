@@ -234,6 +234,67 @@ func TestOffsetActiveWindowSharesOverlappingOwners(t *testing.T) {
 	}
 }
 
+func TestGlobalBudgetCompetitionStillRegistersExistingOwners(t *testing.T) {
+	store := cache.New(128 << 20)
+	budget := newPrefetchBudget(defaultPrefetchPieces)
+	coordinator := newTestCoordinator(store)
+	coordinator.budget = budget
+	other := newTestCoordinator(store)
+	other.budget = budget
+	fileA := playbackTestFile(3<<20, 1<<20, store, coordinator)
+	otherFile := playbackTestFile(2<<20, 1<<20, store, other)
+	if _, err := coordinator.startPlaybackStream("stream-a", "payload.bin", fileA, 1<<20); err != nil {
+		t.Fatalf("start stream A: %v", err)
+	}
+	if len(coordinator.active) != 2 {
+		t.Fatalf("stream A active pieces = %d, want 2", len(coordinator.active))
+	}
+	if _, err := other.startPlaybackStream("other", "other.bin", otherFile, 0); err != nil {
+		t.Fatalf("start competing coordinator: %v", err)
+	}
+	if _, used := budget.snapshot(); used != defaultPrefetchPieces {
+		t.Fatalf("global budget after competing coordinator = %d, want %d", used, defaultPrefetchPieces)
+	}
+	if _, err := coordinator.startPlaybackStream("stream-b", "payload.bin", fileA, 0); err != nil {
+		t.Fatalf("start stream B: %v", err)
+	}
+	for index := 1; index <= 2; index++ {
+		owners := coordinator.activeNormalOwners[index]
+		if len(owners) != 2 {
+			t.Fatalf("Piece %d owners after global budget block = %d, want 2", index, len(owners))
+		}
+	}
+	if err := coordinator.stopPlaybackStream("stream-a"); err != nil {
+		t.Fatalf("stop stream A: %v", err)
+	}
+	for index := 1; index <= 2; index++ {
+		if _, active := coordinator.active[index]; !active {
+			t.Fatalf("Piece %d cancelled while stream B still owns it", index)
+		}
+		if len(coordinator.activeNormalOwners[index]) != 1 {
+			t.Fatalf("Piece %d owners after A stop = %d, want 1", index, len(coordinator.activeNormalOwners[index]))
+		}
+	}
+	if _, used := budget.snapshot(); used != defaultPrefetchPieces {
+		t.Fatalf("global budget after A stop = %d, want %d", used, defaultPrefetchPieces)
+	}
+	if err := coordinator.stopPlaybackStream("stream-b"); err != nil {
+		t.Fatalf("stop stream B: %v", err)
+	}
+	if len(coordinator.active) != 0 {
+		t.Fatalf("coordinator active after B stop = %d, want 0", len(coordinator.active))
+	}
+	if _, used := budget.snapshot(); used != 2 {
+		t.Fatalf("global budget after B stop = %d, want competing coordinator's 2", used)
+	}
+	if err := other.stopPlaybackStream("other"); err != nil {
+		t.Fatalf("stop competing coordinator: %v", err)
+	}
+	if _, used := budget.snapshot(); used != 0 {
+		t.Fatalf("global budget after all owners stop = %d, want 0", used)
+	}
+}
+
 func TestNormalLeaseBookkeepingCoversCompletionBudgetAndStop(t *testing.T) {
 	store := cache.New(16 << 20)
 	coordinator := newTestCoordinator(store)
