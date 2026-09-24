@@ -206,11 +206,9 @@
     function gmRequest(options) {
         return new Promise((resolve, reject) => {
             let request;
-            let timer;
             let settled = false;
             const signal = options.signal;
             const cleanup = () => {
-                clearTimeout(timer);
                 if (signal) {
                     signal.removeEventListener('abort', abort);
                 }
@@ -246,7 +244,6 @@
                     url: options.url,
                     headers: options.headers,
                     data: options.data,
-                    timeout: options.timeout,
                     responseType: options.responseType,
                     anonymous: options.anonymous,
                     redirect: options.redirect,
@@ -257,8 +254,6 @@
                 });
                 if (settled) {
                     request?.abort();
-                } else if (options.timeout) {
-                    timer = pageWindow.setTimeout(abort, options.timeout);
                 }
             } catch (error) {
                 finish(reject, error instanceof Error ? error : makeError('transport', '网络请求失败。'));
@@ -269,26 +264,32 @@
     function requestWithDeadline(options, externalSignal) {
         const controller = new AbortController();
         let deadlineExceeded = false;
-        const abortExternal = () => controller.abort();
+        let externallyAborted = false;
+        const abortExternal = () => {
+            externallyAborted = true;
+            controller.abort();
+        };
         if (externalSignal) {
             if (externalSignal.aborted) {
-                controller.abort();
+                abortExternal();
             } else {
                 externalSignal.addEventListener('abort', abortExternal, { once: true });
             }
         }
-        const request = gmRequest({
-            ...options,
-            signal: controller.signal,
-            timeout: REQUEST_TIMEOUT
-        });
         const timer = pageWindow.setTimeout(() => {
             deadlineExceeded = true;
             controller.abort();
         }, REQUEST_TIMEOUT);
+        const request = gmRequest({
+            ...options,
+            signal: controller.signal
+        });
         return request.catch((error) => {
-            if (deadlineExceeded && error.kind === 'aborted') {
+            if (deadlineExceeded) {
                 throw makeError('timeout', '请求超时。');
+            }
+            if (externallyAborted && error.kind === 'aborted') {
+                throw error;
             }
             throw error;
         }).finally(() => {
@@ -872,7 +873,7 @@
             return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
         }
 
-        function credentialFrameHtml(nonce) {
+        function credentialFrameHtml() {
             return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
 :root { color-scheme: light dark; font: 14px/1.4 sans-serif; }
@@ -899,8 +900,9 @@ button:disabled { cursor: wait; opacity: .65; }
 </form>
 <script>
 (function () {
-    const nonce = ${JSON.stringify(nonce)};
+    let nonce;
     let port;
+    let initialized = false;
     const form = document.getElementById('form');
     const base = document.getElementById('base');
     const username = document.getElementById('username');
@@ -920,7 +922,9 @@ button:disabled { cursor: wait; opacity: .65; }
     };
     base.addEventListener('input', updateRisk);
     window.addEventListener('message', (event) => {
-        if (event.source !== window.parent || !event.data || event.data.type !== 'torrentfs-config-init' || event.data.nonce !== nonce || !event.ports[0]) return;
+        if (initialized || event.source !== window.parent || !event.data || event.data.type !== 'torrentfs-config-init' || typeof event.data.nonce !== 'string' || !event.ports[0]) return;
+        initialized = true;
+        nonce = event.data.nonce;
         port = event.ports[0];
         port.onmessage = (messageEvent) => {
             const data = messageEvent.data;
@@ -930,6 +934,7 @@ button:disabled { cursor: wait; opacity: .65; }
             cancel.disabled = false;
         };
         port.start();
+        port.postMessage({ nonce, type: 'ready' });
         if (event.data.profile) {
             base.value = event.data.profile.baseUrl || '';
             username.value = event.data.profile.username || '';
@@ -986,7 +991,7 @@ button:disabled { cursor: wait; opacity: .65; }
             const frame = document.createElement('iframe');
             frame.title = 'TorrentFS configuration';
             frame.setAttribute('sandbox', 'allow-scripts');
-            frame.srcdoc = credentialFrameHtml(nonce);
+            frame.srcdoc = credentialFrameHtml();
             overlay.appendChild(frame);
             let closed = false;
             let initialized = false;
@@ -1021,12 +1026,16 @@ button:disabled { cursor: wait; opacity: .65; }
                 if (closed || !data || data.nonce !== nonce) {
                     return;
                 }
+                if (data.type === 'ready') {
+                    initialized = true;
+                    return;
+                }
                 if (data.type === 'cancel') {
-                        onCancel?.();
+                    onCancel?.();
                     close();
                     return;
                 }
-                if (data.type !== 'submit' || submitting) {
+                if (data.type !== 'submit' || submitting || !initialized) {
                     return;
                 }
                 submitting = true;
@@ -1041,35 +1050,16 @@ button:disabled { cursor: wait; opacity: .65; }
                     data.password = '';
                     Promise.resolve(onSubmit(credentials)).then((result) => {
                         credentials.password = '';
-                                sendResult(result || { ok: false, message: '绑定失败，请重试。' });
+                        sendResult(result || { ok: false, message: '绑定失败，请重试。' });
                     }).catch(() => {
                         credentials.password = '';
-                                sendResult({ ok: false, message: '绑定失败，请重试。' });
+                        sendResult({ ok: false, message: '绑定失败，请重试。' });
                     });
                 } catch {
-                        sendResult({ ok: false, message: '绑定失败，请重试。' });
+                    sendResult({ ok: false, message: '绑定失败，请重试。' });
                 }
             };
             channel.port1.start();
-            frame.addEventListener('load', () => {
-                if (closed || initialized) {
-                    return;
-                }
-                initialized = true;
-                try {
-                    frame.contentWindow.postMessage({
-                        type: 'torrentfs-config-init',
-                        nonce,
-                        profile: {
-                            baseUrl: initialConnection?.baseUrl || '',
-                            username: initialConnection?.username || ''
-                        }
-                    }, '*', [channel.port2]);
-                } catch {
-                    setStatus('error', '配置界面无法启动，请重试。');
-                    close();
-                }
-            }, { once: true });
             readyTimer = pageWindow.setTimeout(() => {
                 if (!initialized && !closed) {
                     setStatus('error', '配置界面无法启动，请检查浏览器对 sandbox iframe 的支持。');
@@ -1077,6 +1067,19 @@ button:disabled { cursor: wait; opacity: .65; }
                 }
             }, 5000);
             (document.body || document.documentElement).appendChild(overlay);
+            try {
+                frame.contentWindow.postMessage({
+                    type: 'torrentfs-config-init',
+                    nonce,
+                    profile: {
+                        baseUrl: initialConnection?.baseUrl || '',
+                        username: initialConnection?.username || ''
+                    }
+                }, '*', [channel.port2]);
+            } catch {
+                setStatus('error', '配置界面无法启动，请重试。');
+                close();
+            }
             return { close };
         }
 
