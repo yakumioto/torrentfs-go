@@ -94,7 +94,13 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 		if info == nil {
 			continue
 		}
-		view := filesystem.TorrentView{Name: t.Name(), Hash: hash, SingleFile: !info.IsDir()}
+		entry := s.states[hash]
+		view := filesystem.TorrentView{
+			Name:       t.Name(),
+			Hash:       hash,
+			CreatedAt:  entry.CreatedAt,
+			SingleFile: !info.IsDir(),
+		}
 		for _, f := range t.tor.Files() {
 			view.Files = append(view.Files, filesystem.FileView{
 				Path: f.DisplayPath(),

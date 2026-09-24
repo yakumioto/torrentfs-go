@@ -26,10 +26,19 @@ type FileView struct {
 // value keeps the directory layout, so a Backend that never sets it still gets
 // the historical behaviour.
 type TorrentView struct {
-	Name       string
-	Hash       metainfo.Hash
+	Name string
+	Hash metainfo.Hash
+	// CreatedAt is the durable time when the torrent was added to the session.
+	CreatedAt  time.Time
 	Files      []FileView
 	SingleFile bool
+}
+
+func setCreatedAt(attr *fuse.Attr, createdAt time.Time) {
+	if createdAt.IsZero() {
+		return
+	}
+	attr.SetTimes(&createdAt, &createdAt, &createdAt)
 }
 
 // Backend supplies the filesystem layer with torrent snapshots and file
