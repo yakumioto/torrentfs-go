@@ -1545,7 +1545,7 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			continue
 		}
 		if len(c.active) >= c.currentLimit() {
-			break
+			continue
 		}
 		if !c.budget.tryAcquire() {
 			c.budgetBlocks++

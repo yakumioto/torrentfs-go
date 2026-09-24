@@ -182,6 +182,58 @@ func TestFullActiveWindowSharesOwnersAcrossStreams(t *testing.T) {
 	}
 }
 
+func TestOffsetActiveWindowSharesOverlappingOwners(t *testing.T) {
+	store := cache.New(128 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(16<<20, 1<<20, store, coordinator)
+	if _, err := coordinator.startPlaybackStream("stream-a", "payload.bin", file, 1<<20); err != nil {
+		t.Fatalf("start offset stream A: %v", err)
+	}
+	activeA := make(map[int]struct{}, len(coordinator.active))
+	for index := range coordinator.active {
+		activeA[index] = struct{}{}
+	}
+	if len(activeA) != defaultPrefetchPieces {
+		t.Fatalf("offset stream A active pieces = %d, want %d", len(activeA), defaultPrefetchPieces)
+	}
+	if _, err := coordinator.startPlaybackStream("stream-b", "payload.bin", file, 0); err != nil {
+		t.Fatalf("start offset stream B: %v", err)
+	}
+	for index := 1; index <= 3; index++ {
+		if _, active := coordinator.active[index]; !active {
+			t.Fatalf("shared Piece %d stopped being active", index)
+		}
+		if len(coordinator.activeNormalOwners[index]) != 2 {
+			t.Fatalf("shared Piece %d owners = %d, want 2", index, len(coordinator.activeNormalOwners[index]))
+		}
+	}
+	_, budgetBefore := coordinator.budget.snapshot()
+	if err := coordinator.stopPlaybackStream("stream-a"); err != nil {
+		t.Fatalf("stop offset stream A: %v", err)
+	}
+	for index := 1; index <= 3; index++ {
+		if _, active := coordinator.active[index]; !active {
+			t.Fatalf("Piece %d cancelled while stream B still owns it", index)
+		}
+		owners := coordinator.activeNormalOwners[index]
+		if len(owners) != 1 {
+			t.Fatalf("Piece %d owners after A stop = %d, want 1", index, len(owners))
+		}
+	}
+	if _, budgetAfterA := coordinator.budget.snapshot(); budgetAfterA != budgetBefore {
+		t.Fatalf("budget after offset stream A stop = %d, want %d", budgetAfterA, budgetBefore)
+	}
+	if err := coordinator.stopPlaybackStream("stream-b"); err != nil {
+		t.Fatalf("stop offset stream B: %v", err)
+	}
+	if len(coordinator.active) != 0 || len(coordinator.activeNormalOwners) != 0 {
+		t.Fatalf("offset streams left active=%d owners=%d", len(coordinator.active), len(coordinator.activeNormalOwners))
+	}
+	if _, budgetAfterB := coordinator.budget.snapshot(); budgetAfterB != 0 {
+		t.Fatalf("budget after offset stream cleanup = %d, want 0", budgetAfterB)
+	}
+}
+
 func TestNormalLeaseBookkeepingCoversCompletionBudgetAndStop(t *testing.T) {
 	store := cache.New(16 << 20)
 	coordinator := newTestCoordinator(store)
