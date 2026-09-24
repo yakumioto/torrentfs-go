@@ -3,16 +3,17 @@
 // @namespace    https://github.com/yakumioto/torrentfs-go
 // @version      0.2.0
 // @description  Send a torrent from an M-Team detail page to a configured TorrentFS instance.
-// @match        https://m-team.cc/detail/*
-// @match        https://*.m-team.cc/detail/*
-// @match        https://m-team.io/detail/*
-// @match        https://*.m-team.io/detail/*
+// @match        https://m-team.cc/*
+// @match        https://*.m-team.cc/*
+// @match        https://m-team.io/*
+// @match        https://*.m-team.io/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        GM_addElement
 // @connect      *
 // @sandbox      DOM
 // @run-at       document-start
@@ -41,14 +42,63 @@
             fallbackMount: '.mt-4>div'
         },
         matchesPage() {
-            const host = pageWindow.location.hostname.toLowerCase();
-            const path = pageWindow.location.pathname;
-            return this.isHost(host) && path.indexOf('/detail/') === 0;
+            return Boolean(parseDetailRoute());
         },
         isHost(host) {
             return this.hosts.some((domain) => host === domain || host.endsWith(`.${domain}`));
         }
     };
+
+    function parseDetailRoute(href = pageWindow.location.href) {
+        let url;
+        try {
+            url = new URL(href);
+        } catch {
+            return null;
+        }
+        if (!MTEAM.isHost(url.hostname.toLowerCase())) {
+            return null;
+        }
+        const match = /^\/detail\/([^/]+)\/?$/.exec(url.pathname);
+        if (!match) {
+            return null;
+        }
+        let id;
+        try {
+            id = decodeURIComponent(match[1]);
+        } catch {
+            return null;
+        }
+        if (!id || id.includes('/') || id.includes('\\')) {
+            return null;
+        }
+        return { id, routeHref: url.href };
+    }
+
+    const diagnostics = {
+        scriptVersion: '0.2.0',
+        hrefPattern: '/detail/<id>',
+        routeMatched: false,
+        routeIdPresent: false,
+        providerRunning: false,
+        bridgeReady: false,
+        detailSeen: false,
+        candidateSource: 'none',
+        inlineMountMatched: false,
+        actionMounted: false,
+        actionFixed: false
+    };
+
+    function updateDiagnostics(patch) {
+        Object.assign(diagnostics, patch);
+    }
+
+    function diagnosticSnapshot() {
+        return {
+            ...diagnostics,
+            bound: Boolean(storage.getConnection()?.token)
+        };
+    }
 
     function makeError(kind, message, status) {
         const error = new Error(message);
@@ -606,13 +656,13 @@
 
     // page bridge
     function pageBridgeScript(detailPath, downloadTokenPath, source) {
+        const post = (payload) => window.postMessage(Object.assign({ source }, payload), '*');
         const installedKey = '__torrentfsMteamBridgeInstalled';
         if (window[installedKey]) {
+            post({ type: 'bridge-ready', version: 1 });
             return;
         }
         window[installedKey] = true;
-
-        const post = (payload) => window.postMessage(Object.assign({ source }, payload), '*');
         const isDetailRequest = (url) => String(url || '').indexOf(detailPath) !== -1;
         const emitDetail = (text, routeHref) => {
             let response;
@@ -724,32 +774,101 @@
                 post({ type: 'download-url-error', requestId, reason: 'request-failed' });
             });
         });
+        post({ type: 'bridge-ready', version: 1 });
     }
 
     const pageBridge = (() => {
-        let installed = false;
+        const MAX_ATTEMPTS = 3;
+        const BRIDGE_TIMEOUT = 1200;
+        let bridgeReady = false;
+        let bridgeFailed = false;
+        let injecting = false;
+        let attempts = 0;
+        let retryTimer;
+        let readyTimer;
         let requestSequence = 0;
+        const stateListeners = new Set();
+        const notifyState = (state) => stateListeners.forEach((listener) => listener(state));
 
-        function install() {
-            if (installed) {
+        const isBridgeMessage = (event) => (event.source === pageWindow || event.source === window) && event.data && event.data.source === BRIDGE_SOURCE;
+        const bridgeListener = (event) => {
+            if (!isBridgeMessage(event) || event.data.type !== 'bridge-ready' || event.data.version !== 1) {
                 return;
             }
-            installed = true;
+            bridgeReady = true;
+            bridgeFailed = false;
+            injecting = false;
+            pageWindow.clearTimeout(readyTimer);
+            pageWindow.clearTimeout(retryTimer);
+            updateDiagnostics({ bridgeReady: true });
+            notifyState('ready');
+        };
+        pageWindow.addEventListener('message', bridgeListener);
+
+        function injectScript(text) {
             const root = document.documentElement || document.head || document.body;
             if (!root) {
-                installed = false;
-                document.addEventListener('readystatechange', install, { once: true });
+                return false;
+            }
+            if (typeof GM_addElement === 'function') {
+                try {
+                    GM_addElement(root, 'script', { textContent: text });
+                    return true;
+                } catch {
+                    // Fall through to the DOM injection path.
+                }
+            }
+            try {
+                const script = document.createElement('script');
+                script.textContent = text;
+                root.appendChild(script);
+                script.remove();
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        function attemptInstall() {
+            if (bridgeReady || bridgeFailed || injecting) {
                 return;
             }
-            const script = document.createElement('script');
-            script.textContent = `(${pageBridgeScript.toString()})(${JSON.stringify(MTEAM.detailPath)},${JSON.stringify(MTEAM.downloadTokenPath)},${JSON.stringify(BRIDGE_SOURCE)});`;
-            root.appendChild(script);
-            script.remove();
+            if (attempts >= MAX_ATTEMPTS) {
+                bridgeFailed = true;
+                updateDiagnostics({ bridgeReady: false });
+                notifyState('failed');
+                return;
+            }
+            attempts += 1;
+            injecting = true;
+            const script = `(${pageBridgeScript.toString()})(${JSON.stringify(MTEAM.detailPath)},${JSON.stringify(MTEAM.downloadTokenPath)},${JSON.stringify(BRIDGE_SOURCE)});`;
+            if (!injectScript(script)) {
+                injecting = false;
+            }
+            readyTimer = pageWindow.setTimeout(() => {
+                if (bridgeReady) {
+                    return;
+                }
+                injecting = false;
+                if (attempts < MAX_ATTEMPTS) {
+                    retryTimer = pageWindow.setTimeout(attemptInstall, 250);
+                } else {
+                    bridgeFailed = true;
+                    updateDiagnostics({ bridgeReady: false });
+                    notifyState('failed');
+                }
+            }, BRIDGE_TIMEOUT);
+        }
+
+        function install() {
+            if (!bridgeReady && !bridgeFailed) {
+                attemptInstall();
+            }
         }
 
         function listenDetail(callback) {
             const listener = (event) => {
-                if ((event.source !== pageWindow && event.source !== window) || !event.data || event.data.source !== BRIDGE_SOURCE || event.data.type !== 'detail') {
+                if (!isBridgeMessage(event) || event.data.type !== 'detail') {
                     return;
                 }
                 callback(event.data);
@@ -760,7 +879,7 @@
 
         function listenRoute(callback) {
             const listener = (event) => {
-                if ((event.source !== pageWindow && event.source !== window) || !event.data || event.data.source !== BRIDGE_SOURCE || event.data.type !== 'route-change') {
+                if (!isBridgeMessage(event) || event.data.type !== 'route-change') {
                     return;
                 }
                 callback(event.data.routeHref);
@@ -771,9 +890,20 @@
 
         function requestDownloadUrl(torrentId, signal) {
             return new Promise((resolve, reject) => {
+                if (bridgeFailed) {
+                    reject(makeError('bridge-unavailable', '页面桥接未就绪，无法获取 M-Team 下载地址。'));
+                    return;
+                }
+                if (!bridgeReady) {
+                    install();
+                    reject(makeError('bridge-unavailable', '页面桥接尚未就绪，无法获取 M-Team 下载地址。'));
+                    return;
+                }
                 const requestId = `${Date.now()}-${++requestSequence}`;
                 let settled = false;
+                const timer = pageWindow.setTimeout(() => finish(reject, makeError('mteam-token-timeout', 'M-Team 下载地址请求超时。')), REQUEST_TIMEOUT);
                 const cleanup = () => {
+                    pageWindow.clearTimeout(timer);
                     pageWindow.removeEventListener('message', listener);
                     signal?.removeEventListener('abort', abort);
                 };
@@ -787,7 +917,7 @@
                 };
                 const abort = () => finish(reject, makeError('aborted', '请求已取消。'));
                 const listener = (event) => {
-                    if ((event.source !== pageWindow && event.source !== window) || !event.data || event.data.source !== BRIDGE_SOURCE || event.data.requestId !== requestId) {
+                    if (!isBridgeMessage(event) || event.data.requestId !== requestId) {
                         return;
                     }
                     if (event.data.type === 'download-url') {
@@ -797,7 +927,7 @@
                     }
                 };
                 if (signal?.aborted) {
-                    reject(makeError('aborted', '请求已取消。'));
+                    finish(reject, makeError('aborted', '请求已取消。'));
                     return;
                 }
                 pageWindow.addEventListener('message', listener);
@@ -811,7 +941,20 @@
             });
         }
 
-        return { install, listenDetail, listenRoute, requestDownloadUrl };
+        function listenState(callback) {
+            stateListeners.add(callback);
+            return () => stateListeners.delete(callback);
+        }
+
+        return {
+            install,
+            listenDetail,
+            listenRoute,
+            listenState,
+            requestDownloadUrl,
+            isReady: () => bridgeReady,
+            isFailed: () => bridgeFailed
+        };
     })();
 
     // UI
@@ -949,7 +1092,19 @@
                 element,
                 setBusy(busy) {
                     element.disabled = busy;
-                    element.textContent = busy ? '提交中…' : '发送到 TorrentFS';
+                    element.textContent = busy ? '提交中…' : element.dataset.label || '发送到 TorrentFS';
+                },
+                setLabel(label) {
+                    element.dataset.label = label;
+                    if (!element.disabled) {
+                        element.textContent = label;
+                    }
+                },
+                setFixed(fixed) {
+                    element.dataset.fixed = fixed ? 'true' : 'false';
+                },
+                setDisabled(disabled) {
+                    element.disabled = disabled;
                 },
                 dispose() {
                     element.removeEventListener('click', listener);
@@ -981,8 +1136,11 @@
         if (error.kind === 'unauthorized') {
             return 'TorrentFS 会话已失效，请重新绑定。';
         }
-        if (error.kind === 'mteam-token') {
-            return 'M-Team 下载地址获取失败，请刷新详情页或重新登录。';
+        if (error.kind === 'mteam-token' || error.kind === 'mteam-token-timeout') {
+            return error.kind === 'mteam-token-timeout' ? 'M-Team 下载地址请求超时，请重试。' : 'M-Team 下载地址获取失败，请刷新详情页或重新登录。';
+        }
+        if (error.kind === 'bridge-unavailable') {
+            return '页面桥接未就绪，请刷新详情页后重试。';
         }
         if (error.kind === 'mteam-download' || error.kind === 'upload' || error.kind === 'upload-unknown') {
             return error.message;
@@ -996,22 +1154,40 @@
             return MTEAM.matchesPage();
         },
 
-        start() {
-            if (!this.matches()) {
+        start(routeCandidate = parseDetailRoute()) {
+            if (!routeCandidate) {
                 return;
             }
             ui.ensureStyles();
             pageBridge.install();
 
-            let candidate;
-            let candidateRouteHref = '';
-            let routeKey = '';
+            let candidate = {
+                ...routeCandidate,
+                source: 'route',
+                name: '',
+                originFileName: '',
+                smallDescr: '',
+                conflict: false
+            };
+            let candidateRouteHref = routeCandidate.routeHref;
+            let routeKey = `${routeCandidate.routeHref}:${routeCandidate.id}`;
             let action;
             let activeController;
             let credentialSession;
             let bindingController;
             let lastHref = pageWindow.location.href;
             let mountTimer;
+            updateDiagnostics({
+                routeMatched: true,
+                routeIdPresent: Boolean(routeCandidate.id),
+                providerRunning: true,
+                detailSeen: false,
+                candidateSource: 'route',
+                inlineMountMatched: false,
+                actionMounted: false,
+                actionFixed: false,
+                bridgeReady: pageBridge.isReady()
+            });
 
             const disposeAction = () => {
                 activeController?.abort();
@@ -1030,19 +1206,31 @@
                 }, 0);
             };
 
+            const bridgeStateDispose = pageBridge.listenState((state) => {
+                updateDiagnostics({ bridgeReady: state === 'ready' });
+                if (state === 'failed' && action && !candidate?.conflict) {
+                    action.setLabel('页面桥接未就绪');
+                    ui.setStatus('error', '页面桥接未就绪，请刷新详情页后重试。');
+                }
+                scheduleMount();
+            });
+
             const findMount = () => {
                 const appContent = document.querySelector(MTEAM.selectors.appContent);
                 if (appContent) {
                     const preferred = appContent.querySelector(MTEAM.selectors.preferredMount);
                     const cell = preferred?.closest('td');
                     if (cell) {
+                        updateDiagnostics({ inlineMountMatched: true });
                         return { element: cell, fixed: false };
                     }
                 }
                 const fallback = document.querySelector(MTEAM.selectors.fallbackMount);
                 if (fallback) {
+                    updateDiagnostics({ inlineMountMatched: true });
                     return { element: fallback, fixed: false };
                 }
+                updateDiagnostics({ inlineMountMatched: false });
                 if (document.body) {
                     return { element: document.body, fixed: true };
                 }
@@ -1107,6 +1295,10 @@
                 if (activeController) {
                     return;
                 }
+                if (!selectedCandidate || selectedCandidate.conflict) {
+                    ui.setStatus('error', '无法识别当前种子，请刷新详情页。');
+                    return;
+                }
                 const connection = storage.getConnection();
                 if (!connection || !connection.token) {
                     ui.setStatus('unbound', connectionStatus(connection));
@@ -1143,40 +1335,62 @@
             };
 
             const mountAction = () => {
-                if (!candidate || action) {
-                    return;
-                }
                 const mount = findMount();
                 if (!mount) {
                     return;
                 }
-                action = ui.createAction(() => submit(candidate, action), mount.fixed);
-                mount.element.appendChild(action.element);
+                if (!action) {
+                    action = ui.createAction(() => submit(candidate, action), mount.fixed);
+                    mount.element.appendChild(action.element);
+                } else if (action.element.dataset.fixed === 'true' && !mount.fixed) {
+                    mount.element.appendChild(action.element);
+                    action.setFixed(false);
+                }
+                updateDiagnostics({ actionMounted: true, actionFixed: action.element.dataset.fixed === 'true' });
                 const connection = storage.getConnection();
-                ui.setStatus(connection?.token ? 'ready' : 'unbound', connectionStatus(connection));
+                if (candidate?.conflict) {
+                    action.setLabel('无法识别当前种子');
+                    action.setDisabled(true);
+                    ui.setStatus('error', '详情 ID 与 URL 不一致，请刷新详情页。');
+                } else if (candidate?.source === 'route' && !candidate?.name) {
+                    action.setLabel('正在识别种子…');
+                    action.setDisabled(false);
+                    ui.setStatus('busy', pageBridge.isFailed() ? '页面桥接未就绪，入口仍可见。' : '正在识别种子…');
+                } else {
+                    action.setLabel('发送到 TorrentFS');
+                    action.setDisabled(false);
+                    ui.setStatus(connection?.token ? 'ready' : 'unbound', connectionStatus(connection));
+                }
             };
+
+            scheduleMount();
 
             const handleDetail = (value) => {
                 const responseRouteHref = value && typeof value.routeHref === 'string' ? value.routeHref : '';
                 const currentRouteHref = pageWindow.location.href;
-                if (!responseRouteHref || responseRouteHref !== currentRouteHref || !value.candidate || value.candidate.id === undefined || value.candidate.id === null || !this.matches()) {
+                if (!responseRouteHref || responseRouteHref !== currentRouteHref || !value.candidate || value.candidate.id === undefined || value.candidate.id === null || !parseDetailRoute(currentRouteHref)) {
                     return;
                 }
-                const nextCandidate = {
-                    id: String(value.candidate.id),
-                    name: typeof value.candidate.name === 'string' ? value.candidate.name : '',
-                    originFileName: typeof value.candidate.originFileName === 'string' ? value.candidate.originFileName : '',
-                    smallDescr: typeof value.candidate.smallDescr === 'string' ? value.candidate.smallDescr : ''
-                };
-                const nextRouteKey = `${responseRouteHref}:${nextCandidate.id}`;
-                lastHref = responseRouteHref;
-                if (routeKey !== nextRouteKey) {
-                    disposeAction();
-                    ui.clearStatus();
-                    routeKey = nextRouteKey;
+                updateDiagnostics({ detailSeen: true });
+                const responseId = String(value.candidate.id);
+                if (candidate && candidate.id !== responseId) {
+                    candidate = { ...candidate, conflict: true, responseId };
+                    updateDiagnostics({ candidateSource: 'conflict' });
+                    scheduleMount();
+                    return;
                 }
-                candidate = nextCandidate;
-                candidateRouteHref = responseRouteHref;
+                candidate = {
+                    ...candidate,
+                    id: responseId,
+                    routeHref: responseRouteHref,
+                    source: 'network',
+                    name: typeof value.candidate.name === 'string' ? value.candidate.name : candidate?.name || '',
+                    originFileName: typeof value.candidate.originFileName === 'string' ? value.candidate.originFileName : candidate?.originFileName || '',
+                    smallDescr: typeof value.candidate.smallDescr === 'string' ? value.candidate.smallDescr : candidate?.smallDescr || '',
+                    conflict: false
+                };
+                updateDiagnostics({ candidateSource: 'network' });
+                lastHref = responseRouteHref;
                 scheduleMount();
             };
 
@@ -1209,6 +1423,7 @@
                 if (action && !document.contains(action.element)) {
                     action.dispose();
                     action = undefined;
+                    updateDiagnostics({ actionMounted: false, actionFixed: false });
                 }
                 if (candidate) {
                     scheduleMount();
@@ -1220,6 +1435,7 @@
 
             return () => {
                 detailDispose();
+                bridgeStateDispose();
                 routeDispose();
                 pageWindow.removeEventListener('popstate', routeChanged);
                 pageWindow.removeEventListener('hashchange', routeChanged);
@@ -1227,23 +1443,92 @@
                 observer.disconnect();
                 closeCredentialSession();
                 disposeAction();
+                updateDiagnostics({ providerRunning: false, actionMounted: false, actionFixed: false, candidateSource: 'none', detailSeen: false });
             };
         }
     };
 
-    function registerPairingCommands(openConfig, unpair) {
-        if (typeof GM_registerMenuCommand !== 'function') {
+    const routeCoordinator = (() => {
+        let providerCleanup;
+        let routeKey = '';
+        let routeDispose;
+        let observer;
+        let routeTimer;
+
+        const syncRoute = () => {
+            const route = parseDetailRoute();
+            const nextKey = route ? route.routeHref : '';
+            updateDiagnostics({ routeMatched: Boolean(route), routeIdPresent: Boolean(route?.id) });
+            if (nextKey === routeKey) {
+                return;
+            }
+            routeKey = nextKey;
+            providerCleanup?.();
+            providerCleanup = undefined;
+            if (route) {
+                providerCleanup = mteamProvider.start(route);
+            }
+        };
+
+        function start() {
+            routeDispose = pageBridge.listenRoute(syncRoute);
+            pageWindow.addEventListener('popstate', syncRoute);
+            pageWindow.addEventListener('hashchange', syncRoute);
+            observer = new MutationObserver(syncRoute);
+            if (document.documentElement) {
+                observer.observe(document.documentElement, { childList: true, subtree: true });
+            }
+            routeTimer = pageWindow.setInterval(syncRoute, 500);
+            syncRoute();
+            pageBridge.install();
+            return () => {
+                routeDispose?.();
+                pageWindow.removeEventListener('popstate', syncRoute);
+                pageWindow.removeEventListener('hashchange', syncRoute);
+                pageWindow.clearInterval(routeTimer);
+                observer?.disconnect();
+                providerCleanup?.();
+                providerCleanup = undefined;
+            };
+        }
+
+        return { start };
+    })();
+
+    const pairingMenu = { registered: false, openConfig: null, unpair: null };
+    let diagnosticsMenuRegistered = false;
+
+    function registerDiagnosticsMenu() {
+        if (diagnosticsMenuRegistered || typeof GM_registerMenuCommand !== 'function') {
             return;
         }
-        GM_registerMenuCommand('配置 / 重新绑定 TorrentFS', () => openConfig());
-        GM_registerMenuCommand('解除 TorrentFS 绑定', () => { void unpair(); });
+        diagnosticsMenuRegistered = true;
+        GM_registerMenuCommand('显示 TorrentFS 页面诊断', () => {
+            sandboxPrompt?.('TorrentFS 页面诊断（可复制）', JSON.stringify(diagnosticSnapshot(), null, 2));
+        });
+    }
+
+    function registerPairingCommands(openConfig, unpair) {
+        pairingMenu.openConfig = openConfig;
+        pairingMenu.unpair = unpair;
+        if (pairingMenu.registered || typeof GM_registerMenuCommand !== 'function') {
+            return;
+        }
+        pairingMenu.registered = true;
+        GM_registerMenuCommand('配置 / 重新绑定 TorrentFS', () => pairingMenu.openConfig?.());
+        GM_registerMenuCommand('解除 TorrentFS 绑定', () => { void pairingMenu.unpair?.(); });
+        registerDiagnosticsMenu();
     }
 
     function bootstrap() {
-        if (mteamProvider.matches()) {
-            mteamProvider.start();
+        const host = pageWindow.location.hostname.toLowerCase();
+        if (!MTEAM.isHost(host)) {
+            return;
         }
+        registerDiagnosticsMenu();
+        routeCoordinator.start();
     }
 
     bootstrap();
+
 })();
