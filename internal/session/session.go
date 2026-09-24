@@ -85,10 +85,11 @@ type Session struct {
 
 	// states and operations back the torrent management API. states mirrors
 	// the durable sidecars; operations are in-memory deletion records.
-	states     map[metainfo.Hash]*registryEntry
-	operations map[string]*Operation
-	activeOps  map[metainfo.Hash]string
-	lastOps    map[metainfo.Hash]string
+	states          map[metainfo.Hash]*registryEntry
+	operations      map[string]*Operation
+	activeOps       map[metainfo.Hash]string
+	lastOps         map[metainfo.Hash]string
+	playbackStreams map[string]*playbackSessionStream
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -250,6 +251,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		operations:      make(map[string]*Operation),
 		activeOps:       make(map[metainfo.Hash]string),
 		lastOps:         make(map[metainfo.Hash]string),
+		playbackStreams: make(map[string]*playbackSessionStream),
 		opLocks:         make(map[metainfo.Hash]*sync.Mutex),
 		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
 	}
@@ -327,6 +329,11 @@ func (s *Session) Close(ctx context.Context) error {
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
+	playbackStreams := make([]*playbackSessionStream, 0, len(s.playbackStreams))
+	for _, stream := range s.playbackStreams {
+		playbackStreams = append(playbackStreams, stream)
+	}
+	s.playbackStreams = make(map[string]*playbackSessionStream)
 	s.mu.Unlock()
 	s.logger.Info("session closing")
 
@@ -347,6 +354,11 @@ func (s *Session) Close(ctx context.Context) error {
 	s.mu.Unlock()
 
 	var errs []error
+	for _, stream := range playbackStreams {
+		if err := stream.file.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close playback stream %s: %w", stream.id, err))
+		}
+	}
 	for _, t := range torrents {
 		if err := t.close(); err != nil {
 			errs = append(errs, err)
@@ -382,6 +394,7 @@ func (s *Session) Close(ctx context.Context) error {
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)
 	s.lastOps = make(map[metainfo.Hash]string)
+	s.playbackStreams = make(map[string]*playbackSessionStream)
 	s.metadataFetches = make(map[metainfo.Hash]*metadataFetch)
 	s.storageCloser = nil
 	s.instanceLock = nil
