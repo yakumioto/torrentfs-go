@@ -191,8 +191,9 @@ func UnderlyingTorrentForTest(st *Torrent) *torrent.Torrent {
 // must be concurrency-safe as read: WriteStatus holds the client's read lock
 // for its whole run, so every accessor it reaches has to be synchronized too.
 // The tracker segment reaches internal/mytimer.Timer.When(), which upstream
-// reads without a lock — that is why go.mod pins v1.61.0-bep27.2 rather than
-// -bep27.1 (MIO-46).
+// reads without a lock. v1.61.0-bep27.2 (MIO-46) adds that timer lock; the
+// current v1.61.0-bep27.3 pin retains it and adds MIO-62's closed peer-request
+// shutdown cleanup.
 func UnderlyingClientForTest(s *Session) *torrent.Client {
 	return s.cl
 }

@@ -105,5 +105,10 @@ require (
 // the fix it is a data race against the announce-timer goroutine and cannot be
 // used as a status observation point (MIO-46).
 //
-// Drop this replace once upstream publishes a release containing both.
-replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.2
+// v1.61.0-bep27.3 additionally carries upstream commit
+// 0aa61207b9357e8bf52ebd43a554c97e998ded8f: remove a closed torrent's peer
+// request before returning from a failed storage read, preserving the
+// unreadPeerRequests invariant during shutdown (MIO-62).
+//
+// Drop this replace once upstream publishes a release containing all changes.
+replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.3
