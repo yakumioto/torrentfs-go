@@ -382,7 +382,7 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 ### 使用方式与错误语义
 
-进入 `/detail/<id>` 时，route coordinator 会立即显示 **发送到 TorrentFS** action shell，不等待网络 detail response；inline selector 命中时挂在详情操作区，否则固定在右下角。detail candidate 到达后会把 fixed action 迁移到 inline mount；即使 bridge 或 selector 失配，入口仍可见并显示诊断状态。route ID 只作为严格校验过的最小 candidate，detail response 负责补充标题字段；ID 冲突时按钮禁用，不猜测。
+进入 `/detail/<decimal-id>` 时，route coordinator 会立即显示 40–48px 的 TF 悬浮按钮，不等待网络 detail response；优先挂到 M-Team 原生 `#float-btns`，槽位缺失/晚到时使用 `right:24px; bottom:96px` 的自有 fallback。按钮始终 floating，不插入 `.mt-4` 或原生 action row；原生“下載”按钮只用于诊断，不劫持 click。route ID 只作为严格校验过的最小 candidate，detail response 负责补充字段；ID 冲突时按钮禁用，不猜测。
 
 未绑定或 token 失效时，点击按钮会打开同一配置界面；绑定成功后若仍处于同一详情 route，会继续当前 candidate。点击时才取得短期 `.torrent` URL，然后通过 userscript 网络 API下载并上传到现有 `POST /api/v1/torrents` multipart 接口。上传文件名是受控的 `mteam-<id>.torrent`，实际任务名称仍由 metainfo 决定。
 
@@ -394,18 +394,18 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 ### 详情入口诊断
 
-Tampermonkey 菜单提供 **显示 TorrentFS 页面诊断**。诊断只包含脱敏状态字段：`routeMatched`、`routeIdPresent`、`providerRunning`、`bridgeReady`、`detailSeen`、`candidateSource`、`inlineMountMatched`、`actionMounted`、`actionFixed` 和 `bound`；不包含 query、凭据、token、cookie、passkey、标题或签名 URL。`bridgeReady=false` 时会进行有限重试，入口仍保留并显示“页面桥接未就绪”。
+Tampermonkey 菜单提供 **显示 TorrentFS 页面诊断**。诊断只包含脱敏状态字段：`routeMatched`、`routeIdPresent`、`providerRunning`、`bridgeReady`、`detailSeen`、`candidateSource`、`nativeFloatMountFound`、`mountMode`、`nativeDownloadSeen`、`actionMounted` 和 `bound`；不包含 query、凭据、token、cookie、passkey、标题、ID或签名 URL。`bridgeReady=false` 时会进行有限重试，入口仍保留并显示“页面桥接未就绪”。
 
 ### Source-based 假设与人工验收
 
-当前脚本按固定参考源码 `M-Team-to-qBittorrent` `download_to_qb.js` v5.9 的 source-based 行为实现：详情路径假设为 `/api/torrent/detail`，成功响应包含 `message: "SUCCESS"` 以及 `id`、`name`、`originFileName`、`smallDescr`；点击时在页面上下文向 `/torrent/genDlToken` 发送 URL-encoded `id`，并使用页面 `localStorage.apiHost` 与 `localStorage.auth`。详情 URL 的单一 `/detail/<id>` segment 是 network response 之前的最小 candidate；response 只 enrich 并校验 ID。inline selector 假设为 `.mt-4.app-content__inner`、`button.ant-btn.ant-btn-link.ant-btn-sm.ant-dropdown-trigger` 的祖先 `td`，fallback 为 `.mt-4>div`，再退回固定按钮。SPA detail response 会绑定请求发起时的 route，旧 route response 会被丢弃；bridge 通过 ready ack 和有限重试判定可用性。
+当前脚本按固定参考源码 `M-Team-to-qBittorrent` `download_to_qb.js` v5.9 的 source-based 行为实现：详情路径假设为 `/api/torrent/detail`，成功响应包含 `message: "SUCCESS"` 以及 `id`、`name`、`originFileName`、`smallDescr`；点击时在页面上下文向 `/torrent/genDlToken` 发送 URL-encoded `id`，并使用页面 `localStorage.apiHost` 与 `localStorage.auth`。详情 URL 的单一 `/detail/<decimal-id>` segment 是 network response 之前的最小 candidate；response 只 enrich 并校验 ID。入口固定使用原生 `#float-btns` 或自有 fallback float，不解析或劫持原生“下載”按钮，不依赖 Ant hash class、`.mt-4` 或其他 userscript DOM。SPA detail response 会绑定请求发起时的 route，旧 route response 会被丢弃；bridge 通过 ready ack 和有限重试判定可用性。
 
 以上 M-Team 生产 endpoint、字段、XHR/fetch 实现、DOM selector、cookie/Referer 要求和最终下载重定向 host 尚未完成真实站点验证。负责人交付后应人工检查：
 
 - Chromium/Tampermonkey 能识别 metadata，并在 M-Team 页面通过原生 prompt/confirm 绑定 HTTPS、loopback HTTP、LAN/public HTTP 和带 path prefix 的地址；验证 HTTP 未确认时不会发 login 请求；
 - 原生对话框不属于页面 DOM，M-Team 页面脚本无法读取密码；GM storage 中无 password，状态对 HTTP 显示 `HTTP（不安全）`；
-- 从列表点击进入详情、直接硬刷新详情、详情 A→B、返回列表再进入详情均显示 action shell；详情 ID network response 未到达时 fixed 按钮仍可见，selector 可用后迁移到 inline；
-- 详情页只出现一个按钮，正常提交和重复提交最终只有一个 info hash 任务，文案保持“任务已可用”；
+- 从列表点击进入详情、直接硬刷新详情、详情 A→B、返回列表再进入详情均显示唯一 floating action；`#float-btns` 缺失/晚到时右下角 fallback 仍可见，出现原生 slot 后移动同一按钮；`.mt-4` 中不得出现 TorrentFS inline 按钮；
+- 原生“下載”按钮只影响 `nativeDownloadSeen` 诊断，不被劫持、不作为 URL/ID 来源；详情页只出现一个 TorrentFS floating button，正常提交和重复提交最终只有一个 info hash 任务，文案保持“任务已可用”；
 - logout、token 过期或 daemon 重启后，提交收到 `401`、清理 token、保留 profile 并要求重新输入密码；解除绑定即使网络失败也清理 profile；
 - login/logout/upload 的 3xx、错误 host/path、TLS/DNS/timeout，以及 TorrentFS `400/409/413/415/500` 均显示安全错误文案，不发生跨地址重试；
 - M-Team token 失败、下载超时/空 body/HTML、未允许的下载 host 或 redirect 均不会上传；

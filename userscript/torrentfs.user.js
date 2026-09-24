@@ -37,12 +37,11 @@
         downloadTokenPath: '/torrent/genDlToken',
         hosts: ['m-team.cc', 'm-team.io'],
         selectors: {
-            appContent: '.mt-4.app-content__inner',
-            preferredMount: 'button.ant-btn.ant-btn-link.ant-btn-sm.ant-dropdown-trigger',
-            fallbackMount: '.mt-4>div'
+            floatMount: '#float-btns',
+            nativeDownload: 'button.ant-btn-primary'
         },
         matchesPage() {
-            return Boolean(parseDetailRoute());
+            return Boolean(parseDetailRoute() || isDetailRoutePath());
         },
         isHost(host) {
             return this.hosts.some((domain) => host === domain || host.endsWith(`.${domain}`));
@@ -59,20 +58,21 @@
         if (!MTEAM.isHost(url.hostname.toLowerCase())) {
             return null;
         }
-        const match = /^\/detail\/([^/]+)\/?$/.exec(url.pathname);
+        const match = /^\/detail\/([0-9]+)\/?$/.exec(url.pathname);
         if (!match) {
             return null;
         }
-        let id;
+        return { id: match[1], routeHref: url.href };
+    }
+
+    function isDetailRoutePath(href = pageWindow.location.href) {
+        let url;
         try {
-            id = decodeURIComponent(match[1]);
+            url = new URL(href);
         } catch {
-            return null;
+            return false;
         }
-        if (!id || id.includes('/') || id.includes('\\')) {
-            return null;
-        }
-        return { id, routeHref: url.href };
+        return MTEAM.isHost(url.hostname.toLowerCase()) && /^\/detail(?:\/|$)/.test(url.pathname);
     }
 
     const diagnostics = {
@@ -84,9 +84,10 @@
         bridgeReady: false,
         detailSeen: false,
         candidateSource: 'none',
-        inlineMountMatched: false,
-        actionMounted: false,
-        actionFixed: false
+        nativeFloatMountFound: false,
+        mountMode: 'none',
+        nativeDownloadSeen: false,
+        actionMounted: false
     };
 
     function updateDiagnostics(patch) {
@@ -968,11 +969,12 @@
             }
             stylesAdded = true;
             const css = `
-                .torrentfs-mteam-button { border: 1px solid #1677ff; border-radius: 4px; background: #1677ff; color: #fff; cursor: pointer; font: inherit; margin: 4px; padding: 6px 12px; }
+                .torrentfs-mteam-button { align-items: center; background: #1677ff; border: 0; border-radius: 50%; box-shadow: 0 4px 12px rgba(0,0,0,.24); color: #fff; cursor: pointer; display: inline-flex; font: 700 12px/1 sans-serif; height: 44px; justify-content: center; margin: 0; padding: 0; width: 44px; }
                 .torrentfs-mteam-button:hover { background: #4096ff; }
-                .torrentfs-mteam-button:disabled { cursor: wait; opacity: .65; }
-                .torrentfs-mteam-button[data-fixed="true"] { bottom: 24px; position: fixed; right: 24px; z-index: 2147483646; }
-                #torrentfs-mteam-status { background: #fff; border: 1px solid #d9d9d9; border-radius: 6px; bottom: 72px; box-shadow: 0 4px 12px rgba(0,0,0,.15); color: #262626; display: none; font: 14px/1.4 sans-serif; max-width: 360px; padding: 10px 12px; position: fixed; right: 24px; z-index: 2147483646; }
+                .torrentfs-mteam-button:focus-visible { outline: 3px solid rgba(22,119,255,.35); outline-offset: 2px; }
+                .torrentfs-mteam-button:disabled { cursor: not-allowed; opacity: .65; }
+                #torrentfs-float-root { bottom: 96px; position: fixed; right: 24px; z-index: 2147483646; }
+                #torrentfs-mteam-status { background: #fff; border: 1px solid #d9d9d9; border-radius: 6px; bottom: 48px; box-shadow: 0 4px 12px rgba(0,0,0,.15); color: #262626; display: none; font: 14px/1.4 sans-serif; max-width: 280px; padding: 10px 12px; position: fixed; right: 84px; z-index: 2147483646; }
                 #torrentfs-mteam-status[data-state="error"] { border-color: #ff4d4f; color: #cf1322; }
                 #torrentfs-mteam-status[data-state="success"] { border-color: #52c41a; color: #389e0d; }
                 #torrentfs-mteam-status[data-state="busy"] { border-color: #1677ff; color: #0958d9; }
@@ -1076,13 +1078,16 @@
             return { close };
         }
 
-        function createAction(onClick, fixed) {
+        function createAction(onClick, mode) {
             ensureStyles();
             const element = document.createElement('button');
             element.type = 'button';
+            element.id = 'torrentfs-mteam-float-action';
             element.className = 'torrentfs-mteam-button';
-            element.dataset.fixed = fixed ? 'true' : 'false';
-            element.textContent = '发送到 TorrentFS';
+            element.dataset.mode = mode;
+            element.title = '发送到 TorrentFS';
+            element.setAttribute('aria-label', '发送到 TorrentFS');
+            element.textContent = 'TF';
             const listener = (event) => {
                 event.preventDefault();
                 onClick();
@@ -1092,16 +1097,18 @@
                 element,
                 setBusy(busy) {
                     element.disabled = busy;
-                    element.textContent = busy ? '提交中…' : element.dataset.label || '发送到 TorrentFS';
+                    element.textContent = busy ? '…' : element.dataset.label || 'TF';
                 },
                 setLabel(label) {
                     element.dataset.label = label;
+                    element.title = '发送到 TorrentFS';
+                    element.setAttribute('aria-label', '发送到 TorrentFS');
                     if (!element.disabled) {
-                        element.textContent = label;
+                        element.textContent = label === '发送到 TorrentFS' ? 'TF' : label === '正在识别种子…' ? '…' : '×';
                     }
                 },
-                setFixed(fixed) {
-                    element.dataset.fixed = fixed ? 'true' : 'false';
+                setMode(mode) {
+                    element.dataset.mode = mode;
                 },
                 setDisabled(disabled) {
                     element.disabled = disabled;
@@ -1154,11 +1161,12 @@
             return MTEAM.matchesPage();
         },
 
-        start(routeCandidate = parseDetailRoute()) {
+        start(routeCandidate = parseDetailRoute() || (isDetailRoutePath() ? { id: '', routeHref: pageWindow.location.href, invalid: true } : null)) {
             if (!routeCandidate) {
                 return;
             }
             ui.ensureStyles();
+            document.querySelectorAll('.torrentfs-mteam-button').forEach((element) => element.remove());
             pageBridge.install();
 
             let candidate = {
@@ -1167,7 +1175,8 @@
                 name: '',
                 originFileName: '',
                 smallDescr: '',
-                conflict: false
+                conflict: false,
+                invalid: routeCandidate.invalid === true || !routeCandidate.id
             };
             let candidateRouteHref = routeCandidate.routeHref;
             let routeKey = `${routeCandidate.routeHref}:${routeCandidate.id}`;
@@ -1177,15 +1186,17 @@
             let bindingController;
             let lastHref = pageWindow.location.href;
             let mountTimer;
+            let fallbackRoot;
             updateDiagnostics({
                 routeMatched: true,
                 routeIdPresent: Boolean(routeCandidate.id),
                 providerRunning: true,
                 detailSeen: false,
                 candidateSource: 'route',
-                inlineMountMatched: false,
+                nativeFloatMountFound: Boolean(document.querySelector(MTEAM.selectors.floatMount)),
+                mountMode: 'none',
+                nativeDownloadSeen: false,
                 actionMounted: false,
-                actionFixed: false,
                 bridgeReady: pageBridge.isReady()
             });
 
@@ -1215,26 +1226,23 @@
                 scheduleMount();
             });
 
-            const findMount = () => {
-                const appContent = document.querySelector(MTEAM.selectors.appContent);
-                if (appContent) {
-                    const preferred = appContent.querySelector(MTEAM.selectors.preferredMount);
-                    const cell = preferred?.closest('td');
-                    if (cell) {
-                        updateDiagnostics({ inlineMountMatched: true });
-                        return { element: cell, fixed: false };
+            const findFloatMount = () => {
+                const nativeMount = document.querySelector(MTEAM.selectors.floatMount);
+                const nativeDownloadSeen = Array.from(document.querySelectorAll(MTEAM.selectors.nativeDownload)).some((button) => button.textContent?.trim() === '下載');
+                updateDiagnostics({ nativeFloatMountFound: Boolean(nativeMount), nativeDownloadSeen });
+                if (nativeMount) {
+                    if (fallbackRoot) {
+                        fallbackRoot.remove();
+                        fallbackRoot = undefined;
                     }
+                    return { element: nativeMount, mode: 'native-float' };
                 }
-                const fallback = document.querySelector(MTEAM.selectors.fallbackMount);
-                if (fallback) {
-                    updateDiagnostics({ inlineMountMatched: true });
-                    return { element: fallback, fixed: false };
+                if (!fallbackRoot && document.body) {
+                    fallbackRoot = document.createElement('div');
+                    fallbackRoot.id = 'torrentfs-float-root';
+                    document.body.appendChild(fallbackRoot);
                 }
-                updateDiagnostics({ inlineMountMatched: false });
-                if (document.body) {
-                    return { element: document.body, fixed: true };
-                }
-                return null;
+                return fallbackRoot ? { element: fallbackRoot, mode: 'fallback-float' } : null;
             };
 
             const closeCredentialSession = () => {
@@ -1295,7 +1303,7 @@
                 if (activeController) {
                     return;
                 }
-                if (!selectedCandidate || selectedCandidate.conflict) {
+                if (!selectedCandidate || selectedCandidate.invalid || selectedCandidate.conflict || !selectedCandidate.id) {
                     ui.setStatus('error', '无法识别当前种子，请刷新详情页。');
                     return;
                 }
@@ -1335,27 +1343,31 @@
             };
 
             const mountAction = () => {
-                const mount = findMount();
+                const mount = findFloatMount();
                 if (!mount) {
                     return;
                 }
                 if (!action) {
-                    action = ui.createAction(() => submit(candidate, action), mount.fixed);
+                    action = ui.createAction(() => submit(candidate, action), mount.mode);
                     mount.element.appendChild(action.element);
-                } else if (action.element.dataset.fixed === 'true' && !mount.fixed) {
+                } else if (action.element.parentElement !== mount.element) {
                     mount.element.appendChild(action.element);
-                    action.setFixed(false);
+                    action.setMode(mount.mode);
                 }
-                updateDiagnostics({ actionMounted: true, actionFixed: action.element.dataset.fixed === 'true' });
+                updateDiagnostics({ actionMounted: true, mountMode: mount.mode });
                 const connection = storage.getConnection();
-                if (candidate?.conflict) {
+                if (candidate?.invalid) {
+                    action.setLabel('无法识别当前种子');
+                    action.setDisabled(true);
+                    ui.setStatus('error', '无法识别详情 ID。');
+                } else if (candidate?.conflict) {
                     action.setLabel('无法识别当前种子');
                     action.setDisabled(true);
                     ui.setStatus('error', '详情 ID 与 URL 不一致，请刷新详情页。');
                 } else if (candidate?.source === 'route' && !candidate?.name) {
-                    action.setLabel('正在识别种子…');
+                    action.setLabel(pageBridge.isFailed() ? '页面桥接未就绪' : '正在识别种子…');
                     action.setDisabled(false);
-                    ui.setStatus('busy', pageBridge.isFailed() ? '页面桥接未就绪，入口仍可见。' : '正在识别种子…');
+                    ui.setStatus(pageBridge.isFailed() ? 'error' : 'busy', pageBridge.isFailed() ? '页面桥接未就绪，入口仍可见。' : '正在识别种子…');
                 } else {
                     action.setLabel('发送到 TorrentFS');
                     action.setDisabled(false);
@@ -1423,7 +1435,7 @@
                 if (action && !document.contains(action.element)) {
                     action.dispose();
                     action = undefined;
-                    updateDiagnostics({ actionMounted: false, actionFixed: false });
+                    updateDiagnostics({ actionMounted: false, mountMode: 'none' });
                 }
                 if (candidate) {
                     scheduleMount();
@@ -1443,7 +1455,10 @@
                 observer.disconnect();
                 closeCredentialSession();
                 disposeAction();
-                updateDiagnostics({ providerRunning: false, actionMounted: false, actionFixed: false, candidateSource: 'none', detailSeen: false });
+                ui.clearStatus();
+                fallbackRoot?.remove();
+                fallbackRoot = undefined;
+                updateDiagnostics({ providerRunning: false, actionMounted: false, mountMode: 'none', candidateSource: 'none', detailSeen: false, nativeFloatMountFound: false, nativeDownloadSeen: false });
             };
         }
     };
@@ -1456,9 +1471,10 @@
         let routeTimer;
 
         const syncRoute = () => {
-            const route = parseDetailRoute();
+            const validRoute = parseDetailRoute();
+            const route = validRoute || (isDetailRoutePath() ? { id: '', routeHref: pageWindow.location.href, invalid: true } : null);
             const nextKey = route ? route.routeHref : '';
-            updateDiagnostics({ routeMatched: Boolean(route), routeIdPresent: Boolean(route?.id) });
+            updateDiagnostics({ routeMatched: Boolean(route), routeIdPresent: Boolean(validRoute?.id) });
             if (nextKey === routeKey) {
                 return;
             }
