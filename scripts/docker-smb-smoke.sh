@@ -18,6 +18,8 @@ readonly START_TIMEOUT=60
 # web-seeded download finishes comfortably inside this bound on a slow runner.
 readonly CLIENT_TIMEOUT=180
 readonly CLIENT_SMB_TIMEOUT=120
+readonly SMOKE_UID="${TORRENTFS_SMOKE_UID:-99}"
+readonly SMOKE_GID="${TORRENTFS_SMOKE_GID:-100}"
 readonly FILE_SIZE=$((64 * 1024 * 1024 + 123))
 readonly PIECE_LENGTH=$((1 * 1024 * 1024))
 # Smaller than the payload and large enough for the reader's readahead window;
@@ -61,6 +63,105 @@ probe() {
 
 logs() {
 	probe "read logs for $1" docker logs "$1" 2>&1 || true
+}
+
+all_process_identities() {
+	local container="$1" process_name="$2"
+	probe "read $process_name credentials" docker exec "$container" /bin/sh -c '
+		wanted="$1"
+		found=0
+		for status in /proc/[0-9]*/status; do
+			[ -r "$status" ] || continue
+			name="$(grep "^Name:" "$status" | cut -d: -f2 | tr -d "[:space:]")"
+			[ "$name" = "$wanted" ] || continue
+			uid_line="$(grep "^Uid:" "$status")"
+			gid_line="$(grep "^Gid:" "$status")"
+			uid_line="${uid_line#Uid:}"
+			gid_line="${gid_line#Gid:}"
+			set -- $uid_line
+			uid="$1:$2:$3:$4"
+			set -- $gid_line
+			gid="$1:$2:$3:$4"
+			pid="${status#/proc/}"
+			pid="${pid%/status}"
+			printf "%s %s %s\\n" "$pid" "$uid" "$gid"
+			found=1
+		done
+		[ "$found" -eq 1 ]
+	' sh "$process_name"
+}
+
+pid_identity() {
+	local container="$1" pid="$2"
+	probe "read PID $pid credentials" docker exec "$container" /bin/sh -c '
+		status="/proc/$1/status"
+		[ -r "$status" ] || exit 1
+		uid_line="$(grep "^Uid:" "$status")"
+		gid_line="$(grep "^Gid:" "$status")"
+		uid_line="${uid_line#Uid:}"
+		gid_line="${gid_line#Gid:}"
+		set -- $uid_line
+		uid="$1:$2:$3:$4"
+		set -- $gid_line
+		gid="$1:$2:$3:$4"
+		printf "%s %s\\n" "$uid" "$gid"
+	' sh "$pid"
+}
+
+assert_process_identities() {
+	local container="$1" process_name="$2" output pid uid gid count=0
+	if ! output="$(all_process_identities "$container" "$process_name")"; then
+		fail "$container has no $process_name process"
+	fi
+	while IFS=' ' read -r pid uid gid; do
+		[[ -n "$pid" ]] || continue
+		[[ "$uid" == "$SMOKE_UID:$SMOKE_UID:$SMOKE_UID:$SMOKE_UID" ]] ||
+			fail "$container $process_name PID $pid has UID credentials $uid, expected $SMOKE_UID in every field"
+		[[ "$gid" == "$SMOKE_GID:$SMOKE_GID:$SMOKE_GID:$SMOKE_GID" ]] ||
+			fail "$container $process_name PID $pid has GID credentials $gid, expected $SMOKE_GID in every field"
+		count=$((count + 1))
+	done <<<"$output"
+	(( count > 0 )) || fail "$container has no $process_name process"
+	printf 'docker SMB smoke: %s %s process(es) run as %s:%s\n' "$process_name" "$count" "$SMOKE_UID" "$SMOKE_GID"
+}
+
+assert_pid_identity() {
+	local container="$1" name="$2" pid="$3" actual uid gid
+	actual="$(pid_identity "$container" "$pid")" || fail "$container $name PID $pid disappeared"
+	IFS=' ' read -r uid gid <<<"$actual"
+	[[ "$uid" == "$SMOKE_UID:$SMOKE_UID:$SMOKE_UID:$SMOKE_UID" ]] ||
+		fail "$container $name PID $pid has UID credentials $uid, expected $SMOKE_UID in every field"
+	[[ "$gid" == "$SMOKE_GID:$SMOKE_GID:$SMOKE_GID:$SMOKE_GID" ]] ||
+		fail "$container $name PID $pid has GID credentials $gid, expected $SMOKE_GID in every field"
+}
+
+wait_pid_file() {
+	local container="$1" path="$2" pid=''
+	for _ in {1..60}; do
+		pid="$(probe "read $path" docker exec "$container" cat "$path" 2>/dev/null || true)"
+		if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+			printf '%s\n' "$pid"
+			return 0
+		fi
+		sleep 0.2
+	done
+	fail "$container did not create $path"
+}
+
+assert_runtime_tree() {
+	local container="$1" path mode actual
+	for path in /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache \
+		/var/lib/samba /var/cache/samba /var/log/samba; do
+		mode=755
+		[[ "$path" == /run/samba/private ]] && mode=700
+		actual="$(probe "inspect $path" docker exec "$container" stat -c '%u:%g %a %n' "$path")" ||
+			fail "$container is missing Samba runtime path $path"
+		[[ "$actual" == "$SMOKE_UID:$SMOKE_GID $mode $path" ]] ||
+			fail "$container runtime path $path is '$actual', expected '$SMOKE_UID:$SMOKE_GID $mode $path'"
+	done
+	probe 'check Samba runtime access as configured identity' docker exec "$container" /bin/sh -c \
+		'for path in /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache /var/lib/samba /var/cache/samba /var/log/samba; do test -r "$path" && test -w "$path" && test -x "$path"; done' ||
+		fail "$container runtime directories are not usable by the configured identity"
 }
 
 # remove_work_dir deletes the scratch tree even when torrentfs created files as a
@@ -283,18 +384,8 @@ cat >"$torrents_dir/.metadata/state/$torrent_hash.json" <<EOF
 {"id":"$torrent_hash","info_hash":"$torrent_hash","name":"payload.bin","state":"ready","created_at":"$now","updated_at":"$now"}
 EOF
 
-printf 'docker SMB smoke: building application image\n'
-# TORRENTFS_SMOKE_UID/GID override the image's runtime identity so the
-# container/host UID mismatch path (metadata readability and scratch cleanup)
-# can be exercised on a host whose own UID happens to match the image default.
-build_args=()
-if [[ -n "${TORRENTFS_SMOKE_UID:-}" ]]; then
-	build_args+=(--build-arg "TORRENTFS_UID=$TORRENTFS_SMOKE_UID")
-fi
-if [[ -n "${TORRENTFS_SMOKE_GID:-}" ]]; then
-	build_args+=(--build-arg "TORRENTFS_GID=$TORRENTFS_SMOKE_GID")
-fi
-bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "${build_args[@]}" "$ROOT_DIR"
+printf 'docker SMB smoke: building generic application image for %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
+bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "$ROOT_DIR"
 image_built=1
 printf 'docker SMB smoke: building SMB client image\n'
 docker build --tag "$CLIENT_IMAGE" - <<'EOF'
@@ -305,8 +396,7 @@ client_image_built=1
 bounded 30 'create SMB network' docker network create "$NETWORK" >/dev/null
 network_created=1
 
-smb_user="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c "awk -F= '\$1 == \"user\" { print \$2 }' /etc/torrentfs/runtime-identity")"
-[[ -n "$smb_user" ]] || fail 'could not determine runtime SMB username'
+smb_user=torrentfs
 smb_password="torrentfs-smoke-${BASHPID}-${RANDOM}"
 credentials_file="$work_dir/$CLIENT_CREDENTIALS_NAME"
 printf 'username=%s\npassword=%s\n' "$smb_user" "$smb_password" >"$credentials_file"
@@ -315,6 +405,8 @@ chmod 0400 "$credentials_file"
 start_app() {
 	local app="$1" app_torrents="$2" http_auth="${3:-true}"
 	local env_args=(
+		--env "PUID=$SMOKE_UID"
+		--env "PGID=$SMOKE_GID"
 		--env TORRENTFS_SMB_ENABLED=true
 		--env "TORRENTFS_USERNAME=$smb_user"
 		--env "TORRENTFS_PASSWORD=$smb_password"
@@ -400,9 +492,16 @@ smb_client() {
 		-A "/run/secrets/$CLIENT_CREDENTIALS_NAME" -m SMB3 -t "$CLIENT_SMB_TIMEOUT" "$@"
 }
 
-printf 'docker SMB smoke: starting HTTP+SMB authenticated share\n'
+printf 'docker SMB smoke: starting HTTP+SMB authenticated share as %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
 app_normal="${APP_PREFIX}-normal"
 start_app "$app_normal" "$torrents_dir" true
+assert_process_identities "$app_normal" torrentfs
+assert_process_identities "$app_normal" smbd
+torrentfs_pid="$(wait_pid_file "$app_normal" /run/torrentfs.pid)"
+assert_pid_identity "$app_normal" torrentfs "$torrentfs_pid"
+smbd_pid="$(wait_pid_file "$app_normal" /run/samba/smbd.pid)"
+assert_pid_identity "$app_normal" smbd "$smbd_pid"
+assert_runtime_tree "$app_normal"
 share_fstype="$(probe 'inspect FUSE share mount' docker exec "$app_normal" findmnt -T /share -n -o FSTYPE)"
 [[ "$share_fstype" == fuse.* ]] ||
 	fail "SMB backend at /share is not a FUSE mount: $share_fstype"
@@ -423,6 +522,7 @@ if ! listing_output="$(smb_client "$app_normal" -c 'ls' 2>&1)"; then
 	fail "authenticated SMB directory listing failed: $listing_output\napp logs:\n$(logs "$app_normal")"
 fi
 [[ "$listing_output" == *'payload.bin'* ]] || fail "SMB share root did not list payload.bin: $listing_output"
+assert_process_identities "$app_normal" smbd
 wrong_credentials="$work_dir/wrong-credentials"
 printf 'username=%s\npassword=definitely-wrong\n' "$smb_user" >"$wrong_credentials"
 chmod 0400 "$wrong_credentials"

@@ -26,6 +26,13 @@ readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
 readonly HOST_UID="$(id -u)"
 readonly HOST_GID="$(id -g)"
+if (( HOST_UID == 0 || HOST_GID == 0 )); then
+	readonly RUNTIME_UID=1500
+	readonly RUNTIME_GID=1500
+else
+	readonly RUNTIME_UID="$HOST_UID"
+	readonly RUNTIME_GID="$HOST_GID"
+fi
 
 # Every Docker call is bounded: a wedged daemon or an unmount that waits forever
 # must fail the smoke instead of hanging it. The positive scenario's bound is
@@ -75,6 +82,8 @@ fail() {
 	exit 1
 }
 
+(( RUNTIME_UID != 0 && RUNTIME_GID != 0 )) || fail "docker smoke requires non-root runtime UID/GID"
+
 # bounded runs a potentially blocking Docker operation under a timeout.
 bounded() {
 	local seconds="$1" description="$2"
@@ -89,6 +98,43 @@ probe() {
 	local description="$1"
 	shift
 	bounded "$PROBE_TIMEOUT" "$description" "$@"
+}
+
+process_identity() {
+	local container="$1" process_name="$2"
+	probe "read $process_name credentials" docker exec "$container" /bin/sh -c '
+		wanted="$1"
+		for status in /proc/[0-9]*/status; do
+			[ -r "$status" ] || continue
+			name="$(grep "^Name:" "$status" | cut -d: -f2 | tr -d "[:space:]")"
+			[ "$name" = "$wanted" ] || continue
+			uid_line="$(grep "^Uid:" "$status")"
+			gid_line="$(grep "^Gid:" "$status")"
+			uid_line="${uid_line#Uid:}"
+			gid_line="${gid_line#Gid:}"
+			set -- $uid_line
+			uid="$1:$2:$3:$4"
+			set -- $gid_line
+			gid="$1:$2:$3:$4"
+			pid="${status#/proc/}"
+			pid="${pid%/status}"
+			printf "%s %s %s\\n" "$pid" "$uid" "$gid"
+			exit 0
+		done
+		exit 1
+	' sh "$process_name"
+}
+
+wait_process_identity() {
+	local container="$1" process_name="$2" output
+	for _ in {1..60}; do
+		if output="$(process_identity "$container" "$process_name" 2>/dev/null)"; then
+			printf '%s\n' "$output"
+			return 0
+		fi
+		sleep 0.2
+	done
+	return 1
 }
 
 # container_logs prints a container's logs, bounded so an unresponsive daemon
@@ -228,7 +274,6 @@ trap 'exit 130' INT TERM
 for command_name in docker findmnt sha256sum timeout python3; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
-(( HOST_UID != 0 )) || fail "docker smoke must run as a non-root host user to exercise UID/GID ownership"
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
 probe "docker info" docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 [[ -f "$FIXTURE_TORRENT" ]] || fail "fixture is missing: $FIXTURE_TORRENT"
@@ -242,6 +287,7 @@ mkdir -p "$TORRENT_HOST_DIR" "$MOUNT_HOST_DIR" "$NEGATIVE_MOUNT_DIR"
 SEEDED_TORRENT_HOST_DIR="$TMP_DIR/seeded-torrents"
 WEBSEED_DIR="$TMP_DIR/webseed"
 mkdir -p "$SEEDED_TORRENT_HOST_DIR" "$WEBSEED_DIR"
+chmod 0777 "$TORRENT_HOST_DIR" "$SEEDED_TORRENT_HOST_DIR" "$MOUNT_HOST_DIR" "$NEGATIVE_MOUNT_DIR"
 HOST_PROPAGATION="$(findmnt -T "$MOUNT_HOST_DIR" -n -o PROPAGATION 2>/dev/null || true)"
 [[ "$HOST_PROPAGATION" == *shared* ]] || \
 	fail "host mount containing $MOUNT_HOST_DIR must use shared propagation (current: ${HOST_PROPAGATION:-unknown})"
@@ -285,15 +331,13 @@ printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 printf 'docker smoke: building %s\n' "$IMAGE"
 IMAGE_TAGGED=1
 if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build \
-	--build-arg "TORRENTFS_UID=$HOST_UID" \
-	--build-arg "TORRENTFS_GID=$HOST_GID" \
 	--tag "$IMAGE" "$ROOT_DIR"; then
 	fail "docker build failed"
 fi
 
-printf 'docker smoke: starting same-user host mount observer before FUSE\n'
-if ! bounded "$DOCKER_OP_TIMEOUT" "start the same-user host mount observer" docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
-	--user "$HOST_UID:$HOST_GID" \
+printf 'docker smoke: starting runtime-user host mount observer before FUSE\n'
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the runtime-user host mount observer" docker run --detach --name "$HOST_OBSERVER_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--entrypoint /bin/sh \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/host-mnt,bind-propagation=rslave" \
 	"$IMAGE" -c 'sleep 300' >/dev/null; then
@@ -301,9 +345,10 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the same-user host mount observer" dock
 fi
 HOST_OBSERVER_STARTED=1
 
-printf 'docker smoke: starting non-root real FUSE mount (uid=%s gid=%s)\n' "$HOST_UID" "$HOST_GID"
-if ! bounded "$DOCKER_OP_TIMEOUT" "start the non-root FUSE container" docker run --detach --name "$CONTAINER" \
-	--user "$HOST_UID:$HOST_GID" \
+printf 'docker smoke: starting runtime-configured real FUSE mount (uid=%s gid=%s)\n' "$RUNTIME_UID" "$RUNTIME_GID"
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the runtime-configured FUSE container" docker run --detach --name "$CONTAINER" \
+	--env "PUID=$RUNTIME_UID" \
+	--env "PGID=$RUNTIME_GID" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -320,15 +365,14 @@ MNT_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{rang
 	fail "container /mnt mount propagation is ${MNT_PROPAGATION:-unknown}, expected rshared"
 printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
 
-CONTAINER_UID="$(probe "read FUSE container UID" docker exec "$CONTAINER" id -u)" || \
-	fail "could not read the FUSE container UID"
-CONTAINER_GID="$(probe "read FUSE container GID" docker exec "$CONTAINER" id -g)" || \
-	fail "could not read the FUSE container GID"
-[[ "$CONTAINER_UID" == "$HOST_UID" ]] || \
-	fail "FUSE container UID is $CONTAINER_UID, expected $HOST_UID"
-[[ "$CONTAINER_GID" == "$HOST_GID" ]] || \
-	fail "FUSE container GID is $CONTAINER_GID, expected $HOST_GID"
-printf 'docker smoke: container identity verified (%s:%s)\n' "$CONTAINER_UID" "$CONTAINER_GID"
+PROCESS_CREDENTIALS="$(wait_process_identity "$CONTAINER" torrentfs)" || \
+	fail "could not read the FUSE torrentfs process credentials"
+IFS=' ' read -r TORRENTFS_PID TORRENTFS_UIDS TORRENTFS_GIDS <<<"$PROCESS_CREDENTIALS"
+[[ "$TORRENTFS_UIDS" == "$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID" ]] || \
+	fail "FUSE torrentfs UID credentials are $TORRENTFS_UIDS, expected $RUNTIME_UID in every field"
+[[ "$TORRENTFS_GIDS" == "$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID" ]] || \
+	fail "FUSE torrentfs GID credentials are $TORRENTFS_GIDS, expected $RUNTIME_GID in every field"
+printf 'docker smoke: torrentfs process %s runs as %s:%s\n' "$TORRENTFS_PID" "$RUNTIME_UID" "$RUNTIME_GID"
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do
@@ -338,13 +382,13 @@ while ((SECONDS < mount_deadline)); do
 		fail "FUSE container exited before exposing the fixture (state=$state):$'\n'$logs"
 	fi
 	if [[ "$state" == "running" ]] \
-		&& probe "expose fixture in the FUSE container" docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1 \
+		&& probe "expose fixture in the FUSE container" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1 \
 		&& probe "expose fixture in the propagation peer" docker exec "$HOST_OBSERVER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.2
 done
-if ! probe "expose fixture in the FUSE container" docker exec "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+if ! probe "expose fixture in the FUSE container" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 	logs="$(container_logs "$CONTAINER")"
 	fail "timed out waiting for $MOUNTED_PAYLOAD:$'\n'$logs"
 fi
@@ -352,7 +396,7 @@ if ! probe "expose fixture in the propagation peer" docker exec "$HOST_OBSERVER_
 	fail "timed out waiting for $MOUNT_HOST_DIR/payload.txt"
 fi
 
-ACTUAL_HASH="$(probe "read the fixture through the FUSE mount" docker exec "$CONTAINER" sha256sum "$MOUNTED_PAYLOAD")" || \
+ACTUAL_HASH="$(probe "read the fixture through the FUSE mount" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$CONTAINER" sha256sum "$MOUNTED_PAYLOAD")" || \
 	fail "could not read the fixture through the FUSE mount"
 ACTUAL_HASH="${ACTUAL_HASH%% *}"
 [[ "$ACTUAL_HASH" == "$EXPECTED_HASH" ]] || \
@@ -369,16 +413,16 @@ HOST_DIRECT_HASH="${HOST_DIRECT_HASH%% *}"
 	fail "direct host payload hash $HOST_DIRECT_HASH does not match fixture hash $EXPECTED_HASH"
 HOST_STAT="$(stat -c '%u:%g %a %n' "$MOUNT_HOST_DIR/payload.txt")" || \
 	fail "could not stat the propagated payload"
-EXPECTED_STAT="$HOST_UID:$HOST_GID 444 $MOUNT_HOST_DIR/payload.txt"
+EXPECTED_STAT="$RUNTIME_UID:$RUNTIME_GID 444 $MOUNT_HOST_DIR/payload.txt"
 [[ "$HOST_STAT" == "$EXPECTED_STAT" ]] || \
 	fail "mounted payload stat is '$HOST_STAT', expected '$EXPECTED_STAT'"
 printf 'docker smoke: mounted payload verified in container and host (%s), ownership %s:%s mode 444\n' \
-	"$ACTUAL_HASH" "$HOST_UID" "$HOST_GID"
+	"$ACTUAL_HASH" "$RUNTIME_UID" "$RUNTIME_GID"
 
 # The mount exposes torrent data only: the former control directories must be
 # absent, and the legacy .stats directory must be untouched.
 for control_path in /mnt/metadata /mnt/stats; do
-	if probe "check for $control_path" docker exec "$CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
+	if probe "check for $control_path" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$CONTAINER" test -e "$control_path" >/dev/null 2>&1; then
 		fail "$control_path exists in the mount; the data mount must expose data only"
 	fi
 done
@@ -387,7 +431,7 @@ for control_path in /host-mnt/metadata /host-mnt/stats; do
 		fail "$control_path exists in the propagated mount; the data mount must expose data only"
 	fi
 done
-if ! probe "check the legacy .stats marker" docker exec "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
+if ! probe "check the legacy .stats marker" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$CONTAINER" test -f "$LEGACY_STATS_MARKER" >/dev/null 2>&1; then
 	fail "legacy $LEGACY_STATS_MARKER was removed or rewritten by startup"
 fi
 printf 'docker smoke: control paths absent and legacy .stats preserved\n'
@@ -466,6 +510,8 @@ printf 'docker smoke: starting blocked-read shutdown scenario\n'
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
 mkdir -p "$BLOCKED_MOUNT_DIR"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run --detach --name "$BLOCKED_READ_CONTAINER" \
+	--env "PUID=$RUNTIME_UID" \
+	--env "PGID=$RUNTIME_GID" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -480,7 +526,7 @@ BLOCKED_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{
 
 blocked_deadline=$((SECONDS + 30))
 while ((SECONDS < blocked_deadline)); do
-	if probe "expose fixture in the blocked-read container" docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+	if probe "expose fixture in the blocked-read container" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 		break
 	fi
 	# Only a terminal state is a failure. A probe that times out reports an
@@ -493,7 +539,7 @@ while ((SECONDS < blocked_deadline)); do
 	fi
 	sleep 0.2
 done
-if ! probe "expose fixture in the blocked-read container" docker exec "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
+if ! probe "expose fixture in the blocked-read container" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$BLOCKED_READ_CONTAINER" test -f "$MOUNTED_PAYLOAD" >/dev/null 2>&1; then
 	collect_unmount_diagnostics "$BLOCKED_READ_CONTAINER" "$BLOCKED_MOUNT_DIR"
 	fail "blocked-read container never exposed $MOUNTED_PAYLOAD"
 fi
@@ -503,12 +549,12 @@ fi
 # stay inside the file and inside one piece; a read past EOF would return
 # immediately and prove nothing. Both are bounded and reclaimable.
 BLOCKED_READ_PIDS=()
-bounded 60 "first blocked read" docker exec "$BLOCKED_READ_CONTAINER" \
+bounded 60 "first blocked read" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$BLOCKED_READ_CONTAINER" \
 	dd if="$MOUNTED_PAYLOAD" of=/dev/null bs=8 skip=0 count=1 >/dev/null 2>&1 &
 BLOCKED_READ_PIDS+=("$!")
 # Let the first request reach the loader before the overlapping one arrives.
 sleep 1
-bounded 60 "second blocked read" docker exec "$BLOCKED_READ_CONTAINER" \
+bounded 60 "second blocked read" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$BLOCKED_READ_CONTAINER" \
 	dd if="$MOUNTED_PAYLOAD" of=/dev/null bs=8 skip=1 count=1 >/dev/null 2>&1 &
 BLOCKED_READ_PIDS+=("$!")
 sleep 2
@@ -591,10 +637,25 @@ printf 'docker smoke: blocked-read shutdown completed without a daemon-owned unm
 printf 'docker smoke: starting peer mount namespace shutdown scenario\n'
 PEER_MOUNT_DIR="$TMP_DIR/peer-mnt"
 mkdir -p "$PEER_MOUNT_DIR"
+# Start the holder before the daemon mounts FUSE. Its pre-existing bind mount
+# receives the later rshared propagation without Docker needing to inspect a
+# non-root FUSE mount while creating the holder container. A private bind made
+# after propagation keeps the FUSE connection alive when the daemon unmounts.
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer mount namespace holder" docker run --detach --name "$PEER_HOLDER_CONTAINER" \
+	--cap-add SYS_ADMIN \
+	--security-opt apparmor=unconfined \
+	--entrypoint /bin/sh \
+	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/host-mnt,bind-propagation=rslave" \
+	"$IMAGE" -c 'mkdir -p /held; sleep 300' >/dev/null; then
+	fail "could not start the peer mount namespace holder"
+fi
+
 # The peer daemon is fed by the web seed so a read cannot block on a missing
 # piece; the outstanding-request cause belongs to the blocked-read scenario,
 # not this one.
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker run --detach --name "$PEER_DAEMON_CONTAINER" \
+	--env "PUID=$RUNTIME_UID" \
+	--env "PGID=$RUNTIME_GID" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -608,14 +669,6 @@ fi
 PEER_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
 [[ "$PEER_PROPAGATION" == "rshared" ]] || \
 	fail "peer-namespace /mnt propagation is ${PEER_PROPAGATION:-unknown}, expected rshared"
-
-if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer mount namespace holder" docker run --detach --name "$PEER_HOLDER_CONTAINER" \
-	--entrypoint /bin/sh \
-	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/host-mnt,bind-propagation=rslave" \
-	"$IMAGE" -c 'sleep 300' >/dev/null; then
-	fail "could not start the peer mount namespace holder"
-fi
-
 peer_mount_deadline=$((SECONDS + 30))
 while ((SECONDS < peer_mount_deadline)); do
 	peer_state="$(probe "check peer-namespace container state" docker inspect --format '{{.State.Status}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
@@ -623,19 +676,34 @@ while ((SECONDS < peer_mount_deadline)); do
 		collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
 		fail "peer-namespace container exited before exposing the fixture (state=$peer_state)"
 	fi
-	if probe "expose fixture in the peer mount namespace" docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+	if probe "expose fixture in the peer mount namespace" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.2
 done
 # Scenario validity: without a real copy in the peer namespace the shutdown
 # below would be exercised against nothing.
-if ! probe "expose fixture in the peer mount namespace" docker exec "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
+if ! probe "expose fixture in the peer mount namespace" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$PEER_HOLDER_CONTAINER" test -f /host-mnt/payload.txt >/dev/null 2>&1; then
 	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
 	fail "the peer mount namespace never received a propagated copy of $PEER_MOUNT_DIR/payload.txt"
 fi
+if ! bounded 30 'create private peer bind' docker exec "$PEER_HOLDER_CONTAINER" /bin/sh -c \
+	'mount --bind /host-mnt /held && mount --make-private /held' >/dev/null; then
+	fail 'could not create a private peer bind mount'
+fi
+held_mount_deadline=$((SECONDS + 30))
+while ((SECONDS < held_mount_deadline)); do
+	if probe "expose private peer bind" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$PEER_HOLDER_CONTAINER" test -f /held/payload.txt >/dev/null 2>&1; then
+		break
+	fi
+	sleep 0.2
+done
+if ! probe "expose private peer bind" docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$PEER_HOLDER_CONTAINER" test -f /held/payload.txt >/dev/null 2>&1; then
+	collect_unmount_diagnostics "$PEER_DAEMON_CONTAINER" "$PEER_MOUNT_DIR"
+	fail "the private peer bind did not expose $PEER_MOUNT_DIR/payload.txt"
+fi
 PEER_HASH="$(probe "read through the peer mount namespace" \
-	docker exec "$PEER_HOLDER_CONTAINER" sha256sum /host-mnt/payload.txt)" || \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$PEER_HOLDER_CONTAINER" sha256sum /held/payload.txt)" || \
 	fail "could not read the fixture through the peer mount namespace"
 PEER_HASH="${PEER_HASH%% *}"
 [[ "$PEER_HASH" == "$EXPECTED_HASH" ]] || \
@@ -692,6 +760,8 @@ FILE_INPUT_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
 if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --name "$FILE_INPUT_CONTAINER" \
+	--env "PUID=$RUNTIME_UID" \
+	--env "PGID=$RUNTIME_GID" \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -715,7 +785,9 @@ MISSING_DIR_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
 if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --name "$MISSING_DIR_CONTAINER" \
-	--device /dev/fuse \
+		--env "PUID=$RUNTIME_UID" \
+		--env "PGID=$RUNTIME_GID" \
+		--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \

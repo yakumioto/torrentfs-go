@@ -56,21 +56,68 @@ valid_account_name() {
 	[[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_.-]*\$?$ ]]
 }
 
-read_identity() {
-	[[ -r "$IDENTITY_FILE" ]] || fail "missing runtime identity file $IDENTITY_FILE"
-	runtime_uid="$(awk -F= '$1 == "uid" { print $2; exit }' "$IDENTITY_FILE")"
-	runtime_gid="$(awk -F= '$1 == "gid" { print $2; exit }' "$IDENTITY_FILE")"
-	runtime_user="$(awk -F= '$1 == "user" { print $2; exit }' "$IDENTITY_FILE")"
-	runtime_group="$(awk -F= '$1 == "group" { print $2; exit }' "$IDENTITY_FILE")"
-	[[ "$runtime_uid" =~ ^[1-9][0-9]*$ ]] || fail 'runtime UID must be a non-root numeric UID'
-	[[ "$runtime_gid" =~ ^[1-9][0-9]*$ ]] || fail 'runtime GID must be a non-root numeric GID'
-	valid_account_name "$runtime_user" || fail 'runtime username is invalid'
-	valid_account_name "$runtime_group" || fail 'runtime group name is invalid'
-	[[ "$(id -u "$runtime_user" 2>/dev/null || true)" == "$runtime_uid" ]] ||
-		fail 'runtime username and UID do not match'
-	[[ "$(getent group "$runtime_gid" | awk -F: 'NR == 1 { print $1 }')" == "$runtime_group" ]] ||
-		fail 'runtime group name and GID do not match'
-	(( runtime_uid != 0 )) || fail 'SMB mode cannot use UID 0 for torrentfs'
+validate_runtime_id() {
+	local variable_name="$1" value="$2" normalized
+	if [[ -z "$value" ]]; then
+		fail "$variable_name must be an unsigned decimal integer from 1 to 4294967294 (got empty value)"
+	fi
+	if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+		fail "$variable_name must be an unsigned decimal integer from 1 to 4294967294 (got invalid value)"
+	fi
+
+	normalized="$value"
+	while [[ "${#normalized}" -gt 1 && "${normalized:0:1}" == 0 ]]; do
+		normalized="${normalized:1}"
+	done
+	if [[ "$normalized" == 0 ]]; then
+		fail "$variable_name must be between 1 and 4294967294 (got zero)"
+	fi
+	if [[ "${#normalized}" -gt 10 || ( "${#normalized}" -eq 10 && "$normalized" > 4294967294 ) ]]; then
+		fail "$variable_name must be between 1 and 4294967294 (got out-of-range value)"
+	fi
+	printf '%s\n' "$normalized"
+}
+
+initialize_runtime_identity() {
+	local identity_tmp
+	runtime_uid="$(validate_runtime_id PUID "${PUID-1000}")"
+	runtime_gid="$(validate_runtime_id PGID "${PGID-1000}")"
+	runtime_user=torrentfs
+	runtime_group=torrentfs
+
+	if getent group "$runtime_group" >/dev/null 2>&1; then
+		groupmod --gid "$runtime_gid" --non-unique "$runtime_group" ||
+			fail "could not set group $runtime_group to GID $runtime_gid"
+	else
+		groupadd --gid "$runtime_gid" --non-unique "$runtime_group" ||
+			fail "could not create group $runtime_group with GID $runtime_gid"
+	fi
+	if getent passwd "$runtime_user" >/dev/null 2>&1; then
+		usermod --uid "$runtime_uid" --gid "$runtime_group" --non-unique "$runtime_user" ||
+			fail "could not set user $runtime_user to UID $runtime_uid:$runtime_gid"
+	else
+		useradd --uid "$runtime_uid" --gid "$runtime_group" --non-unique \
+			--no-create-home --shell /usr/sbin/nologin "$runtime_user" ||
+			fail "could not create user $runtime_user with UID $runtime_uid:$runtime_gid"
+	fi
+
+	[[ "$(id -u "$runtime_user")" == "$runtime_uid" ]] ||
+		fail "user $runtime_user does not resolve to UID $runtime_uid"
+	[[ "$(id -g "$runtime_user")" == "$runtime_gid" ]] ||
+		fail "group $runtime_group does not resolve to GID $runtime_gid"
+
+	identity_tmp="$(mktemp "${IDENTITY_FILE}.tmp.XXXXXX")" ||
+		fail "could not create temporary runtime identity file"
+	printf 'uid=%s\ngid=%s\nuser=%s\ngroup=%s\n' \
+		"$runtime_uid" "$runtime_gid" "$runtime_user" "$runtime_group" >"$identity_tmp"
+	chown root:root "$identity_tmp"
+	chmod 0444 "$identity_tmp"
+	mv -f -- "$identity_tmp" "$IDENTITY_FILE"
+}
+
+prepare_runtime_dirs() {
+	chown "$runtime_uid:$runtime_gid" "$MOUNTPOINT"
+	chmod 0755 "$MOUNTPOINT"
 }
 
 validate_mountpoint() {
@@ -135,8 +182,12 @@ prepare_samba() {
 	mkdir -p /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache \
 		/var/lib/samba /var/cache/samba /var/log/samba
 	chown -R "$runtime_uid:$runtime_gid" /run/samba /var/lib/samba /var/cache/samba /var/log/samba
-	chmod 0755 /run/samba
+	chmod 0755 /run/samba /run/samba/lock /run/samba/state /run/samba/cache \
+		/var/lib/samba /var/cache/samba /var/log/samba
 	chmod 0700 /run/samba/private
+	: >"$TORRENTFS_PID_FILE"
+	chown "$runtime_uid:$runtime_gid" "$TORRENTFS_PID_FILE"
+	chmod 0644 "$TORRENTFS_PID_FILE"
 
 	password="$TORRENTFS_PASSWORD"
 	template="$(<"$SMB_TEMPLATE")"
@@ -293,15 +344,20 @@ unexpected_torrentfs_exit() {
 	exit 1
 }
 
+[[ "$EUID" == 0 ]] ||
+	fail 'container entrypoint must start as root; do not use docker run --user; configure PUID and PGID instead'
+initialize_runtime_identity
+prepare_runtime_dirs
+validate_torrents_dir
+
 if ! smb_enabled; then
-	exec /usr/local/bin/torrentfs "$@"
+	log "starting torrentfs as $runtime_uid:$runtime_gid"
+	exec setpriv --reuid="$runtime_uid" --regid="$runtime_gid" --clear-groups -- \
+		/usr/local/bin/torrentfs "$@"
 fi
 
-[[ "$EUID" == 0 ]] || fail 'SMB mode requires the container entrypoint to start as root'
-read_identity
 validate_smb_credentials
 validate_user_args "$@"
-validate_torrents_dir
 validate_mountpoint
 validate_samba_capability
 prepare_samba
@@ -313,9 +369,12 @@ on_shutdown_signal() {
 trap on_shutdown_signal INT TERM
 log "starting torrentfs as $runtime_uid:$runtime_gid"
 setsid --wait -- setpriv --reuid="$runtime_uid" --regid="$runtime_gid" --clear-groups -- \
-	/usr/local/bin/torrentfs -mountpoint "$MOUNTPOINT" "$@" &
+	/bin/sh -c '
+		printf "%s\\n" "$$" >"$1"
+		shift
+		exec /usr/local/bin/torrentfs "$@"
+	' sh "$TORRENTFS_PID_FILE" -mountpoint "$MOUNTPOINT" "$@" &
 torrentfs_pid=$!
-printf '%s\n' "$torrentfs_pid" >"$TORRENTFS_PID_FILE"
 
 ready_deadline=$((SECONDS + START_TIMEOUT_SECONDS))
 while :; do
