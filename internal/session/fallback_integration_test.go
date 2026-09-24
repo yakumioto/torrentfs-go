@@ -24,7 +24,11 @@ func TestReadWithoutPlaybackStreamIsForegroundOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("OpenFile did not return a closable handle")
 	}
-	defer closer.Close()
+	defer func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close fallback handle: %v", err)
+		}
+	}()
 
 	buf := make([]byte, 64)
 	if _, err := reader.ReadAt(buf, 0); err != nil {
@@ -60,7 +64,11 @@ func TestDirectReadAtHandleCloseCancelsOwnDemand(t *testing.T) {
 	}
 	closeA := readerA.(interface{ Close() error })
 	closeB := readerB.(interface{ Close() error })
-	defer closeB.Close()
+	defer func() {
+		if err := closeB.Close(); err != nil {
+			t.Errorf("close reader B: %v", err)
+		}
+	}()
 
 	readDone := make(chan error, 1)
 	go func() {
