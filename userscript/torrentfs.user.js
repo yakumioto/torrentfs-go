@@ -1227,6 +1227,9 @@
             });
 
             const findFloatMount = () => {
+                if (fallbackRoot && !document.contains(fallbackRoot)) {
+                    fallbackRoot = undefined;
+                }
                 const nativeMount = document.querySelector(MTEAM.selectors.floatMount);
                 const nativeDownloadSeen = Array.from(document.querySelectorAll(MTEAM.selectors.nativeDownload)).some((button) => button.textContent?.trim() === '下載');
                 updateDiagnostics({ nativeFloatMountFound: Boolean(nativeMount), nativeDownloadSeen });
@@ -1347,6 +1350,11 @@
                 if (!mount) {
                     return;
                 }
+                document.querySelectorAll('#torrentfs-mteam-float-action').forEach((element) => {
+                    if (!action || element !== action.element) {
+                        element.remove();
+                    }
+                });
                 if (!action) {
                     action = ui.createAction(() => submit(candidate, action), mount.mode);
                     mount.element.appendChild(action.element);
@@ -1433,9 +1441,8 @@
             const observer = new MutationObserver(() => {
                 routeChanged();
                 if (action && !document.contains(action.element)) {
-                    action.dispose();
-                    action = undefined;
-                    updateDiagnostics({ actionMounted: false, mountMode: 'none' });
+                    updateDiagnostics({ actionMounted: false });
+                    scheduleMount();
                 }
                 if (candidate) {
                     scheduleMount();
