@@ -405,18 +405,19 @@
 
         const post = (payload) => window.postMessage(Object.assign({ source }, payload), '*');
         const isDetailRequest = (url) => String(url || '').indexOf(detailPath) !== -1;
-        const emitDetail = (text) => {
+        const emitDetail = (text, routeHref) => {
             let response;
             try {
                 response = JSON.parse(text);
             } catch {
                 return;
             }
-            if (!response || response.message !== 'SUCCESS' || !response.data || !response.data.id) {
+            if (!routeHref || !response || response.message !== 'SUCCESS' || !response.data || !response.data.id) {
                 return;
             }
             post({
                 type: 'detail',
+                routeHref,
                 candidate: {
                     id: response.data.id,
                     name: response.data.name,
@@ -429,11 +430,12 @@
         const originalOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function (method, url) {
             const requestUrl = String(url || '');
+            const requestRouteHref = window.location.href;
             if (isDetailRequest(requestUrl) && !this.__torrentfsMteamDetailListener) {
                 this.__torrentfsMteamDetailListener = true;
                 this.addEventListener('readystatechange', () => {
                     if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
-                        emitDetail(this.responseText);
+                        emitDetail(this.responseText, requestRouteHref);
                     }
                 });
             }
@@ -444,13 +446,14 @@
             const originalFetch = window.fetch;
             window.fetch = function (input) {
                 const requestUrl = typeof input === 'string' ? input : input && input.url;
+                const requestRouteHref = window.location.href;
                 const result = originalFetch.apply(this, arguments);
                 if (!isDetailRequest(requestUrl)) {
                     return result;
                 }
                 return result.then((response) => {
                     try {
-                        response.clone().text().then(emitDetail).catch(() => {});
+                        response.clone().text().then((text) => emitDetail(text, requestRouteHref)).catch(() => {});
                     } catch {
                         return response;
                     }
@@ -458,6 +461,22 @@
                 });
             };
         }
+
+        const notifyRouteChange = () => post({ type: 'route-change', routeHref: window.location.href });
+        const originalPushState = window.history.pushState;
+        const originalReplaceState = window.history.replaceState;
+        window.history.pushState = function () {
+            const result = originalPushState.apply(this, arguments);
+            notifyRouteChange();
+            return result;
+        };
+        window.history.replaceState = function () {
+            const result = originalReplaceState.apply(this, arguments);
+            notifyRouteChange();
+            return result;
+        };
+        window.addEventListener('popstate', notifyRouteChange);
+        window.addEventListener('hashchange', notifyRouteChange);
 
         window.addEventListener('message', (event) => {
             if (event.source !== window || !event.data || event.data.source !== source || event.data.type !== 'request-download-url') {
@@ -524,7 +543,18 @@
                 if ((event.source !== pageWindow && event.source !== window) || !event.data || event.data.source !== BRIDGE_SOURCE || event.data.type !== 'detail') {
                     return;
                 }
-                callback(event.data.candidate);
+                callback(event.data);
+            };
+            pageWindow.addEventListener('message', listener);
+            return () => pageWindow.removeEventListener('message', listener);
+        }
+
+        function listenRoute(callback) {
+            const listener = (event) => {
+                if ((event.source !== pageWindow && event.source !== window) || !event.data || event.data.source !== BRIDGE_SOURCE || event.data.type !== 'route-change') {
+                    return;
+                }
+                callback(event.data.routeHref);
             };
             pageWindow.addEventListener('message', listener);
             return () => pageWindow.removeEventListener('message', listener);
@@ -572,7 +602,7 @@
             });
         }
 
-        return { install, listenDetail, requestDownloadUrl };
+        return { install, listenDetail, listenRoute, requestDownloadUrl };
     })();
 
     // UI
@@ -684,6 +714,7 @@
             pageBridge.install();
 
             let candidate;
+            let candidateRouteHref = '';
             let routeKey = '';
             let action;
             let activeController;
@@ -778,38 +809,51 @@
             };
 
             const handleDetail = (value) => {
-                if (!value || value.id === undefined || value.id === null || !this.matches()) {
+                const responseRouteHref = value && typeof value.routeHref === 'string' ? value.routeHref : '';
+                const currentRouteHref = pageWindow.location.href;
+                if (!responseRouteHref || responseRouteHref !== currentRouteHref || !value.candidate || value.candidate.id === undefined || value.candidate.id === null || !this.matches()) {
                     return;
                 }
                 const nextCandidate = {
-                    id: String(value.id),
-                    name: typeof value.name === 'string' ? value.name : '',
-                    originFileName: typeof value.originFileName === 'string' ? value.originFileName : '',
-                    smallDescr: typeof value.smallDescr === 'string' ? value.smallDescr : ''
+                    id: String(value.candidate.id),
+                    name: typeof value.candidate.name === 'string' ? value.candidate.name : '',
+                    originFileName: typeof value.candidate.originFileName === 'string' ? value.candidate.originFileName : '',
+                    smallDescr: typeof value.candidate.smallDescr === 'string' ? value.candidate.smallDescr : ''
                 };
-                const nextRouteKey = `${pageWindow.location.host}${pageWindow.location.pathname}:${nextCandidate.id}`;
+                const nextRouteKey = `${responseRouteHref}:${nextCandidate.id}`;
+                lastHref = responseRouteHref;
                 if (routeKey !== nextRouteKey) {
                     disposeAction();
                     ui.clearStatus();
                     routeKey = nextRouteKey;
                 }
                 candidate = nextCandidate;
+                candidateRouteHref = responseRouteHref;
                 scheduleMount();
             };
 
             const detailDispose = pageBridge.listenDetail(handleDetail);
-            const routeChanged = () => {
-                if (lastHref === pageWindow.location.href) {
+            const routeChanged = (observedHref) => {
+                const currentRouteHref = pageWindow.location.href;
+                if (observedHref && observedHref !== currentRouteHref) {
                     return;
                 }
-                lastHref = pageWindow.location.href;
+                if (lastHref === currentRouteHref) {
+                    return;
+                }
+                lastHref = currentRouteHref;
+                if (candidateRouteHref === currentRouteHref) {
+                    return;
+                }
                 disposeAction();
                 candidate = undefined;
+                candidateRouteHref = '';
                 routeKey = '';
                 ui.clearStatus();
             };
             pageWindow.addEventListener('popstate', routeChanged);
             pageWindow.addEventListener('hashchange', routeChanged);
+            const routeDispose = pageBridge.listenRoute(routeChanged);
 
             const observer = new MutationObserver(() => {
                 routeChanged();
@@ -825,12 +869,11 @@
                 observer.observe(document.documentElement, { childList: true, subtree: true });
             }
 
-            const routeTimer = pageWindow.setInterval(routeChanged, 500);
             return () => {
                 detailDispose();
+                routeDispose();
                 pageWindow.removeEventListener('popstate', routeChanged);
                 pageWindow.removeEventListener('hashchange', routeChanged);
-                pageWindow.clearInterval(routeTimer);
                 pageWindow.clearTimeout(mountTimer);
                 observer.disconnect();
                 disposeAction();
