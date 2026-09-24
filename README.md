@@ -373,7 +373,7 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 1. 确保 TorrentFS 已启用 HTTP auth，并记住其服务根地址。地址可以包含 reverse-proxy path prefix，例如 `https://nas.example.com/torrentfs/`；不要输入 `/api/v1/...` 具体 API endpoint。
 2. 在 Tampermonkey 中导入 `userscript/torrentfs.user.js`。脚本使用已批准的 `@connect *` 以支持任意用户配置地址，但运行时只请求当前配置的 TorrentFS base 和允许的 M-Team 下载 host；没有远程 `@require`。
-3. 在 M-Team 详情页打开 Tampermonkey 菜单，选择 **配置 / 重新绑定 TorrentFS**，使用 userscript sandbox 的浏览器原生 prompt/confirm 输入服务地址、用户名和密码。原生对话框不属于页面 DOM，M-Team 页面无法导航、替换或读取其中的密码；密码不会进入 page bridge、URL、console 或 GM storage。
+3. 在 M-Team 详情页打开 Tampermonkey 菜单，选择 **配置 / 重新绑定 TorrentFS**，使用 userscript sandbox 在脚本加载早期捕获的浏览器原生 prompt/confirm 输入服务地址、用户名和密码。原生对话框不属于页面 DOM，M-Team 页面无法导航、替换或读取其中的密码；密码不会进入 page bridge、URL、console 或 GM storage。
 4. HTTP 地址仍然允许，但每次输入密码绑定前必须勾选明文风险告知。HTTP 会明文传输用户名、密码、Bearer token、torrent 元数据和上传内容，可能被观察、窃取或篡改；勾选即表示理解并自行承担风险。脚本不会声称 HTTP 已加密，也没有忽略 HTTPS 证书错误或自动降级开关。
 5. 登录成功后只保存 normalized base URL、username、opaque Bearer token、`pairedAt`、`expiresAt` 和由地址派生的 `insecureHttp` 标志。旧版 loopback `{baseUrl, token, pairedAt}` 会迁移为 v2 profile；不保存密码。
 6. 更换服务时先完成新地址登录，再替换本地 profile；旧 token 会 best-effort logout。选择 **解除 TorrentFS 绑定** 会 best-effort logout，并无条件清理本地 token/profile。
