@@ -13,8 +13,8 @@
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
-// @grant        unsafeWindow
 // @connect      *
+// @sandbox      DOM
 // @run-at       document-start
 // @license      MPL-2.0
 // ==/UserScript==
@@ -26,7 +26,7 @@
     const MAX_TORRENT_BYTES = 10 * 1024 * 1024;
     const REQUEST_TIMEOUT = 30 * 1000;
     const BRIDGE_SOURCE = 'torrentfs-mteam-bridge';
-    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const pageWindow = window;
     // Capture sandbox dialog functions before any page event handler runs; they return browser UI values, not page DOM data.
     const sandboxPrompt = typeof globalThis.prompt === 'function' ? globalThis.prompt.bind(globalThis) : null;
     const sandboxConfirm = typeof globalThis.confirm === 'function' ? globalThis.confirm.bind(globalThis) : null;
