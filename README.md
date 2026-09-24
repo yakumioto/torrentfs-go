@@ -365,6 +365,43 @@ npm run dev --prefix web
 
 Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8080`。后端仍需在另一个终端运行；生产构建使用同源的相对 `/api/v1` 请求。
 
+## M-Team userscript
+
+仓库提供一个不依赖构建步骤的 Tampermonkey userscript：[`userscript/torrentfs.user.js`](userscript/torrentfs.user.js)。它只支持 M-Team 详情页，不支持列表页、其他 PT 站点、LAN/公网 TorrentFS 地址或 qBittorrent/Transmission 选项。
+
+### 安装与绑定
+
+1. 使用启用了 HTTP auth 的 TorrentFS 实例，并通过内置 Web UI 在 `http://localhost:<port>/` 或 `http://127.0.0.1:<port>/` 登录。userscript 不支持匿名配对。
+2. 在 Tampermonkey 中导入 `userscript/torrentfs.user.js`。脚本没有远程 `@require`，也没有 `@connect *`；网络权限只列出 loopback 和 M-Team 域名。
+3. 保持 Web UI 登录页面打开，在 Tampermonkey 菜单执行 **绑定当前 TorrentFS**。脚本从当前 tab 的 `sessionStorage['torrentfs.access-token']` 读取短期 Bearer token，使用 `GET /api/v1/torrents` 验证后才保存绑定。
+4. 需要更换服务或清除 token 时，在同一 Web UI 页面执行 **解除 TorrentFS 绑定**，再重新绑定。
+
+绑定状态只保存到 userscript 私有存储中的 loopback `baseUrl`、opaque token 和时间戳；TorrentFS 密码、M-Team cookie、Authorization、passkey 和签名下载 URL不会写入持久化存储、页面 DOM 或日志。
+
+### 使用方式与错误语义
+
+在 M-Team 详情页加载完成后，脚本会从详情请求提取候选信息并在下载操作区添加 **发送到 TorrentFS** 按钮；页面结构不匹配时使用右侧固定按钮。点击时才取得短期 `.torrent` URL，然后通过 userscript 网络 API下载并上传到现有 `POST /api/v1/torrents` multipart 接口。上传文件名是受控的 `mteam-<id>.torrent`，实际任务名称仍由 metainfo 决定。
+
+- `201` 显示中性文案“任务已可用”；现有 API 对首次和重复上传都返回 `201`，因此脚本不会声称一定新建。
+- `401` 清除本地绑定并要求回到 Web UI 重新绑定。
+- `400`、`409`、`413`、`415` 和 `500` 分别提示种子无效、任务正在删除、超过上传限制、上传格式不兼容和服务端失败。
+- 下载超时、空响应、HTML 登录页或上传超时不会自动重放；上传结果未知时可手动重试，后端按 info hash 去重。
+
+### Source-based 假设与人工验收
+
+当前脚本按固定参考源码 `M-Team-to-qBittorrent` `download_to_qb.js` v5.9 的 source-based 行为实现：详情路径假设为 `/api/torrent/detail`，成功响应包含 `message: "SUCCESS"` 以及 `id`、`name`、`originFileName`、`smallDescr`；点击时在页面上下文向 `/torrent/genDlToken` 发送 URL-encoded `id`，并使用页面 `localStorage.apiHost` 与 `localStorage.auth`。inline selector 假设为 `.mt-4.app-content__inner`、`button.ant-btn.ant-btn-link.ant-btn-sm.ant-dropdown-trigger` 的祖先 `td`，fallback 为 `.mt-4>div`，再退回固定按钮。
+
+以上 M-Team 生产 endpoint、字段、XHR/fetch 实现、DOM selector、cookie/Referer 要求和最终下载重定向 host 尚未完成真实站点验证。负责人交付后应人工检查：
+
+- Chromium/Tampermonkey 能识别脚本 metadata，并能在 loopback Web UI 完成绑定和解除绑定；
+- 详情页只出现一个按钮，正常提交和重复提交最终只有一个 info hash 任务，文案保持“任务已可用”；
+- Web UI logout、token 过期或 daemon 重启后，提交收到 `401`、清理绑定并要求重新配对；
+- M-Team token 失败、下载超时/空 body/HTML、未知 redirect host 以及 TorrentFS `400/409/413/415/500` 均显示安全的错误文案；
+- 浏览器开发者工具和服务日志不出现 TorrentFS 密码、Bearer token、M-Team Authorization、passkey 或完整签名 URL；
+- 最终下载 host 能被 metadata 中的有限 `@connect` 条目覆盖。若必须使用 `@connect *`、非 loopback endpoint、站点凭据透传或新增公共 API，应停止并重新审批，而不是扩大当前脚本权限。
+
+本次实现只交付 userscript 源码和本节文档；未执行自动化测试、lint、typecheck、构建检查或真实 M-Team/Tampermonkey 验证。
+
 ## 配置
 
 可以直接使用内置默认值，也可以复制仓库中的完整示例：
