@@ -626,18 +626,11 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, opID string) {
 // owned by the registry hash.
 func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
 	var errs []error
-	var playbackStreams []*playbackSessionStream
 	if st != nil {
-		playbackStreams = s.detachPlaybackStreamsForTorrent(st)
 		if err := st.close(); err != nil {
 			errs = append(errs, err)
 		}
 		st.tor.Drop()
-	}
-	for _, stream := range playbackStreams {
-		if err := stream.file.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close playback stream %s: %w", stream.id, err))
-		}
 	}
 	if err := s.removeFinalMetainfoForDelete(hash); err != nil {
 		errs = append(errs, err)

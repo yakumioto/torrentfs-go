@@ -41,14 +41,12 @@ type FileStatus struct {
 
 // TorrentStatusView is one consistent status snapshot for a torrent.
 type TorrentStatusView struct {
-	Torrent         TorrentView
-	MetainfoReady   bool
-	PieceLength     int64
-	Pieces          []PieceStatus
-	Files           []FileStatus
-	Playback        []PlaybackStreamSnapshot
-	PlaybackStreams []PlaybackStreamSnapshot
-	Network         NetworkStatus
+	Torrent       TorrentView
+	MetainfoReady bool
+	PieceLength   int64
+	Pieces        []PieceStatus
+	Files         []FileStatus
+	Network       NetworkStatus
 }
 
 // NetworkStatus is the client-visible network state behind a status snapshot.
@@ -173,8 +171,6 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 	if info == nil {
 		return view, nil
 	}
-	view.Playback = s.playbackSnapshotsFor(st)
-	view.PlaybackStreams = append([]PlaybackStreamSnapshot(nil), view.Playback...)
 
 	pieceCount := info.NumPieces()
 	view.MetainfoReady = true

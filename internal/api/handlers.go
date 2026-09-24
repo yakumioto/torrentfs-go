@@ -63,47 +63,12 @@ type fileStatusResponse struct {
 }
 
 type torrentStatusResponse struct {
-	Torrent       torrentResponse          `json:"torrent"`
-	MetainfoReady bool                     `json:"metainfo_ready"`
-	PieceLength   int64                    `json:"piece_length"`
-	Pieces        []pieceStatusResponse    `json:"pieces"`
-	Files         []fileStatusResponse     `json:"files"`
-	Playback      []playbackStreamResponse `json:"playback_streams"`
-	Network       networkStatusResponse    `json:"network"`
-}
-
-type playbackStreamRequest struct {
-	Path          string `json:"path"`
-	PositionBytes int64  `json:"position_bytes"`
-}
-
-type playbackUpdateRequest struct {
-	Sequence      uint64 `json:"sequence"`
-	Event         string `json:"event"`
-	PositionBytes int64  `json:"position_bytes"`
-}
-
-type playbackStreamResponse struct {
-	ID                    string    `json:"stream_id"`
-	TorrentID             string    `json:"torrent_id"`
-	Path                  string    `json:"path"`
-	Generation            uint64    `json:"generation"`
-	PlaybackCursor        int64     `json:"playback_cursor"`
-	PlaybackConsumedBytes int64     `json:"playback_consumed_bytes"`
-	UsefulDownloadBytes   int64     `json:"useful_download_bytes"`
-	CacheResidentBytes    int64     `json:"cache_resident_bytes"`
-	BufferedBytes         int64     `json:"buffered_bytes"`
-	TargetLow             int64     `json:"target_low_bytes"`
-	TargetHigh            int64     `json:"target_high_bytes"`
-	EffectiveLow          int64     `json:"effective_low_bytes"`
-	EffectiveHigh         int64     `json:"effective_high_bytes"`
-	State                 string    `json:"state"`
-	LastSequence          uint64    `json:"last_sequence"`
-	LastUpdate            time.Time `json:"last_update"`
-	ExpiresAt             time.Time `json:"expires_at"`
-	ForegroundPieces      []int     `json:"foreground_pieces"`
-	BackgroundPieces      []int     `json:"background_pieces"`
-	PinnedPieces          []int     `json:"pinned_pieces"`
+	Torrent       torrentResponse       `json:"torrent"`
+	MetainfoReady bool                  `json:"metainfo_ready"`
+	PieceLength   int64                 `json:"piece_length"`
+	Pieces        []pieceStatusResponse `json:"pieces"`
+	Files         []fileStatusResponse  `json:"files"`
+	Network       networkStatusResponse `json:"network"`
 }
 
 // networkStatusResponse reports network visibility next to the piece data.
@@ -159,17 +124,12 @@ func newRuntimeStatsResponse(view session.RuntimeStatsView) runtimeStatsResponse
 }
 
 func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusResponse {
-	playback := view.Playback
-	if len(playback) == 0 {
-		playback = view.PlaybackStreams
-	}
 	out := torrentStatusResponse{
 		Torrent:       newTorrentResponse(view.Torrent),
 		MetainfoReady: view.MetainfoReady,
 		PieceLength:   view.PieceLength,
 		Pieces:        make([]pieceStatusResponse, len(view.Pieces)),
 		Files:         make([]fileStatusResponse, len(view.Files)),
-		Playback:      make([]playbackStreamResponse, len(playback)),
 	}
 	for i, piece := range view.Pieces {
 		out.Pieces[i] = pieceStatusResponse{
@@ -187,36 +147,8 @@ func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusRespo
 			PieceEnd:   file.PieceEnd,
 		}
 	}
-	for i, stream := range playback {
-		out.Playback[i] = newPlaybackStreamResponse(stream)
-	}
 	out.Network = newNetworkStatusResponse(view.Network)
 	return out
-}
-
-func newPlaybackStreamResponse(view session.PlaybackStreamSnapshot) playbackStreamResponse {
-	return playbackStreamResponse{
-		ID:                    view.ID,
-		TorrentID:             view.TorrentID,
-		Path:                  view.Path,
-		Generation:            view.Generation,
-		PlaybackCursor:        view.PlaybackCursor,
-		PlaybackConsumedBytes: view.PlaybackConsumedBytes,
-		UsefulDownloadBytes:   view.UsefulDownloadBytes,
-		CacheResidentBytes:    view.CacheResidentBytes,
-		BufferedBytes:         view.BufferedBytes,
-		TargetLow:             view.TargetLow,
-		TargetHigh:            view.TargetHigh,
-		EffectiveLow:          view.EffectiveLow,
-		EffectiveHigh:         view.EffectiveHigh,
-		State:                 view.State,
-		LastSequence:          view.LastSequence,
-		LastUpdate:            view.LastUpdate,
-		ExpiresAt:             view.ExpiresAt,
-		ForegroundPieces:      append([]int(nil), view.ForegroundPieces...),
-		BackgroundPieces:      append([]int(nil), view.BackgroundPieces...),
-		PinnedPieces:          append([]int(nil), view.PinnedPieces...),
-	}
 }
 
 func newNetworkStatusResponse(view session.NetworkStatus) networkStatusResponse {
@@ -361,93 +293,6 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		State:       string(op.State),
 		Error:       op.Error,
 	})
-}
-
-func (s *Server) handlePlaybackStart(w http.ResponseWriter, r *http.Request) {
-	backend, ok := s.backend.(PlaybackBackend)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "playback control is unavailable")
-		return
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var body playbackStreamRequest
-	if err := decodeJSON(r.Body, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid playback stream body")
-		return
-	}
-	if strings.TrimSpace(body.Path) == "" || body.PositionBytes < 0 {
-		writeError(w, http.StatusBadRequest, "path and non-negative position_bytes are required")
-		return
-	}
-	snapshot, err := backend.StartPlaybackStream(r.Context(), r.PathValue("id"), session.PlaybackStreamStart{
-		Path:          body.Path,
-		PositionBytes: body.PositionBytes,
-	})
-	if err != nil {
-		writePlaybackError(w, "start playback", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, newPlaybackStreamResponse(snapshot))
-}
-
-func (s *Server) handlePlaybackUpdate(w http.ResponseWriter, r *http.Request) {
-	backend, ok := s.backend.(PlaybackBackend)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "playback control is unavailable")
-		return
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var body playbackUpdateRequest
-	if err := decodeJSON(r.Body, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid playback update body")
-		return
-	}
-	snapshot, err := backend.UpdatePlaybackStream(r.Context(), r.PathValue("stream_id"), session.PlaybackStreamUpdate{
-		Sequence:      body.Sequence,
-		Event:         body.Event,
-		PositionBytes: body.PositionBytes,
-	})
-	if err != nil {
-		writePlaybackError(w, "update playback", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, newPlaybackStreamResponse(snapshot))
-}
-
-func (s *Server) handlePlaybackStop(w http.ResponseWriter, r *http.Request) {
-	backend, ok := s.backend.(PlaybackBackend)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "playback control is unavailable")
-		return
-	}
-	if err := backend.StopPlaybackStream(r.Context(), r.PathValue("stream_id")); err != nil {
-		writePlaybackError(w, "stop playback", err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func writePlaybackError(w http.ResponseWriter, action string, err error) {
-	switch {
-	case errors.Is(err, session.ErrPlaybackStreamNotFound):
-		writeError(w, http.StatusNotFound, "unknown playback stream")
-	case errors.Is(err, session.ErrPlaybackSequenceConflict):
-		writeError(w, http.StatusConflict, "playback sequence conflict")
-	case errors.Is(err, session.ErrPlaybackEventInvalid), errors.Is(err, session.ErrPlaybackPositionInvalid):
-		writeError(w, http.StatusBadRequest, err.Error())
-	default:
-		writeSessionError(w, action, err)
-	}
 }
 
 func readUploadedTorrent(r *http.Request) ([]byte, error) {

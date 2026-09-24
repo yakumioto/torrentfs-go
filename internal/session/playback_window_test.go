@@ -643,7 +643,7 @@ func TestPlaybackWindowColdStartHoleCleanupAfterLastTicket(t *testing.T) {
 	coordinator.mu.Lock()
 	hasAnchor := coordinator.hasAnchor
 	desired := coordinator.desiredPiecesLocked()
-	consumed := len(coordinator.demandSpans)
+	consumed := len(coordinator.consumed)
 	windowPins := len(coordinator.windowPins)
 	active := len(coordinator.active)
 	coordinator.mu.Unlock()
