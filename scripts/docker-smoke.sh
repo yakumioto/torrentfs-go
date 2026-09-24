@@ -26,7 +26,7 @@ readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
 readonly HOST_UID="$(id -u)"
 readonly HOST_GID="$(id -g)"
-if (( HOST_UID == 0 )); then
+if (( HOST_UID == 0 || HOST_GID == 0 )); then
 	readonly RUNTIME_UID=1500
 	readonly RUNTIME_GID=1500
 else
