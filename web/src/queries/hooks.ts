@@ -131,6 +131,85 @@ export function useAddTorrent(api: ApiClient) {
   });
 }
 
+export type TorrentFileBatchStatus = 'uploading' | 'succeeded' | 'failed' | 'skipped';
+
+export interface TorrentFileBatchUpdate {
+  file: File;
+  index: number;
+  total: number;
+  status: TorrentFileBatchStatus;
+  torrent?: Torrent;
+  error?: unknown;
+}
+
+export interface TorrentFileBatchItemResult {
+  file: File;
+  index: number;
+  status: Exclude<TorrentFileBatchStatus, 'uploading'>;
+  torrent?: Torrent;
+  error?: unknown;
+}
+
+export interface TorrentFileBatchResult {
+  items: TorrentFileBatchItemResult[];
+  torrents: Torrent[];
+  stopped: boolean;
+}
+
+export interface AddTorrentFilesVariables {
+  files: File[];
+  onFileStatus?: (update: TorrentFileBatchUpdate) => void;
+}
+
+function shouldContinueTorrentFileBatch(error: unknown): boolean {
+  return error instanceof ApiError && [400, 409, 413, 415].includes(error.status);
+}
+
+export function useAddTorrentFiles(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation<TorrentFileBatchResult, Error, AddTorrentFilesVariables>({
+    mutationFn: async ({ files, onFileStatus }) => {
+      const items: TorrentFileBatchItemResult[] = [];
+      const torrents = new Map<string, Torrent>();
+      let stopped = false;
+
+      for (const [index, file] of files.entries()) {
+        onFileStatus?.({ file, index, total: files.length, status: 'uploading' });
+        try {
+          const torrent = await api.addTorrent(file);
+          items.push({ file, index, status: 'succeeded', torrent });
+          torrents.set(torrent.id, torrent);
+          onFileStatus?.({ file, index, total: files.length, status: 'succeeded', torrent });
+        } catch (error) {
+          items.push({ file, index, status: 'failed', error });
+          onFileStatus?.({ file, index, total: files.length, status: 'failed', error });
+          if (shouldContinueTorrentFileBatch(error)) {
+            continue;
+          }
+
+          stopped = true;
+          for (let skippedIndex = index + 1; skippedIndex < files.length; skippedIndex += 1) {
+            const skippedFile = files[skippedIndex];
+            items.push({ file: skippedFile, index: skippedIndex, status: 'skipped', error });
+            onFileStatus?.({ file: skippedFile, index: skippedIndex, total: files.length, status: 'skipped', error });
+          }
+          break;
+        }
+      }
+
+      return { items, torrents: [...torrents.values()], stopped };
+    },
+    onSuccess: (result) => {
+      for (const torrent of result.torrents) {
+        queryClient.setQueryData(queryKeys.torrent(torrent.id), torrent);
+      }
+      if (result.torrents.length > 0) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
+      }
+    },
+  });
+}
+
 export function useDeleteTorrent(api: ApiClient) {
   const queryClient = useQueryClient();
   return useMutation({

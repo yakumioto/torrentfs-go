@@ -29,9 +29,13 @@ export function AppLayout() {
         opened={addOpen}
         onClose={() => setAddOpen(false)}
         api={auth.api}
-        onAdded={(id) => {
+        onAdded={(ids) => {
           setAddOpen(false);
-          navigate(`/torrents/${id}`);
+          if (ids.length === 1) {
+            navigate(`/torrents/${ids[0]}`);
+          } else if (ids.length > 1) {
+            navigate('/');
+          }
         }}
       />
     </AppShell>
