@@ -373,7 +373,7 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 1. 确保 TorrentFS 已启用 HTTP auth，并记住其服务根地址。地址可以包含 reverse-proxy path prefix，例如 `https://nas.example.com/torrentfs/`；不要输入 `/api/v1/...` 具体 API endpoint。
 2. 在 Tampermonkey 中导入 `userscript/torrentfs.user.js`。脚本使用已批准的 `@connect *` 以支持任意用户配置地址，但运行时只请求当前配置的 TorrentFS base 和允许的 M-Team 下载 host；没有远程 `@require`。
-3. 在 M-Team 详情页打开 Tampermonkey 菜单，选择 **配置 / 重新绑定 TorrentFS**，输入服务地址、用户名和密码。配置表单运行在 `sandbox="allow-scripts"` 且不含 `allow-same-origin` 的 iframe 中；iframe 先通过真实 receiver-ready 消息建立握手，userscript 再以不写入共享 DOM 的 capability commitment 验证后定向交付唯一 `MessageChannel`。nonce/capability 不写入 iframe `srcdoc` 或共享 DOM，密码不会进入 M-Team page bridge、普通页面组件、URL、console 或 GM storage。
+3. 在 M-Team 详情页打开 Tampermonkey 菜单，选择 **配置 / 重新绑定 TorrentFS**，使用 userscript sandbox 的浏览器原生 prompt/confirm 输入服务地址、用户名和密码。原生对话框不属于页面 DOM，M-Team 页面无法导航、替换或读取其中的密码；密码不会进入 page bridge、URL、console 或 GM storage。
 4. HTTP 地址仍然允许，但每次输入密码绑定前必须勾选明文风险告知。HTTP 会明文传输用户名、密码、Bearer token、torrent 元数据和上传内容，可能被观察、窃取或篡改；勾选即表示理解并自行承担风险。脚本不会声称 HTTP 已加密，也没有忽略 HTTPS 证书错误或自动降级开关。
 5. 登录成功后只保存 normalized base URL、username、opaque Bearer token、`pairedAt`、`expiresAt` 和由地址派生的 `insecureHttp` 标志。旧版 loopback `{baseUrl, token, pairedAt}` 会迁移为 v2 profile；不保存密码。
 6. 更换服务时先完成新地址登录，再替换本地 profile；旧 token 会 best-effort logout。选择 **解除 TorrentFS 绑定** 会 best-effort logout，并无条件清理本地 token/profile。
@@ -396,8 +396,8 @@ Vite 默认监听 `127.0.0.1:5173`，并把 `/api` 代理到 `http://127.0.0.1:8
 
 以上 M-Team 生产 endpoint、字段、XHR/fetch 实现、DOM selector、cookie/Referer 要求和最终下载重定向 host 尚未完成真实站点验证。负责人交付后应人工检查：
 
-- Chromium/Tampermonkey 能识别 metadata，并在 M-Team 页面通过 sandbox 配置界面绑定 HTTPS、loopback HTTP、LAN/public HTTP 和带 path prefix 的地址；验证 HTTP 未勾选时不会发 login 请求；
-- 配置 iframe 不允许 M-Team 页面脚本读取密码；GM storage 中无 password，状态对 HTTP 显示 `HTTP（不安全）`；
+- Chromium/Tampermonkey 能识别 metadata，并在 M-Team 页面通过原生 prompt/confirm 绑定 HTTPS、loopback HTTP、LAN/public HTTP 和带 path prefix 的地址；验证 HTTP 未确认时不会发 login 请求；
+- 原生对话框不属于页面 DOM，M-Team 页面脚本无法读取密码；GM storage 中无 password，状态对 HTTP 显示 `HTTP（不安全）`；
 - 详情页只出现一个按钮，正常提交和重复提交最终只有一个 info hash 任务，文案保持“任务已可用”；
 - logout、token 过期或 daemon 重启后，提交收到 `401`、清理 token、保留 profile 并要求重新输入密码；解除绑定即使网络失败也清理 profile；
 - login/logout/upload 的 3xx、错误 host/path、TLS/DNS/timeout，以及 TorrentFS `400/409/413/415/500` 均显示安全错误文案，不发生跨地址重试；

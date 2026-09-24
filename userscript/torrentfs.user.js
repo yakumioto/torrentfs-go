@@ -27,6 +27,8 @@
     const REQUEST_TIMEOUT = 30 * 1000;
     const BRIDGE_SOURCE = 'torrentfs-mteam-bridge';
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const sandboxPrompt = typeof globalThis.prompt === 'function' ? globalThis.prompt.bind(globalThis) : null;
+    const sandboxConfirm = typeof globalThis.confirm === 'function' ? globalThis.confirm.bind(globalThis) : null;
 
     const MTEAM = {
         detailPath: '/api/torrent/detail',
@@ -826,8 +828,6 @@
                 .torrentfs-mteam-button:hover { background: #4096ff; }
                 .torrentfs-mteam-button:disabled { cursor: wait; opacity: .65; }
                 .torrentfs-mteam-button[data-fixed="true"] { bottom: 24px; position: fixed; right: 24px; z-index: 2147483646; }
-                #torrentfs-mteam-config-overlay { align-items: center; background: rgba(0,0,0,.45); display: flex; inset: 0; justify-content: center; padding: 16px; position: fixed; z-index: 2147483647; }
-                #torrentfs-mteam-config-overlay iframe { background: Canvas; border: 0; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.35); height: min(560px, calc(100vh - 32px)); max-width: 520px; width: min(520px, 100%); }
                 #torrentfs-mteam-status { background: #fff; border: 1px solid #d9d9d9; border-radius: 6px; bottom: 72px; box-shadow: 0 4px 12px rgba(0,0,0,.15); color: #262626; display: none; font: 14px/1.4 sans-serif; max-width: 360px; padding: 10px 12px; position: fixed; right: 24px; z-index: 2147483646; }
                 #torrentfs-mteam-status[data-state="error"] { border-color: #ff4d4f; color: #cf1322; }
                 #torrentfs-mteam-status[data-state="success"] { border-color: #52c41a; color: #389e0d; }
@@ -861,339 +861,72 @@
             }
         }
 
-        function randomHex(byteLength) {
-            const bytes = new Uint8Array(byteLength);
-            if (globalThis.crypto?.getRandomValues) {
-                globalThis.crypto.getRandomValues(bytes);
-            } else {
-                for (let index = 0; index < bytes.length; index += 1) {
-                    bytes[index] = Math.floor(Math.random() * 256);
-                }
-            }
-            return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-        }
-
-        function randomNonce() {
-            return randomHex(16);
-        }
-
-        function sha256Hex(input) {
-            const constants = [
-                0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-                0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-                0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-                0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-                0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-                0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-                0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-                0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-            ];
-            const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-            const bytes = [];
-            for (let index = 0; index < input.length; index += 1) bytes.push(input.charCodeAt(index) & 0xff);
-            const bitLength = bytes.length * 8;
-            bytes.push(0x80);
-            while (bytes.length % 64 !== 56) bytes.push(0);
-            for (let shift = 7; shift >= 0; shift -= 1) bytes.push(Math.floor(bitLength / (2 ** (shift * 8))) & 0xff);
-            const rotate = (value, bits) => (value >>> bits) | (value << (32 - bits));
-            for (let offset = 0; offset < bytes.length; offset += 64) {
-                const words = new Uint32Array(64);
-                for (let index = 0; index < 16; index += 1) {
-                    const position = offset + index * 4;
-                    words[index] = ((bytes[position] << 24) | (bytes[position + 1] << 16) | (bytes[position + 2] << 8) | bytes[position + 3]) >>> 0;
-                }
-                for (let index = 16; index < 64; index += 1) {
-                    const value = words[index - 15];
-                    const s0 = rotate(value, 7) ^ rotate(value, 18) ^ (value >>> 3);
-                    const next = words[index - 2];
-                    const s1 = rotate(next, 17) ^ rotate(next, 19) ^ (next >>> 10);
-                    words[index] = (words[index - 16] + s0 + words[index - 7] + s1) >>> 0;
-                }
-                let [a, b, c, d, e, f, g, h] = state;
-                for (let index = 0; index < 64; index += 1) {
-                    const s1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
-                    const choice = (e & f) ^ (~e & g);
-                    const first = (h + s1 + choice + constants[index] + words[index]) >>> 0;
-                    const s0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
-                    const majority = (a & b) ^ (a & c) ^ (b & c);
-                    const second = (s0 + majority) >>> 0;
-                    h = g;
-                    g = f;
-                    f = e;
-                    e = (d + first) >>> 0;
-                    d = c;
-                    c = b;
-                    b = a;
-                    a = (first + second) >>> 0;
-                }
-                state[0] = (state[0] + a) >>> 0;
-                state[1] = (state[1] + b) >>> 0;
-                state[2] = (state[2] + c) >>> 0;
-                state[3] = (state[3] + d) >>> 0;
-                state[4] = (state[4] + e) >>> 0;
-                state[5] = (state[5] + f) >>> 0;
-                state[6] = (state[6] + g) >>> 0;
-                state[7] = (state[7] + h) >>> 0;
-            }
-            return state.map((value) => value.toString(16).padStart(8, '0')).join('');
-        }
-
-        function credentialFrameHtml(capabilityCommitment) {
-            const serializedCommitment = JSON.stringify(capabilityCommitment);
-            return `<!doctype html>
-<html><head><meta charset="utf-8"><style>
-:root { color-scheme: light dark; font: 14px/1.4 sans-serif; }
-body { margin: 0; padding: 20px; background: Canvas; color: CanvasText; }
-form { display: grid; gap: 10px; }
-label { display: grid; gap: 4px; }
-input[type="url"], input[type="text"], input[type="password"] { box-sizing: border-box; border: 1px solid #888; border-radius: 4px; font: inherit; padding: 7px; width: 100%; }
-fieldset { border: 1px solid #b33; border-radius: 4px; color: #b33; display: grid; gap: 6px; padding: 8px; }
-fieldset[hidden] { display: none; }
-.actions { display: flex; gap: 8px; justify-content: flex-end; }
-button { border: 1px solid #1677ff; border-radius: 4px; background: #1677ff; color: #fff; cursor: pointer; font: inherit; padding: 7px 12px; }
-button.secondary { background: transparent; color: inherit; }
-button:disabled { cursor: wait; opacity: .65; }
-#status { min-height: 1.4em; }
-</style></head><body>
-<form id="form" hidden>
-<h2>配置 / 重新绑定 TorrentFS</h2>
-<label>服务地址<input id="base" type="url" autocomplete="url" required placeholder="https://torrentfs.example.com/base"></label>
-<label>用户名<input id="username" type="text" autocomplete="username" required></label>
-<label>密码<input id="password" type="password" autocomplete="current-password" required></label>
-<fieldset id="risk" hidden><strong>HTTP 明文传输风险</strong><span>当前地址使用 HTTP。用户名、密码、Bearer token、torrent 元数据及上传内容可能被观察、窃取或篡改。继续表示你理解并自行承担该风险。</span><label><span><input id="consent" type="checkbox"> 我理解并承担此 HTTP 风险</span></label></fieldset>
-<div id="status" role="status"></div>
-<div class="actions"><button id="cancel" class="secondary" type="button">取消</button><button id="submit" type="submit">登录并绑定</button></div>
-</form>
-<script>
-(function () {
-    const capabilityCommitment = ${serializedCommitment};
-    const sha256Hex = ${sha256Hex.toString()};
-    const challengeBytes = new Uint8Array(32);
-    crypto.getRandomValues(challengeBytes);
-    const challenge = Array.from(challengeBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-    let nonce;
-    let port;
-    let initializing = false;
-    let initialized = false;
-    const form = document.getElementById('form');
-    const base = document.getElementById('base');
-    const username = document.getElementById('username');
-    const password = document.getElementById('password');
-    const risk = document.getElementById('risk');
-    const consent = document.getElementById('consent');
-    const status = document.getElementById('status');
-    const submit = document.getElementById('submit');
-    const cancel = document.getElementById('cancel');
-    const setStatus = (message) => { status.textContent = message; };
-    const updateRisk = () => {
-        let isHttp = false;
-        try { isHttp = new URL(base.value.trim()).protocol === 'http:'; } catch { isHttp = false; }
-        risk.hidden = !isHttp;
-        consent.required = isHttp;
-        if (!isHttp) consent.checked = false;
-    };
-    base.addEventListener('input', updateRisk);
-    window.addEventListener('message', async (event) => {
-        if (initialized || initializing || event.source !== window.parent || !event.data || event.data.type !== 'torrentfs-config-init' || event.data.challenge !== challenge || typeof event.data.capability !== 'string' || typeof event.data.nonce !== 'string' || !event.ports[0]) return;
-        initializing = true;
-        const valid = typeof event.data.capability === 'string' && sha256Hex(event.data.capability) === capabilityCommitment;
-        if (!valid || initialized) {
-            initializing = false;
-            return;
-        }
-        initialized = true;
-        nonce = event.data.nonce;
-        port = event.ports[0];
-        port.onmessage = (messageEvent) => {
-            const data = messageEvent.data;
-            if (!data || data.nonce !== nonce || data.type !== 'result') return;
-            setStatus(data.message || (data.ok ? '绑定成功。' : '绑定失败。'));
-            submit.disabled = false;
-            cancel.disabled = false;
-        };
-        port.start();
-        port.postMessage({ nonce, type: 'ready' });
-        if (event.data.profile) {
-            base.value = event.data.profile.baseUrl || '';
-            username.value = event.data.profile.username || '';
-        }
-        form.hidden = false;
-        updateRisk();
-        base.focus();
-    });
-    window.parent.postMessage({ type: 'torrentfs-config-ready', challenge }, '*');
-    form.addEventListener('submit', (event) => {
-        event.preventDefault();
-        updateRisk();
-        let parsed;
-        try { parsed = new URL(base.value.trim()); } catch { parsed = null; }
-        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-            setStatus('请输入有效的 HTTP 或 HTTPS 地址。');
-            return;
-        }
-        if (parsed.protocol === 'http:' && !consent.checked) {
-            setStatus('请先确认 HTTP 明文传输风险。');
-            return;
-        }
-        if (!username.value.trim() || !password.value) {
-            setStatus('请输入用户名和密码。');
-            return;
-        }
-        if (!port) {
-            setStatus('配置界面尚未准备好，请重试。');
-            return;
-        }
-        port.postMessage({ nonce, type: 'submit', baseUrl: base.value, username: username.value, password: password.value, httpConsent: consent.checked });
-        password.value = '';
-        submit.disabled = true;
-        cancel.disabled = true;
-        setStatus('正在登录 TorrentFS…');
-    });
-    cancel.addEventListener('click', () => {
-        password.value = '';
-        port?.postMessage({ nonce, type: 'cancel' });
-    });
-})();
-</script></body></html>`;
-        }
-
         function openCredentialForm(initialConnection, onSubmit, onCancel, onClose) {
-            ensureStyles();
-            if (typeof MessageChannel !== 'function') {
+            const promptFn = sandboxPrompt;
+            const confirmFn = sandboxConfirm;
+            if (!promptFn || !confirmFn) {
                 setStatus('error', '当前浏览器不支持安全配置界面。');
                 return { close() {} };
             }
             let closed = false;
-            let frameCleanup = () => {};
             const close = () => {
                 if (closed) {
                     return;
                 }
                 closed = true;
-                frameCleanup();
                 onClose?.();
             };
-            Promise.resolve().then(() => {
+            const cancel = () => {
+                onCancel?.();
+                close();
+            };
+            const baseUrl = promptFn('TorrentFS 服务地址（HTTP 或 HTTPS）', initialConnection?.baseUrl || '');
+            if (baseUrl === null) {
+                cancel();
+                return { close };
+            }
+            let isHttp = false;
+            try {
+                isHttp = new URL(baseUrl.trim()).protocol === 'http:';
+            } catch {
+                // The client reports invalid addresses without sending a request.
+            }
+            if (isHttp && !confirmFn('当前 TorrentFS 地址使用 HTTP。用户名、密码、Bearer token、torrent 元数据及上传内容可能被观察、窃取或篡改。继续表示你理解并自行承担该风险。')) {
+                cancel();
+                return { close };
+            }
+            const username = promptFn('TorrentFS 用户名', initialConnection?.username || '');
+            if (username === null) {
+                cancel();
+                return { close };
+            }
+            const password = promptFn('TorrentFS 密码（仅本次登录使用，不会保存）', '');
+            if (password === null) {
+                cancel();
+                return { close };
+            }
+            const credentials = {
+                baseUrl,
+                username,
+                password,
+                httpConsent: isHttp
+            };
+            const sendResult = (result) => {
                 if (closed) {
                     return;
                 }
-                let capability = randomHex(32);
-                const capabilityCommitment = sha256Hex(capability);
-                const nonce = randomNonce();
-                const channel = new MessageChannel();
-                const overlay = document.createElement('div');
-                overlay.id = 'torrentfs-mteam-config-overlay';
-                const frame = document.createElement('iframe');
-                frame.title = 'TorrentFS configuration';
-                frame.setAttribute('sandbox', 'allow-scripts');
-                frame.srcdoc = credentialFrameHtml(capabilityCommitment);
-                const expectedSrcdoc = frame.srcdoc;
-                overlay.appendChild(frame);
-                let receiverReady = false;
-                let initialized = false;
-                let readyTimer;
-                let submitting = false;
-                let receiverListener;
-                const closeFrame = () => {
-                    pageWindow.clearTimeout(readyTimer);
-                    if (receiverListener) pageWindow.removeEventListener('message', receiverListener);
-                    channel.port1.onmessage = null;
-                    channel.port1.close();
-                    capability = '';
-                    frame.remove();
-                    overlay.remove();
-                };
-                frameCleanup = closeFrame;
-                const sendResult = (result) => {
-                    if (closed || !initialized) {
-                        return;
-                    }
-                    channel.port1.postMessage({
-                        nonce,
-                        type: 'result',
-                        ok: result.ok === true,
-                        message: result.message || (result.ok ? '绑定成功。' : '绑定失败。')
-                    });
-                    pageWindow.setTimeout(close, result.ok ? 500 : 1200);
-                };
-                channel.port1.onmessage = (event) => {
-                    const data = event.data;
-                    if (closed || !data || data.nonce !== nonce) {
-                        return;
-                    }
-                    if (data.type === 'ready') {
-                        initialized = true;
-                        return;
-                    }
-                    if (data.type === 'cancel') {
-                        onCancel?.();
-                        close();
-                        return;
-                    }
-                    if (data.type !== 'submit' || submitting || !initialized) {
-                        return;
-                    }
-                    submitting = true;
-                    let credentials;
-                    try {
-                        credentials = {
-                            baseUrl: typeof data.baseUrl === 'string' ? data.baseUrl : '',
-                            username: typeof data.username === 'string' ? data.username : '',
-                            password: typeof data.password === 'string' ? data.password : '',
-                            httpConsent: data.httpConsent === true
-                        };
-                        data.password = '';
-                        Promise.resolve(onSubmit(credentials)).then((result) => {
-                            credentials.password = '';
-                            sendResult(result || { ok: false, message: '绑定失败，请重试。' });
-                        }).catch(() => {
-                            credentials.password = '';
-                            sendResult({ ok: false, message: '绑定失败，请重试。' });
-                        });
-                    } catch {
-                        sendResult({ ok: false, message: '绑定失败，请重试。' });
-                    }
-                };
-                channel.port1.start();
-                receiverListener = (event) => {
-                    const data = event.data;
-                    if (closed || receiverReady || event.source !== frame.contentWindow || !data || data.type !== 'torrentfs-config-ready' || typeof data.challenge !== 'string') {
-                        return;
-                    }
-                    if (frame.srcdoc !== expectedSrcdoc || frame.getAttribute('sandbox') !== 'allow-scripts') {
-                        close();
-                        return;
-                    }
-                    receiverReady = true;
-                    try {
-                        frame.contentWindow.postMessage({
-                            type: 'torrentfs-config-init',
-                            challenge: data.challenge,
-                            capability,
-                            nonce,
-                            profile: {
-                                baseUrl: initialConnection?.baseUrl || '',
-                                username: initialConnection?.username || ''
-                            }
-                        }, '*', [channel.port2]);
-                        capability = '';
-                    } catch {
-                        setStatus('error', '配置界面无法启动，请重试。');
-                        close();
-                    }
-                };
-                pageWindow.addEventListener('message', receiverListener);
-                readyTimer = pageWindow.setTimeout(() => {
-                    if (!initialized && !closed) {
-                        setStatus('error', '配置界面无法启动，请检查浏览器对 sandbox iframe 的支持。');
-                        close();
-                    }
-                }, 5000);
-                (document.body || document.documentElement).appendChild(overlay);
-            }).catch(() => {
+                setStatus(result.ok === true ? 'success' : 'error', result.message || (result.ok ? '绑定成功。' : '绑定失败，请重试。'));
+                close();
+            };
+            Promise.resolve().then(() => onSubmit(credentials)).then((result) => {
+                credentials.password = '';
                 if (!closed) {
-                    setStatus('error', '配置界面无法启动，请重试。');
-                    close();
+                    sendResult(result || { ok: false, message: '绑定失败，请重试。' });
+                }
+            }).catch(() => {
+                credentials.password = '';
+                if (!closed) {
+                    sendResult({ ok: false, message: '绑定失败，请重试。' });
                 }
             });
             return { close };
