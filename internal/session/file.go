@@ -460,7 +460,7 @@ var _ io.ReaderAt = (*openedFile)(nil)
 var _ io.Closer = (*openedFile)(nil)
 
 func (f *openedFile) ReadAt(p []byte, off int64) (int, error) {
-	return f.file.ReadAt(p, off)
+	return f.file.readAtContext(context.Background(), p, off, f.demandID)
 }
 
 func (f *openedFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {

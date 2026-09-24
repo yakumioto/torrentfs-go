@@ -128,3 +128,70 @@ func TestDemandFallbackPinsOnlyCurrentPiece(t *testing.T) {
 		t.Fatalf("fallback left %d Piece pins after READ", got)
 	}
 }
+
+func TestNormalLeaseBookkeepingCoversCompletionBudgetAndStop(t *testing.T) {
+	store := cache.New(16 << 20)
+	coordinator := newTestCoordinator(store)
+	file := playbackTestFile(8<<20, 1<<20, store, coordinator)
+	if _, err := coordinator.startPlaybackStream("complete", "payload.bin", file, 0); err != nil {
+		t.Fatalf("start completion stream: %v", err)
+	}
+	_, usedBefore := coordinator.budget.snapshot()
+	if usedBefore == 0 || len(coordinator.active) == 0 {
+		t.Fatalf("initial active state = active %d, budget %d", len(coordinator.active), usedBefore)
+	}
+	store.Put(cache.Key{Torrent: coordinator.torrentKey, Piece: 0}, make([]byte, 1<<20))
+	coordinator.mu.Lock()
+	coordinator.completeActiveLocked()
+	coordinator.mu.Unlock()
+	if _, active := coordinator.active[0]; active {
+		t.Fatal("completed Piece remained active")
+	}
+	if _, activeOwner := coordinator.activeNormalOwners[0]; activeOwner {
+		t.Fatal("completed Piece retained an active Normal owner")
+	}
+	_, usedAfter := coordinator.budget.snapshot()
+	if usedAfter >= usedBefore {
+		t.Fatalf("budget after completion = %d, before %d", usedAfter, usedBefore)
+	}
+	if err := coordinator.stopPlaybackStream("complete"); err != nil {
+		t.Fatalf("stop completion stream: %v", err)
+	}
+
+	blocked := newTestCoordinator(cache.New(16 << 20))
+	blockedFile := playbackTestFile(8<<20, 1<<20, blocked.cache, blocked)
+	for i := 0; i < defaultPrefetchPieces; i++ {
+		if !blocked.budget.tryAcquire() {
+			t.Fatalf("reserve budget token %d", i)
+		}
+	}
+	if _, err := blocked.startPlaybackStream("blocked", "payload.bin", blockedFile, 0); err != nil {
+		t.Fatalf("start blocked stream: %v", err)
+	}
+	if len(blocked.active) != 0 || len(blocked.activeNormalOwners) != 0 {
+		t.Fatalf("budget-blocked active state = active %d owners %d", len(blocked.active), len(blocked.activeNormalOwners))
+	}
+	for i := 0; i < defaultPrefetchPieces; i++ {
+		blocked.budget.release()
+	}
+	_ = blocked.stopPlaybackStream("blocked")
+
+	interleaved := newTestCoordinator(cache.New(16 << 20))
+	interleavedFile := playbackTestFile(8<<20, 1<<20, interleaved.cache, interleaved)
+	if _, err := interleaved.startPlaybackStream("interleaved", "payload.bin", interleavedFile, 0); err != nil {
+		t.Fatalf("start interleaved stream: %v", err)
+	}
+	request, plan := playbackReadPlan(interleavedFile, 0, 64)
+	ticket := interleaved.beginForeground(interleavedFile, request, plan, context.Background(), 404)
+	ticket.startPiece(0)
+	if err := interleaved.stopPlaybackStream("interleaved"); err != nil {
+		t.Fatalf("stop interleaved stream: %v", err)
+	}
+	ticket.finishPiece(0)
+	if len(interleaved.active) != 0 || len(interleaved.activeNormalOwners) != 0 {
+		t.Fatalf("interleaved cleanup left active=%d owners=%d", len(interleaved.active), len(interleaved.activeNormalOwners))
+	}
+	if _, used := interleaved.budget.snapshot(); used != 0 {
+		t.Fatalf("interleaved cleanup left budget token count %d", used)
+	}
+}

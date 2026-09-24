@@ -233,25 +233,26 @@ type prefetchCoordinator struct {
 	wake   chan struct{}
 	done   chan struct{}
 
-	mu               sync.Mutex
-	closed           bool
-	demandOnly       bool
-	anchor           prefetchAnchor
-	hasAnchor        bool
-	anchorConfirmed  bool
-	generation       uint64
-	streams          map[string]*playbackStreamState
-	normalOwners     map[int]map[string]struct{}
-	demands          map[uint64]*demandState
-	demandByFile     map[*raFile]*demandState
-	demandCursors    map[uint64]int64
-	expiredCallbacks []func()
-	now              func() time.Time
-	nextTicket       uint64
-	anchorTicket     uint64
-	demandSpans      []byteSpan
-	candidate        *seekCandidate
-	nextCandidate    uint64
+	mu                 sync.Mutex
+	closed             bool
+	demandOnly         bool
+	anchor             prefetchAnchor
+	hasAnchor          bool
+	anchorConfirmed    bool
+	generation         uint64
+	streams            map[string]*playbackStreamState
+	normalOwners       map[int]map[string]struct{}
+	activeNormalOwners map[int]map[string]struct{}
+	demands            map[uint64]*demandState
+	demandByFile       map[*raFile]*demandState
+	demandCursors      map[uint64]int64
+	expiredCallbacks   []func()
+	now                func() time.Time
+	nextTicket         uint64
+	anchorTicket       uint64
+	demandSpans        []byteSpan
+	candidate          *seekCandidate
+	nextCandidate      uint64
 
 	foreground       map[uint64]*foregroundTicket
 	foregroundPieces map[int]int
@@ -325,26 +326,27 @@ func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *p
 		budget = s.prefetchBudget
 	}
 	coordinator := &prefetchCoordinator{
-		torrent:          tor,
-		cache:            c,
-		budget:           budget,
-		torrentKey:       tor.InfoHash().HexString(),
-		ctx:              ctx,
-		cancel:           cancel,
-		sub:              tor.SubscribePieceStateChanges(),
-		wake:             make(chan struct{}, 1),
-		done:             make(chan struct{}),
-		foreground:       make(map[uint64]*foregroundTicket),
-		foregroundPieces: make(map[int]int),
-		refs:             make(map[int]int),
-		windowPins:       make(map[int]struct{}),
-		active:           make(map[int]struct{}),
-		streams:          make(map[string]*playbackStreamState),
-		normalOwners:     make(map[int]map[string]struct{}),
-		demands:          make(map[uint64]*demandState),
-		demandByFile:     make(map[*raFile]*demandState),
-		demandCursors:    make(map[uint64]int64),
-		now:              time.Now,
+		torrent:            tor,
+		cache:              c,
+		budget:             budget,
+		torrentKey:         tor.InfoHash().HexString(),
+		ctx:                ctx,
+		cancel:             cancel,
+		sub:                tor.SubscribePieceStateChanges(),
+		wake:               make(chan struct{}, 1),
+		done:               make(chan struct{}),
+		foreground:         make(map[uint64]*foregroundTicket),
+		foregroundPieces:   make(map[int]int),
+		refs:               make(map[int]int),
+		windowPins:         make(map[int]struct{}),
+		active:             make(map[int]struct{}),
+		streams:            make(map[string]*playbackStreamState),
+		normalOwners:       make(map[int]map[string]struct{}),
+		activeNormalOwners: make(map[int]map[string]struct{}),
+		demands:            make(map[uint64]*demandState),
+		demandByFile:       make(map[*raFile]*demandState),
+		demandCursors:      make(map[uint64]int64),
+		now:                time.Now,
 	}
 	if s != nil {
 		s.bgMu.Lock()
@@ -402,6 +404,9 @@ func (c *prefetchCoordinator) ensurePlaybackMapsLocked() {
 	}
 	if c.normalOwners == nil {
 		c.normalOwners = make(map[int]map[string]struct{})
+	}
+	if c.activeNormalOwners == nil {
+		c.activeNormalOwners = make(map[int]map[string]struct{})
 	}
 }
 
@@ -624,18 +629,42 @@ func (c *prefetchCoordinator) releasePlaybackResourcesLocked(stream *playbackStr
 	stream.pins = make(map[int]struct{})
 }
 
-func (c *prefetchCoordinator) removeNormalOwnerLocked(index int, streamID string) {
-	owners := c.normalOwners[index]
+func (c *prefetchCoordinator) addActiveNormalOwnerLocked(index int, streamID string) {
+	if c.activeNormalOwners == nil {
+		c.activeNormalOwners = make(map[int]map[string]struct{})
+	}
+	owners := c.activeNormalOwners[index]
+	if owners == nil {
+		owners = make(map[string]struct{})
+		c.activeNormalOwners[index] = owners
+	}
+	owners[streamID] = struct{}{}
+}
+
+func (c *prefetchCoordinator) removeActiveNormalOwnerLocked(index int, streamID string) {
+	owners := c.activeNormalOwners[index]
 	if len(owners) == 0 {
 		return
 	}
 	delete(owners, streamID)
 	if len(owners) == 0 {
-		delete(c.normalOwners, index)
+		delete(c.activeNormalOwners, index)
 	}
-	if len(owners) == 0 && c.foregroundPieces[index] == 0 {
+}
+
+func (c *prefetchCoordinator) removeNormalOwnerLocked(index int, streamID string) {
+	owners := c.normalOwners[index]
+	if len(owners) > 0 {
+		delete(owners, streamID)
+		if len(owners) == 0 {
+			delete(c.normalOwners, index)
+		}
+	}
+	c.removeActiveNormalOwnerLocked(index, streamID)
+	if len(c.activeNormalOwners[index]) == 0 && c.foregroundPieces[index] == 0 {
 		c.cancelLeaseLocked(index)
 	}
+	c.restorePiecePriorityLocked(index)
 }
 
 func (c *prefetchCoordinator) clearLegacyLocked() {
@@ -1284,13 +1313,31 @@ func (t *foregroundTicket) finishPiece(index int) {
 	coordinator.signal()
 }
 
+func (c *prefetchCoordinator) dropActiveLeaseLocked(index int) {
+	if _, active := c.active[index]; !active {
+		return
+	}
+	if c.torrent != nil {
+		c.torrent.CancelPieces(index, index+1)
+	}
+	c.priorityCancels++
+	c.cancelled++
+	delete(c.active, index)
+	delete(c.activeNormalOwners, index)
+	c.budget.release()
+}
+
 func (c *prefetchCoordinator) restorePiecePriorityLocked(index int) {
 	if c.torrent == nil || c.foregroundPieces[index] > 0 {
 		return
 	}
-	if owners := c.normalOwners[index]; len(owners) > 0 {
+	_, active := c.active[index]
+	if active && len(c.activeNormalOwners[index]) > 0 {
 		c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNormal)
 		return
+	}
+	if active {
+		c.dropActiveLeaseLocked(index)
 	}
 	c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNone)
 }
@@ -1485,12 +1532,15 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			stream.owners[index] = struct{}{}
 		}
 		if _, ok := c.active[index]; ok {
+			c.addActiveNormalOwnerLocked(index, stream.id)
+			c.restorePiecePriorityLocked(index)
 			c.dedupe++
 			continue
 		}
 		if !c.budget.tryAcquire() {
 			c.budgetBlocks++
 			stream.state = prefetchBudgetBlocked
+			c.restorePiecePriorityLocked(index)
 			break
 		}
 		if c.torrent != nil {
@@ -1498,6 +1548,7 @@ func (c *prefetchCoordinator) reconcilePlaybackStreamLocked(stream *playbackStre
 			c.torrent.Piece(index).SetPriority(torrent.PiecePriorityNormal)
 		}
 		c.active[index] = struct{}{}
+		c.addActiveNormalOwnerLocked(index, stream.id)
 		c.priorityAdds++
 		if len(c.active) > c.maxActive {
 			c.maxActive = len(c.active)
@@ -1643,6 +1694,7 @@ func (c *prefetchCoordinator) completeActiveLocked() {
 		}
 		c.priorityCancels++
 		delete(c.active, index)
+		delete(c.activeNormalOwners, index)
 		c.budget.release()
 		c.restorePiecePriorityLocked(index)
 	}
@@ -1661,13 +1713,7 @@ func (c *prefetchCoordinator) cancelLeaseLocked(index int) {
 	if _, ok := c.active[index]; !ok {
 		return
 	}
-	if c.torrent != nil {
-		c.torrent.CancelPieces(index, index+1)
-	}
-	c.priorityCancels++
-	c.cancelled++
-	delete(c.active, index)
-	c.budget.release()
+	c.dropActiveLeaseLocked(index)
 	c.restorePiecePriorityLocked(index)
 }
 
@@ -1988,6 +2034,7 @@ func (c *prefetchCoordinator) cleanup() {
 	}
 	c.streams = make(map[string]*playbackStreamState)
 	c.normalOwners = make(map[int]map[string]struct{})
+	c.activeNormalOwners = make(map[int]map[string]struct{})
 	for _, ticket := range c.foreground {
 		if cancel := c.removeForegroundLocked(ticket); cancel != nil {
 			cancels = append(cancels, cancel)
