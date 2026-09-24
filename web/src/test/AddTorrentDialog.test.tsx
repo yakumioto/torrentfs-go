@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { AddTorrentDialog } from '../components/dialogs/AddTorrentDialog';
+import dialogStyles from '../components/dialogs/AddTorrentDialog.module.css';
 import { theme } from '../styles/theme';
 import type { Torrent } from '../types/api';
 
@@ -98,6 +99,10 @@ describe('AddTorrentDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '上传种子文件' }));
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已处理 1 / 1'));
+    const succeededStatus = screen.getByText('已处理，任务可用');
+    expect(succeededStatus.parentElement).toHaveAttribute('data-status', 'succeeded');
+    expect(succeededStatus.parentElement).toHaveClass(dialogStyles.fileStatus);
+    expect(succeededStatus.parentElement?.querySelector(`.${dialogStyles.fileStatusError}`)).toBeNull();
     expect(fetchMock).toHaveBeenCalledOnce();
     const request = firstRequest(fetchMock);
     expect(request.body).toBeInstanceOf(FormData);
@@ -106,6 +111,25 @@ describe('AddTorrentDialog', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '完成并关闭' }));
     expect(onAdded).toHaveBeenCalledWith(['torrent-1']);
+  });
+
+  it('marks an uploading file without applying an error style', async () => {
+    let resolveRequest!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { resolveRequest = resolve; }));
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('tab', { name: '种子文件' }));
+    const input = document.querySelector('input[type="file"]');
+    fireEvent.change(input as HTMLInputElement, { target: { files: [file('pending.torrent')] } });
+    fireEvent.click(screen.getByRole('button', { name: '上传种子文件' }));
+
+    await waitFor(() => expect(screen.getByText('正在上传')).toBeInTheDocument());
+    const uploadingStatus = screen.getByText('正在上传');
+    expect(uploadingStatus.parentElement).toHaveAttribute('data-status', 'uploading');
+    expect(uploadingStatus.parentElement).toHaveClass(dialogStyles.fileStatus);
+    expect(uploadingStatus.parentElement?.querySelector(`.${dialogStyles.fileStatusError}`)).toBeNull();
+
+    resolveRequest(jsonResponse(torrent()));
   });
 
   it('uploads multiple files in order and reports count progress', async () => {
@@ -135,6 +159,9 @@ describe('AddTorrentDialog', () => {
     const dropzone = screen.getByTestId('torrent-dropzone');
     fireEvent.drop(dropzone, { dataTransfer: { files: [selectedFile, file('notes.txt')] } });
     expect(screen.getByText('文件队列（1）')).toBeInTheDocument();
+    const queuedStatus = screen.getByText('等待上传');
+    expect(queuedStatus.parentElement).toHaveAttribute('data-status', 'queued');
+    expect(queuedStatus.parentElement?.querySelector(`.${dialogStyles.fileStatusError}`)).toBeNull();
     expect(screen.getByRole('alert')).toHaveTextContent('notes.txt');
 
     const input = document.querySelector('input[type="file"]');
@@ -161,7 +188,9 @@ describe('AddTorrentDialog', () => {
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('2 个文件成功，2 个唯一任务可用，1 个文件失败或未尝试'));
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(screen.getByText('上传的 .torrent 文件超过后台服务的大小限制。')).toBeInTheDocument();
+    const fileError = screen.getByText('上传的 .torrent 文件超过后台服务的大小限制。');
+    expect(fileError).toHaveClass(dialogStyles.fileStatusError);
+    expect(fileError.parentElement).toHaveAttribute('data-status', 'failed');
 
     fireEvent.click(screen.getByRole('button', { name: '重试失败项' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已处理 1 / 1'));

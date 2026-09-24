@@ -353,9 +353,9 @@ export function AddTorrentDialog({ opened, onClose, api, onAdded }: AddTorrentDi
                         <span className={styles.fileName} title={item.file.name}>{item.file.name}</span>
                         <span className={styles.fileMeta}>{fileSizeCopy(item.file.size)}</span>
                       </div>
-                      <div className={styles.fileStatus} role={item.error !== undefined ? 'alert' : undefined}>
+                      <div className={styles.fileStatus} data-status={item.status} role={item.error !== undefined ? 'alert' : undefined}>
                         <span>{fileStatusCopy(item.status)}</span>
-                        {item.error !== undefined && <span>{fileErrorCopy(item.error)}</span>}
+                        {item.error !== undefined && <span className={styles.fileStatusError}>{fileErrorCopy(item.error)}</span>}
                       </div>
                       <Button
                         variant="subtle"
