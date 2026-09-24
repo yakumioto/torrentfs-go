@@ -36,9 +36,10 @@ import (
 // The announce counter is read through Client.WriteStatus, which is only a
 // usable observation point while every accessor it reaches is synchronized.
 // It reads the tracker dispatcher's timer deadline via mytimer.Timer.When(),
-// which upstream leaves unlocked, so go.mod pins v1.61.0-bep27.2: the fork
-// takes a read lock there. Before any future dependency bump, re-check that
-// WriteStatus is race-free with the whole package running.
+// which upstream leaves unlocked. v1.61.0-bep27.2 (MIO-46) adds a read lock
+// there; the current v1.61.0-bep27.3 pin retains that fix and adds MIO-62's
+// closed peer-request shutdown cleanup. Before any future dependency bump,
+// re-check that WriteStatus is race-free with the whole package running.
 
 const bep27SettleWindow = 3 * time.Second
 
