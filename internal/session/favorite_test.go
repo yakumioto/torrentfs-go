@@ -39,6 +39,23 @@ func writeAgedTorrent(t *testing.T, torrentsDir, name string, createdAt time.Tim
 	return hash
 }
 
+// blockRegistryWrites makes the next registry write for one hash fail: the
+// atomic publish ends in a rename, and a directory cannot be replaced by a
+// rename of a plain file. The entry stays loaded in memory, which is how a real
+// write failure (read-only or full filesystem, I/O error) reaches the prune
+// loop. Call it after the session has opened, since restoring a sidecar
+// rewrites it.
+func blockRegistryWrites(t *testing.T, torrentsDir string, hash metainfo.Hash) {
+	t.Helper()
+	path := registryPath(torrentsDir, hash)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove state %s: %v", path, err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("block state %s: %v", path, err)
+	}
+}
+
 // writeFavoriteRegistry seeds a sidecar with an explicit created_at and favorite
 // flag.
 func writeFavoriteRegistry(t *testing.T, torrentsDir string, hash metainfo.Hash, state string, createdAt time.Time, favorite bool) {
@@ -217,6 +234,50 @@ func TestPruneDeletesOnlyUnfavoritedOlderThanCutoff(t *testing.T) {
 		if _, err := sess.TorrentViewFor(hash.HexString()); err != nil {
 			t.Fatalf("torrent %s should have survived prune: %v", hash.HexString(), err)
 		}
+	}
+}
+
+// A batch that matched candidates but could not start some of their deletions
+// must report that, and must not look like a batch that matched nothing.
+func TestPruneReportsCandidatesItCannotStartDeleting(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	now := time.Now().UTC()
+	blocked := writeAgedTorrent(t, torrentsDir, "blocked-candidate", now.Add(-40*24*time.Hour), false)
+	healthy := writeAgedTorrent(t, torrentsDir, "healthy-candidate", now.Add(-40*24*time.Hour), false)
+
+	sess := newManageSession(t, torrentsDir)
+	blockRegistryWrites(t, torrentsDir, blocked)
+
+	result, err := sess.DeleteUnfavoritedOlderThan(ctx, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("DeleteUnfavoritedOlderThan: %v", err)
+	}
+
+	if len(result.Failures) != 1 || result.Failures[0].TorrentID != blocked.HexString() {
+		t.Fatalf("Failures = %+v, want exactly %s", result.Failures, blocked.HexString())
+	}
+	if result.Failures[0].Error == "" {
+		t.Fatal("failure carries no error detail")
+	}
+	// The batch kept going after the blocked candidate.
+	if len(result.Operations) != 1 || result.Operations[0].TorrentID != healthy.HexString() {
+		t.Fatalf("Operations = %+v, want exactly %s", result.Operations, healthy.HexString())
+	}
+	if result.ExcludedFavorites != 0 {
+		t.Fatalf("ExcludedFavorites = %d, want 0", result.ExcludedFavorites)
+	}
+	// A zero-candidate run returns an all-zero result; this one must not.
+	var zero session.PruneResult
+	if len(result.Operations) == len(zero.Operations) && len(result.Failures) == len(zero.Failures) && result.ExcludedFavorites == zero.ExcludedFavorites {
+		t.Fatalf("blocked batch is indistinguishable from a zero-candidate batch: %+v", result)
+	}
+
+	if final := waitOperation(t, sess, result.Operations[0].ID); final.State != session.StateDeleted {
+		t.Fatalf("healthy candidate = %s (%s), want deleted", final.State, final.Error)
+	}
+	if _, err := sess.TorrentViewFor(blocked.HexString()); err != nil {
+		t.Fatalf("blocked candidate should have been left in place: %v", err)
 	}
 }
 

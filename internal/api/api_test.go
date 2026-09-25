@@ -725,6 +725,62 @@ func TestPruneEndpoint(t *testing.T) {
 	if got.ExcludedFavorites != 2 {
 		t.Fatalf("excluded_favorites = %d, want 2", got.ExcludedFavorites)
 	}
+	// A clean run must not carry a failures key, so it can never be read as a
+	// run that failed to start some deletions.
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := raw["failures"]; ok {
+		t.Fatalf("clean prune run exposed a failures key: %v", raw)
+	}
+}
+
+func TestPruneEndpointReportsFailures(t *testing.T) {
+	backend := &fakeBackend{pruneResult: session.PruneResult{
+		Operations: []session.Operation{{
+			ID:        "op-1",
+			TorrentID: strings.Repeat("c", 40),
+			State:     session.StateDeleting,
+		}},
+		ExcludedFavorites: 1,
+		Failures: []session.PruneFailure{{
+			TorrentID: strings.Repeat("d", 40),
+			Error:     "session: write state: read-only file system",
+		}},
+	}}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/prune", strings.NewReader(`{"older_than_days":30}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := do(t, srv, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Operations        []map[string]any `json:"operations"`
+		ExcludedFavorites int              `json:"excluded_favorites"`
+		Failures          []map[string]any `json:"failures"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Operations) != 1 {
+		t.Fatalf("operations = %v, want the one deletion that did start", got.Operations)
+	}
+	if len(got.Failures) != 1 {
+		t.Fatalf("failures = %v, want one entry", got.Failures)
+	}
+	if got.Failures[0]["torrent_id"] != strings.Repeat("d", 40) {
+		t.Fatalf("failure torrent_id = %v, want %s", got.Failures[0]["torrent_id"], strings.Repeat("d", 40))
+	}
+	if got.Failures[0]["error"] == "" || got.Failures[0]["error"] == nil {
+		t.Fatalf("failure carries no error: %v", got.Failures[0])
+	}
+	if got.ExcludedFavorites != 1 {
+		t.Fatalf("excluded_favorites = %d, want 1", got.ExcludedFavorites)
+	}
 }
 
 // The cap itself must still be accepted, and must reach the session as a

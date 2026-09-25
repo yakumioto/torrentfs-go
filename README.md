@@ -337,6 +337,20 @@ token_ttl = "30m"
 
    批量删除同样走异步 operation 模型：轮询 `GET /api/v1/operations/{id}` 观察每个任务的终态。早于阈值但已收藏的任务永远保留，`excluded_favorites` 即其数量。
 
+   单个候选无法开始删除（例如磁盘写满或只读挂载，侧车写入失败）不会中断整批：其余候选照常发起，该候选记录在 `failures` 中。全部候选都正常发起时该字段**不出现**，因此「有候选但未能删除」与「没有符合条件的任务」不会得到同一响应形状：
+
+   ```json
+   {
+     "operations": [
+       {"operation_id": "<operation-id>", "torrent_id": "<info-hash>", "state": "deleting"}
+     ],
+     "excluded_favorites": 0,
+     "failures": [
+       {"torrent_id": "<info-hash>", "error": "session: write state ..."}
+     ]
+   }
+   ```
+
 8. 登出：
 
    ```sh

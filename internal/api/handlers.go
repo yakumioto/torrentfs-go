@@ -33,9 +33,17 @@ type torrentResponse struct {
 // than the client asked for.
 const maxOlderThanDays = 106751
 
+type pruneFailureResponse struct {
+	TorrentID string `json:"torrent_id"`
+	Error     string `json:"error"`
+}
+
 type pruneResponse struct {
 	Operations        []operationResponse `json:"operations"`
 	ExcludedFavorites int                 `json:"excluded_favorites"`
+	// Failures is omitted when every candidate started deleting, so a clean run
+	// and a run that could not start some deletions never have the same shape.
+	Failures []pruneFailureResponse `json:"failures,omitempty"`
 }
 
 type operationResponse struct {
@@ -352,6 +360,12 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 			TorrentID:   op.TorrentID,
 			State:       string(op.State),
 			Error:       op.Error,
+		})
+	}
+	for _, failure := range result.Failures {
+		out.Failures = append(out.Failures, pruneFailureResponse{
+			TorrentID: failure.TorrentID,
+			Error:     failure.Error,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

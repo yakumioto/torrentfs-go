@@ -30,6 +30,11 @@ export function PruneTorrentsDialog({ opened, onClose }: { opened: boolean; onCl
   };
 
   const result = prune.data;
+  const failures = result?.failures ?? [];
+  const nothingMatched = result !== undefined
+    && result.operations.length === 0
+    && result.excluded_favorites === 0
+    && failures.length === 0;
   return (
     <Modal opened={opened} onClose={close} title="批量清理旧任务" centered closeButtonProps={{ 'aria-label': '关闭弹窗' }}>
       <Stack gap="md">
@@ -55,9 +60,15 @@ export function PruneTorrentsDialog({ opened, onClose }: { opened: boolean; onCl
         )}
         {result !== undefined && (
           <div role="status">
-            {result.operations.length === 0 && result.excluded_favorites === 0 && <p style={{ margin: 0 }}>没有符合条件的任务。</p>}
+            {nothingMatched && <p style={{ margin: 0 }}>没有符合条件的任务。</p>}
             {result.operations.length > 0 && <p style={{ margin: 0 }}>已开始删除 {result.operations.length} 个任务。</p>}
             {result.excluded_favorites > 0 && <p style={{ margin: 0 }}>已保留 {result.excluded_favorites} 个收藏任务。</p>}
+          </div>
+        )}
+        {failures.length > 0 && (
+          <div className="error-callout" role="alert">
+            <IconAlertTriangle size={15} aria-hidden="true" />
+            有 {failures.length} 个符合条件的任务未能开始删除，其余任务不受影响，请稍后重试或查看服务端日志。
           </div>
         )}
         <Group justify="flex-end">

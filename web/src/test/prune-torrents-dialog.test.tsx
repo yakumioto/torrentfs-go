@@ -91,6 +91,36 @@ describe('PruneTorrentsDialog', () => {
     await waitFor(() => expect(screen.getByText('没有符合条件的任务。')).toBeInTheDocument());
   });
 
+  it('reports tasks it could not start instead of claiming nothing matched', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({
+      operations: [],
+      excluded_favorites: 0,
+      failures: [{ torrent_id: 'abc', error: 'read-only file system' }],
+    })));
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('button', { name: '开始清理' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('有 1 个符合条件的任务未能开始删除'));
+    expect(screen.queryByText('没有符合条件的任务。')).not.toBeInTheDocument();
+  });
+
+  it('reports started deletions and failures side by side', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({
+      operations: [{ operation_id: 'op-1', torrent_id: 'abc', state: 'deleting' }],
+      excluded_favorites: 1,
+      failures: [{ torrent_id: 'def', error: 'read-only file system' }],
+    })));
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('button', { name: '开始清理' }));
+
+    await waitFor(() => expect(screen.getByText('已开始删除 1 个任务。')).toBeInTheDocument());
+    expect(screen.getByText('已保留 1 个收藏任务。')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('有 1 个符合条件的任务未能开始删除');
+    expect(screen.queryByText('没有符合条件的任务。')).not.toBeInTheDocument();
+  });
+
   it('refuses a threshold above the day limit before sending it', () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
     renderDialog(fetchMock);

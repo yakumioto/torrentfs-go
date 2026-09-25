@@ -52,6 +52,12 @@ func (s *Session) SetFavorite(ctx context.Context, id string, favorite bool) (To
 	return s.buildView(hash, s.torrents[hash], updated), nil
 }
 
+// PruneFailure records one candidate the batch could not turn into a deletion.
+type PruneFailure struct {
+	TorrentID string
+	Error     string
+}
+
 // PruneResult reports one age-based prune pass.
 type PruneResult struct {
 	// Operations holds one entry per deletion that was actually started.
@@ -59,6 +65,10 @@ type PruneResult struct {
 	// ExcludedFavorites counts torrents older than the cutoff that were kept
 	// because they are favorites.
 	ExcludedFavorites int
+	// Failures holds the candidates that matched but whose deletion could not
+	// be started. One failure never stops the batch, so this can be non-empty
+	// alongside a populated Operations.
+	Failures []PruneFailure
 }
 
 // DeleteUnfavoritedOlderThan deletes every non-favorite torrent created more
@@ -110,6 +120,7 @@ func (s *Session) DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time
 			// skipping it keeps the rest of the batch going.
 		case err != nil:
 			s.logger.Error("prune delete failed", "hash", hash.HexString(), "err", err)
+			result.Failures = append(result.Failures, PruneFailure{TorrentID: hash.HexString(), Error: err.Error()})
 		default:
 			result.Operations = append(result.Operations, op.clone())
 		}
