@@ -26,6 +26,7 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
     uploaded_bytes: 0,
     cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
+    favorite: false,
     ...overrides,
   };
 }

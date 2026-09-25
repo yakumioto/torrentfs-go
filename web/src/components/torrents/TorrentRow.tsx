@@ -1,20 +1,26 @@
 import { ActionIcon, Menu, Tooltip } from '@mantine/core';
-import { IconDots, IconExternalLink, IconTrash } from '@tabler/icons-react';
+import { IconDots, IconExternalLink, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { Torrent } from '../../types/api';
+import { useAuth } from '../../app/auth-context';
+import { useSetFavorite } from '../../queries/hooks';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
 import { StateBadge } from './StateBadge';
 
 export function TorrentRow({ torrent }: { torrent: Torrent }) {
+  const auth = useAuth();
   const navigate = useNavigate();
+  const favorite = useSetFavorite(auth.api);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const disabled = torrent.state === 'deleting';
   const name = torrent.name || '未命名任务';
+  const favoriteLabel = torrent.favorite ? `取消收藏 ${name}` : `收藏 ${name}`;
 
   const openDelete = () => setDeleteOpen(true);
+  const toggleFavorite = () => favorite.mutate({ id: torrent.id, favorite: !torrent.favorite });
 
   return (
     <div className={styles.row} role="listitem">
@@ -42,6 +48,19 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
         <div className={`${styles.added} text-mono`} title={torrent.created_at}>{formatDate(torrent.created_at)}</div>
       </Link>
       <div className={styles.action}>
+        <Tooltip label={favoriteLabel}>
+          <ActionIcon
+            variant="subtle"
+            color={torrent.favorite ? 'yellow' : 'gray'}
+            aria-label={favoriteLabel}
+            aria-pressed={torrent.favorite}
+            disabled={disabled}
+            loading={favorite.isPending}
+            onClick={toggleFavorite}
+          >
+            {torrent.favorite ? <IconStarFilled size={18} /> : <IconStar size={18} />}
+          </ActionIcon>
+        </Tooltip>
         <Menu shadow="md" width={220} position="bottom-end" withinPortal>
           <Menu.Target>
             <Tooltip label="更多操作">

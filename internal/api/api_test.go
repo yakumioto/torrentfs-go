@@ -40,6 +40,14 @@ type fakeBackend struct {
 	deleteOp  *session.Operation
 	deleteErr error
 
+	setFavoriteID    string
+	setFavoriteValue bool
+	setFavoriteView  session.TorrentView
+	setFavoriteErr   error
+	pruneOlderThan   time.Duration
+	pruneResult      session.PruneResult
+	pruneErr         error
+
 	runtimeStats session.RuntimeStatsView
 	ops          map[string]session.Operation
 }
@@ -79,6 +87,27 @@ func (f *fakeBackend) DeleteTorrent(_ context.Context, _ string) (*session.Opera
 		return nil, f.deleteErr
 	}
 	return f.deleteOp, nil
+}
+
+func (f *fakeBackend) SetFavorite(_ context.Context, id string, favorite bool) (session.TorrentView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setFavoriteID = id
+	f.setFavoriteValue = favorite
+	if f.setFavoriteErr != nil {
+		return session.TorrentView{}, f.setFavoriteErr
+	}
+	return f.setFavoriteView, nil
+}
+
+func (f *fakeBackend) DeleteUnfavoritedOlderThan(_ context.Context, olderThan time.Duration) (session.PruneResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneOlderThan = olderThan
+	if f.pruneErr != nil {
+		return session.PruneResult{}, f.pruneErr
+	}
+	return f.pruneResult, nil
 }
 
 func (f *fakeBackend) Operation(id string) (session.Operation, bool) {
@@ -285,7 +314,7 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("list length = %d, want 1", len(got))
 	}
-	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "downloaded_bytes", "uploaded_bytes", "cached_bytes", "created_at"} {
+	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "downloaded_bytes", "uploaded_bytes", "cached_bytes", "created_at", "favorite"} {
 		if _, ok := got[0][key]; !ok {
 			t.Fatalf("list entry missing %q: %v", key, got[0])
 		}
@@ -599,4 +628,124 @@ func buildTestTorrent(t *testing.T, name string, data []byte) []byte {
 		t.Fatalf("encode metainfo: %v", err)
 	}
 	return out
+}
+
+func TestSetFavoriteEndpoint(t *testing.T) {
+	id := strings.Repeat("b", 40)
+	backend := &fakeBackend{setFavoriteView: session.TorrentView{
+		ID:       id,
+		InfoHash: id,
+		Name:     "payload",
+		State:    session.StateReady,
+		Favorite: true,
+	}}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/"+id+"/favorite", strings.NewReader(`{"favorite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := do(t, srv, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if backend.setFavoriteID != id || !backend.setFavoriteValue {
+		t.Fatalf("backend call = (%q, %v), want (%q, true)", backend.setFavoriteID, backend.setFavoriteValue, id)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["favorite"] != true {
+		t.Fatalf("response favorite = %v, want true", got["favorite"])
+	}
+}
+
+func TestSetFavoriteRejectsMissingField(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing favorite", `{}`},
+		{"invalid json", `{`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeBackend{}, nil)
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/"+strings.Repeat("b", 40)+"/favorite", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			if rec := do(t, srv, req); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSetFavoriteMapsUnknownTorrentTo404(t *testing.T) {
+	backend := &fakeBackend{setFavoriteErr: session.ErrUnknownTorrent}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/"+strings.Repeat("b", 40)+"/favorite", strings.NewReader(`{"favorite":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	if rec := do(t, srv, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPruneEndpoint(t *testing.T) {
+	backend := &fakeBackend{pruneResult: session.PruneResult{
+		Operations: []session.Operation{{
+			ID:        "op-1",
+			TorrentID: strings.Repeat("c", 40),
+			State:     session.StateDeleting,
+		}},
+		ExcludedFavorites: 2,
+	}}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/prune", strings.NewReader(`{"older_than_days":30}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := do(t, srv, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if backend.pruneOlderThan != 30*24*time.Hour {
+		t.Fatalf("backend age = %s, want 720h", backend.pruneOlderThan)
+	}
+	var got struct {
+		Operations        []map[string]any `json:"operations"`
+		ExcludedFavorites int              `json:"excluded_favorites"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Operations) != 1 || got.Operations[0]["operation_id"] != "op-1" {
+		t.Fatalf("operations = %v, want one op-1", got.Operations)
+	}
+	if got.ExcludedFavorites != 2 {
+		t.Fatalf("excluded_favorites = %d, want 2", got.ExcludedFavorites)
+	}
+}
+
+func TestPruneRejectsInvalidDays(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing", `{}`},
+		{"zero", `{"older_than_days":0}`},
+		{"negative", `{"older_than_days":-1}`},
+		{"fractional", `{"older_than_days":1.5}`},
+		{"invalid json", `{`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeBackend{}, nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/prune", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			if rec := do(t, srv, req); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
 }

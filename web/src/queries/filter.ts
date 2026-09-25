@@ -1,6 +1,6 @@
 import type { Torrent } from '../types/api';
 
-export type TorrentFilter = 'all' | 'ready' | 'error';
+export type TorrentFilter = 'all' | 'ready' | 'error' | 'favorite';
 
 export interface TorrentSummary {
   total: number;
@@ -23,6 +23,8 @@ export function matchesTorrentFilter(torrent: Torrent, filter: TorrentFilter): b
       return torrent.state === 'ready';
     case 'error':
       return torrent.state === 'error' || torrent.state === 'delete_failed';
+    case 'favorite':
+      return torrent.favorite === true;
     case 'all':
       return true;
   }

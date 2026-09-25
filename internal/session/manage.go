@@ -447,6 +447,7 @@ func (s *Session) buildViewWithCached(hash metainfo.Hash, st *Torrent, entry *re
 		view.CreatedAt = entry.CreatedAt
 		view.Error = entry.Error
 		view.State = entry.State
+		view.Favorite = entry.Favorite
 	}
 	if st == nil {
 		return view
@@ -475,6 +476,18 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string) (*Operation, err
 	if err != nil {
 		s.logger.Error("torrent delete failed", "op", "parse-id", "err", ErrUnknownTorrent)
 		return nil, ErrUnknownTorrent
+	}
+	return s.deleteByHash(ctx, hash, false)
+}
+
+// deleteByHash starts the durable deletion of one torrent identified by its
+// parsed hash. With skipFavorites a favorite is refused instead of deleted,
+// which is how age-based pruning honors that flag: the check runs in the same
+// critical section that flips the state to deleting, so a favorite set just
+// before the prune is still honored.
+func (s *Session) deleteByHash(ctx context.Context, hash metainfo.Hash, skipFavorites bool) (*Operation, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	logFailure := func(err error) {
 		s.logger.Error("torrent delete failed", "hash", hash.HexString(), "op", "delete", "err", err)
@@ -508,6 +521,11 @@ func (s *Session) DeleteTorrent(ctx context.Context, id string) (*Operation, err
 		logFailure(ErrUnknownTorrent)
 		return nil, ErrUnknownTorrent
 	}
+	if skipFavorites && entry.Favorite {
+		s.mu.Unlock()
+		return nil, errFavoriteSkip
+	}
+	var err error
 	opID := entry.OperationID
 	if opID == "" {
 		if last, ok := s.lastOps[hash]; ok {

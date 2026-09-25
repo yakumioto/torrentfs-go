@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import type { Operation, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
+import type { Operation, PruneResult, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
 import { sortTorrents } from './sort';
@@ -218,6 +218,32 @@ export function useDeleteTorrent(api: ApiClient) {
     onSuccess: (operation: Operation) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
       queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);
+    },
+  });
+}
+
+export function useSetFavorite(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, favorite, signal }: { id: string; favorite: boolean; signal?: AbortSignal }) =>
+      api.setFavorite(id, favorite, signal),
+    onSuccess: (torrent: Torrent) => {
+      queryClient.setQueryData(queryKeys.torrent(torrent.id), torrent);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
+    },
+  });
+}
+
+export function usePruneTorrents(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ olderThanDays, signal }: { olderThanDays: number; signal?: AbortSignal }) =>
+      api.pruneTorrents(olderThanDays, signal),
+    onSuccess: (result: PruneResult) => {
+      for (const operation of result.operations) {
+        queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);
+      }
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
     },
   });
 }

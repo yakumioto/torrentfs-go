@@ -7,7 +7,7 @@ import { formatBytes, formatDate } from '../utils/format';
 
 const piece = (overrides: Partial<PieceStatus> = {}): PieceStatus => ({ index: 0, cached: false, cached_bytes: 0, pinned: false, ...overrides });
 
-const torrent = (overrides: Partial<Torrent> = {}): Torrent => ({ id: 'a', info_hash: 'a', name: 'alpha', state: 'ready', total_bytes: 10, downloaded_bytes: 0, uploaded_bytes: 0, cached_bytes: 0, created_at: '2026-01-01T00:00:00Z', ...overrides });
+const torrent = (overrides: Partial<Torrent> = {}): Torrent => ({ id: 'a', info_hash: 'a', name: 'alpha', state: 'ready', total_bytes: 10, downloaded_bytes: 0, uploaded_bytes: 0, cached_bytes: 0, created_at: '2026-01-01T00:00:00Z', favorite: false, ...overrides });
 
 const order = (items: Torrent[], sort?: TorrentSort) => sortTorrents(items, sort).map((item) => item.id);
 
