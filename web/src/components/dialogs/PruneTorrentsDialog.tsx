@@ -5,12 +5,16 @@ import { useAuth } from '../../app/auth-context';
 import { usePruneTorrents } from '../../queries/hooks';
 import { userFacingError } from '../../utils/user-facing-error';
 
+// Mirrors the server's cap: the day count is multiplied into a time.Duration,
+// so a larger value would overflow rather than mean "585 years".
+export const MAX_PRUNE_DAYS = 106751;
+
 export function PruneTorrentsDialog({ opened, onClose }: { opened: boolean; onClose: () => void }) {
   const auth = useAuth();
   const prune = usePruneTorrents(auth.api);
   const [days, setDays] = useState<number | string>(30);
   const daysValue = Number(days);
-  const daysValid = Number.isInteger(daysValue) && daysValue >= 1;
+  const daysValid = Number.isInteger(daysValue) && daysValue >= 1 && daysValue <= MAX_PRUNE_DAYS;
 
   const close = () => {
     prune.reset();
@@ -37,6 +41,7 @@ export function PruneTorrentsDialog({ opened, onClose }: { opened: boolean; onCl
           aria-label="保留天数阈值"
           description="删除添加时间早于该天数的未收藏任务"
           min={1}
+          max={MAX_PRUNE_DAYS}
           allowDecimal={false}
           allowNegative={false}
           value={days}

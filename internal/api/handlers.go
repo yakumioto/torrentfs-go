@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -25,6 +26,12 @@ type torrentResponse struct {
 	Favorite        bool      `json:"favorite"`
 	Error           string    `json:"error,omitempty"`
 }
+
+// maxOlderThanDays bounds the prune window. time.Duration is int64
+// nanoseconds, so multiplying a day count above this overflows before the
+// session ever sees it; a wrapped value would prune using a far smaller cutoff
+// than the client asked for.
+const maxOlderThanDays = 106751
 
 type pruneResponse struct {
 	Operations        []operationResponse `json:"operations"`
@@ -326,8 +333,8 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if body.OlderThanDays == nil || *body.OlderThanDays < 1 {
-		writeError(w, http.StatusBadRequest, "older_than_days must be a positive integer")
+	if body.OlderThanDays == nil || *body.OlderThanDays < 1 || *body.OlderThanDays > maxOlderThanDays {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("older_than_days must be an integer between 1 and %d", maxOlderThanDays))
 		return
 	}
 	result, err := s.backend.DeleteUnfavoritedOlderThan(r.Context(), time.Duration(*body.OlderThanDays)*24*time.Hour)

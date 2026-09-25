@@ -727,6 +727,25 @@ func TestPruneEndpoint(t *testing.T) {
 	}
 }
 
+// The cap itself must still be accepted, and must reach the session as a
+// positive duration rather than a wrapped one.
+func TestPruneAcceptsTheDayCap(t *testing.T) {
+	backend := &fakeBackend{}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/prune", strings.NewReader(`{"older_than_days":106751}`))
+	req.Header.Set("Content-Type", "application/json")
+	if rec := do(t, srv, req); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if want := time.Duration(106751) * 24 * time.Hour; backend.pruneOlderThan != want {
+		t.Fatalf("backend age = %s, want %s", backend.pruneOlderThan, want)
+	}
+	if backend.pruneOlderThan <= 0 {
+		t.Fatalf("backend age = %s, want a positive duration", backend.pruneOlderThan)
+	}
+}
+
 func TestPruneRejectsInvalidDays(t *testing.T) {
 	tests := []struct {
 		name string
@@ -737,6 +756,10 @@ func TestPruneRejectsInvalidDays(t *testing.T) {
 		{"negative", `{"older_than_days":-1}`},
 		{"fractional", `{"older_than_days":1.5}`},
 		{"invalid json", `{`},
+		// One day past the cap: multiplying this into a time.Duration would
+		// wrap to a negative value and prune far more than requested.
+		{"over the day cap", `{"older_than_days":106752}`},
+		{"far over the day cap", `{"older_than_days":213504}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

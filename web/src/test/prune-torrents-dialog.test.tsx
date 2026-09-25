@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
-import { PruneTorrentsDialog } from '../components/dialogs/PruneTorrentsDialog';
+import { MAX_PRUNE_DAYS, PruneTorrentsDialog } from '../components/dialogs/PruneTorrentsDialog';
 import { theme } from '../styles/theme';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -46,12 +46,12 @@ afterEach(() => {
 
 describe('PruneTorrentsDialog', () => {
   it('states that favorites are exempt before anything is submitted', () => {
-    renderDialog(vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 }))));
+    renderDialog(vi.fn(() => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 }))));
     expect(screen.getByRole('dialog')).toHaveTextContent('已收藏的任务不会被删除');
   });
 
   it('posts the requested threshold and reports how many favorites were kept', async () => {
-    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => Promise.resolve(jsonResponse({
+    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(() => Promise.resolve(jsonResponse({
       operations: [{ operation_id: 'op-1', torrent_id: 'abc', state: 'deleting' }],
       excluded_favorites: 2,
     })));
@@ -72,7 +72,7 @@ describe('PruneTorrentsDialog', () => {
   });
 
   it('refuses a threshold below one day', async () => {
-    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
     renderDialog(fetchMock);
 
     const input = screen.getByLabelText('保留天数阈值');
@@ -84,10 +84,22 @@ describe('PruneTorrentsDialog', () => {
   });
 
   it('reports when nothing matched the threshold', async () => {
-    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
     renderDialog(fetchMock);
 
     fireEvent.click(screen.getByRole('button', { name: '开始清理' }));
     await waitFor(() => expect(screen.getByText('没有符合条件的任务。')).toBeInTheDocument());
+  });
+
+  it('refuses a threshold above the day limit before sending it', () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ operations: [], excluded_favorites: 0 })));
+    renderDialog(fetchMock);
+
+    const input = screen.getByLabelText('保留天数阈值');
+    fireEvent.change(input, { target: { value: String(MAX_PRUNE_DAYS + 1) } });
+
+    expect(screen.getByRole('button', { name: '开始清理' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '开始清理' }));
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

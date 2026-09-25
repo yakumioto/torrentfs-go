@@ -315,7 +315,7 @@ token_ttl = "30m"
 
    成功返回 `200` 和更新后的任务对象。`favorite` 必须显式给出；缺字段返回 `400`。
 
-   按任务年龄批量删除时，`older_than_days` 必须是正整数（`0` 和负数返回 `400`）：
+   按任务年龄批量删除时，`older_than_days` 必须是 `1` 到 `106751` 之间的整数（`0`、负数与超过上限的值返回 `400`）。上限来自时长本身：天数会乘以 24 小时得到 Go 的 `time.Duration`（int64 纳秒），再大的值会溢出：
 
    ```sh
    curl --fail --request POST "$BASE_URL/api/v1/torrents/prune" \
