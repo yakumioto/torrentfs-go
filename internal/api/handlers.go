@@ -51,6 +51,18 @@ type operationResponse struct {
 	TorrentID   string `json:"torrent_id"`
 	State       string `json:"state"`
 	Error       string `json:"error,omitempty"`
+	// ErrorCode is a stable machine-readable reason for a failed operation.
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+func newOperationResponse(op session.Operation) operationResponse {
+	return operationResponse{
+		OperationID: op.ID,
+		TorrentID:   op.TorrentID,
+		State:       string(op.State),
+		Error:       op.Error,
+		ErrorCode:   op.ErrorCode,
+	}
 }
 
 type runtimeStatsResponse struct {
@@ -89,7 +101,11 @@ type torrentStatusResponse struct {
 	PieceLength   int64                 `json:"piece_length"`
 	Pieces        []pieceStatusResponse `json:"pieces"`
 	Files         []fileStatusResponse  `json:"files"`
-	Network       networkStatusResponse `json:"network"`
+	// SubtitleTargets and Subtitles are additive. Files keeps its payload-only
+	// meaning, because every entry there carries a piece range.
+	SubtitleTargets []subtitleTargetResponse `json:"subtitle_targets"`
+	Subtitles       []subtitleResponse       `json:"subtitles"`
+	Network         networkStatusResponse    `json:"network"`
 }
 
 // networkStatusResponse reports network visibility next to the piece data.
@@ -147,11 +163,13 @@ func newRuntimeStatsResponse(view session.RuntimeStatsView) runtimeStatsResponse
 
 func newTorrentStatusResponse(view session.TorrentStatusView) torrentStatusResponse {
 	out := torrentStatusResponse{
-		Torrent:       newTorrentResponse(view.Torrent),
-		MetainfoReady: view.MetainfoReady,
-		PieceLength:   view.PieceLength,
-		Pieces:        make([]pieceStatusResponse, len(view.Pieces)),
-		Files:         make([]fileStatusResponse, len(view.Files)),
+		Torrent:         newTorrentResponse(view.Torrent),
+		MetainfoReady:   view.MetainfoReady,
+		PieceLength:     view.PieceLength,
+		Pieces:          make([]pieceStatusResponse, len(view.Pieces)),
+		Files:           make([]fileStatusResponse, len(view.Files)),
+		SubtitleTargets: newSubtitleTargetResponses(view.SubtitleTargets),
+		Subtitles:       newSubtitleResponses(view.Subtitles),
 	}
 	for i, piece := range view.Pieces {
 		out.Pieces[i] = pieceStatusResponse{
@@ -295,12 +313,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeSessionError(w, "delete", err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, operationResponse{
-		OperationID: op.ID,
-		TorrentID:   op.TorrentID,
-		State:       string(op.State),
-		Error:       op.Error,
-	})
+	writeJSON(w, http.StatusAccepted, newOperationResponse(*op))
 }
 
 func (s *Server) handleSetFavorite(w http.ResponseWriter, r *http.Request) {
@@ -355,12 +368,7 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 		ExcludedFavorites: result.ExcludedFavorites,
 	}
 	for _, op := range result.Operations {
-		out.Operations = append(out.Operations, operationResponse{
-			OperationID: op.ID,
-			TorrentID:   op.TorrentID,
-			State:       string(op.State),
-			Error:       op.Error,
-		})
+		out.Operations = append(out.Operations, newOperationResponse(op))
 	}
 	for _, failure := range result.Failures {
 		out.Failures = append(out.Failures, pruneFailureResponse{
@@ -377,12 +385,7 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown operation")
 		return
 	}
-	writeJSON(w, http.StatusOK, operationResponse{
-		OperationID: op.ID,
-		TorrentID:   op.TorrentID,
-		State:       string(op.State),
-		Error:       op.Error,
-	})
+	writeJSON(w, http.StatusOK, newOperationResponse(op))
 }
 
 func readUploadedTorrent(r *http.Request) ([]byte, error) {

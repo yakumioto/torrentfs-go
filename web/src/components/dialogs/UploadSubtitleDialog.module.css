@@ -1,0 +1,45 @@
+.preview {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.previewRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.previewLabel {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+  color: var(--text-secondary);
+}
+
+.success {
+  display: flex;
+  align-items: start;
+  gap: 0.7rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.successTitle {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.successDetail {
+  margin-top: 0.22rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}

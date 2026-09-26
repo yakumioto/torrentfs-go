@@ -66,6 +66,8 @@ type Session struct {
 	torrents       map[metainfo.Hash]*Torrent
 	torrentsDir    string
 	metadataDir    string
+	subtitleRoot   string
+	subtitles      map[metainfo.Hash]map[string]managedSubtitle
 
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.
@@ -163,6 +165,12 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("create-state-dir", err)
 		return nil, err
 	}
+	subtitleRoot := filepath.Join(metadataDir, "subtitles")
+	if err := ensureManagedDirectory(subtitleRoot, 0o700); err != nil {
+		err = fmt.Errorf("session: create subtitle dir: %w", err)
+		logInitFailure("create-subtitle-dir", err)
+		return nil, err
+	}
 	instanceLock, err := lockInstance(metadataDir)
 	if err != nil {
 		logInitFailure("acquire-instance-lock", err)
@@ -242,6 +250,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		torrents:        make(map[metainfo.Hash]*Torrent),
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
+		subtitleRoot:    subtitleRoot,
+		subtitles:       make(map[metainfo.Hash]map[string]managedSubtitle),
 		storageCloser:   pieceStore,
 		instanceLock:    instanceLock,
 		dhtRecorder:     dhtRecorder,
@@ -264,6 +274,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		{stage: "torrent-restore", fn: func() error {
 			return s.restoreRegistryEntries(context.Background())
 		}},
+		{stage: "subtitle-restore", fn: s.loadManagedSubtitles},
 	}
 	for _, step := range startup {
 		if err := step.fn(); err != nil {
@@ -378,6 +389,7 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.torrents = make(map[metainfo.Hash]*Torrent)
+	s.subtitles = make(map[metainfo.Hash]map[string]managedSubtitle)
 	s.states = make(map[metainfo.Hash]*registryEntry)
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)

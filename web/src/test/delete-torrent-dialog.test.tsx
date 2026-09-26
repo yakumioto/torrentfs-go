@@ -92,4 +92,33 @@ describe('DeleteTorrentDialog', () => {
 
     await waitFor(() => expect(screen.getByText('正在删除任务…')).toBeInTheDocument());
   });
+
+  it('warns that managed subtitles are removed with the task', () => {
+    renderDialog(vi.fn(() => Promise.resolve(jsonResponse({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' }))));
+    expect(screen.getByText(/由 TorrentFS 管理的字幕文件会一并清理/)).toBeInTheDocument();
+  });
+
+  it('explains a subtitle cleanup failure and how to retry', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/operations/op-1')) {
+        return Promise.resolve(jsonResponse({
+          operation_id: 'op-1',
+          torrent_id: 'torrent-1',
+          state: 'delete_failed',
+          error: 'subtitle cleanup failed',
+          error_code: 'subtitle_cleanup_failed',
+        }));
+      }
+      return Promise.resolve(jsonResponse({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' }));
+    });
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('button', { name: '删除任务' }));
+
+    await waitFor(() => expect(screen.getByText('字幕文件清理失败')).toBeInTheDocument());
+    expect(screen.getByText(/再次删除同一任务即可重试/)).toBeInTheDocument();
+    // The retry stays available rather than reporting success.
+    expect(screen.getByRole('button', { name: '删除任务' })).toBeEnabled();
+    expect(screen.queryByText('任务已删除')).not.toBeInTheDocument();
+  });
 });

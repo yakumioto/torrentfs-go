@@ -23,6 +23,13 @@ readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
 readonly HOST_OBSERVER_CONTAINER="torrentfs-mio17-host-observer-${BASHPID}"
 readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
+readonly SUBTITLE_CONTAINER="torrentfs-mio17-subtitle-${BASHPID}"
+readonly SUBTITLE_OBSERVER_CONTAINER="torrentfs-mio17-subtitle-observer-${BASHPID}"
+# The bcrypt hash of "password", matching the API tests. The subtitle scenario
+# needs authentication enabled, and auth credentials are TOML-only.
+readonly SUBTITLE_PASSWORD_HASH='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq'
+readonly SUBTITLE_VIDEO_NAME="video.mkv"
+readonly SUBTITLE_VIDEO_STEM="video"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
 readonly HOST_UID="$(id -u)"
 readonly HOST_GID="$(id -g)"
@@ -205,12 +212,93 @@ write_registry_fixture() {
 EOF
 }
 
+# write_registry_fixture_for registers one ready task whose canonical metainfo
+# already sits in torrents_dir. The subtitle scenario needs its own info hash
+# and payload name, so the fixture is not hard-coded to the shared one.
+write_registry_fixture_for() {
+	local torrents_dir="$1" info_hash="$2" name="$3" now
+	now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	mkdir -p "$torrents_dir/.metadata/state" "$torrents_dir/.metadata/pending"
+	printf '2\n' > "$torrents_dir/.metadata/layout_version"
+	cat >"$torrents_dir/.metadata/state/$info_hash.json" <<EOF
+{"id":"$info_hash","info_hash":"$info_hash","name":"$name","state":"ready","created_at":"$now","updated_at":"$now"}
+EOF
+}
+
 # webseed_fetch fetches a path under the running web seed and prints it, so
 # readiness and the served bytes are checked through the same HTTP path
 # anacrolix will use.
 webseed_fetch() {
 	local path="$1"
 	python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "http://127.0.0.1:${WEBSEED_PORT}/${path}"
+}
+
+# build_video_torrent writes a deterministic single-file .torrent whose payload
+# is named with a supported video extension, and prints its info hash. The
+# subtitle overlay scenario needs no payload bytes: it proves where a managed
+# subtitle lands and how it is cleaned up, not how pieces are read.
+build_video_torrent() {
+	local dst="$1" name="$2"
+	python3 - "$dst" "$name" <<'PY'
+import hashlib, sys
+
+def bencode(value):
+    if isinstance(value, int):
+        return b"i%de" % value
+    if isinstance(value, (bytes, bytearray)):
+        return b"%d:%s" % (len(value), bytes(value))
+    if isinstance(value, str):
+        return bencode(value.encode())
+    if isinstance(value, list):
+        return b"l" + b"".join(bencode(item) for item in value) + b"e"
+    if isinstance(value, dict):
+        out = b"d"
+        for key in sorted(value):
+            out += bencode(key) + bencode(value[key])
+        return out + b"e"
+    raise TypeError(type(value))
+
+dst, name = sys.argv[1], sys.argv[2]
+data = b"torrentfs subtitle overlay fixture\n"
+info = {
+    "length": len(data),
+    "name": name,
+    "piece length": 16384,
+    "pieces": hashlib.sha1(data).digest(),
+}
+with open(dst, "wb") as handle:
+    handle.write(bencode({"info": info}))
+sys.stdout.write(hashlib.sha1(bencode(info)).hexdigest())
+PY
+}
+
+# subtitle_auth simulates the API calls the Web UI makes: log in, then use the
+# bearer token. Every call is bounded and fails the run on a non-2xx status.
+subtitle_login() {
+	local base="$1"
+	curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
+		--request POST "$base/api/v1/auth/login" \
+		--header 'Content-Type: application/json' \
+		--data '{"username":"alice","password":"password"}' |
+		python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])'
+}
+
+subtitle_upload() {
+	local base="$1" token="$2" torrent_id="$3" video_path="$4" file="$5" response code
+	response="$(curl --silent --show-error --max-time "$PROBE_TIMEOUT" --write-out '\n%{http_code}' \
+		--request PUT "$base/api/v1/torrents/$torrent_id/subtitles" \
+		--header "Authorization: Bearer $token" \
+		--form "video_path=$video_path" \
+		--form "file=@$file")" || return 1
+	code="${response##*$'\n'}"
+	SUBTITLE_UPLOAD_BODY="${response%$'\n'*}"
+	case "$code" in
+	200 | 201) return 0 ;;
+	*)
+		printf 'subtitle upload returned HTTP %s: %s\n' "$code" "$SUBTITLE_UPLOAD_BODY" >&2
+		return 1
+		;;
+	esac
 }
 
 # host_mount_released reports whether the propagated FUSE mount under mount is
@@ -247,7 +335,8 @@ cleanup() {
 	# residue; it never changes the recorded exit status, so a forced cleanup
 	# cannot turn a failed run green.
 	for container in "$CONTAINER" "$PEER_DAEMON_CONTAINER" "$BLOCKED_READ_CONTAINER" \
-		"$FILE_INPUT_CONTAINER" "$MISSING_DIR_CONTAINER"; do
+		"$FILE_INPUT_CONTAINER" "$MISSING_DIR_CONTAINER" "$SUBTITLE_CONTAINER" \
+		"$SUBTITLE_OBSERVER_CONTAINER"; do
 		[[ -n "$container" ]] || continue
 		bounded 30 "docker kill $container" docker kill --signal TERM "$container" >/dev/null 2>&1 || true
 		bounded 30 "docker wait $container" docker wait "$container" >/dev/null 2>&1 || true
@@ -271,7 +360,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for command_name in docker findmnt sha256sum timeout python3; do
+for command_name in docker findmnt sha256sum timeout python3 curl; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 [[ -e /dev/fuse ]] || fail "FUSE prerequisite missing: /dev/fuse is not available"
@@ -806,5 +895,291 @@ fi
 [[ "$NEGATIVE_OUTPUT" == *"no such file or directory"* ]] || \
 	fail "missing-directory error omitted the ENOENT text:$'\n'$NEGATIVE_OUTPUT"
 printf 'docker smoke: missing directory rejected accurately\n'
+
+# ---------------------------------------------------------------------------
+# Managed subtitle overlay.
+#
+# A subtitle must reach the mount through the authenticated API only. This
+# scenario proves the whole chain in real Docker: a direct `docker cp` into the
+# FUSE mount fails, the API upload becomes visible and readable in the
+# container mount, in a propagation observer, and on the host; a same-name
+# replacement is served by a later open; DELETE removes payload and subtitle
+# together; and an injected cleanup fault lands in delete_failed with a stable
+# error_code before a retry with the same operation id succeeds.
+printf 'docker smoke: checking managed subtitle overlay\n'
+SUBTITLE_TORRENT_HOST_DIR="$TMP_DIR/subtitle-torrents"
+SUBTITLE_MOUNT_DIR="$TMP_DIR/subtitle-mnt"
+mkdir -p "$SUBTITLE_TORRENT_HOST_DIR" "$SUBTITLE_MOUNT_DIR"
+chmod 0777 "$SUBTITLE_TORRENT_HOST_DIR" "$SUBTITLE_MOUNT_DIR"
+
+SUBTITLE_INFO_HASH="$(build_video_torrent "$SUBTITLE_TORRENT_HOST_DIR/$SUBTITLE_VIDEO_NAME.torrent" "$SUBTITLE_VIDEO_NAME")" || \
+	fail "could not build the subtitle fixture torrent"
+[[ "$SUBTITLE_INFO_HASH" =~ ^[0-9a-f]{40}$ ]] || \
+	fail "subtitle fixture info hash $SUBTITLE_INFO_HASH is not a 40-character hex digest"
+mv -- "$SUBTITLE_TORRENT_HOST_DIR/$SUBTITLE_VIDEO_NAME.torrent" "$SUBTITLE_TORRENT_HOST_DIR/$SUBTITLE_INFO_HASH.torrent"
+write_registry_fixture_for "$SUBTITLE_TORRENT_HOST_DIR" "$SUBTITLE_INFO_HASH" "$SUBTITLE_VIDEO_NAME"
+
+# The uploaded part's filename is what the server matches against the video
+# stem, so the fixture files carry the matching basename. The forged one does
+# not, and proves the mismatch rejection.
+SUBTITLE_FIRST_FILE="$TMP_DIR/subtitles/first/$SUBTITLE_VIDEO_STEM.srt"
+SUBTITLE_SECOND_FILE="$TMP_DIR/subtitles/second/$SUBTITLE_VIDEO_STEM.srt"
+SUBTITLE_FORGED_FILE="$TMP_DIR/subtitles/forged/forged.srt"
+mkdir -p "$(dirname "$SUBTITLE_FIRST_FILE")" "$(dirname "$SUBTITLE_SECOND_FILE")" "$(dirname "$SUBTITLE_FORGED_FILE")"
+printf 'original subtitle\n' > "$SUBTITLE_FIRST_FILE"
+printf 'replaced subtitle\n' > "$SUBTITLE_SECOND_FILE"
+printf 'forged subtitle\n' > "$SUBTITLE_FORGED_FILE"
+FIRST_SHA="$(sha256sum "$SUBTITLE_FIRST_FILE")"; FIRST_SHA="${FIRST_SHA%% *}"
+SECOND_SHA="$(sha256sum "$SUBTITLE_SECOND_FILE")"; SECOND_SHA="${SECOND_SHA%% *}"
+(( ${#FIRST_SHA} == 64 && ${#SECOND_SHA} == 64 )) || fail "could not hash the subtitle fixtures"
+
+SUBTITLE_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+[[ -n "$SUBTITLE_PORT" ]] || fail "could not allocate a subtitle API port"
+SUBTITLE_BASE="http://127.0.0.1:$SUBTITLE_PORT"
+mkdir -p "$TMP_DIR/subtitle-config"
+cat >"$TMP_DIR/subtitle-config/torrentfs.toml" <<EOF
+[http]
+listen_addr = "127.0.0.1:$SUBTITLE_PORT"
+
+[http.auth]
+enabled = true
+username = "alice"
+password_hash = "$SUBTITLE_PASSWORD_HASH"
+token_ttl = "10m"
+EOF
+chmod 0644 "$TMP_DIR/subtitle-config/torrentfs.toml"
+
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the propagation observer for the subtitle mount" docker run --detach --name "$SUBTITLE_OBSERVER_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
+	--entrypoint /bin/sh \
+	--mount "type=bind,src=$SUBTITLE_MOUNT_DIR,dst=/host-mnt,bind-propagation=rslave" \
+	"$IMAGE" -c 'sleep 600' >/dev/null; then
+	fail "could not start the subtitle propagation observer"
+fi
+
+if ! bounded "$DOCKER_OP_TIMEOUT" "start the managed subtitle container" docker run --detach --name "$SUBTITLE_CONTAINER" \
+	--env "PUID=$RUNTIME_UID" \
+	--env "PGID=$RUNTIME_GID" \
+	--device /dev/fuse \
+	--cap-add SYS_ADMIN \
+	--security-opt apparmor=unconfined \
+	--network host \
+	--mount "type=bind,src=$SUBTITLE_TORRENT_HOST_DIR,dst=/torrents" \
+	--mount "type=bind,src=$SUBTITLE_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
+	--mount "type=bind,src=$TMP_DIR/subtitle-config/torrentfs.toml,dst=/etc/torrentfs/subtitle.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/subtitle.toml -mountpoint /mnt /torrents >/dev/null; then
+	fail "could not start the managed subtitle container"
+fi
+
+subtitle_ready_deadline=$((SECONDS + 60))
+while ((SECONDS < subtitle_ready_deadline)); do
+	if probe "read the fixture through the subtitle mount" \
+		docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" test -f "/mnt/$SUBTITLE_VIDEO_NAME" >/dev/null 2>&1 \
+		&& probe "reach the subtitle API" curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" "$SUBTITLE_BASE/" >/dev/null 2>&1; then
+		break
+	fi
+	sleep 0.2
+done
+if ! probe "read the fixture through the subtitle mount" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" test -f "/mnt/$SUBTITLE_VIDEO_NAME" >/dev/null 2>&1; then
+	fail "the subtitle container never exposed /mnt/$SUBTITLE_VIDEO_NAME"
+fi
+if ! probe "reach the subtitle API" curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" "$SUBTITLE_BASE/" >/dev/null 2>&1; then
+	fail "the subtitle API on $SUBTITLE_BASE was never reachable"
+fi
+
+# An unauthenticated upload must be refused: the API is the only writer, and it
+# is not anonymous.
+UNAUTH_STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$PROBE_TIMEOUT" \
+	--request PUT "$SUBTITLE_BASE/api/v1/torrents/$SUBTITLE_INFO_HASH/subtitles" \
+	--form "video_path=$SUBTITLE_VIDEO_NAME" --form "file=@$SUBTITLE_FIRST_FILE" || true)"
+[[ "$UNAUTH_STATUS" == "401" ]] || \
+	fail "unauthenticated subtitle upload returned $UNAUTH_STATUS, want 401"
+
+# A direct copy into the FUSE mount is the workflow this feature replaces: it
+# must fail and leave nothing behind.
+if bounded 30 "docker cp a subtitle into the FUSE mount" docker cp "$SUBTITLE_FIRST_FILE" "$SUBTITLE_CONTAINER:/mnt/direct.srt" >/dev/null 2>&1; then
+	DIRECT_COPY_STATUS=0
+else
+	DIRECT_COPY_STATUS=$?
+fi
+[[ "$DIRECT_COPY_STATUS" != "0" ]] || \
+	fail "docker cp into the FUSE mount succeeded, but the mount must be read-only"
+if probe "verify docker cp left nothing" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" test -e /mnt/direct.srt >/dev/null 2>&1; then
+	fail "docker cp into the FUSE mount left /mnt/direct.srt behind"
+fi
+printf 'docker smoke: direct docker cp into the FUSE mount failed as expected\n'
+
+SUBTITLE_TOKEN="$(subtitle_login "$SUBTITLE_BASE")" || fail "subtitle API login failed"
+[[ -n "$SUBTITLE_TOKEN" ]] || fail "subtitle API login returned an empty token"
+
+# A mismatched name is rejected with the stable code the UI branches on.
+MISMATCH_BODY="$(curl --silent --show-error --max-time "$PROBE_TIMEOUT" \
+	--request PUT "$SUBTITLE_BASE/api/v1/torrents/$SUBTITLE_INFO_HASH/subtitles" \
+	--header "Authorization: Bearer $SUBTITLE_TOKEN" \
+	--form "video_path=$SUBTITLE_VIDEO_NAME" --form "file=@$SUBTITLE_FORGED_FILE" 2>&1 || true)"
+[[ "$MISMATCH_BODY" == *"subtitle_name_mismatch"* ]] || \
+	fail "mismatched subtitle name was not rejected with subtitle_name_mismatch: $MISMATCH_BODY"
+
+subtitle_upload "$SUBTITLE_BASE" "$SUBTITLE_TOKEN" "$SUBTITLE_INFO_HASH" "$SUBTITLE_VIDEO_NAME" "$SUBTITLE_FIRST_FILE" >/dev/null || \
+	fail "subtitle upload failed"
+SUBTITLE_PATH="video.srt"
+
+# Three views of the same file: container mount, propagation observer, host.
+if ! probe "read the subtitle in the container mount" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" sha256sum "/mnt/$SUBTITLE_PATH" >/dev/null 2>&1; then
+	fail "the uploaded subtitle is missing from the container mount"
+fi
+CONTAINER_SUBTITLE_SHA="$(probe "hash the subtitle in the container mount" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" sha256sum "/mnt/$SUBTITLE_PATH")" || \
+	fail "could not hash the subtitle inside the container"
+CONTAINER_SUBTITLE_SHA="${CONTAINER_SUBTITLE_SHA%% *}"
+[[ "$CONTAINER_SUBTITLE_SHA" == "$FIRST_SHA" ]] || \
+	fail "container subtitle hash $CONTAINER_SUBTITLE_SHA does not match the uploaded $FIRST_SHA"
+
+OBSERVER_SUBTITLE_SHA=""
+subtitle_observe_deadline=$((SECONDS + 30))
+while ((SECONDS < subtitle_observe_deadline)); do
+	if OBSERVER_SUBTITLE_SHA="$(probe "hash the subtitle through the propagation observer" \
+		docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_OBSERVER_CONTAINER" sha256sum "/host-mnt/$SUBTITLE_PATH" 2>/dev/null)"; then
+		break
+	fi
+	OBSERVER_SUBTITLE_SHA=""
+	sleep 0.2
+done
+OBSERVER_SUBTITLE_SHA="${OBSERVER_SUBTITLE_SHA%% *}"
+[[ "$OBSERVER_SUBTITLE_SHA" == "$FIRST_SHA" ]] || \
+	fail "propagation observer subtitle hash ${OBSERVER_SUBTITLE_SHA:-missing} does not match the uploaded $FIRST_SHA"
+
+HOST_SUBTITLE_SHA="$(sha256sum "$SUBTITLE_MOUNT_DIR/$SUBTITLE_PATH" 2>/dev/null || true)"
+HOST_SUBTITLE_SHA="${HOST_SUBTITLE_SHA%% *}"
+[[ "$HOST_SUBTITLE_SHA" == "$FIRST_SHA" ]] || \
+	fail "host subtitle hash ${HOST_SUBTITLE_SHA:-missing} does not match the uploaded $FIRST_SHA"
+printf 'docker smoke: managed subtitle visible with matching hash in container, observer, and host views\n'
+
+# The sidecar storage layout is what makes the overlay durable; it must not sit
+# in the mount or in the torrents directory itself.
+if ! probe "verify the subtitle store layout" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" \
+	test -f "/torrents/.metadata/subtitles/$SUBTITLE_INFO_HASH/$SUBTITLE_PATH" >/dev/null 2>&1; then
+	fail "the managed subtitle is missing from /torrents/.metadata/subtitles/$SUBTITLE_INFO_HASH"
+fi
+
+# A same-name replacement must be served by a later open, so the new bytes are
+# read rather than a cached copy of the old ones.
+subtitle_upload "$SUBTITLE_BASE" "$SUBTITLE_TOKEN" "$SUBTITLE_INFO_HASH" "$SUBTITLE_VIDEO_NAME" "$SUBTITLE_SECOND_FILE" >/dev/null || \
+	fail "subtitle replacement failed"
+REPLACED_SHA="$(sha256sum "$SUBTITLE_MOUNT_DIR/$SUBTITLE_PATH" 2>/dev/null || true)"
+REPLACED_SHA="${REPLACED_SHA%% *}"
+[[ "$REPLACED_SHA" == "$SECOND_SHA" ]] || \
+	fail "replacement hash ${REPLACED_SHA:-missing} does not match the new upload $SECOND_SHA"
+CONTAINER_REPLACED_SHA="$(probe "hash the replacement in the container mount" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" sha256sum "/mnt/$SUBTITLE_PATH")" || \
+	fail "could not hash the replacement inside the container"
+CONTAINER_REPLACED_SHA="${CONTAINER_REPLACED_SHA%% *}"
+[[ "$CONTAINER_REPLACED_SHA" == "$SECOND_SHA" ]] || \
+	fail "container replacement hash $CONTAINER_REPLACED_SHA does not match the new upload $SECOND_SHA"
+printf 'docker smoke: subtitle replacement is served by a later open in every view\n'
+
+# Direct mutation through the mount stays refused even for the new node.
+if probe "write the subtitle through the mount" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" \
+	sh -c "echo forged > /mnt/$SUBTITLE_PATH" >/dev/null 2>&1; then
+	fail "writing a managed subtitle through the FUSE mount succeeded"
+fi
+AFTER_WRITE_SHA="$(sha256sum "$SUBTITLE_MOUNT_DIR/$SUBTITLE_PATH" 2>/dev/null || true)"
+AFTER_WRITE_SHA="${AFTER_WRITE_SHA%% *}"
+[[ "$AFTER_WRITE_SHA" == "$SECOND_SHA" ]] || \
+	fail "a refused write changed the subtitle content"
+printf 'docker smoke: writing a managed subtitle through the mount is refused\n'
+
+# An injected cleanup fault must land in delete_failed with the stable code, and
+# the task must stay hidden until a retry succeeds with the same operation id.
+if ! bounded 30 "make the subtitle store unwritable" docker exec --user 0 "$SUBTITLE_CONTAINER" \
+	chmod 0500 "/torrents/.metadata/subtitles" >/dev/null; then
+	fail "could not make the subtitle store unwritable"
+fi
+FAULTED_OP="$(curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
+	--request DELETE "$SUBTITLE_BASE/api/v1/torrents/$SUBTITLE_INFO_HASH" \
+	--header "Authorization: Bearer $SUBTITLE_TOKEN" |
+	python3 -c 'import json, sys; print(json.load(sys.stdin)["operation_id"])')" || \
+	fail "could not start the faulted deletion"
+[[ -n "$FAULTED_OP" ]] || fail "the faulted deletion returned no operation id"
+
+subtitle_fault_deadline=$((SECONDS + 60))
+FAULTED_STATE=""
+FAULTED_CODE=""
+while ((SECONDS < subtitle_fault_deadline)); do
+	FAULTED_JSON="$(curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
+		"$SUBTITLE_BASE/api/v1/operations/$FAULTED_OP" \
+		--header "Authorization: Bearer $SUBTITLE_TOKEN" || true)"
+	FAULTED_STATE="$(printf '%s' "$FAULTED_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
+	FAULTED_CODE="$(printf '%s' "$FAULTED_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("error_code", ""))' 2>/dev/null || true)"
+	if [[ "$FAULTED_STATE" != "deleting" ]]; then
+		break
+	fi
+	sleep 0.2
+done
+[[ "$FAULTED_STATE" == "delete_failed" ]] || \
+	fail "faulted deletion state = ${FAULTED_STATE:-unknown}, want delete_failed"
+[[ "$FAULTED_CODE" == "subtitle_cleanup_failed" ]] || \
+	fail "faulted deletion error_code = ${FAULTED_CODE:-missing}, want subtitle_cleanup_failed"
+if probe "verify the faulted task stays hidden" \
+	docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" test -e "/mnt/$SUBTITLE_PATH" >/dev/null 2>&1; then
+	fail "a delete_failed task still exposed its subtitle in the mount"
+fi
+printf 'docker smoke: subtitle cleanup failure reported delete_failed with subtitle_cleanup_failed\n'
+
+if ! bounded 30 "restore the subtitle store permissions" docker exec --user 0 "$SUBTITLE_CONTAINER" \
+	chmod 0700 "/torrents/.metadata/subtitles" >/dev/null; then
+	fail "could not restore the subtitle store permissions"
+fi
+RETRY_OP="$(curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
+	--request DELETE "$SUBTITLE_BASE/api/v1/torrents/$SUBTITLE_INFO_HASH" \
+	--header "Authorization: Bearer $SUBTITLE_TOKEN" |
+	python3 -c 'import json, sys; print(json.load(sys.stdin)["operation_id"])')" || \
+	fail "could not retry the deletion"
+[[ "$RETRY_OP" == "$FAULTED_OP" ]] || \
+	fail "retry reused operation $RETRY_OP instead of the original $FAULTED_OP"
+
+subtitle_retry_deadline=$((SECONDS + 60))
+RETRY_STATE=""
+while ((SECONDS < subtitle_retry_deadline)); do
+	RETRY_STATE="$(curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
+		"$SUBTITLE_BASE/api/v1/operations/$RETRY_OP" \
+		--header "Authorization: Bearer $SUBTITLE_TOKEN" |
+		python3 -c 'import json, sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
+	if [[ "$RETRY_STATE" != "deleting" ]]; then
+		break
+	fi
+	sleep 0.2
+done
+[[ "$RETRY_STATE" == "deleted" ]] || \
+	fail "retried deletion state = ${RETRY_STATE:-unknown}, want deleted"
+
+# The deletion must take the payload, the subtitle, and the sidecar store with
+# it — in the container mount and on the host.
+for name in "$SUBTITLE_PATH" "$SUBTITLE_VIDEO_NAME"; do
+	if probe "verify $name is gone from the container mount" \
+		docker exec --user "$RUNTIME_UID:$RUNTIME_GID" "$SUBTITLE_CONTAINER" test -e "/mnt/$name" >/dev/null 2>&1; then
+		fail "$name survived the deletion in the container mount"
+	fi
+	if [[ -e "$SUBTITLE_MOUNT_DIR/$name" ]]; then
+		fail "$name survived the deletion on the host mount"
+	fi
+done
+if [[ -e "$SUBTITLE_TORRENT_HOST_DIR/.metadata/subtitles/$SUBTITLE_INFO_HASH" ]]; then
+	fail "the subtitle store survived the deletion"
+fi
+printf 'docker smoke: deleting the torrent removed payload, subtitle, and subtitle store\n'
+
+if ! bounded 30 "remove the managed subtitle container" docker rm -f "$SUBTITLE_CONTAINER" >/dev/null; then
+	fail "could not remove the managed subtitle container"
+fi
+if ! bounded 30 "remove the subtitle propagation observer" docker rm -f "$SUBTITLE_OBSERVER_CONTAINER" >/dev/null; then
+	fail "could not remove the subtitle propagation observer"
+fi
+printf 'docker smoke: managed subtitle overlay checks passed\n'
 
 printf 'docker smoke: all checks passed\n'

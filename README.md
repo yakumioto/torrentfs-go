@@ -4,10 +4,13 @@
 
 它管理一个已有的、可读写的 `torrents` 目录；torrent 任务只能通过 HTTP API 添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
 
+认证后的 HTTP API 和 Web UI 还可以为视频上传**受管理的字幕**：字幕写入 `torrents-dir/.metadata/subtitles`，再由只读 FUSE 投影到视频旁边。挂载点本身仍然完全只读，客户端不能通过 FUSE、SMB 或 `docker cp` 写入任何内容。
+
 ## 项目定位与设计原则
 
-- **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除和状态查询都通过 HTTP API 完成。
-- **管理状态与缓存分离**：由 API 管理的 metainfo 持久化在 `torrents-dir/<infohash>.torrent`，未完成的磁力链接意图、registry 和 peer identity 保存在 `torrents-dir/.metadata`，piece 内容只存在于内存。
+- **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除、字幕上传和状态查询都通过 HTTP API 完成。
+- **字幕是 overlay，不是 payload**：managed subtitle 与 torrent 自带文件分源保存；API 是唯一写入口，FUSE 只读投影，永远不会覆盖不可变的 payload。
+- **管理状态与缓存分离**：由 API 管理的 metainfo 持久化在 `torrents-dir/<infohash>.torrent`，未完成的磁力链接意图、registry、peer identity 和 managed subtitles 保存在 `torrents-dir/.metadata`，piece 内容只存在于内存。
 - **缓存不是下载进度**：`cached_bytes` 表示当前仍驻留在内存中的字节数。piece 会被淘汰，因此这个数值可能下降；进程重启后缓存为空。
 - **种子传输累计独立于缓存**：每个任务的 `downloaded_bytes` / `uploaded_bytes` 分别统计 useful payload 和实际发送的 data payload；两者在当前后端 Session 的运行时句柄生命周期内累计，不持久化。
 - **显式的网络边界**：HTTP 默认只监听 loopback。绑定非 loopback 地址时必须启用认证；服务本身不终止 TLS，应放在 TLS reverse proxy 后面。
@@ -27,7 +30,8 @@ cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
 ├── <infohash>.torrent  API 创建的 canonical metainfo
 └── .metadata/
     ├── pending/<infohash>.magnet
-    └── state/<infohash>.json
+    ├── state/<infohash>.json
+    └── subtitles/<infohash>/<torrent-relative path>
 ```
 
 启动时只从 `.metadata/state` 恢复任务；完整 metainfo 从根目录的 canonical `<infohash>.torrent` 读取，未完成 magnet 从 `.metadata/pending` 恢复。根目录中手工放入的任意 `.torrent` 文件会被忽略，不会创建任务、进入 FUSE 或阻止 API 删除。同一个 `torrents` 目录同时只能由一个进程管理。
@@ -87,6 +91,8 @@ TORRENTFS_HTTP_LISTEN_ADDR= \
   ./torrentfs -mountpoint "$PWD/mnt" "$PWD/torrents"
 ```
 
+只运行 FUSE 时没有 HTTP API 和 Web UI，因此也没有字幕上传入口：该模式下挂载点只读地呈现已有数据，managed subtitles 仍会从 `.metadata/subtitles` 投影出来，但新增或替换字幕必须通过启用 HTTP 的实例完成（同一时刻只有一个进程可以管理该 `torrents` 目录）。
+
 也可以通过示例 TOML 启动 headless 服务：
 
 ```sh
@@ -144,6 +150,19 @@ torrentfs -mountpoint <dir> [-config <file>] <torrents-dir>
 - torrent 的显示名称发生冲突时会追加 hash 前缀以区分。
 - single-file torrent 不会额外包一层目录，因此播放器可以直接打开例如 `<mount>/movie.mp4`。
 
+managed subtitle 以只读文件的形式合并进同一棵树：
+
+```text
+<mount>/
+├── <single-name>            # single-file torrent 的视频
+├── <single-stem>.srt        # 同一 torrent 的字幕，作为 root sibling
+└── <multi-name>/
+    ├── movie.mkv
+    └── movie.srt            # 与视频同目录、同 basename
+```
+
+字幕节点是普通只读文件（`0444`），size 与 mtime 来自持久化文件。同名替换采用同目录原子 rename，因此已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容；`Create`、`Mkdir`、可写 `Open`、`Rename`、`Unlink` 继续返回 `EROFS`。
+
 ## HTTP API
 
 HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0.1:8080`，下表列出当前注册的全部管理路由：
@@ -158,6 +177,7 @@ HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0
 | `GET` | `/api/v1/torrents/{id}` | 查询单个任务的汇总状态 | `200` |
 | `GET` | `/api/v1/torrents/{id}/status` | 查询 piece、文件范围和网络诊断快照 | `200` |
 | `DELETE` | `/api/v1/torrents/{id}` | 发起异步删除 | `202` |
+| `PUT` | `/api/v1/torrents/{id}/subtitles` | 上传或替换该任务的一个 managed subtitle（multipart） | `201` 新建 / `200` 替换 |
 | `PUT` | `/api/v1/torrents/{id}/favorite` | 设置或取消任务的收藏标记 | `200` |
 | `POST` | `/api/v1/torrents/prune` | 批量删除早于 N 天的未收藏任务 | `200` |
 | `GET` | `/api/v1/operations/{id}` | 查询删除 operation | `200` |
@@ -360,6 +380,76 @@ token_ttl = "30m"
 
    成功响应为 `204` 空 body。
 
+### 上传与管理字幕
+
+视频播放器需要与视频**同目录、同 basename** 的字幕文件。torrent 自带的 payload 是不可变且只读的，因此 TorrentFS 不接受把字幕直接写进挂载点，而是通过认证 API 写入一份受管理的 sidecar，再由只读 FUSE 合并到视频旁边。
+
+不要用 `docker cp` 直接写 FUSE 挂载目录：挂载点（以及容器内的 `/mnt` 路径）对所有客户端都是只读的，写入必然失败或不可见。UI 中的“上传字幕”和使用下面 API 的请求是唯一受支持的写入方式。
+
+请求是 multipart，客户端只提交**目标视频的 display path** 和字幕文件本身；目标字幕路径永远由服务端推导：
+
+```sh
+curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
+  --header "Authorization: Bearer $TOKEN" \
+  --form 'video_path=Season 1/E01.mkv' \
+  --form 'file=@./E01.srt'
+```
+
+同样不要手动设置 `Content-Type: multipart/form-data`。新建返回 `201`，替换同一路径的已有 managed subtitle 返回 `200`：
+
+```json
+{
+  "torrent_id": "<info-hash>",
+  "video_path": "Season 1/E01.mkv",
+  "path": "Season 1/E01.srt",
+  "mount_path": "Show/Season 1/E01.srt",
+  "format": "srt",
+  "size": 1234,
+  "updated_at": "2026-09-26T12:00:00Z",
+  "replaced": false
+}
+```
+
+`path` 是 torrent 相对路径，`mount_path` 是它在挂载点中出现的路径（包含可能被 hash 前缀消歧后的 torrent 根名称）。
+
+名称与格式规则：
+
+| 规则 | 说明 |
+| --- | --- |
+| 视频路径 | 必须是该任务 `ready` 状态下的一个 payload 文件，精确匹配 metainfo 的 slash 分隔 display path；不接受绝对路径、反斜杠、`.`、`..` 或宿主/FUSE 前缀 |
+| 视频扩展名 | 首版允许 `.3gp`、`.avi`、`.flv`、`.m2ts`、`.m4v`、`.mkv`、`.mov`、`.mp4`、`.mpeg`、`.mpg`、`.mts`、`.ts`、`.webm`、`.wmv`（大小写不敏感） |
+| 字幕扩展名 | 只允许**小写** `.srt`、`.ass`、`.vtt`；`.SRT` 等非规范形式被 `415` 拒绝，避免在大小写敏感目录里出现重复 |
+| 名称对应 | 视频去掉最终扩展名后的 basename 必须与字幕去掉扩展名后的 basename **完全相同**（逐码点、区分大小写，不做模糊匹配）。例如 `Movie.2026.mkv` 只接受 `Movie.2026.srt` / `.ass` / `.vtt`；`Season 1/E01.mp4` 只接受 `E01.srt` |
+| 语言后缀 | 首版不支持 `Movie.2026.zh-CN.srt` 这类变体后缀 |
+| 目标位置 | 字幕写入所选视频所在目录，文件名保持不变；内容按原始字节保存，不转码、不修改 BOM 或换行 |
+| 覆盖 payload | 若目标路径已是 torrent payload（例如种子自带 `Movie.srt`），返回 `409`，绝不覆盖不可变文件 |
+| 替换 | 目标是同一任务的 managed subtitle 时，同扩展名、同路径执行原子替换；不同扩展名可以并存 |
+| 歧义 | 同目录下 `movie.mkv` 与 `movie.mp4` 会争用 `movie.srt`，两者的 target 都标记为不可上传 |
+| single-file | 视频与字幕都位于挂载根；当同名消歧改变了视频在挂载点的可见名称时，该 target 标记为不可上传，不会静默重命名视频或字幕 |
+
+`GET /api/v1/torrents/{id}/status` 在原有字段之外新增两个数组，`files` 的 payload/piece 语义不变：
+
+- `subtitle_targets`：每个受支持视频的 `video_path`、`mount_path`、`expected_basename`、`uploadable`，以及在不可上传时给出稳定 `reason`。前端只从这些服务端推导结果中选择，不自行推断业务规则。
+- `subtitles`：已发布的 managed subtitle 的 `video_path`、`path`、`mount_path`、`format`、`size`、`updated_at`。它们不参与 piece 覆盖统计。
+
+失败响应保留 `{"error":"..."}`，并额外携带稳定的 `code` 字段，供前端按语义而不是按文本分支：
+
+| `code` | HTTP | 含义 |
+| --- | --- | --- |
+| `subtitle_name_mismatch` | `415` | 字幕 basename 与目标视频不严格对应 |
+| `subtitle_format_unsupported` | `415` | 扩展名不是小写 `.srt`/`.ass`/`.vtt` |
+| `subtitle_video_not_found` | `404` | `video_path` 不是该任务的受支持 payload 视频 |
+| `subtitle_name_conflict` | `409` | 目标视频的字幕名称有歧义（同名 stem 或多个 torrent 争用同一 root 名称） |
+| `subtitle_payload_conflict` | `409` | 目标路径属于 torrent payload |
+| `torrent_deleting` | `409` | 任务正在删除（含 `delete_failed`），不能再上传 |
+| `subtitle_storage_unavailable` | `503` | 字幕存储目录不可用或不是受管理的目录 |
+| `subtitle_storage_full` | `507` | 字幕存储空间不足 |
+| `subtitle_write_failed` | `500` | 写入失败（含客户端中断） |
+
+`413` 表示请求体超过 `http.max_upload_bytes`（该上限同时约束 `.torrent` 与字幕上传）。错误信息不会回显宿主路径。
+
+字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：失败时旧字幕保持完整，临时文件被清理。同名替换后，已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容（挂载点不保留旧 page cache）。
+
 ### 状态与错误语义
 
 `state` 描述生命周期，不是下载或完成百分比：
@@ -375,6 +465,8 @@ token_ttl = "30m"
 
 `cached_bytes` 是内存 cache 当前的占用量，而不是已经下载过的字节数；piece 被淘汰后该值会下降，重启后从零开始。`ready` 不表示整个 torrent 已经下载完成，也不表示所有 piece 都在内存中。
 
+删除的终态包含 managed subtitle 清理：`delete_failed` 时 `GET /api/v1/operations/{id}` 会带上稳定的 `error_code`（当前为 `subtitle_cleanup_failed`）。处于该状态的任务既不会重新出现在 FUSE/status 中，也不会复活；修复存储权限或空间后，再次 `DELETE` 同一任务会复用同一个 operation id 完成幂等重试，重启进程也会自动重试一次。
+
 每个 torrent 的 `downloaded_bytes` 是 `BytesReadUsefulData`（有效内容 payload），`uploaded_bytes` 是 `BytesWrittenData`（实际发送的内容 payload），都不包含 wire overhead。它们从当前 Session 注册该 torrent 的运行时句柄开始累计；页面刷新、多前端读取不会清零，后端重启重建句柄后归零，也不会写入 registry 或其他持久化状态。删除中的行在运行时句柄移除后回落为零。
 
 `GET /api/v1/stats` 返回统一的 Session 运行时快照：`cache.used_bytes` / `cache.capacity_bytes` 分别是已经校验并驻留在共享 piece LRU 中的当前占用和配置硬上限，不包含 staging、临时副本、协议缓冲区或进程 RSS；`transfer.downloaded_bytes` 使用 useful torrent payload，`transfer.uploaded_bytes` 使用实际发送的 torrent data payload，均不包含 wire overhead。统计从后端 Session 创建时开始，后端重启后归零，浏览器刷新或删除任务不会清零/回退，多前端读取同一个累计值。
@@ -386,10 +478,12 @@ token_ttl = "30m"
 | `400` | JSON/multipart body、`Content-Type`、磁力链接或文件名无效 |
 | `401` | 认证缺失、格式错误、过期或已撤销；登录凭据错误也返回 `401` |
 | `404` | 未知 torrent/operation；认证关闭时 login/logout 也不可用；不存在的静态 asset |
-| `409` | torrent 正在删除（包括 `delete_failed` 状态下重新添加同一 info hash） |
-| `413` | body 超过限制；登录 body 上限固定为 8 KiB，上传上限由 `http.max_upload_bytes` 控制 |
-| `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type |
+| `409` | torrent 正在删除（包括 `delete_failed` 状态下重新添加同一 info hash）；字幕名称/目标路径冲突 |
+| `413` | body 超过限制；登录 body 上限固定为 8 KiB，`.torrent` 与字幕上传上限由 `http.max_upload_bytes` 控制 |
+| `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type；字幕名称不匹配或扩展名不受支持 |
 | `500` | 未分类的内部 session/API 错误 |
+| `503` | 字幕存储目录不可用（缺失、被替换为符号链接或普通文件） |
+| `507` | 字幕存储空间不足 |
 
 受保护 API 的 `401` 响应包含 `WWW-Authenticate: Bearer`。未知路由或方法可能由标准 HTTP handler 返回 `404`/`405`，不要把它们当作 SPA 页面或统一的业务 JSON 错误。
 
@@ -400,7 +494,9 @@ HTTP 服务启用时，同一个 listener 同时提供嵌入式 Web UI 和 `/api
 - Dashboard 支持按名称或 info hash 搜索、按全部/就绪/错误筛选，显示全局缓存、本次启动下载/上传统计和任务摘要，并提供磁力/文件添加入口；文件页签支持一次选择多个 `.torrent` 文件或拖放文件，浏览器会按“一文件一请求”复用现有上传接口。
 - Dashboard 任务列表显示逐任务下载量和上传量；任务、大小、状态和添加时间均可在前端排序，传输量仅展示不参与排序，默认按添加时间倒序。
 - 任务详情页提供概览、文件和数据块三个 tab；文件视图显示 piece 范围和缓存覆盖，piece map 区分 cached、pinned 和 uncached。
-- 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。
+- 任务详情页头部提供“上传字幕”入口：选择服务端给出的目标视频、选择一个字幕文件、预览将写入的 torrent 相对路径和 FUSE 挂载路径，随后看到“字幕已上传”或“字幕已替换”。名称不匹配、扩展名不规范、目标属于 payload、任务正在删除、存储权限或空间问题都会显示可操作的提示。按钮不可用时旁边始终说明原因（无受支持视频、名称冲突、元数据未就绪或任务正在删除）。
+- 文件 tab 里另有独立的“已管理字幕”列表（目标视频、挂载路径、格式、大小、更新时间），它与 payload 文件表分开，不参与 piece 覆盖统计。
+- 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。删除弹窗会明确说明 managed subtitles 一并清理，字幕清理失败时提示修复存储后再次删除以重试。
 - 查询默认每 5 秒刷新；浏览器页面不可见时不会在后台继续刷新。
 - 认证开启时，UI 把 opaque Bearer token 放在当前 tab 的 `sessionStorage` 中；服务端 token 仍只存在 daemon 内存中。服务重启或 token 过期后需要重新登录。
 
@@ -512,6 +608,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 └── .metadata/
     ├── pending/<info-hash>.magnet # 尚未解析完成的磁力意图
     ├── state/<info-hash>.json      # 每个任务的 registry entry
+    ├── subtitles/<info-hash>/…     # 该任务的 managed subtitles，镜像 torrent 相对路径
     ├── layout_version              # 一次性旧布局迁移标记
     ├── peer_id                     # 该 torrents 目录的 20 字节 peer identity
     └── instance.lock               # 进程运行期间的独占锁
@@ -521,6 +618,9 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 - registry 是任务集合的唯一事实来源；启动不会扫描根目录猜测任务。根目录中手工放置的 `.torrent` 文件会被忽略，不会进入 API/FUSE，也不会阻止删除。
 - 上传内容会先校验 info hash，再以 `<info-hash>.torrent` 原子发布；磁力链接先写入 `.metadata/pending/<info-hash>.magnet`，metadata 完成后发布最终文件并清理 pending。
 - 首次启动会把当前版本可识别的旧 flat metainfo 和 magnet intent 文件一次性迁移到新布局；目标 hash 冲突、损坏或非 canonical 历史文件会使启动明确失败。写入 `layout_version` 后不再读取旧位置。
+- managed subtitle 与 torrent 自带文件分开保存：`subtitle` 只保存在 `.metadata/subtitles/<info-hash>/` 下，并按 torrent 相对路径镜像目录结构。启动时只为 `ready` 任务扫描并校验这份 overlay；`deleting`/`delete_failed` 任务的 hash 不会进入可见 index。
+- 启动扫描会清理上次崩溃留下的内部临时文件；发现不受管理的符号链接、设备或特殊文件，以及无法唯一对应视频的 sidecar，会让启动明确失败，而不是把不受信任的内容暴露到挂载点。
+- 删除任务（包括 prune）会同步清理 `.metadata/subtitles/<info-hash>`；只有该目录已不存在且父目录完成 `fsync` 后，operation 才会进入 `deleted`。
 - 配置只在启动时读取，修改 TOML 或环境变量后需要重启进程。
 - 一个 `torrents` 目录同时只能由一个 torrentfs 进程使用。
 
@@ -651,6 +751,16 @@ docker run --rm \
 ```
 
 两个 bind source 都必须对 `PUID:PGID` 可读、可写、可遍历。某些系统不需要 `apparmor=unconfined`，但如果 AppArmor 阻止 FUSE，则必须按主机策略放行。`/dev/fuse`、`SYS_ADMIN` 和等价的安全配置不是镜像可以自行授予的权限；缺少它们时容器会挂载失败，而不会静默退化为普通目录。
+
+### 在 Docker 中上传字幕
+
+字幕上传不依赖 `docker cp`，也不需要放宽容器权限：
+
+- 运行身份 `PUID:PGID` 必须对 `/torrents` 可读可写可遍历，因为 managed subtitles 写入 `/torrents/.metadata/subtitles/<infohash>/`。`/torrents` 不会被入口自动 `chown`。
+- `/mnt` 的 rw bind mount 只用于让 FUSE daemon 在其中创建 submount；FUSE 文件系统对宿主机、SMB 和其他容器进程仍然是只读的。把它设为只读会导致挂载失败，但不会让字幕可写。
+- `mount.allow_other`（`TORRENTFS_MOUNT_ALLOW_OTHER`）只影响谁能读取挂载点，不提供写能力。
+- 因此 `docker cp <字幕> <容器>:/mnt/...` 仍然会非零失败或写入后不可见；请通过认证的 `PUT /api/v1/torrents/{id}/subtitles` 或 Web UI 上传。
+- 跨容器公开该 API 时必须启用 `http.auth`，并把它放在 TLS reverse proxy 后面；`/api/` 之外没有其他写入口。
 
 `/srv/mnt` 所在的主机挂载点必须支持递归双向传播；可以先检查：
 
@@ -826,6 +936,32 @@ golangci-lint run ./...
   ```
 
 `TORRENTFS_FUSE_REQUIRED` 只控制测试门禁，不是 daemon 的运行时配置。CI nightly 的多平台 OCI 构建与本地 `scripts/nightly-build.sh` 归档脚本是不同入口；本 README 的命令用于本地构建、运行和验证，不把手工归档脚本写成 nightly 发布保证。
+
+## 字幕故障排查与播放器验证
+
+常见失败与处理：
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| `413` | 请求体超过 `http.max_upload_bytes`（默认 10 MiB）。调高该值后重启进程 |
+| `415` + `subtitle_name_mismatch` | 字幕 basename 与视频不完全一致（含多出的语言后缀）。改名后重试 |
+| `415` + `subtitle_format_unsupported` | 扩展名不是小写 `.srt`/`.ass`/`.vtt`。`.SRT` 不被接受 |
+| `409` + `subtitle_payload_conflict` | 目标路径是种子自带文件。选择另一个视频，或换一个不含该字幕的种子 |
+| `409` + `subtitle_name_conflict` | 同目录存在同名 stem 的多个视频，或 single-file torrent 的挂载名已被 hash 消歧 |
+| `409` + `torrent_deleting` | 任务正在删除或处于 `delete_failed`。先完成删除 |
+| `503` + `subtitle_storage_unavailable` | `.metadata/subtitles` 缺失、不可写，或被替换成符号链接/普通文件。修复目录后重试 |
+| `507` + `subtitle_storage_full` | 磁盘或配额耗尽。释放空间后重试 |
+| `delete_failed` + `error_code=subtitle_cleanup_failed` | 任务已隐藏但字幕目录未清理。修复权限/空间后再次 `DELETE` 同一任务（复用同一 operation id），或重启进程让其自动重试一次 |
+| 上传成功但播放器仍显示旧字幕 | 播放器缓存或未重扫。替换使用原子 rename 且新 `open` 一定读到新内容，但进程外的播放器不会因此收到通知 |
+| `docker cp` 写 `/mnt/...` 失败 | 预期行为：FUSE 挂载点只读。请用 API/UI 上传 |
+
+实际视频服务需要按部署环境手工验证以下三条消费路径，并记录该服务是否需要显式 rescan：
+
+1. 详情页上传新字幕 → 服务重新扫描或重新打开视频 → 字幕可见；
+2. 同名替换 → 新内容生效（服务若缓存了字幕内容，需要其自身重新读取）；
+3. 删除 torrent → 字幕随任务一起从挂载点消失。
+
+只读挂载点不提供任何写能力，因此依赖“直接往目录里丢字幕”的上游流程必须先改造成使用本节所述的 API。仅监听 inotify 且不做定期 rescan 的播放器在替换场景下可能不会自动刷新，这属于消费方行为，不是挂载点可见性或可读性的问题。
 
 ## 许可证
 

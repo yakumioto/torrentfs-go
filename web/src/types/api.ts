@@ -38,12 +38,42 @@ export interface FileStatus {
   piece_end: number;
 }
 
+export interface SubtitleTarget {
+  video_path: string;
+  mount_path: string;
+  expected_basename: string;
+  uploadable: boolean;
+  reason?: string;
+}
+
+export interface Subtitle {
+  video_path: string;
+  path: string;
+  mount_path: string;
+  format: string;
+  size: number;
+  updated_at: string;
+}
+
+export interface SubtitleUploadResponse {
+  torrent_id: string;
+  video_path: string;
+  path: string;
+  mount_path: string;
+  format: string;
+  size: number;
+  updated_at: string;
+  replaced: boolean;
+}
+
 export interface TorrentStatus {
   torrent: Torrent;
   metainfo_ready: boolean;
   piece_length: number;
   pieces: PieceStatus[];
   files: FileStatus[];
+  subtitle_targets: SubtitleTarget[];
+  subtitles: Subtitle[];
 }
 
 export interface Operation {
@@ -51,6 +81,7 @@ export interface Operation {
   torrent_id: string;
   state: string;
   error?: string;
+  error_code?: string;
 }
 
 export interface PruneFailure {

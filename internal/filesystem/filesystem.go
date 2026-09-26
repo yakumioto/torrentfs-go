@@ -18,6 +18,15 @@ type FileView struct {
 	Size int64
 }
 
+// SubtitleView describes one managed subtitle projected beside the immutable
+// torrent payload. Path is relative to the torrent's virtual root.
+type SubtitleView struct {
+	Path       string
+	VideoPath  string
+	Size       int64
+	ModifiedAt time.Time
+}
+
 // TorrentView is the read-only snapshot of a torrent exposed to the
 // filesystem layer. Files is non-empty once the torrent's metainfo is known.
 // SingleFile marks a torrent whose metainfo has no directory structure
@@ -31,6 +40,7 @@ type TorrentView struct {
 	// CreatedAt is the durable time when the torrent was added to the session.
 	CreatedAt  time.Time
 	Files      []FileView
+	Subtitles  []SubtitleView
 	SingleFile bool
 }
 
@@ -39,6 +49,13 @@ func setCreatedAt(attr *fuse.Attr, createdAt time.Time) {
 		return
 	}
 	attr.SetTimes(&createdAt, &createdAt, &createdAt)
+}
+
+func setModifiedAt(attr *fuse.Attr, modifiedAt time.Time) {
+	if modifiedAt.IsZero() {
+		return
+	}
+	attr.SetTimes(&modifiedAt, &modifiedAt, &modifiedAt)
 }
 
 // Backend supplies the filesystem layer with torrent snapshots and file
@@ -50,6 +67,12 @@ type Backend interface {
 	// OpenFile returns a handle for reading the file at the given display path
 	// inside the torrent identified by hash.
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
+}
+
+// SubtitleBackend is the optional extension used for managed subtitle files.
+// Keeping it separate preserves compatibility with small payload-only backends.
+type SubtitleBackend interface {
+	OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error)
 }
 
 // fsState carries the pieces shared by every node in a mount: the Backend and

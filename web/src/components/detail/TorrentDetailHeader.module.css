@@ -46,7 +46,25 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: end;
+  align-items: start;
   gap: 0.5rem;
+}
+
+.actionGroup {
+  display: grid;
+  gap: 0.35rem;
+  justify-items: end;
+}
+
+.tooltipAnchor {
+  display: inline-flex;
+}
+
+.actionHint {
+  max-width: 16rem;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  text-align: right;
 }
 
 @media (max-width: 760px) {

@@ -18,13 +18,14 @@ type torrentDirNode struct {
 	fs.Inode
 	state     *fsState
 	hash      metainfo.Hash
-	files     []FileView // display paths of every file in the torrent
-	prefix    string     // torrent-relative prefix this directory represents
+	files     []FileView     // display paths of every file in the torrent
+	subtitles []SubtitleView // managed sidecars in the torrent
+	prefix    string         // torrent-relative prefix this directory represents
 	createdAt time.Time
 }
 
 func (n *torrentDirNode) entries() []fsEntry {
-	return childrenOf(n.files, n.prefix)
+	return childrenOfViews(n.files, n.subtitles, n.prefix)
 }
 
 func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -35,7 +36,7 @@ func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse
 }
 
 func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	e, ok := lookupChild(n.files, n.prefix, name)
+	e, ok := lookupChildWithSubtitles(n.files, n.subtitles, n.prefix, name)
 	if !ok {
 		return nil, errnoFor(ErrNotFound)
 	}
@@ -47,6 +48,7 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 			state:     n.state,
 			hash:      n.hash,
 			files:     n.files,
+			subtitles: n.subtitles,
 			prefix:    prefix,
 			createdAt: n.createdAt,
 		}
@@ -57,13 +59,19 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	}
 	out.Mode = 0o444
 	out.Size = uint64(e.Size)
-	setCreatedAt(&out.Attr, n.createdAt)
+	if e.IsSubtitle {
+		setModifiedAt(&out.Attr, e.ModifiedAt)
+	} else {
+		setCreatedAt(&out.Attr, n.createdAt)
+	}
 	child := &torrentFileNode{
-		state:     n.state,
-		hash:      n.hash,
-		path:      e.Path,
-		size:      e.Size,
-		createdAt: n.createdAt,
+		state:      n.state,
+		hash:       n.hash,
+		path:       e.Path,
+		size:       e.Size,
+		subtitle:   e.IsSubtitle,
+		createdAt:  n.createdAt,
+		modifiedAt: e.ModifiedAt,
 	}
 	return n.NewInode(ctx, child, fs.StableAttr{
 		Mode: syscall.S_IFREG,

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/anacrolix/dht/v2"
@@ -41,12 +43,14 @@ type FileStatus struct {
 
 // TorrentStatusView is one consistent status snapshot for a torrent.
 type TorrentStatusView struct {
-	Torrent       TorrentView
-	MetainfoReady bool
-	PieceLength   int64
-	Pieces        []PieceStatus
-	Files         []FileStatus
-	Network       NetworkStatus
+	Torrent         TorrentView
+	MetainfoReady   bool
+	PieceLength     int64
+	Pieces          []PieceStatus
+	Files           []FileStatus
+	Network         NetworkStatus
+	SubtitleTargets []SubtitleTarget
+	Subtitles       []Subtitle
 }
 
 // NetworkStatus is the client-visible network state behind a status snapshot.
@@ -77,6 +81,10 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 	if s.state != stateActive {
 		return nil
 	}
+	return s.filesystemViewsLocked()
+}
+
+func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
 	hashes := make([]metainfo.Hash, 0, len(s.states))
 	for hash, entry := range s.states {
 		if entry.State == StateReady {
@@ -87,11 +95,7 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 	views := make([]filesystem.TorrentView, 0, len(hashes))
 	for _, hash := range hashes {
 		t := s.torrents[hash]
-		if t == nil {
-			continue
-		}
-		info := t.Info()
-		if info == nil {
+		if t == nil || t.Info() == nil {
 			continue
 		}
 		entry := s.states[hash]
@@ -99,14 +103,12 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 			Name:       t.Name(),
 			Hash:       hash,
 			CreatedAt:  entry.CreatedAt,
-			SingleFile: !info.IsDir(),
+			SingleFile: !t.Info().IsDir(),
 		}
 		for _, f := range t.tor.Files() {
-			view.Files = append(view.Files, filesystem.FileView{
-				Path: f.DisplayPath(),
-				Size: f.Length(),
-			})
+			view.Files = append(view.Files, filesystem.FileView{Path: f.DisplayPath(), Size: f.Length()})
 		}
+		view.Subtitles = s.subtitleViewsLocked(hash)
 		views = append(views, view)
 	}
 	return views
@@ -129,6 +131,46 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
 	}
 	return t.readerFor(path)
+}
+
+// OpenSubtitle opens a managed subtitle snapshot for the FUSE read path.
+func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error) {
+	if err := validateSubtitleRelativePath(path); err != nil {
+		return nil, filesystem.ErrNotFound
+	}
+	s.mu.RLock()
+	if err := s.ensureActiveLocked(); err != nil {
+		s.mu.RUnlock()
+		return nil, err
+	}
+	entry := s.states[hash]
+	_, ok := s.subtitles[hash][path]
+	s.mu.RUnlock()
+	if entry == nil || entry.State != StateReady || !ok {
+		return nil, filesystem.ErrNotFound
+	}
+	dir := s.subtitleDir(hash)
+	// The root itself must be the directory the daemon manages: opening a
+	// symlink as the root would resolve wherever it points, so it is rejected
+	// before os.Root confines the read inside it.
+	if info, err := os.Lstat(dir); err != nil {
+		return nil, filesystem.ErrNotFound
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, filesystem.ErrNotFound
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, filesystem.ErrNotFound
+	}
+	defer func() { _ = root.Close() }()
+	file, err := root.Open(filepath.FromSlash(path))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, filesystem.ErrNotFound
+		}
+		return nil, err
+	}
+	return file, nil
 }
 
 // TorrentStatusFor returns one fresh, consistent status snapshot for id.
@@ -159,10 +201,12 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 	}
 
 	view := TorrentStatusView{
-		Torrent: s.buildViewWithCached(hash, st, entry, cachedBytes),
-		Pieces:  make([]PieceStatus, 0),
-		Files:   make([]FileStatus, 0),
-		Network: s.networkStatus(st),
+		Torrent:         s.buildViewWithCached(hash, st, entry, cachedBytes),
+		Pieces:          make([]PieceStatus, 0),
+		Files:           make([]FileStatus, 0),
+		SubtitleTargets: make([]SubtitleTarget, 0),
+		Subtitles:       make([]Subtitle, 0),
+		Network:         s.networkStatus(st),
 	}
 	if st == nil {
 		return view, nil
@@ -171,6 +215,21 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 	if info == nil {
 		return view, nil
 	}
+	if targets, err := s.subtitleTargetsLocked(hash, st); err != nil {
+		return TorrentStatusView{}, err
+	} else {
+		view.SubtitleTargets = targets
+	}
+	allViews := s.filesystemViewsLocked()
+	var currentView filesystem.TorrentView
+	for _, candidate := range allViews {
+		if candidate.Hash == hash {
+			currentView = candidate
+			break
+		}
+	}
+	rootName, _ := filesystem.RootNameFor(currentView, allViews)
+	view.Subtitles = s.subtitlesLocked(hash, rootName, currentView.SingleFile)
 
 	pieceCount := info.NumPieces()
 	view.MetainfoReady = true

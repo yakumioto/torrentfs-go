@@ -18,8 +18,9 @@ import (
 )
 
 type fakeBackend struct {
-	views []TorrentView
-	data  map[string][]byte
+	views    []TorrentView
+	data     map[string][]byte
+	subtitle map[string][]byte
 }
 
 func (b *fakeBackend) Torrents() []TorrentView { return b.views }
@@ -30,6 +31,22 @@ func (b *fakeBackend) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, er
 		return nil, fmt.Errorf("fake backend: no file %q", path)
 	}
 	return bytes.NewReader(data), nil
+}
+
+func (b *fakeBackend) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error) {
+	data, ok := b.subtitle[hash.HexString()+"\x00"+path]
+	if !ok {
+		return nil, fmt.Errorf("fake backend: no subtitle %q", path)
+	}
+	return bytes.NewReader(data), nil
+}
+
+func (b *fakeBackend) addSubtitle(view *TorrentView, path, videoPath string, data []byte) {
+	view.Subtitles = append(view.Subtitles, SubtitleView{Path: path, VideoPath: videoPath, Size: int64(len(data))})
+	if b.subtitle == nil {
+		b.subtitle = make(map[string][]byte)
+	}
+	b.subtitle[view.Hash.HexString()+"\x00"+path] = data
 }
 
 func hashN(n byte) metainfo.Hash {
@@ -341,6 +358,172 @@ func TestReadHandleFallsBackToPlainReaderAt(t *testing.T) {
 	out, status := read.Bytes(make([]byte, 7))
 	if status != fuse.OK || string(out) != "content" {
 		t.Fatalf("plain read = %q status=%v, want content/OK", out, status)
+	}
+}
+
+func TestSubtitleEntriesMergeIntoTheTorrentLayout(t *testing.T) {
+	files := []FileView{
+		{Path: "top.mkv", Size: 10},
+		{Path: "Season 1/E01.mp4", Size: 20},
+	}
+	subtitles := []SubtitleView{
+		{Path: "top.srt", VideoPath: "top.mkv", Size: 3},
+		{Path: "Season 1/E01.srt", VideoPath: "Season 1/E01.mp4", Size: 4},
+	}
+	root := childrenOfViews(files, subtitles, "")
+	if want := []string{"Season 1", "top.mkv", "top.srt"}; !reflect.DeepEqual(entryNames(root), want) {
+		t.Fatalf("root children = %v, want %v", entryNames(root), want)
+	}
+	for _, entry := range root {
+		if entry.Name == "top.srt" && (entry.IsDir || !entry.IsSubtitle) {
+			t.Fatalf("top.srt entry = %+v, want a subtitle file", entry)
+		}
+	}
+	nested := childrenOfViews(files, subtitles, "Season 1")
+	if want := []string{"E01.mp4", "E01.srt"}; !reflect.DeepEqual(entryNames(nested), want) {
+		t.Fatalf("nested children = %v, want %v", entryNames(nested), want)
+	}
+	if entry, ok := lookupChildWithSubtitles(files, subtitles, "Season 1", "E01.srt"); !ok || !entry.IsSubtitle {
+		t.Fatalf("lookup E01.srt = %+v (%v), want a subtitle entry", entry, ok)
+	}
+	if _, ok := lookupChild(files, "Season 1", "E01.srt"); ok {
+		t.Fatal("payload-only lookup found a managed subtitle")
+	}
+}
+
+// TestSubtitleNeverShadowsPayload pins the precedence rule: a managed sidecar
+// must not displace an immutable payload file that happens to share its path.
+func TestSubtitleNeverShadowsPayload(t *testing.T) {
+	files := []FileView{{Path: "movie.mkv", Size: 10}, {Path: "movie.srt", Size: 99}}
+	subtitles := []SubtitleView{{Path: "movie.srt", VideoPath: "movie.mkv", Size: 3}}
+	entries := childrenOfViews(files, subtitles, "")
+	for _, entry := range entries {
+		if entry.Name == "movie.srt" {
+			if entry.IsSubtitle || entry.Size != 99 {
+				t.Fatalf("movie.srt = %+v, want the payload file to win", entry)
+			}
+		}
+	}
+}
+
+func TestSingleFileSubtitleAppearsBesideTheVideo(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeBackend{views: []TorrentView{
+		{Name: "Movie.mkv", Hash: hashN(1), SingleFile: true},
+	}}
+	backend.addFile(&backend.views[0], "Movie.mkv", []byte("video"))
+	backend.addSubtitle(&backend.views[0], "Movie.srt", "Movie.mkv", []byte("sub"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+
+	entries := root.visibleChildren()
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	if want := []string{"Movie.mkv", "Movie.srt"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("root children = %v, want %v", names, want)
+	}
+
+	var subtitleOut fuse.EntryOut
+	subtitleInode, errno := root.Lookup(ctx, "Movie.srt", &subtitleOut)
+	if errno != 0 {
+		t.Fatalf("Lookup Movie.srt errno = %v", errno)
+	}
+	if subtitleOut.Mode&0o7777 != 0o444 {
+		t.Fatalf("subtitle mode = %o, want 0444", subtitleOut.Mode)
+	}
+	node, ok := subtitleInode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("subtitle node = %T, want *torrentFileNode", subtitleInode.Operations())
+	}
+	if _, _, errno := node.Open(ctx, syscall.O_WRONLY); errno != syscall.EROFS {
+		t.Fatalf("write Open on a subtitle errno = %v, want EROFS", errno)
+	}
+	handle, _, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("read Open on a subtitle errno = %v", errno)
+	}
+	read, ok := handle.(*readHandle)
+	if !ok {
+		t.Fatalf("handle = %T, want *readHandle", handle)
+	}
+	buf := make([]byte, 3)
+	result, errno := read.Read(ctx, buf, 0)
+	if errno != 0 {
+		t.Fatalf("Read errno = %v", errno)
+	}
+	out, status := result.Bytes(buf)
+	if status != fuse.OK || string(out) != "sub" {
+		t.Fatalf("subtitle read = %q status=%v, want sub/OK", out, status)
+	}
+	// Direct mutation through the mount stays impossible for subtitles too.
+	if errno := root.Unlink(ctx, "Movie.srt"); errno != syscall.EROFS {
+		t.Fatalf("Unlink Movie.srt errno = %v, want EROFS", errno)
+	}
+	if _, errno := root.Mkdir(ctx, "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
+		t.Fatalf("Mkdir errno = %v, want EROFS", errno)
+	}
+}
+
+// TestSubtitleReplacementIsServedByALaterOpen proves the kernel-facing
+// guarantee: after a byte-for-byte replacement, a fresh open reads the new
+// content, because nothing caches the old snapshot.
+func TestSubtitleReplacementIsServedByALaterOpen(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeBackend{views: []TorrentView{{Name: "show", Hash: hashN(1)}}}
+	backend.addFile(&backend.views[0], "movie.mkv", []byte("video"))
+	backend.addSubtitle(&backend.views[0], "movie.srt", "movie.mkv", []byte("old"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+
+	var entryOut fuse.EntryOut
+	dirInode, errno := root.Lookup(ctx, "show", &entryOut)
+	if errno != 0 {
+		t.Fatalf("Lookup show errno = %v", errno)
+	}
+	dir, ok := dirInode.Operations().(*torrentDirNode)
+	if !ok {
+		t.Fatalf("node = %T, want *torrentDirNode", dirInode.Operations())
+	}
+	var fileOut fuse.EntryOut
+	fileInode, errno := dir.Lookup(ctx, "movie.srt", &fileOut)
+	if errno != 0 {
+		t.Fatalf("Lookup movie.srt errno = %v", errno)
+	}
+	node := fileInode.Operations().(*torrentFileNode)
+	first, _, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("first Open errno = %v", errno)
+	}
+	buf := make([]byte, 16)
+	result, _ := first.(*readHandle).Read(ctx, buf, 0)
+	out, _ := result.Bytes(buf)
+	if string(out) != "old" {
+		t.Fatalf("first read = %q, want old", out)
+	}
+
+	backend.subtitle[hashN(1).HexString()+"\x00movie.srt"] = []byte("new subtitle")
+	second, _, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("second Open errno = %v", errno)
+	}
+	result, _ = second.(*readHandle).Read(ctx, buf, 0)
+	out, _ = result.Bytes(buf)
+	if string(out) != "new subtitle" {
+		t.Fatalf("second read = %q, want the replacement content", out)
+	}
+}
+
+func TestRootNameForReportsTheDisambiguatedName(t *testing.T) {
+	views := []TorrentView{{Name: "dup", Hash: hashN(1)}, {Name: "dup", Hash: hashN(2)}}
+	firstName, ok := RootNameFor(views[0], views)
+	if !ok || firstName != "dup" {
+		t.Fatalf("first name = %q (%v), want dup", firstName, ok)
+	}
+	secondName, ok := RootNameFor(views[1], views)
+	if !ok || secondName == "dup" || !strings.HasPrefix(secondName, "dup-") {
+		t.Fatalf("second name = %q (%v), want a disambiguated name", secondName, ok)
 	}
 }
 

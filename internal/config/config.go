@@ -104,7 +104,8 @@ type HTTP struct {
 	ListenAddr string `toml:"listen_addr"`
 	// Auth configures the optional single-user HTTP authentication service.
 	Auth Auth `toml:"auth"`
-	// MaxUploadBytes caps an uploaded .torrent request body.
+	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
+	// managed subtitle file.
 	MaxUploadBytes int64 `toml:"max_upload_bytes"`
 }
 

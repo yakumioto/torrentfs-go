@@ -100,6 +100,19 @@ func (s *Session) PendingMetadataFetches() int {
 	return len(s.metadataFetches)
 }
 
+// SetSubtitleCleanupHook installs fn as the forced-failure hook for the
+// subtitle cleanup stage of a deletion and returns a function that restores the
+// previous value. A nil hook clears it. Test-only.
+func SetSubtitleCleanupHook(fn func(metainfo.Hash) error) func() {
+	previous := subtitleCleanupHook
+	subtitleCleanupHook = fn
+	return func() { subtitleCleanupHook = previous }
+}
+
+// SubtitleRootForTest reports the durable root that owns managed subtitles.
+// Test-only.
+func (s *Session) SubtitleRootForTest() string { return s.subtitleRoot }
+
 // SetMetadataFetchHook installs fn as the post-resolution metadata fetch hook
 // and returns a function that restores the previous value. A nil hook clears
 // it. Test-only.

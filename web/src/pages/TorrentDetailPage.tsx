@@ -5,12 +5,13 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/errors';
 import { useAuth } from '../app/auth-context';
 import { DeleteTorrentDialog } from '../components/dialogs/DeleteTorrentDialog';
+import { UploadSubtitleDialog } from '../components/dialogs/UploadSubtitleDialog';
 import { TorrentDetailHeader } from '../components/detail/TorrentDetailHeader';
 import { TorrentFilesPanel } from '../components/detail/TorrentFilesPanel';
 import { TorrentLiveSummary } from '../components/detail/TorrentLiveSummary';
 import { TorrentOverview } from '../components/detail/TorrentOverview';
 import { TorrentPiecesPanel } from '../components/detail/TorrentPiecesPanel';
-import type { FileStatus, PieceStatus } from '../types/api';
+import type { FileStatus, PieceStatus, Subtitle } from '../types/api';
 import {
   useTorrentDetail,
   useTorrentLiveSummary,
@@ -18,7 +19,9 @@ import {
   useTorrentStatusFiles,
   useTorrentStatusMeta,
   useTorrentStatusPieces,
+  useTorrentStatusSubtitles,
   useTorrentStatusTorrent,
+  useTorrentSubtitleTargets,
 } from '../queries/hooks';
 import { userFacingError } from '../utils/user-facing-error';
 import { usePageVisible } from '../utils/visibility';
@@ -26,6 +29,27 @@ import styles from './TorrentDetailPage.module.css';
 
 const EMPTY_FILES: FileStatus[] = [];
 const EMPTY_PIECES: PieceStatus[] = [];
+const EMPTY_SUBTITLES: Subtitle[] = [];
+
+/**
+ * A disabled upload button always carries a reason, so the control never looks
+ * broken without explaining what would make it work.
+ */
+function subtitleUploadDisabledReason(input: { statusLoaded: boolean; deleting: boolean; pending: boolean; uploadableCount: number }): string {
+  if (!input.statusLoaded) {
+    return '正在读取任务状态，稍后即可上传字幕。';
+  }
+  if (input.deleting) {
+    return '任务正在删除，无法再上传字幕。';
+  }
+  if (input.pending) {
+    return '正在等待元数据，视频列表就绪后才能上传字幕。';
+  }
+  if (input.uploadableCount === 0) {
+    return '这个任务没有可上传字幕的视频：要么没有受支持的视频文件，要么视频名称在挂载点中存在冲突。';
+  }
+  return '';
+}
 
 export function TorrentDetailPage() {
   const { id = '' } = useParams();
@@ -33,7 +57,9 @@ export function TorrentDetailPage() {
   const navigate = useNavigate();
   const visible = usePageVisible();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [subtitleOpen, setSubtitleOpen] = useState(false);
   const openDelete = useCallback(() => setDeleteOpen(true), []);
+  const openSubtitle = useCallback(() => setSubtitleOpen(true), []);
   const enabled = auth.isReady && visible;
   const detail = useTorrentDetail(auth.api, id, enabled);
   const status = useTorrentStatus(auth.api, id, enabled);
@@ -42,6 +68,8 @@ export function TorrentDetailPage() {
   const statusMeta = useTorrentStatusMeta(auth.api, id, enabled);
   const statusFiles = useTorrentStatusFiles(auth.api, id, enabled);
   const statusPieces = useTorrentStatusPieces(auth.api, id, enabled);
+  const statusSubtitles = useTorrentStatusSubtitles(auth.api, id, enabled);
+  const subtitleTargets = useTorrentSubtitleTargets(auth.api, id, enabled);
 
   if (detail.isPending) {
     return <div className={`panel panel--padding ${styles.loading}`} role="status" aria-busy="true" aria-label="正在加载任务详情"><div className={styles.loadingBar} /><div className={`${styles.loadingBar} ${styles.loadingBarShort}`} /><div className={styles.loadingBlock} /></div>;
@@ -66,7 +94,17 @@ export function TorrentDetailPage() {
   const torrent = statusTorrent.data ?? detailTorrent;
   const files = statusFiles.data ?? EMPTY_FILES;
   const pieces = statusPieces.data ?? EMPTY_PIECES;
+  const subtitles = statusSubtitles.data ?? EMPTY_SUBTITLES;
+  const targets = subtitleTargets.data ?? [];
   const pending = torrent.state === 'adding' || statusMeta.data?.metainfoReady === false;
+  const uploadableTargets = targets.filter((target) => target.uploadable);
+  const uploadDisabledReason = subtitleUploadDisabledReason({
+    statusLoaded: subtitleTargets.data !== undefined,
+    deleting: torrent.state === 'deleting' || torrent.state === 'delete_failed',
+    pending,
+    uploadableCount: uploadableTargets.length,
+  });
+  const uploadDisabled = uploadDisabledReason !== '';
 
   return (
     <div className={styles.page}>
@@ -75,6 +113,9 @@ export function TorrentDetailPage() {
         infoHash={torrent.info_hash}
         onDelete={openDelete}
         deleteDisabled={torrent.state === 'deleting'}
+        onUploadSubtitle={openSubtitle}
+        uploadDisabled={uploadDisabled}
+        uploadDisabledReason={uploadDisabledReason}
       />
 
       <TorrentLiveSummary summary={liveSummary.data} />
@@ -103,12 +144,21 @@ export function TorrentDetailPage() {
           <TorrentOverview torrent={torrent} summary={liveSummary.data} meta={statusMeta.data} />
         </Tabs.Panel>
         <Tabs.Panel value="files" className={styles.tabPanel}>
-          <TorrentFilesPanel files={files} pieces={pieces} />
+          <TorrentFilesPanel files={files} pieces={pieces} subtitles={subtitles} />
         </Tabs.Panel>
         <Tabs.Panel value="pieces" className={styles.tabPanel}>
           <TorrentPiecesPanel pieces={pieces} pieceLength={statusMeta.data?.pieceLength} />
         </Tabs.Panel>
       </Tabs>
+
+      <UploadSubtitleDialog
+        api={auth.api}
+        torrentId={id}
+        targets={targets}
+        subtitles={subtitles}
+        opened={subtitleOpen}
+        onClose={() => setSubtitleOpen(false)}
+      />
 
       <DeleteTorrentDialog torrent={torrent} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />
     </div>

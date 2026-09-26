@@ -15,18 +15,24 @@ import (
 // on demand through the Backend; nothing is cached and nothing is written.
 type torrentFileNode struct {
 	fs.Inode
-	state     *fsState
-	hash      metainfo.Hash
-	path      string // torrent-relative display path
-	size      int64
-	createdAt time.Time
+	state      *fsState
+	hash       metainfo.Hash
+	path       string // torrent-relative display path
+	size       int64
+	createdAt  time.Time
+	subtitle   bool
+	modifiedAt time.Time
 }
 
 func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o444
 	out.Size = uint64(n.size)
 	out.Nlink = 1
-	setCreatedAt(&out.Attr, n.createdAt)
+	if n.subtitle {
+		setModifiedAt(&out.Attr, n.modifiedAt)
+	} else {
+		setCreatedAt(&out.Attr, n.createdAt)
+	}
 	return 0
 }
 
@@ -37,7 +43,19 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 	if flags&syscall.O_TRUNC != 0 {
 		return nil, 0, errnoFor(ErrReadOnly)
 	}
-	ra, err := n.state.backend.OpenFile(n.hash, n.path)
+	var (
+		ra  io.ReaderAt
+		err error
+	)
+	if n.subtitle {
+		backend, ok := n.state.backend.(SubtitleBackend)
+		if !ok {
+			return nil, 0, errnoFor(ErrNotFound)
+		}
+		ra, err = backend.OpenSubtitle(n.hash, n.path)
+	} else {
+		ra, err = n.state.backend.OpenFile(n.hash, n.path)
+	}
 	if err != nil {
 		return nil, 0, errnoFor(err)
 	}

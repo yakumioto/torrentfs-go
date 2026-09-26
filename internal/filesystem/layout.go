@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 )
@@ -11,13 +12,16 @@ import (
 // fsEntry is one immediate child of a torrent directory: a leaf file or a
 // (possibly virtual) subdirectory holding deeper files.
 type fsEntry struct {
-	Name  string
-	IsDir bool
+	Name       string
+	IsDir      bool
+	IsSubtitle bool
 	// Path is the torrent-relative display path of the leaf file; set only
 	// for file entries.
 	Path string
 	// Size is the leaf file's length; set only for file entries.
 	Size int64
+	// ModifiedAt is set for managed subtitle files.
+	ModifiedAt time.Time
 }
 
 // childrenOf returns the sorted immediate children of the torrent directory
@@ -25,15 +29,19 @@ type fsEntry struct {
 // display paths of one torrent. It is a pure function: the mount nodes only
 // wrap its result for Lookup and Readdir.
 func childrenOf(files []FileView, relPrefix string) []fsEntry {
+	return childrenOfViews(files, nil, relPrefix)
+}
+
+func childrenOfViews(files []FileView, subtitles []SubtitleView, relPrefix string) []fsEntry {
 	prefix := relPrefix
 	if prefix != "" {
 		prefix += "/"
 	}
 	seen := make(map[string]*fsEntry)
-	for _, f := range files {
-		rest, ok := strings.CutPrefix(f.Path, prefix)
+	add := func(path string, size int64, subtitle bool, modifiedAt time.Time) {
+		rest, ok := strings.CutPrefix(path, prefix)
 		if !ok || rest == "" {
-			continue
+			return
 		}
 		name, _, _ := strings.Cut(rest, "/")
 		e, ok := seen[name]
@@ -42,12 +50,23 @@ func childrenOf(files []FileView, relPrefix string) []fsEntry {
 			seen[name] = e
 		}
 		if rest == name {
+			if e.IsDir || (e.Path != "" && !e.IsSubtitle) {
+				return
+			}
 			e.IsDir = false
-			e.Path = f.Path
-			e.Size = f.Size
-		} else {
-			e.IsDir = true
+			e.IsSubtitle = subtitle
+			e.Path = path
+			e.Size = size
+			e.ModifiedAt = modifiedAt
+			return
 		}
+		e.IsDir = true
+	}
+	for _, f := range files {
+		add(f.Path, f.Size, false, time.Time{})
+	}
+	for _, subtitle := range subtitles {
+		add(subtitle.Path, subtitle.Size, true, subtitle.ModifiedAt)
 	}
 	out := make([]fsEntry, 0, len(seen))
 	for _, e := range seen {
@@ -70,10 +89,23 @@ func lookupChild(files []FileView, relPrefix, name string) (fsEntry, bool) {
 	return fsEntry{}, false
 }
 
+func lookupChildWithSubtitles(files []FileView, subtitles []SubtitleView, relPrefix, name string) (fsEntry, bool) {
+	for _, e := range childrenOfViews(files, subtitles, relPrefix) {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return fsEntry{}, false
+}
+
 // rootEntry is one immediate child of the mount root.
 type rootEntry struct {
-	Name string
-	View TorrentView
+	Name       string
+	View       TorrentView
+	Path       string
+	Size       int64
+	ModifiedAt time.Time
+	IsSubtitle bool
 }
 
 // isDir reports whether the entry is a directory entry. Only a single-file
@@ -136,6 +168,16 @@ func uniqueTorrentName(v TorrentView, used map[string]bool) string {
 			return cand
 		}
 	}
+}
+
+// RootNameFor returns the mount-visible root name assigned to view.
+func RootNameFor(view TorrentView, views []TorrentView) (string, bool) {
+	for _, entry := range rootEntries(views) {
+		if entry.View.Hash == view.Hash {
+			return entry.Name, true
+		}
+	}
+	return "", false
 }
 
 // torrentKey is the inode identity of a torrent's top directory.
