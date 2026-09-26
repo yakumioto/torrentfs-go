@@ -160,8 +160,9 @@
     flex-direction: column;
   }
 
-  .heading > :global(.mantine-Button-root) {
+  .headingActions {
     align-self: stretch;
+    width: 100%;
   }
 
   .runtimeStats,

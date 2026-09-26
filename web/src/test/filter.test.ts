@@ -13,6 +13,7 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
     uploaded_bytes: 0,
     cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
+    favorite: false,
     ...overrides,
   };
 }
@@ -32,6 +33,20 @@ describe('torrent dashboard filters', () => {
     expect(matchesTorrentFilter(torrent({ state: 'adding' }), 'ready')).toBe(false);
     expect(matchesTorrentFilter(torrent({ state: 'ready', cached_bytes: 0 }), 'ready')).toBe(true);
     expect(matchesTorrentFilter(torrent({ state: 'adding', cached_bytes: 100 }), 'ready')).toBe(false);
+  });
+
+  it('matches favorites without changing the status filters', () => {
+    expect(matchesTorrentFilter(torrent({ favorite: true }), 'favorite')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ favorite: false }), 'favorite')).toBe(false);
+    expect(matchesTorrentFilter(torrent({ state: 'adding', favorite: true }), 'favorite')).toBe(true);
+    expect(matchesTorrentFilter(torrent({ favorite: true }), 'ready')).toBe(true);
+
+    const torrents = [
+      torrent({ id: 'starred', favorite: true }),
+      torrent({ id: 'plain', favorite: false, state: 'error' }),
+    ];
+    expect(filterTorrents(torrents, '', 'favorite').map((item) => item.id)).toEqual(['starred']);
+    expect(filterTorrents(torrents, '', 'all')).toHaveLength(2);
   });
 
   it('keeps summary counts aligned with the filter predicates', () => {

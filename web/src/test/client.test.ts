@@ -68,3 +68,29 @@ describe('ApiClient', () => {
     await expect(api.logout('opaque')).resolves.toBeUndefined();
   });
 });
+
+describe('ApiClient favorite and prune calls', () => {
+  it('sends a favorite update to the per-torrent endpoint', async () => {
+    vi.mocked(fetch).mockResolvedValue(response({ id: 'abc', favorite: true }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await api.setFavorite('abc/def', true);
+
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(String(call[0])).toBe('/api/v1/torrents/abc%2Fdef/favorite');
+    const request = call[1] as RequestInit;
+    expect(request.method).toBe('PUT');
+    expect(request.body).toBe(JSON.stringify({ favorite: true }));
+  });
+
+  it('sends the prune threshold as older_than_days', async () => {
+    vi.mocked(fetch).mockResolvedValue(response({ operations: [], excluded_favorites: 0 }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.pruneTorrents(30)).resolves.toEqual({ operations: [], excluded_favorites: 0 });
+
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(String(call[0])).toBe('/api/v1/torrents/prune');
+    const request = call[1] as RequestInit;
+    expect(request.method).toBe('POST');
+    expect(request.body).toBe(JSON.stringify({ older_than_days: 30 }));
+  });
+});

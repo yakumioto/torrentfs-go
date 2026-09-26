@@ -8,6 +8,7 @@ export interface Torrent {
   uploaded_bytes: number;
   cached_bytes: number;
   created_at: string;
+  favorite: boolean;
   error?: string;
 }
 
@@ -50,6 +51,18 @@ export interface Operation {
   torrent_id: string;
   state: string;
   error?: string;
+}
+
+export interface PruneFailure {
+  torrent_id: string;
+  error: string;
+}
+
+export interface PruneResult {
+  operations: Operation[];
+  excluded_favorites: number;
+  /** Absent when every matched torrent started deleting. */
+  failures?: PruneFailure[];
 }
 
 export interface LoginResponse {

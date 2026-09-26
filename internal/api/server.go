@@ -28,6 +28,8 @@ type Backend interface {
 	TorrentViewFor(id string) (session.TorrentView, error)
 	TorrentStatusFor(id string) (session.TorrentStatusView, error)
 	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
+	SetFavorite(ctx context.Context, id string, favorite bool) (session.TorrentView, error)
+	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
 }
@@ -94,6 +96,8 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
+	mux.HandleFunc("PUT /api/v1/torrents/{id}/favorite", s.handleSetFavorite)
+	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.handler = dispatchAPIAndStatic(s.authenticate(mux), web.Handler())
 	return s, nil

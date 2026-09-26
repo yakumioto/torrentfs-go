@@ -1,10 +1,11 @@
-import { Button, Skeleton, TextInput } from '@mantine/core';
-import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
+import { Button, Group, Skeleton, TextInput } from '@mantine/core';
+import { IconPlus, IconSearch, IconTrashX, IconX } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
 import { userFacingError } from '../utils/user-facing-error';
 import type { AppOutletContext } from '../components/layout/AppLayout';
+import { PruneTorrentsDialog } from '../components/dialogs/PruneTorrentsDialog';
 import { TorrentList } from '../components/torrents/TorrentList';
 import { useRuntimeStats, useTorrentList } from '../queries/hooks';
 import { filterTorrents, summarizeTorrents, type TorrentFilter } from '../queries/filter';
@@ -23,6 +24,7 @@ const FILTERS: Array<{ value: TorrentFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'ready', label: '就绪' },
   { value: 'error', label: '错误' },
+  { value: 'favorite', label: '收藏' },
 ];
 
 export function DashboardPage() {
@@ -32,6 +34,7 @@ export function DashboardPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<TorrentFilter>('all');
   const [sort, setSort] = useState<TorrentSort>(DEFAULT_TORRENT_SORT);
+  const [pruneOpen, setPruneOpen] = useState(false);
   const query = useTorrentList(auth.api, auth.isReady && visible);
   const statsQuery = useRuntimeStats(auth.api, auth.isReady && visible);
   const sourceTorrents = query.data;
@@ -63,9 +66,14 @@ export function DashboardPage() {
           <h1 className={styles.title} id="dashboard-title">任务列表</h1>
           <p className={styles.subtitle}>集中管理任务，查看全局缓存与本次后端启动以来的传输统计。</p>
         </div>
-        <Button color="torrent" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
-          添加任务
-        </Button>
+        <Group gap="xs" className={styles.headingActions}>
+          <Button variant="light" color="torrent" leftSection={<IconTrashX size={17} />} onClick={() => setPruneOpen(true)}>
+            批量清理
+          </Button>
+          <Button color="torrent" leftSection={<IconPlus size={17} />} onClick={openAddTorrent}>
+            添加任务
+          </Button>
+        </Group>
       </section>
 
       <section aria-label="运行时统计" className={styles.runtimeStats}>
@@ -169,6 +177,7 @@ export function DashboardPage() {
         onSortKeyChange={changeSortKey}
         onSortDirectionToggle={toggleSortDirection}
       />
+      <PruneTorrentsDialog opened={pruneOpen} onClose={() => setPruneOpen(false)} />
     </div>
   );
 }

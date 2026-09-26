@@ -26,6 +26,7 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
     uploaded_bytes: 0,
     cached_bytes: 25,
     created_at: '2026-09-17T00:00:00Z',
+    favorite: false,
     ...overrides,
   };
 }
@@ -188,8 +189,33 @@ describe('DashboardPage', () => {
     expect(screen.queryByText('任务列表暂不可用')).not.toBeInTheDocument();
   });
 
-  it('shows distinct empty states for no tasks and no matches', async () => {
-    renderDashboard([]);
+  it('filters to favorites only and restores the full list', async () => {
+    renderDashboard([
+      torrent({ id: 'starred', name: 'Alpha archive', favorite: true }),
+      torrent({ id: 'plain', name: 'Beta movie', favorite: false }),
+    ]);
+
+    await waitFor(() => expect(screen.getByText('Beta movie')).toBeInTheDocument());
+
+    const favoriteButton = screen.getByRole('button', { name: '收藏' });
+    fireEvent.click(favoriteButton);
+    expect(favoriteButton).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Alpha archive')).toBeInTheDocument();
+    expect(screen.queryByText('Beta movie')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '全部' }));
+    expect(screen.getByText('Beta movie')).toBeInTheDocument();
+  });
+
+  it('opens the prune dialog from the heading', async () => {
+    renderDashboard([torrent()]);
+    await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: '批量清理' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('已收藏的任务不会被删除'));
+  });
+
+  it('shows distinct empty states for no tasks and no matches', async () => {    renderDashboard([]);
     await waitFor(() => expect(screen.getByRole('heading', { name: '还没有任务' })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: '添加第一个任务' }));

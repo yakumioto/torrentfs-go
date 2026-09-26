@@ -20,6 +20,7 @@ function torrent(id = 'torrent-1'): Torrent {
     uploaded_bytes: 0,
     cached_bytes: 0,
     created_at: '2026-09-17T00:00:00Z',
+    favorite: false,
   };
 }
 

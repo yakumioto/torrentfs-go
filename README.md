@@ -158,6 +158,8 @@ HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0
 | `GET` | `/api/v1/torrents/{id}` | 查询单个任务的汇总状态 | `200` |
 | `GET` | `/api/v1/torrents/{id}/status` | 查询 piece、文件范围和网络诊断快照 | `200` |
 | `DELETE` | `/api/v1/torrents/{id}` | 发起异步删除 | `202` |
+| `PUT` | `/api/v1/torrents/{id}/favorite` | 设置或取消任务的收藏标记 | `200` |
+| `POST` | `/api/v1/torrents/prune` | 批量删除早于 N 天的未收藏任务 | `200` |
 | `GET` | `/api/v1/operations/{id}` | 查询删除 operation | `200` |
 
 `{id}` 是 40 个字符的小写十六进制 info hash。业务错误使用 `{"error":"..."}` JSON；未知 API 路径和不匹配的方法由标准 `net/http` 路由处理，不能假定所有错误响应都是 JSON。
@@ -191,7 +193,7 @@ token_ttl = "30m"
 
 ### curl 使用流程
 
-下面的流程覆盖登录、列表、添加、状态查询、异步删除和登出。认证关闭时可跳过登录，并省略后续的 `Authorization` header。
+下面的流程覆盖登录、列表、添加、状态查询、收藏、批量清理、异步删除和登出。认证关闭时可跳过登录，并省略后续的 `Authorization` header。
 
 1. 登录。登录请求必须使用 `application/json`：
 
@@ -263,7 +265,8 @@ token_ttl = "30m"
        "downloaded_bytes": 262144,
        "uploaded_bytes": 0,
        "cached_bytes": 262144,
-       "created_at": "2026-01-01T00:00:00Z"
+       "created_at": "2026-01-01T00:00:00Z",
+       "favorite": false
      },
      "metainfo_ready": true,
      "piece_length": 262144,
@@ -301,7 +304,54 @@ token_ttl = "30m"
 
    删除响应为 `202`，初始 operation 状态通常为 `deleting`；随后轮询到 `deleted` 或 `delete_failed`。根目录中的非 registry `.torrent` 文件不会参与删除保护。
 
-7. 登出：
+7. 收藏与批量清理。收藏标记持久化在任务的 sidecar 中，且**只会让任务豁免批量清理** —— 单个 `DELETE` 仍可删除已收藏任务：
+
+   ```sh
+   curl --fail --request PUT "$BASE_URL/api/v1/torrents/$TORRENT_ID/favorite" \
+     --header "Authorization: Bearer $TOKEN" \
+     --header 'Content-Type: application/json' \
+     --data '{"favorite":true}'
+   ```
+
+   成功返回 `200` 和更新后的任务对象。`favorite` 必须显式给出；缺字段返回 `400`。
+
+   按任务年龄批量删除时，`older_than_days` 必须是 `1` 到 `106751` 之间的整数（`0`、负数与超过上限的值返回 `400`）。上限来自时长本身：天数会乘以 24 小时得到 Go 的 `time.Duration`（int64 纳秒），再大的值会溢出：
+
+   ```sh
+   curl --fail --request POST "$BASE_URL/api/v1/torrents/prune" \
+     --header "Authorization: Bearer $TOKEN" \
+     --header 'Content-Type: application/json' \
+     --data '{"older_than_days":30}'
+   ```
+
+   响应列出本次实际发起的删除 operation，以及因收藏而保留的任务数：
+
+   ```json
+   {
+     "operations": [
+       {"operation_id": "<operation-id>", "torrent_id": "<info-hash>", "state": "deleting"}
+     ],
+     "excluded_favorites": 1
+   }
+   ```
+
+   批量删除同样走异步 operation 模型：轮询 `GET /api/v1/operations/{id}` 观察每个任务的终态。早于阈值但已收藏的任务永远保留，`excluded_favorites` 即其数量。
+
+   单个候选无法开始删除（例如磁盘写满或只读挂载，侧车写入失败）不会中断整批：其余候选照常发起，该候选记录在 `failures` 中。全部候选都正常发起时该字段**不出现**，因此「有候选但未能删除」与「没有符合条件的任务」不会得到同一响应形状：
+
+   ```json
+   {
+     "operations": [
+       {"operation_id": "<operation-id>", "torrent_id": "<info-hash>", "state": "deleting"}
+     ],
+     "excluded_favorites": 0,
+     "failures": [
+       {"torrent_id": "<info-hash>", "error": "session: write state ..."}
+     ]
+   }
+   ```
+
+8. 登出：
 
    ```sh
    curl --fail --request POST "$BASE_URL/api/v1/auth/logout" \

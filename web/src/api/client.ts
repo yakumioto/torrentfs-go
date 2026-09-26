@@ -1,4 +1,4 @@
-import type { LoginResponse, Operation, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
+import type { LoginResponse, Operation, PruneResult, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
 import { apiErrorFromResponse } from './errors';
 
 export interface ApiClientOptions {
@@ -78,6 +78,22 @@ export class ApiClient {
   deleteTorrent(id: string, signal?: AbortSignal): Promise<Operation> {
     return this.request<Operation>(`/torrents/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+      signal,
+    });
+  }
+
+  setFavorite(id: string, favorite: boolean, signal?: AbortSignal): Promise<Torrent> {
+    return this.request<Torrent>(`/torrents/${encodeURIComponent(id)}/favorite`, {
+      method: 'PUT',
+      body: JSON.stringify({ favorite }),
+      signal,
+    });
+  }
+
+  pruneTorrents(olderThanDays: number, signal?: AbortSignal): Promise<PruneResult> {
+    return this.request<PruneResult>('/torrents/prune', {
+      method: 'POST',
+      body: JSON.stringify({ older_than_days: olderThanDays }),
       signal,
     });
   }

@@ -54,7 +54,11 @@ type TorrentView struct {
 	// counter.
 	CachedBytes int64
 	CreatedAt   time.Time
-	Error       string
+	// Favorite marks a torrent the user wants to keep. It is persisted in the
+	// sidecar and only exempts the torrent from age-based pruning; a direct
+	// delete still removes it.
+	Favorite bool
+	Error    string
 }
 
 // Operation tracks one deletion request. It is returned by DeleteTorrent and
@@ -83,6 +87,9 @@ type registryEntry struct {
 	OperationID string       `json:"operation_id,omitempty"`
 	CreatedAt   time.Time    `json:"created_at"`
 	UpdatedAt   time.Time    `json:"updated_at"`
+	// Favorite is a plain bool so sidecars written before the field existed
+	// decode to false instead of failing validation.
+	Favorite bool `json:"favorite,omitempty"`
 }
 
 func cloneRegistryEntry(entry *registryEntry) *registryEntry {

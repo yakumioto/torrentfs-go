@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -22,7 +23,27 @@ type torrentResponse struct {
 	UploadedBytes   int64     `json:"uploaded_bytes"`
 	CachedBytes     int64     `json:"cached_bytes"`
 	CreatedAt       time.Time `json:"created_at"`
+	Favorite        bool      `json:"favorite"`
 	Error           string    `json:"error,omitempty"`
+}
+
+// maxOlderThanDays bounds the prune window. time.Duration is int64
+// nanoseconds, so multiplying a day count above this overflows before the
+// session ever sees it; a wrapped value would prune using a far smaller cutoff
+// than the client asked for.
+const maxOlderThanDays = 106751
+
+type pruneFailureResponse struct {
+	TorrentID string `json:"torrent_id"`
+	Error     string `json:"error"`
+}
+
+type pruneResponse struct {
+	Operations        []operationResponse `json:"operations"`
+	ExcludedFavorites int                 `json:"excluded_favorites"`
+	// Failures is omitted when every candidate started deleting, so a clean run
+	// and a run that could not start some deletions never have the same shape.
+	Failures []pruneFailureResponse `json:"failures,omitempty"`
 }
 
 type operationResponse struct {
@@ -105,6 +126,7 @@ func newTorrentResponse(view session.TorrentView) torrentResponse {
 		UploadedBytes:   view.UploadedBytes,
 		CachedBytes:     view.CachedBytes,
 		CreatedAt:       view.CreatedAt,
+		Favorite:        view.Favorite,
 		Error:           view.Error,
 	}
 }
@@ -279,6 +301,74 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		State:       string(op.State),
 		Error:       op.Error,
 	})
+}
+
+func (s *Server) handleSetFavorite(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	var body struct {
+		Favorite *bool `json:"favorite"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		if isTooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Favorite == nil {
+		writeError(w, http.StatusBadRequest, "favorite is required")
+		return
+	}
+	view, err := s.backend.SetFavorite(r.Context(), r.PathValue("id"), *body.Favorite)
+	if err != nil {
+		writeSessionError(w, "set favorite", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newTorrentResponse(view))
+}
+
+func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	var body struct {
+		OlderThanDays *int `json:"older_than_days"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		if isTooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.OlderThanDays == nil || *body.OlderThanDays < 1 || *body.OlderThanDays > maxOlderThanDays {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("older_than_days must be an integer between 1 and %d", maxOlderThanDays))
+		return
+	}
+	result, err := s.backend.DeleteUnfavoritedOlderThan(r.Context(), time.Duration(*body.OlderThanDays)*24*time.Hour)
+	if err != nil {
+		writeSessionError(w, "prune", err)
+		return
+	}
+	out := pruneResponse{
+		Operations:        make([]operationResponse, 0, len(result.Operations)),
+		ExcludedFavorites: result.ExcludedFavorites,
+	}
+	for _, op := range result.Operations {
+		out.Operations = append(out.Operations, operationResponse{
+			OperationID: op.ID,
+			TorrentID:   op.TorrentID,
+			State:       string(op.State),
+			Error:       op.Error,
+		})
+	}
+	for _, failure := range result.Failures {
+		out.Failures = append(out.Failures, pruneFailureResponse{
+			TorrentID: failure.TorrentID,
+			Error:     failure.Error,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
