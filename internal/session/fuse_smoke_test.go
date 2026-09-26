@@ -584,3 +584,79 @@ func TestFuseSmokeSubtitleReplacementChangesLength(t *testing.T) {
 		t.Fatalf("Unmount: %v", err)
 	}
 }
+
+// TestFuseSmokeSubtitleReadsStayConsistentDuringReplacement hammers the
+// replacement path through a real mount: while a subtitle is swapped between two
+// known versions, every read must return exactly one of them. A read that
+// combines one version's length with another version's bytes - a truncated
+// prefix, or an unexpected end of file - would match neither.
+func TestFuseSmokeSubtitleReadsStayConsistentDuringReplacement(t *testing.T) {
+	requireFuse(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	soloPath, soloHash := buildSingleFileTorrent(t, work, "Movie.mkv", []byte("video payload"))
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: soloPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	short := "short\n"
+	long := strings.Repeat("long-subtitle-line\n", 128)
+	versions := map[string]bool{short: true, long: true}
+
+	upload := func(content string) {
+		t.Helper()
+		if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(content), 1<<20); err != nil {
+			t.Fatalf("upload %d bytes: %v", len(content), err)
+		}
+	}
+	upload(short)
+	subtitlePath := filepath.Join(mnt, "Movie.srt")
+
+	for i := 0; i < 24; i++ {
+		want := short
+		if i%2 == 0 {
+			want = long
+		}
+		upload(want)
+		got, err := os.ReadFile(subtitlePath)
+		if err != nil {
+			t.Fatalf("read after replacement %d: %v", i, err)
+		}
+		if !versions[string(got)] {
+			t.Fatalf("read %d returned %d bytes matching neither version (truncated or mixed)", i, len(got))
+		}
+		if string(got) != want {
+			t.Fatalf("read %d returned the other version, want the one just published", i)
+		}
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}

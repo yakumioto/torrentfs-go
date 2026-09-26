@@ -168,6 +168,11 @@ func subtitleStagingName() (string, error) {
 	return ".torrentfs-subtitle-" + hex.EncodeToString(raw[:]) + ".tmp", nil
 }
 
+// subtitleOpenHook, when set, runs inside one subtitle open after its file
+// descriptor is opened and before the metadata is read from it. A test uses it
+// to land a replacement exactly in that window. Production never sets it.
+var subtitleOpenHook func(hash metainfo.Hash, path string)
+
 // subtitleIOFault, when set, forces the named upload stage to fail. It is a
 // test-only seam: production never sets it.
 var subtitleIOFault func(stage string) error
@@ -198,32 +203,21 @@ func subtitleIOError(stage string, err error) error {
 // visible. It is the post-commit half of an upload, so its error is logged by
 // the caller rather than reported, and the returned error joins every failing
 // step so the log explains all of them. Both paths stay inside the store.
-func subtitleCommitSteps(store *os.Root, relDir, relDestination string, size int64) error {
+func subtitleCommitSteps(store *subtitleStore, relDir, relDestination string, size int64) error {
 	var errs []error
 	if err := subtitleStageFault(subtitleStageCommit); err != nil {
 		errs = append(errs, fmt.Errorf("directory sync: %w", err))
-	} else if err := syncRootDirectory(store, relDir); err != nil {
+	} else if err := store.syncDir(relDir); err != nil {
 		errs = append(errs, fmt.Errorf("directory sync: %w", err))
 	}
-	if info, err := store.Lstat(relDestination); err != nil {
+	if stat, err := store.lstat(relDestination); err != nil {
 		errs = append(errs, fmt.Errorf("verify published file: %w", err))
-	} else if !info.Mode().IsRegular() {
+	} else if stat.Mode&subtitleStoreFileType != subtitleStoreRegular {
 		errs = append(errs, fmt.Errorf("published file %q is not a regular file", relDestination))
-	} else if info.Size() != size {
-		errs = append(errs, fmt.Errorf("published file %q is %d bytes, wrote %d", relDestination, info.Size(), size))
+	} else if stat.Size != size {
+		errs = append(errs, fmt.Errorf("published file %q is %d bytes, wrote %d", relDestination, stat.Size, size))
 	}
 	return errors.Join(errs...)
-}
-
-// syncRootDirectory fsyncs a directory inside a Root by opening it through the
-// same handle, so the sync cannot be redirected by a path swap either.
-func syncRootDirectory(store *os.Root, relDir string) error {
-	dir, err := store.Open(relDir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
 }
 
 // subtitleStoreError covers the pre-write store checks: a full disk is still a
@@ -252,10 +246,6 @@ func isStorageUnavailable(err error) bool {
 var subtitleCleanupHook func(metainfo.Hash) error
 
 func subtitleDirName(hash metainfo.Hash) string { return hash.HexString() }
-
-func (s *Session) subtitleDir(hash metainfo.Hash) string {
-	return filepath.Join(s.subtitleRoot, subtitleDirName(hash))
-}
 
 func ensureManagedDirectory(dir string, mode os.FileMode) error {
 	info, err := os.Lstat(dir)
@@ -570,21 +560,20 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	if maxBytes <= 0 {
 		maxBytes = 10 << 20
 	}
-	// Every path below is resolved relative to the managed store's own directory
-	// handle, so a host process that swaps a path component for a symlink between
-	// the checks and the write cannot redirect the staging file or the published
-	// subtitle outside the store.
-	store, err := os.OpenRoot(s.subtitleRoot)
-	if err != nil {
+	// Every path below is resolved from the store's persistent directory handle,
+	// one component at a time and without following symlinks, so neither a
+	// replaced store path nor a link planted inside the store can redirect the
+	// staging file or the published subtitle.
+	store := s.subtitleStore
+	if err := store.verify(); err != nil {
 		return SubtitleUploadResponse{}, subtitleStoreError(err)
 	}
-	defer func() { _ = store.Close() }()
 	relDir := filepath.Join(subtitleDirName(hash), filepath.FromSlash(path.Dir(relPath)))
 	relDestination := filepath.Join(subtitleDirName(hash), filepath.FromSlash(relPath))
-	if err := store.MkdirAll(relDir, 0o700); err != nil {
+	if err := store.mkdirAll(relDir, 0o700); err != nil {
 		return SubtitleUploadResponse{}, subtitleStoreError(err)
 	}
-	if info, statErr := store.Lstat(relDestination); statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
+	if stat, statErr := store.lstat(relDestination); statErr == nil && stat.Mode&subtitleStoreFileType != subtitleStoreRegular {
 		return SubtitleUploadResponse{}, subtitleStoreError(fmt.Errorf("subtitle path %q is not a regular file", relPath))
 	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return SubtitleUploadResponse{}, subtitleStoreError(statErr)
@@ -603,13 +592,13 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
 	}
 	relStaging := filepath.Join(relDir, stagingName)
-	file, err := store.OpenFile(relStaging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := store.createExclusive(relStaging, 0o600)
 	if err != nil {
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
 	}
 	cleanup := func() {
 		_ = file.Close()
-		_ = store.Remove(relStaging)
+		_ = store.remove(relStaging)
 	}
 	if err := subtitleStageFault(subtitleStageWrite); err != nil {
 		cleanup()
@@ -646,15 +635,15 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	if err := file.Close(); err != nil {
-		_ = store.Remove(relStaging)
+		_ = store.remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	if err := subtitleStageFault(subtitleStageRename); err != nil {
-		_ = store.Remove(relStaging)
+		_ = store.remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
-	if err := store.Rename(relStaging, relDestination); err != nil {
-		_ = store.Remove(relStaging)
+	if err := store.rename(relStaging, relDestination); err != nil {
+		_ = store.remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
 	// The rename is the commit point: the destination is the new content from
@@ -794,28 +783,30 @@ func subtitleVideoFor(mapping map[string]SubtitleTarget, relPath string) (string
 func (s *Session) loadManagedSubtitles() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entries, err := os.ReadDir(s.subtitleRoot)
-	if err != nil {
-		return fmt.Errorf("session: scan subtitle dir: %w", err)
+	store := s.subtitleStore
+	if store == nil {
+		return errors.New("session: subtitle store is not open")
 	}
+	entries, err := store.readDir("")
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		hash, err := parseInfoHash(entry.Name())
-		if err != nil || entry.Name() != hash.HexString() {
-			return fmt.Errorf("session: subtitle directory %q is not canonical", entry.Name())
-		}
-		info, err := os.Lstat(filepath.Join(s.subtitleRoot, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("session: subtitle directory %s is not a directory", hash)
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		hash, err := parseInfoHash(name)
+		if err != nil || name != hash.HexString() {
+			return fmt.Errorf("session: subtitle directory %q is not canonical", name)
 		}
 		registry := s.states[hash]
 		if registry == nil || registry.State != StateReady || s.torrents[hash] == nil || s.torrents[hash].Info() == nil {
 			continue
 		}
 		files := make([]string, 0)
-		if err := scanManagedSubtitleFiles(filepath.Join(s.subtitleRoot, entry.Name()), "", &files); err != nil {
+		if err := store.walkFiles(name, &files); err != nil {
 			return err
 		}
 		mapping, err := s.subtitleTargetMapLocked(hash, s.torrents[hash])
@@ -823,7 +814,8 @@ func (s *Session) loadManagedSubtitles() error {
 			return err
 		}
 		records := make(map[string]managedSubtitle, len(files))
-		for _, relPath := range files {
+		for _, hashRel := range files {
+			relPath := strings.TrimPrefix(strings.TrimPrefix(filepath.ToSlash(hashRel), name), "/")
 			ext, ok := subtitleExtension(path.Base(relPath))
 			if !ok {
 				return fmt.Errorf("session: subtitle %s has unsupported format", relPath)
@@ -840,11 +832,12 @@ func (s *Session) loadManagedSubtitles() error {
 				// restart failure is classifiable.
 				return fmt.Errorf("%w: subtitle %s has no uploadable target", ErrSubtitleNamespaceConflict, relPath)
 			}
-			info, err := os.Stat(filepath.Join(s.subtitleDir(hash), filepath.FromSlash(relPath)))
+			stat, err := store.lstat(hashRel)
 			if err != nil {
 				return err
 			}
-			records[relPath] = managedSubtitle{VideoPath: videoPath, Path: relPath, Format: strings.TrimPrefix(ext, "."), Size: info.Size(), UpdatedAt: info.ModTime().UTC()}
+			modifiedAt := time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec).UTC()
+			records[relPath] = managedSubtitle{VideoPath: videoPath, Path: relPath, Format: strings.TrimPrefix(ext, "."), Size: stat.Size, UpdatedAt: modifiedAt}
 		}
 		if len(records) > 0 {
 			s.subtitles[hash] = records
@@ -852,79 +845,9 @@ func (s *Session) loadManagedSubtitles() error {
 	}
 	// No separate layout re-check runs here: a restored torrent that would rename
 	// a subtitled video, or whose root name shadows a subtitle path, makes the
-	// subtitle resolve to an unusable target below, so the same refusal already
+	// subtitle resolve to an unusable target above, so the same refusal already
 	// covers the persisted state an older build or a hand-placed metainfo can
 	// leave behind.
-	return nil
-}
-
-func scanManagedSubtitleFiles(root, rel string, out *[]string) error {
-	dir := root
-	if rel != "" {
-		dir = filepath.Join(root, filepath.FromSlash(rel))
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("session: scan subtitle path %q: %w", rel, err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		relPath := name
-		if rel != "" {
-			relPath = rel + "/" + name
-		}
-		full := filepath.Join(dir, name)
-		info, err := os.Lstat(full)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || (info.Mode()&os.ModeType != 0 && !info.IsDir()) {
-			return fmt.Errorf("session: subtitle path %q is not a regular file", relPath)
-		}
-		if info.IsDir() {
-			if err := scanManagedSubtitleFiles(root, relPath, out); err != nil {
-				return err
-			}
-			continue
-		}
-		if strings.HasPrefix(name, ".torrentfs-subtitle-") && strings.HasSuffix(name, ".tmp") {
-			if err := os.Remove(full); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := validateSubtitleRelativePath(relPath); err != nil {
-			return err
-		}
-		*out = append(*out, relPath)
-	}
-	return nil
-}
-
-func validateManagedSubtitleTree(root string) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		full := filepath.Join(root, entry.Name())
-		info, err := os.Lstat(full)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("subtitle path %q is a symlink", full)
-		}
-		if info.IsDir() {
-			if err := validateManagedSubtitleTree(full); err != nil {
-				return err
-			}
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("subtitle path %q is not regular", full)
-		}
-	}
 	return nil
 }
 
@@ -934,24 +857,26 @@ func (s *Session) removeManagedSubtitlesForDelete(hash metainfo.Hash) error {
 			return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
 		}
 	}
-	root := s.subtitleDir(hash)
-	info, err := os.Lstat(root)
-	if errors.Is(err, os.ErrNotExist) {
+	store := s.subtitleStore
+	if store == nil {
+		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
+	}
+	name := subtitleDirName(hash)
+	if _, err := store.lstat(name); errors.Is(err, os.ErrNotExist) {
 		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	// Host-planted links and devices are refused before anything is removed, so
+	// a cleanup never follows a link out of the store or deletes an unrelated
+	// inode. The removal itself uses unlinkat, which does not follow links.
+	if err := store.validateTree(name); err != nil {
 		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
 	}
-	if err := validateManagedSubtitleTree(root); err != nil {
+	if err := store.removeTree(name); err != nil {
 		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
 	}
-	if err := os.RemoveAll(root); err != nil {
-		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
-	}
-	if err := syncDirectory(s.subtitleRoot); err != nil {
+	if err := store.syncDir(""); err != nil {
 		return newSubtitleError(SubtitleCodeCleanupFailed, ErrSubtitleCleanupFailed)
 	}
 	s.mu.Lock()

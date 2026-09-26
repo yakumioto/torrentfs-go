@@ -18,9 +18,10 @@ import (
 )
 
 type fakeBackend struct {
-	views    []TorrentView
-	data     map[string][]byte
-	subtitle map[string][]byte
+	views         []TorrentView
+	data          map[string][]byte
+	subtitle      map[string][]byte
+	subtitleMtime map[string]time.Time
 }
 
 func (b *fakeBackend) Torrents() []TorrentView { return b.views }
@@ -33,34 +34,41 @@ func (b *fakeBackend) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, er
 	return bytes.NewReader(data), nil
 }
 
-func (b *fakeBackend) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error) {
-	data, ok := b.subtitle[hash.HexString()+"\x00"+path]
+func (b *fakeBackend) OpenSubtitle(hash metainfo.Hash, path string) (SubtitleSnapshot, error) {
+	key := hash.HexString() + "\x00" + path
+	data, ok := b.subtitle[key]
 	if !ok {
-		return nil, fmt.Errorf("fake backend: no subtitle %q", path)
+		return SubtitleSnapshot{}, fmt.Errorf("fake backend: no subtitle %q", path)
 	}
-	return bytes.NewReader(data), nil
+	// One version serves both the bytes and the metadata, like the real backend.
+	return SubtitleSnapshot{Reader: bytes.NewReader(data), Size: int64(len(data)), ModifiedAt: b.subtitleMtime[key]}, nil
 }
 
 func (b *fakeBackend) addSubtitle(view *TorrentView, path, videoPath string, data []byte) {
 	view.Subtitles = append(view.Subtitles, SubtitleView{Path: path, VideoPath: videoPath, Size: int64(len(data))})
 	if b.subtitle == nil {
 		b.subtitle = make(map[string][]byte)
+		b.subtitleMtime = make(map[string]time.Time)
 	}
 	b.subtitle[view.Hash.HexString()+"\x00"+path] = data
 }
 
-// replaceSubtitle swaps the stored bytes without touching the view snapshot, so
-// a test can prove which source the node reads its metadata from.
-func (b *fakeBackend) replaceSubtitle(hash metainfo.Hash, path string, data []byte) {
-	b.subtitle[hash.HexString()+"\x00"+path] = data
+// replaceSubtitle swaps the stored bytes and their mtime without touching the
+// view snapshot, so a test can prove which source the node reads its metadata
+// from.
+func (b *fakeBackend) replaceSubtitle(hash metainfo.Hash, path string, data []byte, modifiedAt time.Time) {
+	key := hash.HexString() + "\x00" + path
+	b.subtitle[key] = data
+	b.subtitleMtime[key] = modifiedAt
 }
 
 func (b *fakeBackend) SubtitleStat(hash metainfo.Hash, path string) (SubtitleStat, error) {
-	data, ok := b.subtitle[hash.HexString()+"\x00"+path]
+	key := hash.HexString() + "\x00" + path
+	data, ok := b.subtitle[key]
 	if !ok {
 		return SubtitleStat{}, fmt.Errorf("fake backend: no subtitle %q", path)
 	}
-	return SubtitleStat{Size: int64(len(data))}, nil
+	return SubtitleStat{Size: int64(len(data)), ModifiedAt: b.subtitleMtime[key]}, nil
 }
 
 func hashN(n byte) metainfo.Hash {
@@ -509,16 +517,20 @@ func TestSubtitleNodeReportsReplacedLength(t *testing.T) {
 		t.Fatalf("initial size = %d, want 5", attr.Size)
 	}
 
-	// A replacement changes the file's length; the view snapshot deliberately
-	// keeps the old size, as a cached inode would.
+	// A replacement changes the file's length and mtime; the view snapshot
+	// deliberately keeps the old values, as a cached inode would.
 	longer := bytes.Repeat([]byte("long-subtitle\n"), 512)
-	backend.replaceSubtitle(hashN(1), "Movie.srt", longer)
+	replacedAt := time.Date(2026, 9, 27, 8, 30, 0, 0, time.UTC)
+	backend.replaceSubtitle(hashN(1), "Movie.srt", longer, replacedAt)
 
 	if errno := node.Getattr(ctx, nil, &attr); errno != 0 {
 		t.Fatalf("Getattr after replace errno = %v", errno)
 	}
 	if attr.Size != uint64(len(longer)) {
 		t.Fatalf("size after replace = %d, want %d", attr.Size, len(longer))
+	}
+	if got := time.Unix(int64(attr.Mtime), int64(attr.Mtimensec)).UTC(); !got.Equal(replacedAt) {
+		t.Fatalf("mtime after replace = %s, want %s", got, replacedAt)
 	}
 	handle, _, errno := node.Open(ctx, syscall.O_RDONLY)
 	if errno != 0 {
@@ -567,7 +579,7 @@ func TestSubtitleOpenKeepsTheOldSnapshotForAnOpenHandle(t *testing.T) {
 	}
 	read := handle.(*readHandle)
 
-	backend.replaceSubtitle(hashN(1), "Movie.srt", []byte("a much longer replacement\n"))
+	backend.replaceSubtitle(hashN(1), "Movie.srt", []byte("a much longer replacement\n"), time.Now().UTC())
 
 	buf := make([]byte, 16)
 	result, errno := read.Read(ctx, buf, 0)

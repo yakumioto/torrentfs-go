@@ -68,6 +68,11 @@ type Session struct {
 	metadataDir    string
 	subtitleRoot   string
 	subtitles      map[metainfo.Hash]map[string]managedSubtitle
+	// subtitleStore is the persistent trusted handle for the subtitle tree. It
+	// is opened once at startup instead of being re-derived from the path on
+	// every operation, so a swap of the store's own path cannot redirect a
+	// later read or write.
+	subtitleStore *subtitleStore
 	// rootNamespaceMu serializes the decisions that depend on the mount root's
 	// name layout: a torrent becoming visible and a subtitle being published
 	// must not interleave, or a guard decision can be based on a layout that is
@@ -183,6 +188,15 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("acquire-instance-lock", err)
 		return nil, err
 	}
+	// The store handle is opened once here and reused for every later subtitle
+	// operation. Anything the session publishes or reads afterwards is resolved
+	// from this handle, so replacing the store's path cannot redirect it.
+	subtitleStore, err := openSubtitleStore(subtitleRoot)
+	if err != nil {
+		releaseInstanceLock(instanceLock)
+		logInitFailure("open-subtitle-store", err)
+		return nil, err
+	}
 
 	cc := torrent.NewDefaultClientConfig()
 	if cfg.Identity.TrackerUserAgent != "" {
@@ -258,6 +272,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
 		subtitleRoot:    subtitleRoot,
+		subtitleStore:   subtitleStore,
 		subtitles:       make(map[metainfo.Hash]map[string]managedSubtitle),
 		storageCloser:   pieceStore,
 		instanceLock:    instanceLock,
@@ -345,6 +360,7 @@ func (s *Session) Close(ctx context.Context) error {
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
+	subtitleStore := s.subtitleStore
 	s.mu.Unlock()
 	s.logger.Info("session closing")
 
@@ -385,6 +401,11 @@ func (s *Session) Close(ctx context.Context) error {
 		if err := storageCloser.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close default storage: %w", err))
 		}
+	}
+	// The subtitle store handle outlives no work: every subtitle operation runs
+	// under mu or the per-hash lock and the client is already closed.
+	if err := subtitleStore.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close subtitle store: %w", err))
 	}
 
 	err := errors.Join(errs...)

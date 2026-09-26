@@ -161,7 +161,7 @@ managed subtitle 以只读文件的形式合并进同一棵树：
     └── movie.srt            # 与视频同目录、同 basename
 ```
 
-字幕节点是普通只读文件（`0444`）。`stat`/`open` 每次都从存储层读取当前的 size 与 mtime，所以替换成长度不同的字幕后，同一个挂载路径会立即报告并读取新版本，而不会沿用 inode 首次 lookup 时的旧长度。字幕以 direct I/O 提供：替换后新 `open` 读完整新版本，替换前已经打开的 handle 继续读完它打开的那份快照。`Create`、`Mkdir`、可写 `Open`、`Rename`、`Unlink` 继续返回 `EROFS`。
+字幕节点是普通只读文件（`0444`）。`stat` 每次都从存储层读取当前的 size 与 mtime，所以替换成长度不同的字幕后，同一个挂载路径会立即报告新版本，而不会沿用 inode 首次 lookup 时的旧长度。一次 `open` 由存储层在同一份已打开的文件上同时给出内容与 size/mtime，因此替换即使正好落在打开过程中，也不会出现「旧长度配新内容」或反之。字幕以 direct I/O 提供：替换后新 `open` 读完整新版本，替换前已经打开的 handle 继续读完它打开的那份快照。`Create`、`Mkdir`、可写 `Open`、`Rename`、`Unlink` 继续返回 `EROFS`。
 
 ## HTTP API
 
@@ -455,7 +455,11 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 
 字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：`rename` 之前任一步失败都会删除临时文件并保持旧字幕完整、文件不存在。**`rename` 是提交点**：它成功之后目标就是新内容，因此 rename 之后的目录 `fsync` 与校验步骤只记录 warning，不返回失败——对一个已经生效的写入报告失败，会让调用方、内存索引和挂载点对“存在什么”产生分歧。size 与 mtime 取自 rename 之前的 staging 文件（rename 保持同一 inode），所以发布结果不依赖 rename 之后的 `stat`。
 
-路径安全：父目录创建、staging 创建、rename、`stat` 与读取全部通过 `.metadata/subtitles` 自身的目录 handle（`os.Root` 等价物）以相对路径执行，而不是先 `Lstat` 再用普通路径打开。即使宿主侧进程在检查与写入之间把某个路径组件换成 symlink，写入和读取也只会在受管目录树内解析；越界的 symlink 会让该次上传以 `503` 失败，不会在 store 之外创建或替换任何文件。删除路径使用 `RemoveAll`，它不会跟随 symlink，因此同样不会越界。
+路径安全：`.metadata/subtitles` 的目录 handle 在启动时打开一次并在进程生命周期内复用（关闭时释放），所有创建、替换、读取、扫描与删除都以相对路径在该 handle 上执行，且每个路径组件都用 `O_NOFOLLOW` 逐个解析。因此：
+
+- 宿主把 store 目录本身移走并在原路径放置 symlink 时，会话仍指向打开时的那个目录，并检测到替换后拒绝该次上传（`503`）；读写都不会被重定向到攻击者选定的目录。
+- store 内部的 symlink 会被拒绝而不是跟随，所以把 hash A 的目录换成指向 hash B 的相对链接不能把 A 的上传或读取导到 B 的 sidecar，也不会跨 hash 覆盖。
+- 删除使用 `unlinkat`（不跟随 symlink）并只通过 no-follow 的目录 handle 递归，宿主放置的链接或特殊文件会被先拒绝，不会被跟随或误删。
 
 ### 状态与错误语义
 

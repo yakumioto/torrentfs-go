@@ -75,10 +75,20 @@ type Backend interface {
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 }
 
+// SubtitleSnapshot is one opened managed subtitle: the file itself plus the
+// metadata read from that same open. Size and ModifiedAt therefore always
+// describe the bytes the Reader serves, even if the subtitle is replaced while
+// the open is in flight.
+type SubtitleSnapshot struct {
+	Reader     io.ReaderAt
+	Size       int64
+	ModifiedAt time.Time
+}
+
 // SubtitleBackend is the optional extension used for managed subtitle files.
 // Keeping it separate preserves compatibility with small payload-only backends.
 type SubtitleBackend interface {
-	OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error)
+	OpenSubtitle(hash metainfo.Hash, path string) (SubtitleSnapshot, error)
 }
 
 // SubtitleStatBackend is the optional extension that reports a managed

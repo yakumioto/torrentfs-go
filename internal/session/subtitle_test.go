@@ -74,14 +74,14 @@ func assertSubtitleCode(t *testing.T, err error, want string) {
 
 func readSubtitle(t *testing.T, sess *session.Session, hash metainfo.Hash, relPath string) string {
 	t.Helper()
-	reader, err := sess.OpenSubtitle(hash, relPath)
+	snapshot, err := sess.OpenSubtitle(hash, relPath)
 	if err != nil {
 		t.Fatalf("OpenSubtitle %q: %v", relPath, err)
 	}
-	if closer, ok := reader.(io.Closer); ok {
+	if closer, ok := snapshot.Reader.(io.Closer); ok {
 		defer func() { _ = closer.Close() }()
 	}
-	data, err := io.ReadAll(io.NewSectionReader(reader, 0, 1<<20))
+	data, err := io.ReadAll(io.NewSectionReader(snapshot.Reader, 0, 1<<20))
 	if err != nil {
 		t.Fatalf("read subtitle %q: %v", relPath, err)
 	}
@@ -759,6 +759,167 @@ func readSubtitleCount(t *testing.T, sess *session.Session, hash metainfo.Hash) 
 		t.Fatalf("TorrentStatusFor: %v", err)
 	}
 	return len(status.Subtitles)
+}
+
+// TestSubtitleUploadRefusesSwappedStoreRoot pins the persistent handle: once the
+// session is running, moving the store away and putting a symlink in its place
+// must neither receive writes nor redirect reads. The session keeps using the
+// directory it opened and refuses the change.
+func TestSubtitleUploadRefusesSwappedStoreRoot(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Movie.mkv": []byte("video")})
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", "original\n")
+
+	store := sess.SubtitleRootForTest()
+	moved := filepath.Join(work, "moved-store")
+	if err := os.Rename(store, moved); err != nil {
+		t.Fatalf("move store: %v", err)
+	}
+	escape := filepath.Join(work, "escape")
+	if err := os.MkdirAll(escape, 0o755); err != nil {
+		t.Fatalf("make escape dir: %v", err)
+	}
+	if err := os.Symlink(escape, store); err != nil {
+		t.Fatalf("plant store symlink: %v", err)
+	}
+
+	_, err := sess.UploadSubtitle(context.Background(), hash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader("after swap\n"), 1<<20)
+	assertSubtitleCode(t, err, session.SubtitleCodeStorageUnavailable)
+	entries, err := os.ReadDir(escape)
+	if err != nil {
+		t.Fatalf("read escape dir: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("upload escaped into the replacement directory: %v", names)
+	}
+	// Reads keep working from the directory the session opened.
+	if got := readSubtitle(t, sess, hash, "Movie.srt"); got != "original\n" {
+		t.Fatalf("subtitle read after the swap = %q, want the published content", got)
+	}
+}
+
+// TestSubtitleUploadRefusesCrossHashSymlink pins the no-follow rule: replacing
+// one torrent's store directory with a relative symlink to another torrent's
+// directory must not let the first torrent write into or read the second one's
+// tree.
+func TestSubtitleUploadRefusesCrossHashSymlink(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	aBytes, aHash := buildSingleFileTorrentBytes(t, "A.mkv", []byte("a video"), nil)
+	bBytes, bHash := buildSingleFileTorrentBytes(t, "B.mkv", []byte("b video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, aBytes)
+	addTorrentBytes(t, sess, bBytes)
+	uploadSubtitle(t, sess, bHash, "B.mkv", "B.srt", "b subtitle\n")
+
+	store := sess.SubtitleRootForTest()
+	// A relative link that stays inside the store: a path-following
+	// implementation would resolve it and write A's subtitle into B's tree.
+	if err := os.Symlink(bHash.HexString(), filepath.Join(store, aHash.HexString())); err != nil {
+		t.Fatalf("plant cross-hash symlink: %v", err)
+	}
+
+	_, err := sess.UploadSubtitle(context.Background(), aHash.HexString(), "A.mkv", "A.srt", strings.NewReader("a subtitle\n"), 1<<20)
+	assertSubtitleCode(t, err, session.SubtitleCodeStorageUnavailable)
+	if status, err := sess.TorrentStatusFor(aHash.HexString()); err != nil {
+		t.Fatalf("TorrentStatusFor A: %v", err)
+	} else if len(status.Subtitles) != 0 {
+		t.Fatalf("torrent A published %+v, want nothing through a redirected path", status.Subtitles)
+	}
+	// B's tree only holds B's own subtitle, and it still reads back.
+	if got := readSubtitle(t, sess, bHash, "B.srt"); got != "b subtitle\n" {
+		t.Fatalf("B subtitle = %q, want it untouched", got)
+	}
+	entries, err := os.ReadDir(filepath.Join(store, bHash.HexString()))
+	if err != nil {
+		t.Fatalf("read B store dir: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if len(names) != 1 || names[0] != "B.srt" {
+		t.Fatalf("B store dir holds %v, want only B.srt", names)
+	}
+}
+
+// TestSubtitleOpenMetadataMatchesTheOpenedFile pins the per-open snapshot: a
+// replacement that lands between a subtitle's open and its metadata read must
+// not pair one version's length with another version's bytes, in either
+// direction.
+func TestSubtitleOpenMetadataMatchesTheOpenedFile(t *testing.T) {
+	long := strings.Repeat("long-subtitle\n", 256)
+	for _, tt := range []struct {
+		name        string
+		initial     string
+		replacement string
+	}{
+		{"short to long", "short\n", long},
+		{"long to short", long, "short\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			work := t.TempDir()
+			torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+			data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Movie.mkv": []byte("video")})
+
+			sess := newManageSession(t, torrentsDir)
+			addTorrentBytes(t, sess, data)
+			uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", tt.initial)
+
+			// Land a replacement inside the open, after the descriptor exists.
+			swapped := false
+			store := sess.SubtitleRootForTest()
+			restore := session.SetSubtitleOpenHook(func(hash metainfo.Hash, path string) {
+				if swapped {
+					return
+				}
+				swapped = true
+				dir := filepath.Join(store, hash.HexString())
+				replacement := filepath.Join(dir, "inside-open.tmp")
+				if err := os.WriteFile(replacement, []byte(tt.replacement), 0o644); err != nil {
+					t.Errorf("write replacement: %v", err)
+					return
+				}
+				if err := os.Rename(replacement, filepath.Join(dir, path)); err != nil {
+					t.Errorf("publish replacement: %v", err)
+				}
+			})
+			defer restore()
+
+			snapshot, err := sess.OpenSubtitle(hash, "Movie.srt")
+			if err != nil {
+				t.Fatalf("OpenSubtitle: %v", err)
+			}
+			defer func() {
+				if closer, ok := snapshot.Reader.(io.Closer); ok {
+					_ = closer.Close()
+				}
+			}()
+			if !swapped {
+				t.Fatal("the open hook never ran")
+			}
+			// The length and the bytes describe the version the open holds.
+			if snapshot.Size != int64(len(tt.initial)) {
+				t.Fatalf("opened size = %d, want the opened version's %d", snapshot.Size, len(tt.initial))
+			}
+			opened, err := io.ReadAll(io.NewSectionReader(snapshot.Reader, 0, snapshot.Size))
+			if err != nil {
+				t.Fatalf("read the opened length: %v", err)
+			}
+			if string(opened) != tt.initial {
+				t.Fatalf("opened content = %q, want the opened version", opened)
+			}
+		})
+	}
 }
 
 // TestMagnetMetadataPublishRefusedBeforeWriting pins the metadata order: a

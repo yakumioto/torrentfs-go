@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
@@ -133,45 +134,65 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 	return t.readerFor(path)
 }
 
-// OpenSubtitle opens a managed subtitle snapshot for the FUSE read path.
-func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error) {
+// OpenSubtitle opens a managed subtitle for the FUSE read path. The metadata
+// and the file come from the same opened descriptor, so a replacement that lands
+// between them cannot pair one version's length with another version's bytes.
+func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (filesystem.SubtitleSnapshot, error) {
 	rel, err := s.managedSubtitlePath(hash, path)
 	if err != nil {
-		return nil, err
+		return filesystem.SubtitleSnapshot{}, err
 	}
-	store, err := os.OpenRoot(s.subtitleRoot)
-	if err != nil {
-		return nil, filesystem.ErrNotFound
+	store := s.subtitleStore
+	if store == nil {
+		return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
 	}
-	defer func() { _ = store.Close() }()
-	file, err := store.Open(rel)
+	file, err := store.openRead(rel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, filesystem.ErrNotFound
+			return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
 		}
-		return nil, err
+		return filesystem.SubtitleSnapshot{}, err
 	}
-	return file, nil
+	if subtitleOpenHook != nil {
+		subtitleOpenHook(hash, path)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return filesystem.SubtitleSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
+	}
+	return filesystem.SubtitleSnapshot{
+		Reader:     file,
+		Size:       info.Size(),
+		ModifiedAt: info.ModTime().UTC(),
+	}, nil
 }
 
-// SubtitleStat reports a managed subtitle's current metadata. A cached FUSE
-// inode asks for it on every getattr and open, so a replacement that changes the
-// file's length is visible immediately instead of through a stale snapshot.
+// SubtitleStat reports a managed subtitle's current metadata for getattr. It is
+// separate from OpenSubtitle because a stat is a point-in-time observation: the
+// coherence that matters is between the length and the bytes of one open, which
+// OpenSubtitle guarantees on its own.
 func (s *Session) SubtitleStat(hash metainfo.Hash, path string) (filesystem.SubtitleStat, error) {
 	rel, err := s.managedSubtitlePath(hash, path)
 	if err != nil {
 		return filesystem.SubtitleStat{}, err
 	}
-	store, err := os.OpenRoot(s.subtitleRoot)
-	if err != nil {
+	store := s.subtitleStore
+	if store == nil {
 		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
 	}
-	defer func() { _ = store.Close() }()
-	info, err := store.Stat(rel)
-	if err != nil || !info.Mode().IsRegular() {
+	stat, err := store.lstat(rel)
+	if err != nil || stat.Mode&subtitleStoreFileType != subtitleStoreRegular {
 		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
 	}
-	return filesystem.SubtitleStat{Size: info.Size(), ModifiedAt: info.ModTime().UTC()}, nil
+	return filesystem.SubtitleStat{
+		Size:       stat.Size,
+		ModifiedAt: time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec).UTC(),
+	}, nil
 }
 
 // managedSubtitlePath resolves one published subtitle to a path relative to the

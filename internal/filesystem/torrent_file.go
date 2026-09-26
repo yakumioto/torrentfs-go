@@ -75,14 +75,15 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		if !ok {
 			return nil, 0, errnoFor(ErrNotFound)
 		}
-		// The bound is taken now, not at lookup time: a longer replacement
-		// would otherwise be truncated to the length the inode first saw.
-		stat, errno := n.currentSubtitleStat()
-		if errno != 0 {
-			return nil, 0, errno
+		// The backend returns the file and its metadata together, so the read
+		// bound belongs to the same opened version as the bytes. Querying the
+		// path separately would let a replacement land between the two and pair
+		// one version's length with another version's content.
+		snapshot, err := backend.OpenSubtitle(n.hash, n.path)
+		if err != nil {
+			return nil, 0, errnoFor(err)
 		}
-		size = stat.Size
-		ra, err = backend.OpenSubtitle(n.hash, n.path)
+		ra, size = snapshot.Reader, snapshot.Size
 		// A subtitle is replaced at the same path, and the kernel caches pages
 		// per inode, which for this mount is the path. Direct I/O keeps every
 		// read on the handle that was opened: a new open observes the
@@ -91,9 +92,9 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		openFlags = fuse.FOPEN_DIRECT_IO
 	} else {
 		ra, err = n.state.backend.OpenFile(n.hash, n.path)
-	}
-	if err != nil {
-		return nil, 0, errnoFor(err)
+		if err != nil {
+			return nil, 0, errnoFor(err)
+		}
 	}
 	return &readHandle{ra: ra, size: size}, openFlags, 0
 }

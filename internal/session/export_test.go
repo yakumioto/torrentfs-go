@@ -118,6 +118,15 @@ func SetSubtitleIOFault(fn func(stage string) error) func() {
 	return func() { subtitleIOFault = previous }
 }
 
+// SetSubtitleOpenHook installs fn to run inside one subtitle open, after its
+// file descriptor is opened and before its metadata is read, and returns a
+// function that clears it. Test-only.
+func SetSubtitleOpenHook(fn func(hash metainfo.Hash, path string)) func() {
+	previous := subtitleOpenHook
+	subtitleOpenHook = fn
+	return func() { subtitleOpenHook = previous }
+}
+
 // SubtitleStageParents names the store-check/staging-create window for tests.
 const SubtitleStageParents = subtitleStageParents
 
