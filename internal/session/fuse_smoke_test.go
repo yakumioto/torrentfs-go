@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -469,6 +470,114 @@ func TestFuseSmokeManagedSubtitles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(mnt, "multi")); !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("torrent root after delete = %v, want ENOENT", err)
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}
+
+// TestFuseSmokeSubtitleReplacementChangesLength pins the kernel-facing metadata
+// contract for a replacement that changes the subtitle's length: the mount must
+// report the new size and serve the whole new content, even though the file's
+// inode is the one already cached for that path. A handle opened before the
+// replacement keeps the snapshot it opened.
+func TestFuseSmokeSubtitleReplacementChangesLength(t *testing.T) {
+	requireFuse(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	soloPath, soloHash := buildSingleFileTorrent(t, work, "Movie.mkv", []byte("video payload"))
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: soloPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	short := "short\n"
+	if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(short), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle: %v", err)
+	}
+	subtitlePath := filepath.Join(mnt, "Movie.srt")
+	info, err := os.Stat(subtitlePath)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", subtitlePath, err)
+	}
+	if info.Size() != int64(len(short)) {
+		t.Fatalf("initial size = %d, want %d", info.Size(), len(short))
+	}
+	if got, err := os.ReadFile(subtitlePath); err != nil || string(got) != short {
+		t.Fatalf("initial read = (%q, %v), want %q", got, err, short)
+	}
+
+	// Hold a handle across the replacement: it must keep the snapshot it opened,
+	// including its own end of file.
+	held, err := os.Open(subtitlePath)
+	if err != nil {
+		t.Fatalf("hold open: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+
+	long := strings.Repeat("long-subtitle-line\n", 256)
+	if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(long), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle replacement: %v", err)
+	}
+
+	// The cached inode must not keep answering with the length it first saw.
+	info, err = os.Stat(subtitlePath)
+	if err != nil {
+		t.Fatalf("Stat after replacement: %v", err)
+	}
+	if info.Size() != int64(len(long)) {
+		t.Fatalf("size after replacement = %d, want %d", info.Size(), len(long))
+	}
+	got, err := os.ReadFile(subtitlePath)
+	if err != nil {
+		t.Fatalf("read after replacement: %v", err)
+	}
+	if !bytes.Equal(got, []byte(long)) {
+		t.Fatalf("read after replacement returned %d bytes of %d, want the whole new subtitle", len(got), len(long))
+	}
+
+	// The already-open handle still sees its own snapshot and ends there.
+	snapshot := make([]byte, len(short))
+	if _, err := held.ReadAt(snapshot, 0); err != nil {
+		t.Fatalf("held handle read: %v", err)
+	}
+	if string(snapshot) != short {
+		t.Fatalf("held handle read = %q, want the snapshot it opened %q", snapshot, short)
+	}
+	past := make([]byte, 8)
+	if n, err := held.ReadAt(past, int64(len(short))); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("held handle read past its length = (%d, %v), want (0, EOF)", n, err)
+	}
+	// Release the held handle before unmounting: a live open file keeps the
+	// mount busy.
+	if err := held.Close(); err != nil {
+		t.Fatalf("close held handle: %v", err)
 	}
 
 	if err := server.Unmount(); err != nil {

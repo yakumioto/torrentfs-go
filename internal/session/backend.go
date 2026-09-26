@@ -135,35 +135,16 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 
 // OpenSubtitle opens a managed subtitle snapshot for the FUSE read path.
 func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error) {
-	if err := validateSubtitleRelativePath(path); err != nil {
-		return nil, filesystem.ErrNotFound
-	}
-	s.mu.RLock()
-	if err := s.ensureActiveLocked(); err != nil {
-		s.mu.RUnlock()
+	rel, err := s.managedSubtitlePath(hash, path)
+	if err != nil {
 		return nil, err
 	}
-	entry := s.states[hash]
-	_, ok := s.subtitles[hash][path]
-	s.mu.RUnlock()
-	if entry == nil || entry.State != StateReady || !ok {
-		return nil, filesystem.ErrNotFound
-	}
-	dir := s.subtitleDir(hash)
-	// The root itself must be the directory the daemon manages: opening a
-	// symlink as the root would resolve wherever it points, so it is rejected
-	// before os.Root confines the read inside it.
-	if info, err := os.Lstat(dir); err != nil {
-		return nil, filesystem.ErrNotFound
-	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, filesystem.ErrNotFound
-	}
-	root, err := os.OpenRoot(dir)
+	store, err := os.OpenRoot(s.subtitleRoot)
 	if err != nil {
 		return nil, filesystem.ErrNotFound
 	}
-	defer func() { _ = root.Close() }()
-	file, err := root.Open(filepath.FromSlash(path))
+	defer func() { _ = store.Close() }()
+	file, err := store.Open(rel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, filesystem.ErrNotFound
@@ -171,6 +152,46 @@ func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, er
 		return nil, err
 	}
 	return file, nil
+}
+
+// SubtitleStat reports a managed subtitle's current metadata. A cached FUSE
+// inode asks for it on every getattr and open, so a replacement that changes the
+// file's length is visible immediately instead of through a stale snapshot.
+func (s *Session) SubtitleStat(hash metainfo.Hash, path string) (filesystem.SubtitleStat, error) {
+	rel, err := s.managedSubtitlePath(hash, path)
+	if err != nil {
+		return filesystem.SubtitleStat{}, err
+	}
+	store, err := os.OpenRoot(s.subtitleRoot)
+	if err != nil {
+		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
+	}
+	defer func() { _ = store.Close() }()
+	info, err := store.Stat(rel)
+	if err != nil || !info.Mode().IsRegular() {
+		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
+	}
+	return filesystem.SubtitleStat{Size: info.Size(), ModifiedAt: info.ModTime().UTC()}, nil
+}
+
+// managedSubtitlePath resolves one published subtitle to a path relative to the
+// managed store, refusing anything the index does not know about.
+func (s *Session) managedSubtitlePath(hash metainfo.Hash, path string) (string, error) {
+	if err := validateSubtitleRelativePath(path); err != nil {
+		return "", filesystem.ErrNotFound
+	}
+	s.mu.RLock()
+	activeErr := s.ensureActiveLocked()
+	entry := s.states[hash]
+	_, known := s.subtitles[hash][path]
+	s.mu.RUnlock()
+	if activeErr != nil {
+		return "", activeErr
+	}
+	if entry == nil || entry.State != StateReady || !known {
+		return "", filesystem.ErrNotFound
+	}
+	return filepath.Join(subtitleDirName(hash), filepath.FromSlash(path)), nil
 }
 
 // TorrentStatusFor returns one fresh, consistent status snapshot for id.

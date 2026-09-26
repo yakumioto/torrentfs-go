@@ -49,6 +49,20 @@ func (b *fakeBackend) addSubtitle(view *TorrentView, path, videoPath string, dat
 	b.subtitle[view.Hash.HexString()+"\x00"+path] = data
 }
 
+// replaceSubtitle swaps the stored bytes without touching the view snapshot, so
+// a test can prove which source the node reads its metadata from.
+func (b *fakeBackend) replaceSubtitle(hash metainfo.Hash, path string, data []byte) {
+	b.subtitle[hash.HexString()+"\x00"+path] = data
+}
+
+func (b *fakeBackend) SubtitleStat(hash metainfo.Hash, path string) (SubtitleStat, error) {
+	data, ok := b.subtitle[hash.HexString()+"\x00"+path]
+	if !ok {
+		return SubtitleStat{}, fmt.Errorf("fake backend: no subtitle %q", path)
+	}
+	return SubtitleStat{Size: int64(len(data))}, nil
+}
+
 func hashN(n byte) metainfo.Hash {
 	var hash metainfo.Hash
 	hash[0] = n
@@ -463,6 +477,106 @@ func TestSingleFileSubtitleAppearsBesideTheVideo(t *testing.T) {
 	}
 	if _, errno := root.Mkdir(ctx, "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
 		t.Fatalf("Mkdir errno = %v, want EROFS", errno)
+	}
+}
+
+// TestSubtitleNodeReportsReplacedLength pins the metadata contract: the inode is
+// cached by path, so after a replacement the same node must report the new
+// length and open with the new read bound instead of truncating at the length
+// the inode first saw.
+func TestSubtitleNodeReportsReplacedLength(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeBackend{views: []TorrentView{{Name: "Movie.mkv", Hash: hashN(1), SingleFile: true}}}
+	backend.addFile(&backend.views[0], "Movie.mkv", []byte("video"))
+	backend.addSubtitle(&backend.views[0], "Movie.srt", "Movie.mkv", []byte("short"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+
+	var entryOut fuse.EntryOut
+	inode, errno := root.Lookup(ctx, "Movie.srt", &entryOut)
+	if errno != 0 {
+		t.Fatalf("Lookup Movie.srt errno = %v", errno)
+	}
+	node, ok := inode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("node = %T, want *torrentFileNode", inode.Operations())
+	}
+	var attr fuse.AttrOut
+	if errno := node.Getattr(ctx, nil, &attr); errno != 0 {
+		t.Fatalf("Getattr errno = %v", errno)
+	}
+	if attr.Size != 5 {
+		t.Fatalf("initial size = %d, want 5", attr.Size)
+	}
+
+	// A replacement changes the file's length; the view snapshot deliberately
+	// keeps the old size, as a cached inode would.
+	longer := bytes.Repeat([]byte("long-subtitle\n"), 512)
+	backend.replaceSubtitle(hashN(1), "Movie.srt", longer)
+
+	if errno := node.Getattr(ctx, nil, &attr); errno != 0 {
+		t.Fatalf("Getattr after replace errno = %v", errno)
+	}
+	if attr.Size != uint64(len(longer)) {
+		t.Fatalf("size after replace = %d, want %d", attr.Size, len(longer))
+	}
+	handle, _, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("Open errno = %v", errno)
+	}
+	read, ok := handle.(*readHandle)
+	if !ok {
+		t.Fatalf("handle = %T, want *readHandle", handle)
+	}
+	if read.size != int64(len(longer)) {
+		t.Fatalf("read bound = %d, want the replaced length %d", read.size, len(longer))
+	}
+	// The last page must come back whole: a bound fixed at the old length would
+	// report the tail as out of range.
+	tail := make([]byte, 16)
+	result, errno := read.Read(ctx, tail, int64(len(longer))-16)
+	if errno != 0 {
+		t.Fatalf("tail Read errno = %v", errno)
+	}
+	out, status := result.Bytes(tail)
+	if status != fuse.OK || string(out) != string(longer[len(longer)-16:]) {
+		t.Fatalf("tail read = %q status=%v, want the replaced tail", out, status)
+	}
+}
+
+// TestSubtitleOpenKeepsTheOldSnapshotForAnOpenHandle covers the other side of
+// the same contract: a handle opened before a replacement keeps reading the
+// bytes it opened, which is what the file's own inode still holds.
+func TestSubtitleOpenKeepsTheOldSnapshotForAnOpenHandle(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeBackend{views: []TorrentView{{Name: "Movie.mkv", Hash: hashN(1), SingleFile: true}}}
+	backend.addFile(&backend.views[0], "Movie.mkv", []byte("video"))
+	backend.addSubtitle(&backend.views[0], "Movie.srt", "Movie.mkv", []byte("original\n"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+
+	var entryOut fuse.EntryOut
+	inode, errno := root.Lookup(ctx, "Movie.srt", &entryOut)
+	if errno != 0 {
+		t.Fatalf("Lookup Movie.srt errno = %v", errno)
+	}
+	node := inode.Operations().(*torrentFileNode)
+	handle, _, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("Open errno = %v", errno)
+	}
+	read := handle.(*readHandle)
+
+	backend.replaceSubtitle(hashN(1), "Movie.srt", []byte("a much longer replacement\n"))
+
+	buf := make([]byte, 16)
+	result, errno := read.Read(ctx, buf, 0)
+	if errno != 0 {
+		t.Fatalf("old handle read errno = %v", errno)
+	}
+	out, _ := result.Bytes(buf)
+	if string(out) != "original\n" {
+		t.Fatalf("old handle read = %q, want the snapshot it opened", out)
 	}
 }
 

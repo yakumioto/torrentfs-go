@@ -668,6 +668,99 @@ func TestConcurrentAddWaitsForSubtitleUpload(t *testing.T) {
 	}
 }
 
+// TestSubtitleUploadRefusesSymlinkedStoreParent pins the write confinement: a
+// host process that swaps the torrent's subtitle directory for a symlink into a
+// tree the daemon can also write must not be able to redirect the staging file
+// or the published subtitle outside the managed store.
+func TestSubtitleUploadRefusesSymlinkedStoreParent(t *testing.T) {
+	for _, replacing := range []bool{false, true} {
+		name := "create"
+		if replacing {
+			name = "replace"
+		}
+		t.Run(name, func(t *testing.T) {
+			work := t.TempDir()
+			torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+			data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Movie.mkv": []byte("video")})
+
+			sess := newManageSession(t, torrentsDir)
+			addTorrentBytes(t, sess, data)
+			if replacing {
+				uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", "original\n")
+			}
+
+			torrentDir := filepath.Join(sess.SubtitleRootForTest(), hash.HexString())
+			escape := filepath.Join(work, "escape")
+			if err := os.MkdirAll(escape, 0o755); err != nil {
+				t.Fatalf("make escape dir: %v", err)
+			}
+			moved := filepath.Join(work, "moved-store")
+
+			restore := session.SetSubtitleIOFault(func(stage string) error {
+				if stage != session.SubtitleStageParents {
+					return nil
+				}
+				// Swap the managed directory for a symlink in the window between
+				// the store checks and the write.
+				if err := os.Rename(torrentDir, moved); err != nil {
+					t.Errorf("move managed directory: %v", err)
+					return nil
+				}
+				if err := os.Symlink(escape, torrentDir); err != nil {
+					t.Errorf("plant symlink: %v", err)
+				}
+				return nil
+			})
+			defer restore()
+
+			if _, err := sess.UploadSubtitle(context.Background(), hash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader("escaped\n"), 1<<20); err == nil {
+				t.Fatal("upload through a symlinked store parent reported success")
+			}
+			entries, err := os.ReadDir(escape)
+			if err != nil {
+				t.Fatalf("read escape dir: %v", err)
+			}
+			if len(entries) != 0 {
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				t.Fatalf("upload escaped the managed store: %v", names)
+			}
+			// The moved-aside managed directory still holds its own state.
+			movedEntries, err := os.ReadDir(moved)
+			if err != nil {
+				t.Fatalf("read moved store: %v", err)
+			}
+			if replacing && len(movedEntries) != 1 {
+				t.Fatalf("moved store holds %d entries, want the original subtitle", len(movedEntries))
+			}
+			// The in-memory index was not advanced for the refused upload.
+			if got := readSubtitleCount(t, sess, hash); got != boolToCount(replacing) {
+				t.Fatalf("published subtitles = %d, want %d", got, boolToCount(replacing))
+			}
+			assertNoStagingResidue(t, sess, hash)
+		})
+	}
+}
+
+func boolToCount(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// readSubtitleCount reports how many subtitles the session publishes for hash.
+func readSubtitleCount(t *testing.T, sess *session.Session, hash metainfo.Hash) int {
+	t.Helper()
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	return len(status.Subtitles)
+}
+
 // TestMagnetMetadataPublishRefusedBeforeWriting pins the metadata order: a
 // resolved magnet is refused before its final metainfo is written, so a crash
 // cannot leave a file that a restart would accept.

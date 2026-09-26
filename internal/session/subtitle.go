@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -142,15 +144,29 @@ var videoExtensions = map[string]struct{}{
 var subtitleExtensions = map[string]struct{}{".srt": {}, ".ass": {}, ".vtt": {}}
 
 // Upload staging stages, named so a fault can be attributed to one of them.
-// The first four run before the publish rename; subtitleStageCommit is the
-// post-commit durability step, which cannot fail the upload.
+// subtitleStageParents probes the window between the store checks and the
+// staging create; the next four run before the publish rename; and
+// subtitleStageCommit is the post-commit durability step, which cannot fail the
+// upload.
 const (
-	subtitleStageCreate = "create"
-	subtitleStageWrite  = "write"
-	subtitleStageSync   = "sync"
-	subtitleStageRename = "rename"
-	subtitleStageCommit = "commit"
+	subtitleStageParents = "parents"
+	subtitleStageCreate  = "create"
+	subtitleStageWrite   = "write"
+	subtitleStageSync    = "sync"
+	subtitleStageRename  = "rename"
+	subtitleStageCommit  = "commit"
 )
+
+// subtitleStagingName names one staging file. The name is generated here rather
+// than derived from client input, and it is the prefix the startup scan cleans
+// up if a crash leaves one behind.
+func subtitleStagingName() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return ".torrentfs-subtitle-" + hex.EncodeToString(raw[:]) + ".tmp", nil
+}
 
 // subtitleIOFault, when set, forces the named upload stage to fail. It is a
 // test-only seam: production never sets it.
@@ -181,22 +197,33 @@ func subtitleIOError(stage string, err error) error {
 // making the new directory entry durable and verifying the file that is now
 // visible. It is the post-commit half of an upload, so its error is logged by
 // the caller rather than reported, and the returned error joins every failing
-// step so the log explains all of them.
-func subtitleCommitSteps(dir, destination string, size int64) error {
+// step so the log explains all of them. Both paths stay inside the store.
+func subtitleCommitSteps(store *os.Root, relDir, relDestination string, size int64) error {
 	var errs []error
 	if err := subtitleStageFault(subtitleStageCommit); err != nil {
 		errs = append(errs, fmt.Errorf("directory sync: %w", err))
-	} else if err := syncDirectory(dir); err != nil {
+	} else if err := syncRootDirectory(store, relDir); err != nil {
 		errs = append(errs, fmt.Errorf("directory sync: %w", err))
 	}
-	if info, err := os.Lstat(destination); err != nil {
+	if info, err := store.Lstat(relDestination); err != nil {
 		errs = append(errs, fmt.Errorf("verify published file: %w", err))
 	} else if !info.Mode().IsRegular() {
-		errs = append(errs, fmt.Errorf("published file %q is not a regular file", destination))
+		errs = append(errs, fmt.Errorf("published file %q is not a regular file", relDestination))
 	} else if info.Size() != size {
-		errs = append(errs, fmt.Errorf("published file %q is %d bytes, wrote %d", destination, info.Size(), size))
+		errs = append(errs, fmt.Errorf("published file %q is %d bytes, wrote %d", relDestination, info.Size(), size))
 	}
 	return errors.Join(errs...)
+}
+
+// syncRootDirectory fsyncs a directory inside a Root by opening it through the
+// same handle, so the sync cannot be redirected by a path swap either.
+func syncRootDirectory(store *os.Root, relDir string) error {
+	dir, err := store.Open(relDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 // subtitleStoreError covers the pre-write store checks: a full disk is still a
@@ -243,23 +270,6 @@ func ensureManagedDirectory(dir string, mode os.FileMode) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("path %q must be a directory", dir)
-	}
-	return nil
-}
-
-func ensureManagedParents(root, relDir string) error {
-	if err := ensureManagedDirectory(root, 0o700); err != nil {
-		return err
-	}
-	current := root
-	if relDir == "" || relDir == "." {
-		return nil
-	}
-	for _, component := range strings.Split(relDir, "/") {
-		current = filepath.Join(current, component)
-		if err := ensureManagedDirectory(current, 0o700); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -560,30 +570,46 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	if maxBytes <= 0 {
 		maxBytes = 10 << 20
 	}
-	root := s.subtitleDir(hash)
-	dir := filepath.Dir(filepath.Join(root, filepath.FromSlash(relPath)))
-	if err := ensureManagedParents(root, path.Dir(relPath)); err != nil {
+	// Every path below is resolved relative to the managed store's own directory
+	// handle, so a host process that swaps a path component for a symlink between
+	// the checks and the write cannot redirect the staging file or the published
+	// subtitle outside the store.
+	store, err := os.OpenRoot(s.subtitleRoot)
+	if err != nil {
 		return SubtitleUploadResponse{}, subtitleStoreError(err)
 	}
-	if info, statErr := os.Lstat(filepath.Join(root, filepath.FromSlash(relPath))); statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
+	defer func() { _ = store.Close() }()
+	relDir := filepath.Join(subtitleDirName(hash), filepath.FromSlash(path.Dir(relPath)))
+	relDestination := filepath.Join(subtitleDirName(hash), filepath.FromSlash(relPath))
+	if err := store.MkdirAll(relDir, 0o700); err != nil {
+		return SubtitleUploadResponse{}, subtitleStoreError(err)
+	}
+	if info, statErr := store.Lstat(relDestination); statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
 		return SubtitleUploadResponse{}, subtitleStoreError(fmt.Errorf("subtitle path %q is not a regular file", relPath))
 	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return SubtitleUploadResponse{}, subtitleStoreError(statErr)
 	}
 
-	// os.CreateTemp names the staging file itself (0600), so the destination
-	// directory never receives a client-influenced name.
-	if err := subtitleStageFault(subtitleStageCreate); err != nil {
-		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
+	// The stage probe runs after the store checks and before the staging file
+	// exists, which is the window a host-side symlink swap would use.
+	if err := subtitleStageFault(subtitleStageParents); err != nil {
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageParents, err)
 	}
-	file, err := os.CreateTemp(dir, ".torrentfs-subtitle-*.tmp")
+	stagingName, err := subtitleStagingName()
 	if err != nil {
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
 	}
-	tmp := file.Name()
+	if err := subtitleStageFault(subtitleStageCreate); err != nil {
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
+	}
+	relStaging := filepath.Join(relDir, stagingName)
+	file, err := store.OpenFile(relStaging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
+	}
 	cleanup := func() {
 		_ = file.Close()
-		_ = os.Remove(tmp)
+		_ = store.Remove(relStaging)
 	}
 	if err := subtitleStageFault(subtitleStageWrite); err != nil {
 		cleanup()
@@ -620,16 +646,15 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
+		_ = store.Remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
-	destination := filepath.Join(root, filepath.FromSlash(relPath))
 	if err := subtitleStageFault(subtitleStageRename); err != nil {
-		_ = os.Remove(tmp)
+		_ = store.Remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
-	if err := os.Rename(tmp, destination); err != nil {
-		_ = os.Remove(tmp)
+	if err := store.Rename(relStaging, relDestination); err != nil {
+		_ = store.Remove(relStaging)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
 	// The rename is the commit point: the destination is the new content from
@@ -637,7 +662,7 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	// back. Their failure is reported as a warning instead of a failed upload,
 	// because a caller told the write failed would retry a file that is already
 	// live, and the index would disagree with the mount about what exists.
-	if err := subtitleCommitSteps(dir, destination, written); err != nil {
+	if err := subtitleCommitSteps(store, relDir, relDestination, written); err != nil {
 		s.logger.Warn("subtitle durability step failed after publish", "hash", hash.HexString(), "path", relPath, "err", err)
 	}
 	updatedAt := staged.ModTime().UTC()

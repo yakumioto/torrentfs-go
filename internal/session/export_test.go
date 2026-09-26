@@ -118,6 +118,9 @@ func SetSubtitleIOFault(fn func(stage string) error) func() {
 	return func() { subtitleIOFault = previous }
 }
 
+// SubtitleStageParents names the store-check/staging-create window for tests.
+const SubtitleStageParents = subtitleStageParents
+
 // SubtitleStageCreate names the staging-file creation stage for tests.
 const SubtitleStageCreate = subtitleStageCreate
 

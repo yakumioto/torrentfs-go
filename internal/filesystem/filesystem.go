@@ -27,6 +27,12 @@ type SubtitleView struct {
 	ModifiedAt time.Time
 }
 
+// SubtitleStat is one managed subtitle's current metadata.
+type SubtitleStat struct {
+	Size       int64
+	ModifiedAt time.Time
+}
+
 // TorrentView is the read-only snapshot of a torrent exposed to the
 // filesystem layer. Files is non-empty once the torrent's metainfo is known.
 // SingleFile marks a torrent whose metainfo has no directory structure
@@ -73,6 +79,16 @@ type Backend interface {
 // Keeping it separate preserves compatibility with small payload-only backends.
 type SubtitleBackend interface {
 	OpenSubtitle(hash metainfo.Hash, path string) (io.ReaderAt, error)
+}
+
+// SubtitleStatBackend is the optional extension that reports a managed
+// subtitle's live metadata. A FUSE inode is cached by path, so a node that
+// copied its size and mtime at lookup time would keep answering with the old
+// file's metadata after a replacement; asking the backend on every attribute
+// read and open is what makes a changed length visible. Backends that do not
+// implement it keep serving the lookup-time snapshot.
+type SubtitleStatBackend interface {
+	SubtitleStat(hash metainfo.Hash, path string) (SubtitleStat, error)
 }
 
 // fsState carries the pieces shared by every node in a mount: the Backend and

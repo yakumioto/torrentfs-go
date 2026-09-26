@@ -26,14 +26,35 @@ type torrentFileNode struct {
 
 func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0o444
-	out.Size = uint64(n.size)
 	out.Nlink = 1
 	if n.subtitle {
-		setModifiedAt(&out.Attr, n.modifiedAt)
-	} else {
-		setCreatedAt(&out.Attr, n.createdAt)
+		stat, errno := n.currentSubtitleStat()
+		if errno != 0 {
+			return errno
+		}
+		out.Size = uint64(stat.Size)
+		setModifiedAt(&out.Attr, stat.ModifiedAt)
+		return 0
 	}
+	out.Size = uint64(n.size)
+	setCreatedAt(&out.Attr, n.createdAt)
 	return 0
+}
+
+// currentSubtitleStat reports the metadata this node's file has right now. A
+// subtitle can be replaced at any time, so the size and mtime captured when the
+// inode was created are only a fallback for backends that cannot report live
+// metadata.
+func (n *torrentFileNode) currentSubtitleStat() (SubtitleStat, syscall.Errno) {
+	backend, ok := n.state.backend.(SubtitleStatBackend)
+	if !ok {
+		return SubtitleStat{Size: n.size, ModifiedAt: n.modifiedAt}, 0
+	}
+	stat, err := backend.SubtitleStat(n.hash, n.path)
+	if err != nil {
+		return SubtitleStat{}, errnoFor(err)
+	}
+	return stat, 0
 }
 
 func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -44,22 +65,37 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		return nil, 0, errnoFor(ErrReadOnly)
 	}
 	var (
-		ra  io.ReaderAt
-		err error
+		ra        io.ReaderAt
+		size      = n.size
+		openFlags uint32
+		err       error
 	)
 	if n.subtitle {
 		backend, ok := n.state.backend.(SubtitleBackend)
 		if !ok {
 			return nil, 0, errnoFor(ErrNotFound)
 		}
+		// The bound is taken now, not at lookup time: a longer replacement
+		// would otherwise be truncated to the length the inode first saw.
+		stat, errno := n.currentSubtitleStat()
+		if errno != 0 {
+			return nil, 0, errno
+		}
+		size = stat.Size
 		ra, err = backend.OpenSubtitle(n.hash, n.path)
+		// A subtitle is replaced at the same path, and the kernel caches pages
+		// per inode, which for this mount is the path. Direct I/O keeps every
+		// read on the handle that was opened: a new open observes the
+		// replacement, while a handle opened before it keeps reading the file it
+		// opened instead of a page cache another open has since refilled.
+		openFlags = fuse.FOPEN_DIRECT_IO
 	} else {
 		ra, err = n.state.backend.OpenFile(n.hash, n.path)
 	}
 	if err != nil {
 		return nil, 0, errnoFor(err)
 	}
-	return &readHandle{ra: ra, size: n.size}, 0, 0
+	return &readHandle{ra: ra, size: size}, openFlags, 0
 }
 
 // readHandle serves reads for one opened torrent file. Release closes only the

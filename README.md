@@ -161,7 +161,7 @@ managed subtitle 以只读文件的形式合并进同一棵树：
     └── movie.srt            # 与视频同目录、同 basename
 ```
 
-字幕节点是普通只读文件（`0444`），size 与 mtime 来自持久化文件。同名替换采用同目录原子 rename，因此已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容；`Create`、`Mkdir`、可写 `Open`、`Rename`、`Unlink` 继续返回 `EROFS`。
+字幕节点是普通只读文件（`0444`）。`stat`/`open` 每次都从存储层读取当前的 size 与 mtime，所以替换成长度不同的字幕后，同一个挂载路径会立即报告并读取新版本，而不会沿用 inode 首次 lookup 时的旧长度。字幕以 direct I/O 提供：替换后新 `open` 读完整新版本，替换前已经打开的 handle 继续读完它打开的那份快照。`Create`、`Mkdir`、可写 `Open`、`Rename`、`Unlink` 继续返回 `EROFS`。
 
 ## HTTP API
 
@@ -453,7 +453,9 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 
 `413` 表示请求体超过 `http.max_upload_bytes`（该上限同时约束 `.torrent` 与字幕上传）。错误信息不会回显宿主路径。
 
-字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：`rename` 之前任一步失败都会删除临时文件并保持旧字幕完整、文件不存在。**`rename` 是提交点**：它成功之后目标就是新内容，因此 rename 之后的目录 `fsync` 与校验步骤只记录 warning，不返回失败——对一个已经生效的写入报告失败，会让调用方、内存索引和挂载点对“存在什么”产生分歧。size 与 mtime 取自 rename 之前的 staging 文件（rename 保持同一 inode），所以发布结果不依赖 rename 之后的 `stat`。同名替换后，已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容（挂载点不保留旧 page cache）。
+字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：`rename` 之前任一步失败都会删除临时文件并保持旧字幕完整、文件不存在。**`rename` 是提交点**：它成功之后目标就是新内容，因此 rename 之后的目录 `fsync` 与校验步骤只记录 warning，不返回失败——对一个已经生效的写入报告失败，会让调用方、内存索引和挂载点对“存在什么”产生分歧。size 与 mtime 取自 rename 之前的 staging 文件（rename 保持同一 inode），所以发布结果不依赖 rename 之后的 `stat`。
+
+路径安全：父目录创建、staging 创建、rename、`stat` 与读取全部通过 `.metadata/subtitles` 自身的目录 handle（`os.Root` 等价物）以相对路径执行，而不是先 `Lstat` 再用普通路径打开。即使宿主侧进程在检查与写入之间把某个路径组件换成 symlink，写入和读取也只会在受管目录树内解析；越界的 symlink 会让该次上传以 `503` 失败，不会在 store 之外创建或替换任何文件。删除路径使用 `RemoveAll`，它不会跟随 symlink，因此同样不会越界。
 
 ### 状态与错误语义
 
