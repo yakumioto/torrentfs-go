@@ -48,7 +48,7 @@ export function DeleteTorrentDialog({ torrent, opened, onClose }: { torrent: Tor
   return (
     <Modal opened={opened} onClose={close} title="删除任务" centered closeButtonProps={{ 'aria-label': '关闭弹窗' }}>
       <Stack gap="md">
-        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>从 TorrentFS 中移除 <strong>{torrent.name || '这个任务'}</strong>。任务会从内存中移除，相关缓存也会随之释放；此操作无法撤销。</p>
+        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>从 TorrentFS 中移除 <strong>{torrent.name || '这个任务'}</strong>。任务会从内存中移除，相关缓存也会随之释放，由 TorrentFS 管理的字幕文件会一并清理；此操作无法撤销。</p>
         {conflict && <div className="error-callout" role="alert"><IconAlertTriangle size={15} aria-hidden="true" /> 当前任务仍被用户拥有的 .torrent 文件引用，请先解除该引用。</div>}
         {mutationError !== null && mutationError !== undefined && !conflict && <div className="error-callout" role="alert">{userFacingError(mutationError, '删除任务请求失败，请稍后重试。')}</div>}
         {operationId !== '' && <OperationStatus operation={operation.data} error={operation.error} />}

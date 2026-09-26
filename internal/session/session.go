@@ -66,6 +66,20 @@ type Session struct {
 	torrents       map[metainfo.Hash]*Torrent
 	torrentsDir    string
 	metadataDir    string
+	subtitleRoot   string
+	subtitles      map[metainfo.Hash]map[string]managedSubtitle
+	// subtitleStore is the persistent trusted handle for the subtitle tree. It
+	// is opened once at startup instead of being re-derived from the path on
+	// every operation, so a swap of the store's own path cannot redirect a
+	// later read or write.
+	subtitleStore *subtitleStore
+	// rootNamespaceMu serializes the decisions that depend on the mount root's
+	// name layout: a torrent becoming visible and a subtitle being published
+	// must not interleave, or a guard decision can be based on a layout that is
+	// about to change. It is deliberately separate from mu, which may not be
+	// held across a subtitle upload's disk I/O. Acquisition order is always
+	// rootNamespaceMu -> per-hash lock -> mu.
+	rootNamespaceMu sync.Mutex
 
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.
@@ -163,9 +177,24 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("create-state-dir", err)
 		return nil, err
 	}
+	subtitleRoot := filepath.Join(metadataDir, "subtitles")
+	if err := ensureManagedDirectory(subtitleRoot, 0o700); err != nil {
+		err = fmt.Errorf("session: create subtitle dir: %w", err)
+		logInitFailure("create-subtitle-dir", err)
+		return nil, err
+	}
 	instanceLock, err := lockInstance(metadataDir)
 	if err != nil {
 		logInitFailure("acquire-instance-lock", err)
+		return nil, err
+	}
+	// The store handle is opened once here and reused for every later subtitle
+	// operation. Anything the session publishes or reads afterwards is resolved
+	// from this handle, so replacing the store's path cannot redirect it.
+	subtitleStore, err := openSubtitleStore(subtitleRoot)
+	if err != nil {
+		releaseInstanceLock(instanceLock)
+		logInitFailure("open-subtitle-store", err)
 		return nil, err
 	}
 
@@ -242,6 +271,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		torrents:        make(map[metainfo.Hash]*Torrent),
 		torrentsDir:     torrentsDir,
 		metadataDir:     metadataDir,
+		subtitleRoot:    subtitleRoot,
+		subtitleStore:   subtitleStore,
+		subtitles:       make(map[metainfo.Hash]map[string]managedSubtitle),
 		storageCloser:   pieceStore,
 		instanceLock:    instanceLock,
 		dhtRecorder:     dhtRecorder,
@@ -264,6 +296,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		{stage: "torrent-restore", fn: func() error {
 			return s.restoreRegistryEntries(context.Background())
 		}},
+		{stage: "subtitle-restore", fn: s.loadManagedSubtitles},
 	}
 	for _, step := range startup {
 		if err := step.fn(); err != nil {
@@ -327,6 +360,7 @@ func (s *Session) Close(ctx context.Context) error {
 	bgCancel := s.bgCancel
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
+	subtitleStore := s.subtitleStore
 	s.mu.Unlock()
 	s.logger.Info("session closing")
 
@@ -368,6 +402,11 @@ func (s *Session) Close(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("close default storage: %w", err))
 		}
 	}
+	// The subtitle store handle outlives no work: every subtitle operation runs
+	// under mu or the per-hash lock and the client is already closed.
+	if err := subtitleStore.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close subtitle store: %w", err))
+	}
 
 	err := errors.Join(errs...)
 	// Nothing else touches the torrents directory once the client is closed, so
@@ -378,6 +417,7 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.torrents = make(map[metainfo.Hash]*Torrent)
+	s.subtitles = make(map[metainfo.Hash]map[string]managedSubtitle)
 	s.states = make(map[metainfo.Hash]*registryEntry)
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)

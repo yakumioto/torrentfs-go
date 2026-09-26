@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import type { Operation, PruneResult, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
+import type { Operation, PruneResult, RuntimeStats, SubtitleUploadResponse, Torrent, TorrentStatus } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
 import { sortTorrents } from './sort';
@@ -91,6 +91,8 @@ const selectStatusMeta = (status: TorrentStatus): TorrentStatusMeta => ({
 });
 const selectStatusFiles = (status: TorrentStatus) => status.files;
 const selectStatusPieces = (status: TorrentStatus) => status.pieces;
+const selectStatusSubtitles = (status: TorrentStatus) => status.subtitles;
+const selectStatusSubtitleTargets = (status: TorrentStatus) => status.subtitle_targets;
 
 export function useTorrentStatusTorrent(api: ApiClient, id: string, enabled: boolean) {
   return useTorrentStatusSlice(api, id, enabled, selectStatusTorrent);
@@ -110,6 +112,27 @@ export function useTorrentStatusFiles(api: ApiClient, id: string, enabled: boole
 
 export function useTorrentStatusPieces(api: ApiClient, id: string, enabled: boolean) {
   return useTorrentStatusSlice(api, id, enabled, selectStatusPieces);
+}
+
+export function useTorrentStatusSubtitles(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusSubtitles);
+}
+
+export function useTorrentSubtitleTargets(api: ApiClient, id: string, enabled: boolean) {
+  return useTorrentStatusSlice(api, id, enabled, selectStatusSubtitleTargets);
+}
+
+export function useUploadSubtitle(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, videoPath, file, signal }: { id: string; videoPath: string; file: File; signal?: AbortSignal }) =>
+      api.uploadSubtitle(id, videoPath, file, signal),
+    onSuccess: (_result: SubtitleUploadResponse, variables) => {
+      // Only this torrent's status carries the subtitle list and targets, so
+      // refreshing global statistics here would be unrelated churn.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrentStatus(variables.id) });
+    },
+  });
 }
 
 export function useAddTorrent(api: ApiClient) {

@@ -1,11 +1,13 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -336,6 +338,322 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 	}
 	if err := os.Remove(filepath.Join(root, "a.txt")); !errors.Is(err, syscall.EROFS) {
 		t.Fatalf("unlink in torrent tree = %v, want EROFS", err)
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}
+
+// TestFuseSmokeManagedSubtitles mounts a real torrent and drives the subtitle
+// overlay end to end: an authenticated upload becomes visible and readable
+// through the kernel, a same-name replacement is seen by a later open, the
+// mount still refuses direct writes, and deleting the torrent removes the
+// payload and the subtitle together.
+func TestFuseSmokeManagedSubtitles(t *testing.T) {
+	requireFuse(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	files := map[string][]byte{"movie.mkv": []byte("video payload"), "notes.txt": []byte("notes")}
+	torrentPath, hash, all := buildMultiFileTorrent(t, work, "multi", files)
+	soloPath, soloHash := buildSingleFileTorrent(t, work, "Solo.mkv", []byte("solo video"))
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: soloPath}); err != nil {
+		t.Fatalf("AddTorrent single-file: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("multi-file torrent not registered")
+	}
+	seedPieces(t, sess, hash, all)
+	waitCached(t, ctx, st)
+
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	oldContent := "old subtitle\n"
+	if _, err := sess.UploadSubtitle(ctx, hash.HexString(), "movie.mkv", "movie.srt", strings.NewReader(oldContent), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle: %v", err)
+	}
+
+	// The uploaded subtitle shows up inside the torrent's virtual directory.
+	subtitlePath := filepath.Join(mnt, "multi", "movie.srt")
+	info, err := os.Stat(subtitlePath)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", subtitlePath, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%s mode = %v, want a regular file", subtitlePath, info.Mode())
+	}
+	if info.Size() != int64(len(oldContent)) {
+		t.Fatalf("%s size = %d, want %d", subtitlePath, info.Size(), len(oldContent))
+	}
+	if got, err := os.ReadFile(subtitlePath); err != nil || string(got) != oldContent {
+		t.Fatalf("read %s = (%q, %v), want %q", subtitlePath, got, err, oldContent)
+	}
+	// The payload is still there and unchanged.
+	if got, err := os.ReadFile(filepath.Join(mnt, "multi", "movie.mkv")); err != nil || string(got) != "video payload" {
+		t.Fatalf("payload read = (%q, %v), want the original bytes", got, err)
+	}
+
+	// A same-size replacement must reach a later open: the kernel cache is
+	// invalidated on open, so the new bytes are served, not the old ones.
+	newContent := "new subtitle\n"
+	if len(newContent) != len(oldContent) {
+		t.Fatalf("fixture error: replacement lengths differ (%d vs %d)", len(newContent), len(oldContent))
+	}
+	if _, err := sess.UploadSubtitle(ctx, hash.HexString(), "movie.mkv", "movie.srt", strings.NewReader(newContent), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle replacement: %v", err)
+	}
+	if got, err := os.ReadFile(subtitlePath); err != nil || string(got) != newContent {
+		t.Fatalf("read after replacement = (%q, %v), want %q", got, err, newContent)
+	}
+
+	// A single-file torrent exposes its subtitle beside the video at the root.
+	if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Solo.mkv", "Solo.vtt", strings.NewReader("WEBVTT\n"), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle single-file: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(mnt, "Solo.vtt")); err != nil || string(got) != "WEBVTT\n" {
+		t.Fatalf("single-file subtitle read = (%q, %v), want WEBVTT", got, err)
+	}
+
+	// Writing the overlay through the mount stays impossible: the API is the
+	// only writer.
+	if err := os.WriteFile(subtitlePath, []byte("forged"), 0o644); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("write subtitle through the mount = %v, want EROFS", err)
+	}
+	if err := os.Remove(subtitlePath); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("unlink subtitle through the mount = %v, want EROFS", err)
+	}
+	if got, err := os.ReadFile(subtitlePath); err != nil || string(got) != newContent {
+		t.Fatalf("subtitle after refused mutation = (%q, %v), want %q", got, err, newContent)
+	}
+
+	// Deleting the torrent removes the payload and the subtitle together.
+	op, err := sess.DeleteTorrent(ctx, hash.HexString())
+	if err != nil {
+		t.Fatalf("DeleteTorrent: %v", err)
+	}
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
+		t.Fatalf("delete operation = %+v, want deleted", final)
+	}
+	for _, name := range []string{"movie.mkv", "movie.srt", "notes.txt"} {
+		if _, err := os.Stat(filepath.Join(mnt, "multi", name)); !errors.Is(err, syscall.ENOENT) {
+			t.Fatalf("%s after delete = %v, want ENOENT", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "multi")); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("torrent root after delete = %v, want ENOENT", err)
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}
+
+// TestFuseSmokeSubtitleReplacementChangesLength pins the kernel-facing metadata
+// contract for a replacement that changes the subtitle's length: the mount must
+// report the new size and serve the whole new content, even though the file's
+// inode is the one already cached for that path. A handle opened before the
+// replacement keeps the snapshot it opened.
+func TestFuseSmokeSubtitleReplacementChangesLength(t *testing.T) {
+	requireFuse(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	soloPath, soloHash := buildSingleFileTorrent(t, work, "Movie.mkv", []byte("video payload"))
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: soloPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	short := "short\n"
+	if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(short), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle: %v", err)
+	}
+	subtitlePath := filepath.Join(mnt, "Movie.srt")
+	info, err := os.Stat(subtitlePath)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", subtitlePath, err)
+	}
+	if info.Size() != int64(len(short)) {
+		t.Fatalf("initial size = %d, want %d", info.Size(), len(short))
+	}
+	if got, err := os.ReadFile(subtitlePath); err != nil || string(got) != short {
+		t.Fatalf("initial read = (%q, %v), want %q", got, err, short)
+	}
+
+	// Hold a handle across the replacement: it must keep the snapshot it opened,
+	// including its own end of file.
+	held, err := os.Open(subtitlePath)
+	if err != nil {
+		t.Fatalf("hold open: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+
+	long := strings.Repeat("long-subtitle-line\n", 256)
+	if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(long), 1<<20); err != nil {
+		t.Fatalf("UploadSubtitle replacement: %v", err)
+	}
+
+	// The cached inode must not keep answering with the length it first saw.
+	info, err = os.Stat(subtitlePath)
+	if err != nil {
+		t.Fatalf("Stat after replacement: %v", err)
+	}
+	if info.Size() != int64(len(long)) {
+		t.Fatalf("size after replacement = %d, want %d", info.Size(), len(long))
+	}
+	got, err := os.ReadFile(subtitlePath)
+	if err != nil {
+		t.Fatalf("read after replacement: %v", err)
+	}
+	if !bytes.Equal(got, []byte(long)) {
+		t.Fatalf("read after replacement returned %d bytes of %d, want the whole new subtitle", len(got), len(long))
+	}
+
+	// The already-open handle still sees its own snapshot and ends there.
+	snapshot := make([]byte, len(short))
+	if _, err := held.ReadAt(snapshot, 0); err != nil {
+		t.Fatalf("held handle read: %v", err)
+	}
+	if string(snapshot) != short {
+		t.Fatalf("held handle read = %q, want the snapshot it opened %q", snapshot, short)
+	}
+	past := make([]byte, 8)
+	if n, err := held.ReadAt(past, int64(len(short))); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("held handle read past its length = (%d, %v), want (0, EOF)", n, err)
+	}
+	// Release the held handle before unmounting: a live open file keeps the
+	// mount busy.
+	if err := held.Close(); err != nil {
+		t.Fatalf("close held handle: %v", err)
+	}
+
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}
+
+// TestFuseSmokeSubtitleReadsStayConsistentDuringReplacement hammers the
+// replacement path through a real mount: while a subtitle is swapped between two
+// known versions, every read must return exactly one of them. A read that
+// combines one version's length with another version's bytes - a truncated
+// prefix, or an unexpected end of file - would match neither.
+func TestFuseSmokeSubtitleReadsStayConsistentDuringReplacement(t *testing.T) {
+	requireFuse(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	soloPath, soloHash := buildSingleFileTorrent(t, work, "Movie.mkv", []byte("video payload"))
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: soloPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+
+	short := "short\n"
+	long := strings.Repeat("long-subtitle-line\n", 128)
+	versions := map[string]bool{short: true, long: true}
+
+	upload := func(content string) {
+		t.Helper()
+		if _, err := sess.UploadSubtitle(ctx, soloHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader(content), 1<<20); err != nil {
+			t.Fatalf("upload %d bytes: %v", len(content), err)
+		}
+	}
+	upload(short)
+	subtitlePath := filepath.Join(mnt, "Movie.srt")
+
+	for i := 0; i < 24; i++ {
+		want := short
+		if i%2 == 0 {
+			want = long
+		}
+		upload(want)
+		got, err := os.ReadFile(subtitlePath)
+		if err != nil {
+			t.Fatalf("read after replacement %d: %v", i, err)
+		}
+		if !versions[string(got)] {
+			t.Fatalf("read %d returned %d bytes matching neither version (truncated or mixed)", i, len(got))
+		}
+		if string(got) != want {
+			t.Fatalf("read %d returned the other version, want the one just published", i)
+		}
 	}
 
 	if err := server.Unmount(); err != nil {
