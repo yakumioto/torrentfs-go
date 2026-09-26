@@ -68,6 +68,13 @@ type Session struct {
 	metadataDir    string
 	subtitleRoot   string
 	subtitles      map[metainfo.Hash]map[string]managedSubtitle
+	// rootNamespaceMu serializes the decisions that depend on the mount root's
+	// name layout: a torrent becoming visible and a subtitle being published
+	// must not interleave, or a guard decision can be based on a layout that is
+	// about to change. It is deliberately separate from mu, which may not be
+	// held across a subtitle upload's disk I/O. Acquisition order is always
+	// rootNamespaceMu -> per-hash lock -> mu.
+	rootNamespaceMu sync.Mutex
 
 	// storageCloser owns the piece store the client does not close on its own
 	// when DefaultStorage is set.

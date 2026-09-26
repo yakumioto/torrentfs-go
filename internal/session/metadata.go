@@ -206,6 +206,37 @@ func (s *Session) publishMetainfo(ctx context.Context, hash metainfo.Hash, data 
 	return created, spec, nil
 }
 
+// publishGuardedMetainfo publishes a torrent's final metainfo only after the
+// projected mount-root namespace accepts it. The guard runs first, so a refused
+// torrent never leaves a final metainfo behind that a restart would treat as
+// accepted state. Callers must hold rootNamespaceMu and s.mu.
+func (s *Session) publishGuardedMetainfo(ctx context.Context, hash metainfo.Hash, data []byte) (bool, *torrent.TorrentSpec, error) {
+	name, single, err := metainfoRootShape(data)
+	if err != nil {
+		return false, nil, fmt.Errorf("session: read metainfo %s: %w", hash, err)
+	}
+	if err := s.subtitleNamespaceConflictLocked(hash, name, single); err != nil {
+		return false, nil, err
+	}
+	return s.publishMetainfo(ctx, hash, data)
+}
+
+// metainfoRootShape reports how a metainfo would appear at the mount root: the
+// name it would take and whether it is exposed as a single file. The namespace
+// guard needs exactly this, and it comes from the bytes so the guard can run
+// before the metainfo exists on disk.
+func metainfoRootShape(data []byte) (string, bool, error) {
+	mi, err := metainfo.Load(bytes.NewReader(data))
+	if err != nil {
+		return "", false, err
+	}
+	info, err := mi.UnmarshalInfo()
+	if err != nil {
+		return "", false, err
+	}
+	return info.BestName(), !info.IsDir(), nil
+}
+
 func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, data []byte) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -213,13 +244,21 @@ func (s *Session) writeMetadataBytes(ctx context.Context, hash metainfo.Hash, da
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("session: persist metainfo %s: %w", hash, err)
 	}
+	// A metadata write publishes a final metainfo, so it takes the same
+	// namespace serialization as an add even though it is usually a magnet
+	// resolving.
+	s.rootNamespaceMu.Lock()
+	defer s.rootNamespaceMu.Unlock()
 	s.mu.RLock()
 	deleting := s.deletionPendingLocked(hash)
 	s.mu.RUnlock()
 	if deleting {
 		return fmt.Errorf("%w: %s", ErrDeleting, hash)
 	}
-	if _, _, err := s.publishMetainfo(ctx, hash, data); err != nil {
+	s.mu.Lock()
+	_, _, err := s.publishGuardedMetainfo(ctx, hash, data)
+	s.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	if err := s.removePendingMagnet(hash); err != nil && !errors.Is(err, os.ErrNotExist) {

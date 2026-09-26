@@ -427,7 +427,8 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 | 歧义 | 同目录下 `movie.mkv` 与 `movie.mp4` 会争用 `movie.srt`，两者的 target 都标记为不可上传 |
 | single-file | 视频与字幕都位于挂载根；当同名消歧改变了视频在挂载点的可见名称时，该 target 标记为不可上传，不会静默重命名视频或字幕 |
 | 重启恢复 | 恢复时按“同目录 + 字幕扩展名 + 视频 expected basename”三者共同匹配唯一视频；无法唯一对应的普通文件（宿主植入的 mismatched sidecar）会让启动明确失败，而不是被收编或暴露 |
-| 新增任务保护 | 添加 torrent 前会按 projected root namespace 校验：若新任务会让已有 single-file 视频改名，或新任务的 root 名称正好是已有字幕的路径，则返回 `409` 且不发布任何状态 |
+| 新增任务保护 | 添加 torrent 前会按 projected root namespace 校验：若新任务会让已有 single-file 视频改名，或新任务的 root 名称正好是已有字幕的路径，则返回 `409` 且不发布任何状态。该校验在写入 final metainfo 之前执行，磁力链接解析出元数据时同样适用，因此崩溃不会留下一个绕过校验、重启后被恢复的文件 |
+| 并发上传 | 上传字幕与添加 torrent 共享一把 root namespace 锁，跨整个上传（含磁盘 I/O）持有：add 不会在一个正在发布字幕的布局上做决定，上传返回的 `mount_path` 也不会是过期的。该锁独立于 Session 全局 mutex，不阻塞状态查询 |
 
 `GET /api/v1/torrents/{id}/status` 在原有字段之外新增两个数组，`files` 的 payload/piece 语义不变：
 
@@ -452,7 +453,7 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 
 `413` 表示请求体超过 `http.max_upload_bytes`（该上限同时约束 `.torrent` 与字幕上传）。错误信息不会回显宿主路径。
 
-字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：失败时旧字幕保持完整，临时文件被清理。同名替换后，已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容（挂载点不保留旧 page cache）。
+字幕写入使用同目录临时文件 + `fsync` + 原子 `rename` + 目录 `fsync`：`rename` 之前任一步失败都会删除临时文件并保持旧字幕完整、文件不存在。**`rename` 是提交点**：它成功之后目标就是新内容，因此 rename 之后的目录 `fsync` 与校验步骤只记录 warning，不返回失败——对一个已经生效的写入报告失败，会让调用方、内存索引和挂载点对“存在什么”产生分歧。size 与 mtime 取自 rename 之前的 staging 文件（rename 保持同一 inode），所以发布结果不依赖 rename 之后的 `stat`。同名替换后，已经打开的 fd 读完旧快照，之后的新 `open` 一定读到新内容（挂载点不保留旧 page cache）。
 
 ### 状态与错误语义
 
@@ -958,6 +959,7 @@ golangci-lint run ./...
 | `507` + `subtitle_storage_full` | create/write/fsync/rename 任一阶段返回 `ENOSPC` 或 `EDQUOT`。释放磁盘或配额后重试；失败时旧字幕保持完整且临时文件已清理 |
 | `delete_failed` + `error_code=subtitle_cleanup_failed` | 任务已隐藏但字幕目录未清理。修复权限/空间后再次 `DELETE` 同一任务（复用同一 operation id），或重启进程让其自动重试一次 |
 | 重启时 daemon 拒绝启动并报 subtitle 匹配错误 | 字幕目录里存在无法唯一对应视频的普通文件（例如手工放入或从别处复制）。删掉该文件后重启；TorrentFS 不会收编不受管理的 sidecar |
+| 重启时 daemon 拒绝启动并报 `subtitle namespace conflict` / `no uploadable target` | 持久化状态里存在会让已管理字幕失配的任务：一个同名 single-file torrent 抢走了视频的 root 名称，或某个 torrent 的 root 名称正好是字幕路径（会遮蔽它）。这类状态只能由旧版本或手工放置的文件产生。删除该任务的 `.metadata/state/<infohash>.json` 与根目录的 `<infohash>.torrent` 后重启即可；正常运行中的 add 会提前以 `409` 拒绝，不会写入这种状态 |
 | 上传成功但播放器仍显示旧字幕 | 播放器缓存或未重扫。替换使用原子 rename 且新 `open` 一定读到新内容，但进程外的播放器不会因此收到通知 |
 | `docker cp` 写 `/mnt/...` 失败 | 预期行为：FUSE 挂载点只读。请用 API/UI 上传 |
 

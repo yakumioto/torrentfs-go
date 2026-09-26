@@ -142,11 +142,14 @@ var videoExtensions = map[string]struct{}{
 var subtitleExtensions = map[string]struct{}{".srt": {}, ".ass": {}, ".vtt": {}}
 
 // Upload staging stages, named so a fault can be attributed to one of them.
+// The first four run before the publish rename; subtitleStageCommit is the
+// post-commit durability step, which cannot fail the upload.
 const (
 	subtitleStageCreate = "create"
 	subtitleStageWrite  = "write"
 	subtitleStageSync   = "sync"
 	subtitleStageRename = "rename"
+	subtitleStageCommit = "commit"
 )
 
 // subtitleIOFault, when set, forces the named upload stage to fail. It is a
@@ -172,6 +175,28 @@ func subtitleIOError(stage string, err error) error {
 	default:
 		return newSubtitleError(SubtitleCodeWriteFailed, fmt.Errorf("subtitle %s: %w", stage, err))
 	}
+}
+
+// subtitleCommitSteps runs the work that follows a successful publish rename:
+// making the new directory entry durable and verifying the file that is now
+// visible. It is the post-commit half of an upload, so its error is logged by
+// the caller rather than reported, and the returned error joins every failing
+// step so the log explains all of them.
+func subtitleCommitSteps(dir, destination string, size int64) error {
+	var errs []error
+	if err := subtitleStageFault(subtitleStageCommit); err != nil {
+		errs = append(errs, fmt.Errorf("directory sync: %w", err))
+	} else if err := syncDirectory(dir); err != nil {
+		errs = append(errs, fmt.Errorf("directory sync: %w", err))
+	}
+	if info, err := os.Lstat(destination); err != nil {
+		errs = append(errs, fmt.Errorf("verify published file: %w", err))
+	} else if !info.Mode().IsRegular() {
+		errs = append(errs, fmt.Errorf("published file %q is not a regular file", destination))
+	} else if info.Size() != size {
+		errs = append(errs, fmt.Errorf("published file %q is %d bytes, wrote %d", destination, info.Size(), size))
+	}
+	return errors.Join(errs...)
 }
 
 // subtitleStoreError covers the pre-write store checks: a full disk is still a
@@ -462,6 +487,13 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	if !ok {
 		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeFormatUnsupported, ErrSubtitleFormatUnsupported)
 	}
+	// The mount-root layout must not change between validating this target and
+	// publishing the subtitle, or the returned mount path and the video it
+	// belongs to could disagree with what the mount actually shows. Holding the
+	// namespace lock across the staging I/O is what keeps a concurrent add's
+	// guard from deciding on a layout this upload is about to change.
+	s.rootNamespaceMu.Lock()
+	defer s.rootNamespaceMu.Unlock()
 	unlock := s.lockHash(hash)
 	defer unlock()
 
@@ -579,6 +611,14 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		cleanup()
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
+	// The published file keeps the staging file's inode, so its size and mtime
+	// are read before the rename that makes it visible. Reading them afterwards
+	// would add a failure point past the commit point below.
+	staged, err := file.Stat()
+	if err != nil {
+		cleanup()
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
+	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
@@ -592,15 +632,16 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		_ = os.Remove(tmp)
 		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
-	if err := syncDirectory(dir); err != nil {
-		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
+	// The rename is the commit point: the destination is the new content from
+	// here on, so the durability and verification steps below cannot roll it
+	// back. Their failure is reported as a warning instead of a failed upload,
+	// because a caller told the write failed would retry a file that is already
+	// live, and the index would disagree with the mount about what exists.
+	if err := subtitleCommitSteps(dir, destination, written); err != nil {
+		s.logger.Warn("subtitle durability step failed after publish", "hash", hash.HexString(), "path", relPath, "err", err)
 	}
-	stat, err := os.Stat(destination)
-	if err != nil {
-		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
-	}
-	updatedAt := stat.ModTime().UTC()
-	record := managedSubtitle{VideoPath: videoPath, Path: relPath, Format: strings.TrimPrefix(ext, "."), Size: stat.Size(), UpdatedAt: updatedAt}
+	updatedAt := staged.ModTime().UTC()
+	record := managedSubtitle{VideoPath: videoPath, Path: relPath, Format: strings.TrimPrefix(ext, "."), Size: written, UpdatedAt: updatedAt}
 	s.mu.Lock()
 	if s.subtitles[hash] == nil {
 		s.subtitles[hash] = make(map[string]managedSubtitle)
@@ -646,32 +687,46 @@ func (r *contextReader) Read(p []byte) (int, error) {
 // older video out from under its subtitle, and a new root name can shadow a
 // subtitle entry outright. Both cases are refused before the torrent is
 // published, instead of silently renaming or hiding either side.
+//
+// Callers must hold s.mu (the subtitle index is read) and rootNamespaceMu (a
+// subtitle upload in flight must not be invisible to this decision).
 func (s *Session) subtitleNamespaceConflictLocked(candidate metainfo.Hash, name string, single bool) error {
-	existing := make([]filesystem.TorrentView, 0)
-	for _, view := range s.filesystemViewsLocked() {
-		if view.Hash != candidate {
-			existing = append(existing, view)
+	views := s.filesystemViewsLocked()
+	existing := make([]filesystem.TorrentView, 0, len(views)+1)
+	protected := false
+	for _, view := range views {
+		if view.Hash == candidate {
+			continue
+		}
+		existing = append(existing, view)
+		if view.SingleFile && len(s.subtitles[view.Hash]) > 0 {
+			protected = true
 		}
 	}
-	if len(existing) == 0 {
+	// Without an existing single-file subtitle there is nothing to protect, and
+	// the projected layout is not worth computing.
+	if !protected {
 		return nil
 	}
-	projected := append(append([]filesystem.TorrentView{}, existing...), filesystem.TorrentView{
-		Hash:       candidate,
-		Name:       name,
-		SingleFile: single,
-	})
-	rootNames := make(map[string]struct{}, len(projected))
-	for _, view := range projected {
-		if rootName, ok := filesystem.RootNameFor(view, projected); ok {
+	projected := append(existing, filesystem.TorrentView{Hash: candidate, Name: name, SingleFile: single})
+	return s.subtitleLayoutConflictLocked(projected)
+}
+
+// subtitleLayoutConflictLocked validates one whole mount-root layout: every
+// single-file torrent with managed subtitles must keep its own root name, and
+// no root entry may shadow a root-level subtitle path.
+func (s *Session) subtitleLayoutConflictLocked(views []filesystem.TorrentView) error {
+	rootNames := make(map[string]struct{}, len(views))
+	for _, view := range views {
+		if rootName, ok := filesystem.RootNameFor(view, views); ok {
 			rootNames[rootName] = struct{}{}
 		}
 	}
-	for _, view := range existing {
+	for _, view := range views {
 		if !view.SingleFile || len(s.subtitles[view.Hash]) == 0 {
 			continue
 		}
-		rootName, ok := filesystem.RootNameFor(view, projected)
+		rootName, ok := filesystem.RootNameFor(view, views)
 		if !ok || rootName != view.Name {
 			return fmt.Errorf("%w: torrent %s would be renamed at the mount root", ErrSubtitleNamespaceConflict, view.Hash)
 		}
@@ -754,7 +809,11 @@ func (s *Session) loadManagedSubtitles() error {
 			}
 			target := mapping[videoPath]
 			if !target.Uploadable {
-				return fmt.Errorf("session: subtitle %s has no uploadable target", relPath)
+				// The video's own target is unusable because another torrent or a
+				// same-stem sibling is competing for the name, which is the same
+				// information the namespace guard rejects: report it as one so a
+				// restart failure is classifiable.
+				return fmt.Errorf("%w: subtitle %s has no uploadable target", ErrSubtitleNamespaceConflict, relPath)
 			}
 			info, err := os.Stat(filepath.Join(s.subtitleDir(hash), filepath.FromSlash(relPath)))
 			if err != nil {
@@ -766,6 +825,11 @@ func (s *Session) loadManagedSubtitles() error {
 			s.subtitles[hash] = records
 		}
 	}
+	// No separate layout re-check runs here: a restored torrent that would rename
+	// a subtitled video, or whose root name shadows a subtitle path, makes the
+	// subtitle resolve to an unusable target below, so the same refusal already
+	// covers the persisted state an older build or a hand-placed metainfo can
+	// leave behind.
 	return nil
 }
 

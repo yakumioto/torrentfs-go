@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -129,6 +130,9 @@ const SubtitleStageSync = subtitleStageSync
 // SubtitleStageRename names the publish rename stage for tests.
 const SubtitleStageRename = subtitleStageRename
 
+// SubtitleStageCommit names the post-rename durability stage for tests.
+const SubtitleStageCommit = subtitleStageCommit
+
 // SubtitleRootForTest reports the durable root that owns managed subtitles.
 // Test-only.
 func (s *Session) SubtitleRootForTest() string { return s.subtitleRoot }
@@ -140,6 +144,17 @@ func SetMetadataFetchHook(fn func(metainfo.Hash)) func() {
 	previous := metadataFetchHook
 	metadataFetchHook = fn
 	return func() { metadataFetchHook = previous }
+}
+
+// DeliverMetadataForTest hands a registered torrent the metainfo a peer would
+// have delivered, so the metadata persistence path can be driven without a
+// network. Test-only.
+func DeliverMetadataForTest(st *Torrent, torrentBytes []byte) error {
+	mi, err := metainfo.Load(bytes.NewReader(torrentBytes))
+	if err != nil {
+		return err
+	}
+	return UnderlyingTorrentForTest(st).SetInfoBytes(mi.InfoBytes)
 }
 
 // WriteMetadataForTest exercises the metadata persistence path with a caller

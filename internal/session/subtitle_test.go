@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -579,6 +581,282 @@ func TestStartupResumeRetriesDeleteFailedOnce(t *testing.T) {
 	}
 	if op, ok := recovered.Operation(op.ID); !ok || op.State != session.StateDeleted {
 		t.Fatalf("operation after recovery = %+v (%v), want deleted", op, ok)
+	}
+}
+
+// TestConcurrentAddWaitsForSubtitleUpload pins the concurrency invariant: an
+// add must not decide the root layout while a subtitle upload for an existing
+// video is mid-flight, because that upload is about to attach itself to the
+// layout the add is changing.
+func TestConcurrentAddWaitsForSubtitleUpload(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+
+	// A same-named single-file torrent whose hash sorts first would take the
+	// plain root name away from the video the subtitle belongs to.
+	collidingBytes, collidingHash := singleFileTorrentWithNameOrdering(t, "Movie.mkv", existingHash, true)
+
+	// Hold the upload inside its staging write, which is inside the namespace
+	// critical section, and let the add race it.
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var blockedOnce sync.Once
+	restoreFault := session.SetSubtitleIOFault(func(stage string) error {
+		if stage == session.SubtitleStageWrite {
+			blockedOnce.Do(func() { close(blocked) })
+			<-release
+		}
+		return nil
+	})
+	defer restoreFault()
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		_, err := sess.UploadSubtitle(context.Background(), existingHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader("managed\n"), 1<<20)
+		uploadDone <- err
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upload never reached its staging write")
+	}
+
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: collidingBytes})
+		addDone <- err
+	}()
+	select {
+	case err := <-addDone:
+		t.Fatalf("add returned %v while a subtitle upload was mid-flight", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	close(release)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	select {
+	case err := <-addDone:
+		if !errors.Is(err, session.ErrSubtitleNamespaceConflict) {
+			t.Fatalf("add after the upload published = %v, want ErrSubtitleNamespaceConflict", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("add did not finish after the upload published")
+	}
+
+	// The published pair survived and the refused add left nothing behind.
+	status, err := sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].VideoPath != "Movie.mkv" || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles = %+v, want the published pair intact", status.Subtitles)
+	}
+	if views := sess.Torrents(); len(views) != 1 || views[0].Name != "Movie.mkv" {
+		t.Fatalf("filesystem views = %+v, want only the original video at its own name", views)
+	}
+	if listed := sess.ListTorrents(); len(listed) != 1 {
+		t.Fatalf("ListTorrents = %+v, want only the original torrent", listed)
+	}
+	if _, err := os.Stat(filepath.Join(torrentsDir, collidingHash.HexString()+".torrent")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused add left a metainfo sidecar: %v", err)
+	}
+}
+
+// TestMagnetMetadataPublishRefusedBeforeWriting pins the metadata order: a
+// resolved magnet is refused before its final metainfo is written, so a crash
+// cannot leave a file that a restart would accept.
+func TestMagnetMetadataPublishRefusedBeforeWriting(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+
+	collidingBytes, collidingHash := singleFileTorrentWithNameOrdering(t, "Movie.mkv", existingHash, true)
+	magnet := "magnet:?xt=urn:btih:" + collidingHash.HexString() + "&dn=Movie.mkv"
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: magnet}); err != nil {
+		t.Fatalf("magnet add: %v", err)
+	}
+	st, ok := sess.Torrent(collidingHash)
+	if !ok {
+		t.Fatal("magnet torrent was not registered")
+	}
+
+	// The magnet add already started the persist worker. Delivering the metadata
+	// the way a peer would lets that same worker run; the file must not appear
+	// under any circumstance.
+	if err := session.DeliverMetadataForTest(st, collidingBytes); err != nil {
+		t.Fatalf("deliver metadata: %v", err)
+	}
+	if err := waitFor(ctx, func() bool {
+		view, err := sess.TorrentViewFor(collidingHash.HexString())
+		return err == nil && view.State != session.StateAdding
+	}); err != nil {
+		t.Fatalf("metadata persist never settled: %v", err)
+	}
+
+	finalPath := filepath.Join(torrentsDir, collidingHash.HexString()+".torrent")
+	if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused magnet publish wrote %s", finalPath)
+	}
+	// The conflict is recorded, not swallowed, and the torrent stays hidden.
+	view, err := sess.TorrentViewFor(collidingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentViewFor: %v", err)
+	}
+	if view.State != session.StateError || !strings.Contains(view.Error, "namespace conflict") {
+		t.Fatalf("refused magnet view = %+v, want an error naming the conflict", view)
+	}
+	if views := sess.Torrents(); len(views) != 1 || views[0].Name != "Movie.mkv" {
+		t.Fatalf("filesystem views = %+v, want only the original video", views)
+	}
+	status, err := sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles = %+v, want the pair untouched", status.Subtitles)
+	}
+}
+
+// TestRestartRefusesPersistedLayoutThatBreaksSubtitle pins the startup check: a
+// final metainfo left by a crash, with a registry that is not ready, must not be
+// resurrected into a layout that renames a subtitled video.
+func TestRestartRefusesPersistedLayoutThatBreaksSubtitle(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	collidingBytes, collidingHash := singleFileTorrentWithNameOrdering(t, "Movie.mkv", existingHash, true)
+	if err := os.WriteFile(filepath.Join(torrentsDir, collidingHash.HexString()+".torrent"), collidingBytes, 0o644); err != nil {
+		t.Fatalf("write stranded metainfo: %v", err)
+	}
+	writeRegistry(t, torrentsDir, collidingHash, string(session.StateAdding), "op-stranded")
+
+	if _, err := session.New(testConfig(), torrentsDir); !errors.Is(err, session.ErrSubtitleNamespaceConflict) {
+		t.Fatalf("restart = %v, want ErrSubtitleNamespaceConflict", err)
+	}
+
+	// Removing the stranded task restores a startable state, proving the refusal
+	// is about the persisted layout and not the fixture. The refusal above
+	// normalized the registry entry to ready, so its state sidecar goes too.
+	if err := os.Remove(filepath.Join(torrentsDir, collidingHash.HexString()+".torrent")); err != nil {
+		t.Fatalf("remove stranded metainfo: %v", err)
+	}
+	if err := os.Remove(registryPath(torrentsDir, collidingHash)); err != nil {
+		t.Fatalf("remove stranded registry entry: %v", err)
+	}
+	recovered := newManageSession(t, torrentsDir)
+	status, err := recovered.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor after recovery: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].VideoPath != "Movie.mkv" {
+		t.Fatalf("subtitles after recovery = %+v, want the pair intact", status.Subtitles)
+	}
+}
+
+// TestRestartRefusesPersistedTorrentThatShadowsSubtitle covers the layout rule
+// the per-subtitle scan cannot see: a restored torrent whose root name is
+// exactly a managed subtitle's path would hide that subtitle from the mount,
+// even though the subtitle still resolves to its own video.
+func TestRestartRefusesPersistedTorrentThatShadowsSubtitle(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	shadowBytes, shadowHash := buildSingleFileTorrentBytes(t, "Movie.srt", []byte("shadowing file"), nil)
+	if err := os.WriteFile(filepath.Join(torrentsDir, shadowHash.HexString()+".torrent"), shadowBytes, 0o644); err != nil {
+		t.Fatalf("write shadowing metainfo: %v", err)
+	}
+	writeRegistry(t, torrentsDir, shadowHash, string(session.StateReady), "op-shadow")
+
+	if _, err := session.New(testConfig(), torrentsDir); !errors.Is(err, session.ErrSubtitleNamespaceConflict) {
+		t.Fatalf("restart with a shadowing root name = %v, want ErrSubtitleNamespaceConflict", err)
+	}
+}
+
+// TestPostRenameFailureKeepsEveryViewConsistent pins the commit boundary: once
+// the publish rename has happened the upload has succeeded, so a later
+// durability failure must not report a failed write for content that is live.
+func TestPostRenameFailureKeepsEveryViewConsistent(t *testing.T) {
+	handler, logState := newPhaseLogHandler()
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Movie.mkv": []byte("video")})
+
+	sess, err := session.New(testConfig(), torrentsDir, session.WithLogger(slog.New(handler)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", "old content\n")
+
+	restore := session.SetSubtitleIOFault(func(stage string) error {
+		if stage == session.SubtitleStageCommit {
+			return errors.New("directory sync failed")
+		}
+		return nil
+	})
+	defer restore()
+
+	replaced := uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", "new content\n")
+	if !replaced.Replaced || replaced.Size != int64(len("new content\n")) {
+		t.Fatalf("replacement = %+v, want the committed new content", replaced)
+	}
+	if got := readSubtitle(t, sess, hash, "Movie.srt"); got != "new content\n" {
+		t.Fatalf("subtitle after the post-rename failure = %q, want the new content", got)
+	}
+	assertNoStagingResidue(t, sess, hash)
+
+	// A create after the rename commits too, and is visible everywhere.
+	created := uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.ass", "ass content\n")
+	if created.Replaced {
+		t.Fatal("a new extension reported a replacement")
+	}
+	if got := readSubtitle(t, sess, hash, "Movie.ass"); got != "ass content\n" {
+		t.Fatalf("created subtitle = %q, want the committed content", got)
+	}
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	sizes := map[string]int64{}
+	for _, subtitle := range status.Subtitles {
+		sizes[subtitle.Path] = subtitle.Size
+	}
+	if sizes["Movie.srt"] != int64(len("new content\n")) || sizes["Movie.ass"] != int64(len("ass content\n")) {
+		t.Fatalf("published sizes = %+v, want both committed subtitles listed", sizes)
+	}
+	if !logState.messagesContaining("subtitle durability step failed after publish") {
+		t.Fatalf("the durability failure was not surfaced: %v", logState.messages())
 	}
 }
 
