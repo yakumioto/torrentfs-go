@@ -69,6 +69,44 @@ describe('ApiClient', () => {
   });
 });
 
+describe('ApiClient subtitle upload', () => {
+  it('sends video_path and the file as multipart without a manual boundary', async () => {
+    const responseBody = {
+      torrent_id: 'abc',
+      video_path: 'Movie.2026.mkv',
+      path: 'Movie.2026.srt',
+      mount_path: 'Show/Movie.2026.srt',
+      format: 'srt',
+      size: 4,
+      updated_at: '2026-09-26T12:00:00Z',
+      replaced: false,
+    };
+    vi.mocked(fetch).mockResolvedValue(response({ ...responseBody }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.uploadSubtitle('abc/def', 'Movie.2026.mkv', new File(['sub'], 'Movie.2026.srt'))).resolves.toEqual(responseBody);
+
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(String(call[0])).toBe('/api/v1/torrents/abc%2Fdef/subtitles');
+    const request = call[1] as RequestInit;
+    expect(request.method).toBe('PUT');
+    expect(new Headers(request.headers).get('Content-Type')).toBeNull();
+    const body = request.body as FormData;
+    expect(body.get('video_path')).toBe('Movie.2026.mkv');
+    expect((body.get('file') as File).name).toBe('Movie.2026.srt');
+  });
+
+  it('exposes the stable error code from a rejected upload', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      response({ error: '字幕文件名必须与目标视频的名称严格对应。', code: 'subtitle_name_mismatch' }, { status: 415, statusText: 'Unsupported Media Type' }),
+    );
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.uploadSubtitle('abc', 'Movie.2026.mkv', new File(['x'], 'other.srt'))).rejects.toMatchObject({
+      status: 415,
+      code: 'subtitle_name_mismatch',
+    });
+  });
+});
+
 describe('ApiClient favorite and prune calls', () => {
   it('sends a favorite update to the per-torrent endpoint', async () => {
     vi.mocked(fetch).mockResolvedValue(response({ id: 'abc', favorite: true }));

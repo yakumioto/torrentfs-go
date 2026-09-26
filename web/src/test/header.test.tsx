@@ -46,6 +46,8 @@ function makeStatus(torrent: Torrent): TorrentStatus {
     piece_length: 16,
     pieces: [{ index: 0, cached: true, cached_bytes: 16, pinned: false }],
     files: [{ path: 'file.txt', size: 100, piece_start: 0, piece_end: 1 }],
+    subtitle_targets: [],
+    subtitles: [],
   };
 }
 

@@ -93,6 +93,8 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 		return nil, err
 	}
 
+	s.rootNamespaceMu.Lock()
+	defer s.rootNamespaceMu.Unlock()
 	unlock := s.lockHash(hash)
 	defer unlock()
 
@@ -168,7 +170,9 @@ func (s *Session) addManagedLocked(ctx context.Context, hash metainfo.Hash, spec
 
 	var publishedFinal, publishedPending bool
 	if data != nil {
-		publishedFinal, _, err = s.publishMetainfo(ctx, hash, data)
+		// The guarded publish refuses a torrent that would rename an older video
+		// out from under its managed subtitle before writing anything.
+		publishedFinal, _, err = s.publishGuardedMetainfo(ctx, hash, data)
 		if err == nil {
 			entry.State = StateReady
 			entry.Name = firstNonEmpty(st.Name(), specName(spec), entry.Name)
@@ -294,6 +298,11 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 			return
 		}
 
+		// A resolved magnet is taking a root name for the first time, so it
+		// takes the namespace serialization an add takes: the guard inside
+		// publishGuardedMetainfo decides before any file exists on disk.
+		s.rootNamespaceMu.Lock()
+		defer s.rootNamespaceMu.Unlock()
 		unlock := s.lockHash(hash)
 		defer unlock()
 		s.mu.Lock()
@@ -301,7 +310,7 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 			s.mu.Unlock()
 			return
 		}
-		created, spec, err := s.publishMetainfo(ctx, hash, buf.Bytes())
+		created, spec, err := s.publishGuardedMetainfo(ctx, hash, buf.Bytes())
 		if err == nil {
 			entry := cloneRegistryEntry(s.states[hash])
 			if entry == nil {
@@ -613,35 +622,49 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, opID string) {
 	defer s.mu.Unlock()
 	op := s.operations[opID]
 	if err != nil {
-		s.setDeleteFailedLocked(hash, err)
-		if op != nil {
-			op.State = StateDeleteFailed
-			op.Error = err.Error()
-			op.UpdatedAt = time.Now().UTC()
-		}
-		delete(s.activeOps, hash)
+		s.failDeleteLocked(hash, op, err)
 		return
 	}
 	if err := s.removeRegistryEntryLocked(hash); err != nil {
-		s.setDeleteFailedLocked(hash, err)
-		if op != nil {
-			op.State = StateDeleteFailed
-			op.Error = err.Error()
-			op.UpdatedAt = time.Now().UTC()
-		}
-		delete(s.activeOps, hash)
+		s.failDeleteLocked(hash, op, err)
 		return
 	}
 	if op != nil {
 		op.State = StateDeleted
 		op.Error = ""
+		op.ErrorCode = ""
 		op.UpdatedAt = time.Now().UTC()
 	}
 	delete(s.activeOps, hash)
 }
 
+// failDeleteLocked records a failed deletion on both the durable entry and the
+// in-memory operation. The code distinguishes a subtitle cleanup failure so the
+// UI can explain what a retry would fix.
+func (s *Session) failDeleteLocked(hash metainfo.Hash, op *Operation, err error) {
+	s.setDeleteFailedLocked(hash, err)
+	if op != nil {
+		op.State = StateDeleteFailed
+		op.Error = err.Error()
+		op.ErrorCode = deleteErrorCode(err)
+		op.UpdatedAt = time.Now().UTC()
+	}
+	delete(s.activeOps, hash)
+}
+
+// deleteErrorCode maps a cleanup failure onto a stable code. Subtitle cleanup
+// is reported separately because it is the one stage an operator can fix by
+// repairing permissions or freeing space and then retrying.
+func deleteErrorCode(err error) string {
+	if code := SubtitleErrorCode(err); code == SubtitleCodeCleanupFailed {
+		return SubtitleCodeCleanupFailed
+	}
+	return ""
+}
+
 // performDelete stops the task, releases its resources, and removes only files
-// owned by the registry hash.
+// owned by the registry hash. Every stage is attempted even when an earlier one
+// fails, so one unusable stage never hides the state of the others.
 func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
 	var errs []error
 	if st != nil {
@@ -656,16 +679,19 @@ func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
 	if err := s.removePendingMagnetForDelete(hash); err != nil {
 		errs = append(errs, err)
 	}
+	if err := s.removeManagedSubtitlesForDelete(hash); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
-// resumeDeletions completes deletions interrupted by a crash before active
-// registry entries are restored.
+// resumeDeletions completes deletions interrupted by a crash, and retries a
+// failed deletion once, before active registry entries are restored.
 func (s *Session) resumeDeletions() error {
 	s.mu.Lock()
 	hashes := make([]metainfo.Hash, 0)
 	for hash, entry := range s.states {
-		if entry.State == StateDeleting {
+		if entry.State == StateDeleting || entry.State == StateDeleteFailed {
 			hashes = append(hashes, hash)
 		}
 	}

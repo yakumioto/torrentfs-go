@@ -212,12 +212,18 @@ func TestManualRootTorrentIsIgnoredAndDoesNotBlockManagedDelete(t *testing.T) {
 	}
 }
 
+// A delete_failed task whose cleanup still cannot complete keeps owning the
+// hash across a restart, so a fresh add of the same hash is refused rather than
+// racing the unfinished deletion.
 func TestAddRejectedWhileDeleteFailed(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("blocked"), nil)
 	writeRegistry(t, testTorrentDir(t, dataDir), hash, string(session.StateDeleteFailed), "op-existing")
+
+	restore := session.SetSubtitleCleanupHook(func(metainfo.Hash) error { return errors.New("cleanup still failing") })
+	defer restore()
 
 	sess := newManageSession(t, testTorrentDir(t, dataDir))
 	_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
@@ -375,8 +381,11 @@ func TestLateMetadataWriteRefusedWhileDeleteFailed(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", []byte("late write"), nil)
 	// A task whose deletion failed stays ownershipped by the interrupted
-	// deletion until it is retried.
+	// deletion until it is retried — including across a restart, as long as the
+	// cleanup fault is still present.
 	writeRegistry(t, testTorrentDir(t, dataDir), hash, string(session.StateDeleteFailed), "op-existing")
+	restore := session.SetSubtitleCleanupHook(func(metainfo.Hash) error { return errors.New("cleanup still failing") })
+	defer restore()
 
 	sess := newManageSession(t, testTorrentDir(t, dataDir))
 

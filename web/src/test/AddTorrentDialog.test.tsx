@@ -232,6 +232,25 @@ describe('AddTorrentDialog', () => {
     resolveRequest(jsonResponse(torrent()));
   });
 
+  it('explains a namespace conflict instead of claiming the task is deleting', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(
+      { error: 'adding this torrent would break an existing managed subtitle', code: 'subtitle_namespace_conflict' },
+      { status: 409, statusText: 'Conflict' },
+    )));
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('tab', { name: '种子文件' }));
+    const input = document.querySelector('input[type="file"]');
+    fireEvent.change(input as HTMLInputElement, { target: { files: [file('sample.torrent')] } });
+    fireEvent.click(screen.getByRole('button', { name: '上传种子文件' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('会让已有视频改名'));
+    expect(screen.getByRole('alert')).not.toHaveTextContent('正在删除');
+
+    // A plain 409 (no code) keeps the deleting wording.
+    expect(screen.getByRole('alert')).toHaveTextContent('请先删除其中一个任务');
+  });
+
   it('maps magnet request size errors without implying a file upload', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ error: 'payload too large' }, { status: 413 })));
     renderDialog(fetchMock);

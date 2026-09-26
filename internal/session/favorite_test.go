@@ -128,13 +128,15 @@ func TestSetFavoriteUnknownTorrent(t *testing.T) {
 }
 
 // StateDeleting and StateDeleteFailed share one guard: a torrent the deletion
-// path owns cannot be re-marked. delete_failed is the one of the two that stays
-// put across a restart, so it is the fixture used here.
+// path owns cannot be re-marked. A delete_failed entry survives a restart only
+// while its cleanup fault is still present, so the fixture forces that fault.
 func TestSetFavoriteRejectedWhileDeletionHoldsTorrent(t *testing.T) {
 	ctx := testTimeout(t)
 	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
 	hash := favoriteRegistryHash(0x02)
 	writeFavoriteRegistry(t, torrentsDir, hash, string(session.StateDeleteFailed), time.Now().UTC(), false)
+	restore := session.SetSubtitleCleanupHook(func(metainfo.Hash) error { return errors.New("cleanup still failing") })
+	defer restore()
 
 	sess := newManageSession(t, torrentsDir)
 	if _, err := sess.SetFavorite(ctx, hash.HexString(), true); !errors.Is(err, session.ErrDeleting) {

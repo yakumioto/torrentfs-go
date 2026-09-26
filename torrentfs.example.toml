@@ -23,7 +23,8 @@
 # disables both. The default binds loopback only; non-loopback listeners require
 # http.auth. Static UI files are public; /api/ remains protected when auth is on.
 listen_addr = "127.0.0.1:8080"
-# Maximum size of an uploaded .torrent request body, in bytes (10 MiB default).
+# Maximum size of an uploaded request body in bytes (10 MiB default). It caps
+# both a .torrent upload and a managed subtitle upload.
 max_upload_bytes = 10485760
 
 [http.auth]

@@ -1,4 +1,4 @@
-import type { LoginResponse, Operation, PruneResult, RuntimeStats, Torrent, TorrentStatus } from '../types/api';
+import type { LoginResponse, Operation, PruneResult, RuntimeStats, SubtitleUploadResponse, Torrent, TorrentStatus } from '../types/api';
 import { apiErrorFromResponse } from './errors';
 
 export interface ApiClientOptions {
@@ -78,6 +78,17 @@ export class ApiClient {
   deleteTorrent(id: string, signal?: AbortSignal): Promise<Operation> {
     return this.request<Operation>(`/torrents/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+      signal,
+    });
+  }
+
+  uploadSubtitle(id: string, videoPath: string, file: File, signal?: AbortSignal): Promise<SubtitleUploadResponse> {
+    const body = new FormData();
+    body.append('video_path', videoPath);
+    body.append('file', file);
+    return this.request<SubtitleUploadResponse>(`/torrents/${encodeURIComponent(id)}/subtitles`, {
+      method: 'PUT',
+      body,
       signal,
     });
   }

@@ -29,6 +29,12 @@ const FILE_ACCEPT = '.torrent,application/x-bittorrent';
 
 function fileErrorCopy(error: unknown): string {
   if (error instanceof ApiError) {
+    // The code is checked before the status: a 409 means "already deleting" for
+    // one reason and "would break a managed subtitle" for another, and telling
+    // them apart is the difference between waiting and deleting something.
+    if (error.code === 'subtitle_namespace_conflict') {
+      return '新增这个任务会让已有视频改名，从而与 TorrentFS 管理的字幕失配。请先删除其中一个任务后再试。';
+    }
     switch (error.status) {
       case 400:
         return '文件不是有效的 torrent。';

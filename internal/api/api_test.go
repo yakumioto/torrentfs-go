@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,14 @@ type fakeBackend struct {
 
 	deleteOp  *session.Operation
 	deleteErr error
+
+	subtitleID             string
+	subtitleVideoPath      string
+	subtitleFileName       string
+	subtitleBody           []byte
+	subtitleMaxBytes       int64
+	subtitleErr            error
+	subtitleUploadResponse session.SubtitleUploadResponse
 
 	setFavoriteID    string
 	setFavoriteValue bool
@@ -87,6 +96,27 @@ func (f *fakeBackend) DeleteTorrent(_ context.Context, _ string) (*session.Opera
 		return nil, f.deleteErr
 	}
 	return f.deleteOp, nil
+}
+
+func (f *fakeBackend) UploadSubtitle(_ context.Context, id, videoPath, fileName string, src io.Reader, maxBytes int64) (session.SubtitleUploadResponse, error) {
+	f.mu.Lock()
+	f.subtitleID = id
+	f.subtitleVideoPath = videoPath
+	f.subtitleFileName = fileName
+	f.subtitleMaxBytes = maxBytes
+	err := f.subtitleErr
+	f.mu.Unlock()
+	body, readErr := io.ReadAll(src)
+	f.mu.Lock()
+	f.subtitleBody = body
+	f.mu.Unlock()
+	if readErr != nil {
+		return session.SubtitleUploadResponse{}, readErr
+	}
+	if err != nil {
+		return session.SubtitleUploadResponse{}, err
+	}
+	return f.subtitleUploadResponse, nil
 }
 
 func (f *fakeBackend) SetFavorite(_ context.Context, id string, favorite bool) (session.TorrentView, error) {

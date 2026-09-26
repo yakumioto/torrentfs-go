@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -100,6 +101,54 @@ func (s *Session) PendingMetadataFetches() int {
 	return len(s.metadataFetches)
 }
 
+// SetSubtitleCleanupHook installs fn as the forced-failure hook for the
+// subtitle cleanup stage of a deletion and returns a function that restores the
+// previous value. A nil hook clears it. Test-only.
+func SetSubtitleCleanupHook(fn func(metainfo.Hash) error) func() {
+	previous := subtitleCleanupHook
+	subtitleCleanupHook = fn
+	return func() { subtitleCleanupHook = previous }
+}
+
+// SetSubtitleIOFault forces one named subtitle upload stage to fail with the
+// error the hook returns, and returns a function that clears it. Test-only.
+func SetSubtitleIOFault(fn func(stage string) error) func() {
+	previous := subtitleIOFault
+	subtitleIOFault = fn
+	return func() { subtitleIOFault = previous }
+}
+
+// SetSubtitleOpenHook installs fn to run inside one subtitle open, after its
+// file descriptor is opened and before its metadata is read, and returns a
+// function that clears it. Test-only.
+func SetSubtitleOpenHook(fn func(hash metainfo.Hash, path string)) func() {
+	previous := subtitleOpenHook
+	subtitleOpenHook = fn
+	return func() { subtitleOpenHook = previous }
+}
+
+// SubtitleStageParents names the store-check/staging-create window for tests.
+const SubtitleStageParents = subtitleStageParents
+
+// SubtitleStageCreate names the staging-file creation stage for tests.
+const SubtitleStageCreate = subtitleStageCreate
+
+// SubtitleStageWrite names the payload copy stage for tests.
+const SubtitleStageWrite = subtitleStageWrite
+
+// SubtitleStageSync names the fsync/chmod stage for tests.
+const SubtitleStageSync = subtitleStageSync
+
+// SubtitleStageRename names the publish rename stage for tests.
+const SubtitleStageRename = subtitleStageRename
+
+// SubtitleStageCommit names the post-rename durability stage for tests.
+const SubtitleStageCommit = subtitleStageCommit
+
+// SubtitleRootForTest reports the durable root that owns managed subtitles.
+// Test-only.
+func (s *Session) SubtitleRootForTest() string { return s.subtitleRoot }
+
 // SetMetadataFetchHook installs fn as the post-resolution metadata fetch hook
 // and returns a function that restores the previous value. A nil hook clears
 // it. Test-only.
@@ -107,6 +156,17 @@ func SetMetadataFetchHook(fn func(metainfo.Hash)) func() {
 	previous := metadataFetchHook
 	metadataFetchHook = fn
 	return func() { metadataFetchHook = previous }
+}
+
+// DeliverMetadataForTest hands a registered torrent the metainfo a peer would
+// have delivered, so the metadata persistence path can be driven without a
+// network. Test-only.
+func DeliverMetadataForTest(st *Torrent, torrentBytes []byte) error {
+	mi, err := metainfo.Load(bytes.NewReader(torrentBytes))
+	if err != nil {
+		return err
+	}
+	return UnderlyingTorrentForTest(st).SetInfoBytes(mi.InfoBytes)
 }
 
 // WriteMetadataForTest exercises the metadata persistence path with a caller

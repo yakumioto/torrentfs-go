@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +106,28 @@ func allAttrs(base []slog.Attr, record slog.Record) []slog.Attr {
 
 // cancellationCount reports how many reader cancellation logs were captured in
 // phase.
+// messages returns every captured log message, so a test can assert that a
+// diagnostic surfaced instead of being swallowed.
+func (s *phaseLogState) messages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.events))
+	for _, event := range s.events {
+		out = append(out, event.message)
+	}
+	return out
+}
+
+// messagesContaining reports whether any captured message contains substr.
+func (s *phaseLogState) messagesContaining(substr string) bool {
+	for _, message := range s.messages() {
+		if strings.Contains(message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *phaseLogState) cancellationCount(phase int32) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

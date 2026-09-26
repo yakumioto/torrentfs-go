@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -31,7 +31,37 @@ function makeTorrent(overrides: Partial<Torrent> = {}): Torrent {
 }
 
 function makeStatus(torrent: Torrent): TorrentStatus {
-  return { torrent, metainfo_ready: true, piece_length: 16, pieces: [], files: [] };
+  return { torrent, metainfo_ready: true, piece_length: 16, pieces: [], files: [], subtitle_targets: [], subtitles: [] };
+}
+
+function renderPage(fetchMock: ReturnType<typeof vi.fn>) {
+  const api = new ApiClient();
+  const auth: AuthContextValue = {
+    api,
+    phase: 'anonymous',
+    isReady: true,
+    isAuthenticated: false,
+    loginError: '',
+    sessionNotice: '',
+    connectionError: '',
+    login: async () => false,
+    logout: async () => undefined,
+    retryProbe: () => undefined,
+  };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  vi.stubGlobal('fetch', fetchMock);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MantineProvider theme={theme} defaultColorScheme="light">
+        <AuthContext.Provider value={auth}>
+          <MemoryRouter initialEntries={['/torrents/torrent-1']}>
+            <Routes><Route path="/torrents/:id" element={<TorrentDetailPage />} /></Routes>
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+  return queryClient;
 }
 
 beforeEach(() => vi.unstubAllGlobals());
@@ -111,6 +141,8 @@ describe('TorrentDetailPage', () => {
       piece_length: pieceLength,
       pieces: Array.from({ length: 8131 }, (_, index) => ({ index, cached: index < 344, cached_bytes: index < 344 ? pieceLength : 0, pinned: false })),
       files: [{ path: 'video.mkv', size: fileBytes, piece_start: 0, piece_end: 344 }],
+      subtitle_targets: [],
+      subtitles: [],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       if (String(input).endsWith('/status')) {
@@ -155,5 +187,56 @@ describe('TorrentDetailPage', () => {
     expect(screen.getByText('文件涉及的数据块范围（Torrent 绝对 piece 索引）')).toBeInTheDocument();
     expect(screen.getByText('所涉 piece 当前驻留内存缓存')).toBeInTheDocument();
     expect(screen.getByText(/不是文件下载百分比或播放进度/)).toBeInTheDocument();
+  });
+
+  it('gates the subtitle entry on server-derived targets and explains why', async () => {
+    const torrent = makeTorrent({ name: 'No video targets', state: 'ready' });
+    const status: TorrentStatus = {
+      ...makeStatus(torrent),
+      files: [{ path: 'notes.txt', size: 9, piece_start: 0, piece_end: 1 }],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) =>
+      Promise.resolve(jsonResponse(String(input).endsWith('/status') ? status : torrent)));
+    renderPage(fetchMock);
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'No video targets' })).toBeInTheDocument());
+    const button = screen.getByRole('button', { name: '上传字幕' });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/没有可上传字幕的视频/)).toBeInTheDocument();
+  });
+
+  it('enables the subtitle entry and keeps managed subtitles out of the payload table', async () => {
+    const torrent = makeTorrent({ name: 'With subtitle', state: 'ready' });
+    const status: TorrentStatus = {
+      ...makeStatus(torrent),
+      files: [{ path: 'Movie.2026.mkv', size: 4096, piece_start: 0, piece_end: 1 }],
+      subtitle_targets: [{ video_path: 'Movie.2026.mkv', mount_path: 'Show/Movie.2026.srt', expected_basename: 'Movie.2026', uploadable: true }],
+      subtitles: [{
+        video_path: 'Movie.2026.mkv',
+        path: 'Movie.2026.srt',
+        mount_path: 'Show/Movie.2026.srt',
+        format: 'srt',
+        size: 12,
+        updated_at: '2026-09-26T12:00:00Z',
+      }],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) =>
+      Promise.resolve(jsonResponse(String(input).endsWith('/status') ? status : torrent)));
+    renderPage(fetchMock);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '上传字幕' })).toBeEnabled());
+    const filesTab = screen.getByRole('tab', { name: /文件/ });
+    expect(filesTab).toHaveTextContent('1');
+    fireEvent.click(filesTab);
+
+    // The payload table keeps its piece-range meaning.
+    expect(screen.getByText('文件涉及的数据块范围（Torrent 绝对 piece 索引）')).toBeInTheDocument();
+    expect(screen.getByText('[0, 1)')).toBeInTheDocument();
+
+    // The managed subtitle is listed separately, with its FUSE path.
+    expect(screen.getByRole('heading', { name: '已管理字幕' })).toBeInTheDocument();
+    expect(screen.getByText('Show/Movie.2026.srt')).toBeInTheDocument();
+    expect(screen.getByText('.srt')).toBeInTheDocument();
+    expect(screen.getByText('12 B')).toBeInTheDocument();
   });
 });

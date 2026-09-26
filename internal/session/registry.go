@@ -68,6 +68,8 @@ type Operation struct {
 	TorrentID string
 	State     TorrentState
 	Error     string
+	// ErrorCode is the stable machine-readable reason for a failed operation.
+	ErrorCode string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
