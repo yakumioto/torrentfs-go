@@ -417,6 +417,11 @@ func writeSessionError(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, session.ErrDeleting):
 		writeError(w, http.StatusConflict, "torrent is being deleted")
+	case errors.Is(err, session.ErrSubtitleNamespaceConflict):
+		// The add is refused because it would move or shadow an existing managed
+		// subtitle. The code is what the client acts on; the reason stays out of
+		// the message so no host-side identity leaks.
+		writeCodedError(w, http.StatusConflict, session.SubtitleCodeNamespaceConflict, "adding this torrent would break an existing managed subtitle")
 	case errors.Is(err, session.ErrUnknownTorrent), errors.Is(err, filesystem.ErrNotFound):
 		writeError(w, http.StatusNotFound, "unknown torrent")
 	case errors.Is(err, session.ErrInvalidSource), errors.Is(err, filesystem.ErrInvalidName):

@@ -46,3 +46,14 @@ export function subtitleTargetPath(videoPath: string, fileName: string): string 
   const directory = directoryOf(videoPath);
   return directory === '' ? fileName : `${directory}/${fileName}`;
 }
+
+/**
+ * The FUSE mount path a chosen subtitle file will occupy. Only the basename
+ * differs from the server's target mount path, which is derived for the default
+ * `.srt` name, so substituting the chosen filename keeps the preview honest for
+ * every supported extension while the server still owns the real path.
+ */
+export function mountPathForSelection(targetMountPath: string, fileName: string): string {
+  const index = targetMountPath.lastIndexOf('/');
+  return index === -1 ? fileName : `${targetMountPath.slice(0, index + 1)}${fileName}`;
+}

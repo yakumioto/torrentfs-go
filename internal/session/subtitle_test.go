@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/sys/unix"
 
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -578,6 +580,332 @@ func TestStartupResumeRetriesDeleteFailedOnce(t *testing.T) {
 	if op, ok := recovered.Operation(op.ID); !ok || op.State != session.StateDeleted {
 		t.Fatalf("operation after recovery = %+v (%v), want deleted", op, ok)
 	}
+}
+
+// singleFileTorrentWithNameOrdering finds a single-file torrent named name
+// whose info hash sorts below or above bound. Root names are assigned in hash
+// order, so this is how a test decides which torrent keeps the plain name.
+func singleFileTorrentWithNameOrdering(t *testing.T, name string, bound metainfo.Hash, lower bool) ([]byte, metainfo.Hash) {
+	t.Helper()
+	for i := 0; i < 2000; i++ {
+		torrentBytes, hash := buildSingleFileTorrentBytes(t, name, []byte(fmt.Sprintf("%s payload %d", name, i)), nil)
+		if (hash.HexString() < bound.HexString()) == lower {
+			return torrentBytes, hash
+		}
+	}
+	t.Fatalf("no single-file torrent named %q found with lower=%v than %s", name, lower, bound)
+	return nil, metainfo.Hash{}
+}
+
+// TestAddRejectedWhenItWouldRenameSubtitleVideo pins the namespace guard: a new
+// same-named single-file torrent that would take the plain root name from an
+// already-subtitled video is refused before anything is published, instead of
+// silently renaming the video away from its subtitle.
+func TestAddRejectedWhenItWouldRenameSubtitleVideo(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+
+	collidingBytes, collidingHash := singleFileTorrentWithNameOrdering(t, "Movie.mkv", existingHash, true)
+	_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: collidingBytes})
+	if !errors.Is(err, session.ErrSubtitleNamespaceConflict) {
+		t.Fatalf("colliding add = %v, want ErrSubtitleNamespaceConflict", err)
+	}
+	// The rejected add published nothing.
+	if _, err := os.Stat(filepath.Join(torrentsDir, collidingHash.HexString()+".torrent")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected add left a metainfo sidecar: %v", err)
+	}
+	if listed := sess.ListTorrents(); len(listed) != 1 || listed[0].InfoHash != existingHash.HexString() {
+		t.Fatalf("ListTorrents after a rejected add = %+v, want only the existing torrent", listed)
+	}
+	status, err := sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].VideoPath != "Movie.mkv" || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles after a rejected add = %+v, want the video/subtitle pair intact", status.Subtitles)
+	}
+
+	// A same-named torrent that only receives the hash-suffixed root name does
+	// not disturb the existing pair, so it is allowed.
+	suffixedBytes, suffixedHash := singleFileTorrentWithNameOrdering(t, "Movie.mkv", existingHash, false)
+	addTorrentBytes(t, sess, suffixedBytes)
+	status, err = sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor after the allowed add: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles after the allowed add = %+v, want the existing mount path", status.Subtitles)
+	}
+	suffixedTarget := subtitleTarget(t, sess, suffixedHash, "Movie.mkv")
+	if suffixedTarget.Uploadable || suffixedTarget.Reason != session.SubtitleCodeNameConflict {
+		t.Fatalf("suffixed torrent target = %+v, want its own target blocked", suffixedTarget)
+	}
+	if _, err := sess.UploadSubtitle(context.Background(), collidingHash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader("x"), 1<<20); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("upload to a rejected torrent = %v, want ErrUnknownTorrent", err)
+	}
+}
+
+// TestAddRejectedWhenRootNameShadowsSubtitle covers the other half of the guard:
+// a new torrent whose root name is exactly an existing subtitle's path would
+// hide that subtitle from the mount root.
+func TestAddRejectedWhenRootNameShadowsSubtitle(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+
+	// Above the existing hash, so the older video keeps the plain root name and
+	// only the shadowing rule can reject this add.
+	shadowBytes, shadowHash := singleFileTorrentWithNameOrdering(t, "Movie.srt", existingHash, false)
+	_, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: shadowBytes})
+	if !errors.Is(err, session.ErrSubtitleNamespaceConflict) {
+		t.Fatalf("shadowing add = %v, want ErrSubtitleNamespaceConflict", err)
+	}
+	if listed := sess.ListTorrents(); len(listed) != 1 {
+		t.Fatalf("ListTorrents after a rejected add = %+v, want only the existing torrent", listed)
+	}
+	status, err := sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles after a rejected shadowing add = %+v, want the visible subtitle", status.Subtitles)
+	}
+	if views := sess.Torrents(); len(views) != 1 {
+		t.Fatalf("filesystem views = %d, want the shadowing torrent not exposed", len(views))
+	}
+	_ = shadowHash
+}
+
+// TestUnrelatedAddStillAllowed guards against an over-eager namespace check: a
+// torrent that shares no root name with an existing subtitle must still add.
+func TestUnrelatedAddStillAllowed(t *testing.T) {
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	existingBytes, existingHash := buildSingleFileTorrentBytes(t, "Movie.mkv", []byte("original video"), nil)
+	otherBytes, _ := buildSingleFileTorrentBytes(t, "Other.mkv", []byte("other video"), nil)
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, existingBytes)
+	uploadSubtitle(t, sess, existingHash, "Movie.mkv", "Movie.srt", "managed\n")
+	addTorrentBytes(t, sess, otherBytes)
+
+	if listed := sess.ListTorrents(); len(listed) != 2 {
+		t.Fatalf("ListTorrents = %+v, want both torrents", listed)
+	}
+	status, err := sess.TorrentStatusFor(existingHash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles = %+v, want the existing pair untouched by an unrelated add", status.Subtitles)
+	}
+}
+
+// TestSubtitleRestartRecoversWithSiblingVideos pins the recovery rule: a
+// subtitle belongs to the video whose expected basename it carries, even when
+// its directory holds other videos. Matching only by directory used to make
+// every sibling a candidate, so the whole session failed to start.
+func TestSubtitleRestartRecoversWithSiblingVideos(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{
+		"Season/E01.mkv": []byte("first episode"),
+		"Season/E02.mkv": []byte("second episode"),
+	})
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "Season/E01.mkv", "E01.srt", "first subtitle\n")
+	uploadSubtitle(t, sess, hash, "Season/E02.mkv", "E02.vtt", "WEBVTT second\n")
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened := newManageSession(t, torrentsDir)
+	status, err := reopened.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor after restart: %v", err)
+	}
+	if len(status.Subtitles) != 2 {
+		t.Fatalf("subtitles after restart = %+v, want both sidecars", status.Subtitles)
+	}
+	owners := map[string]string{}
+	for _, subtitle := range status.Subtitles {
+		owners[subtitle.Path] = subtitle.VideoPath
+	}
+	if owners["Season/E01.srt"] != "Season/E01.mkv" {
+		t.Fatalf("Season/E01.srt owner = %q, want Season/E01.mkv", owners["Season/E01.srt"])
+	}
+	if owners["Season/E02.vtt"] != "Season/E02.mkv" {
+		t.Fatalf("Season/E02.vtt owner = %q, want Season/E02.mkv", owners["Season/E02.vtt"])
+	}
+	if got := readSubtitle(t, reopened, hash, "Season/E01.srt"); got != "first subtitle\n" {
+		t.Fatalf("recovered subtitle = %q", got)
+	}
+}
+
+// TestSubtitleRestartRejectsUnmanagedSidecar pins the tampering rule: a regular
+// file the daemon never published is not adopted, and the store does not come
+// up with an entry that has no matching video.
+func TestSubtitleRestartRejectsUnmanagedSidecar(t *testing.T) {
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Season/E01.mkv": []byte("episode")})
+
+	sess := newManageSession(t, torrentsDir)
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "Season/E01.mkv", "E01.srt", "managed\n")
+	store := sess.SubtitleRootForTest()
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A sibling video appears only on disk, not in the torrent, and a planted
+	// sidecar carries a basename no video owns.
+	planted := filepath.Join(store, hash.HexString(), "Season", "Other.srt")
+	if err := os.WriteFile(planted, []byte("planted\n"), 0o600); err != nil {
+		t.Fatalf("plant sidecar: %v", err)
+	}
+	if _, err := session.New(testConfig(), torrentsDir); err == nil {
+		t.Fatal("session started with a planted sidecar that matches no video basename")
+	}
+	if err := os.Remove(planted); err != nil {
+		t.Fatalf("remove planted sidecar: %v", err)
+	}
+	if _, err := session.New(testConfig(), torrentsDir); err != nil {
+		t.Fatalf("session did not start once the planted sidecar was removed: %v", err)
+	}
+}
+
+// TestVideoExtensionCaseInsensitive covers the allowed video extensions in any
+// case: the allowlist is case-insensitive, while the subtitle must still carry
+// the video's stem as spelled, because the extension is cut by its own length.
+func TestVideoExtensionCaseInsensitive(t *testing.T) {
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{
+		"Movie.MKV": []byte("upper video"),
+		"Clip.Mp4":  []byte("mixed video"),
+		"notes.txt": []byte("not a video"),
+	})
+	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+	addTorrentBytes(t, sess, data)
+
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.SubtitleTargets) != 2 {
+		t.Fatalf("targets = %+v, want one per case-insensitive video extension", status.SubtitleTargets)
+	}
+	expected := map[string]string{"Movie.MKV": "Movie", "Clip.Mp4": "Clip"}
+	for _, target := range status.SubtitleTargets {
+		if want := expected[target.VideoPath]; target.ExpectedBasename != want {
+			t.Fatalf("target %s expected basename = %q, want %q", target.VideoPath, target.ExpectedBasename, want)
+		}
+		if !target.Uploadable {
+			t.Fatalf("target %+v, want uploadable", target)
+		}
+	}
+
+	// The stem is the name without its extension, in the file's own case.
+	uploadSubtitle(t, sess, hash, "Movie.MKV", "Movie.srt", "upper\n")
+	uploadSubtitle(t, sess, hash, "Clip.Mp4", "Clip.ass", "mixed\n")
+	_, err = sess.UploadSubtitle(context.Background(), hash.HexString(), "Movie.MKV", "Movie.MKV.srt", strings.NewReader("x"), 1<<20)
+	assertSubtitleCode(t, err, session.SubtitleCodeNameMismatch)
+	_, err = sess.UploadSubtitle(context.Background(), hash.HexString(), "Clip.Mp4", "Clip.Mp4.srt", strings.NewReader("x"), 1<<20)
+	assertSubtitleCode(t, err, session.SubtitleCodeNameMismatch)
+
+	// A single-file torrent behaves the same way: the mount path is the stem
+	// plus the subtitle extension.
+	soloBytes, soloHash := buildSingleFileTorrentBytes(t, "Solo.MKV", []byte("solo video"), nil)
+	addTorrentBytes(t, sess, soloBytes)
+	soloTarget := subtitleTarget(t, sess, soloHash, "Solo.MKV")
+	if soloTarget.ExpectedBasename != "Solo" || soloTarget.MountPath != "Solo.srt" {
+		t.Fatalf("single-file target = %+v, want stem Solo and mount path Solo.srt", soloTarget)
+	}
+	uploadSubtitle(t, sess, soloHash, "Solo.MKV", "Solo.srt", "solo\n")
+}
+
+// TestSubtitleUploadStorageErrorsPerStage pins the error contract per I/O
+// stage: a full store is reported as one, an unusable store as another, and the
+// failing syscall stays reachable for diagnosis. The previous state must
+// survive every failure untouched.
+func TestSubtitleUploadStorageErrorsPerStage(t *testing.T) {
+	stages := []string{
+		session.SubtitleStageCreate,
+		session.SubtitleStageWrite,
+		session.SubtitleStageSync,
+		session.SubtitleStageRename,
+	}
+	errnos := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"ENOSPC", unix.ENOSPC, session.SubtitleCodeStorageFull},
+		{"EDQUOT", unix.EDQUOT, session.SubtitleCodeStorageFull},
+		{"EROFS", unix.EROFS, session.SubtitleCodeStorageUnavailable},
+		{"EACCES", unix.EACCES, session.SubtitleCodeStorageUnavailable},
+		{"generic", errors.New("device exploded"), session.SubtitleCodeWriteFailed},
+	}
+	for _, stage := range stages {
+		for _, tt := range errnos {
+			t.Run(stage+"/"+tt.name, func(t *testing.T) {
+				data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"Movie.mkv": []byte("video")})
+				sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+				addTorrentBytes(t, sess, data)
+				uploadSubtitle(t, sess, hash, "Movie.mkv", "Movie.srt", "keep me\n")
+
+				restore := session.SetSubtitleIOFault(func(got string) error {
+					if got != stage {
+						return nil
+					}
+					return fmt.Errorf("injected %s: %w", tt.name, tt.err)
+				})
+				defer restore()
+
+				_, err := sess.UploadSubtitle(context.Background(), hash.HexString(), "Movie.mkv", "Movie.srt", strings.NewReader("failure\n"), 1<<20)
+				assertSubtitleCode(t, err, tt.code)
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("error %v does not wrap the failing cause %v", err, tt.err)
+				}
+				// The existing subtitle and the staging area are untouched.
+				if got := readSubtitle(t, sess, hash, "Movie.srt"); got != "keep me\n" {
+					t.Fatalf("subtitle after a failed upload = %q, want the previous content", got)
+				}
+				assertNoStagingResidue(t, sess, hash)
+			})
+		}
+	}
+}
+
+// assertNoStagingResidue fails when a failed upload left an internal temp file.
+func assertNoStagingResidue(t *testing.T, sess *session.Session, hash metainfo.Hash) {
+	t.Helper()
+	root := filepath.Join(sess.SubtitleRootForTest(), hash.HexString())
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".torrentfs-subtitle-") {
+				t.Fatalf("staging residue left behind: %s", filepath.Join(dir, entry.Name()))
+			}
+			if entry.IsDir() {
+				walk(filepath.Join(dir, entry.Name()))
+			}
+		}
+	}
+	walk(root)
 }
 
 func TestSubtitleStoreRejectsTamperedDestination(t *testing.T) {

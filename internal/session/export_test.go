@@ -109,6 +109,26 @@ func SetSubtitleCleanupHook(fn func(metainfo.Hash) error) func() {
 	return func() { subtitleCleanupHook = previous }
 }
 
+// SetSubtitleIOFault forces one named subtitle upload stage to fail with the
+// error the hook returns, and returns a function that clears it. Test-only.
+func SetSubtitleIOFault(fn func(stage string) error) func() {
+	previous := subtitleIOFault
+	subtitleIOFault = fn
+	return func() { subtitleIOFault = previous }
+}
+
+// SubtitleStageCreate names the staging-file creation stage for tests.
+const SubtitleStageCreate = subtitleStageCreate
+
+// SubtitleStageWrite names the payload copy stage for tests.
+const SubtitleStageWrite = subtitleStageWrite
+
+// SubtitleStageSync names the fsync/chmod stage for tests.
+const SubtitleStageSync = subtitleStageSync
+
+// SubtitleStageRename names the publish rename stage for tests.
+const SubtitleStageRename = subtitleStageRename
+
 // SubtitleRootForTest reports the durable root that owns managed subtitles.
 // Test-only.
 func (s *Session) SubtitleRootForTest() string { return s.subtitleRoot }

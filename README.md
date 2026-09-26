@@ -419,13 +419,15 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 | 视频路径 | 必须是该任务 `ready` 状态下的一个 payload 文件，精确匹配 metainfo 的 slash 分隔 display path；不接受绝对路径、反斜杠、`.`、`..` 或宿主/FUSE 前缀 |
 | 视频扩展名 | 首版允许 `.3gp`、`.avi`、`.flv`、`.m2ts`、`.m4v`、`.mkv`、`.mov`、`.mp4`、`.mpeg`、`.mpg`、`.mts`、`.ts`、`.webm`、`.wmv`（大小写不敏感） |
 | 字幕扩展名 | 只允许**小写** `.srt`、`.ass`、`.vtt`；`.SRT` 等非规范形式被 `415` 拒绝，避免在大小写敏感目录里出现重复 |
-| 名称对应 | 视频去掉最终扩展名后的 basename 必须与字幕去掉扩展名后的 basename **完全相同**（逐码点、区分大小写，不做模糊匹配）。例如 `Movie.2026.mkv` 只接受 `Movie.2026.srt` / `.ass` / `.vtt`；`Season 1/E01.mp4` 只接受 `E01.srt` |
+| 名称对应 | 视频去掉最终扩展名后的 basename 必须与字幕去掉扩展名后的 basename **完全相同**（逐码点、区分大小写，不做模糊匹配）。扩展名按文件自身的写法截断，因此 `Movie.MKV` 的 basename 是 `Movie`，它只接受 `Movie.srt` / `.ass` / `.vtt`；`Season 1/E01.mp4` 只接受 `E01.srt` |
 | 语言后缀 | 首版不支持 `Movie.2026.zh-CN.srt` 这类变体后缀 |
 | 目标位置 | 字幕写入所选视频所在目录，文件名保持不变；内容按原始字节保存，不转码、不修改 BOM 或换行 |
 | 覆盖 payload | 若目标路径已是 torrent payload（例如种子自带 `Movie.srt`），返回 `409`，绝不覆盖不可变文件 |
 | 替换 | 目标是同一任务的 managed subtitle 时，同扩展名、同路径执行原子替换；不同扩展名可以并存 |
 | 歧义 | 同目录下 `movie.mkv` 与 `movie.mp4` 会争用 `movie.srt`，两者的 target 都标记为不可上传 |
 | single-file | 视频与字幕都位于挂载根；当同名消歧改变了视频在挂载点的可见名称时，该 target 标记为不可上传，不会静默重命名视频或字幕 |
+| 重启恢复 | 恢复时按“同目录 + 字幕扩展名 + 视频 expected basename”三者共同匹配唯一视频；无法唯一对应的普通文件（宿主植入的 mismatched sidecar）会让启动明确失败，而不是被收编或暴露 |
+| 新增任务保护 | 添加 torrent 前会按 projected root namespace 校验：若新任务会让已有 single-file 视频改名，或新任务的 root 名称正好是已有字幕的路径，则返回 `409` 且不发布任何状态 |
 
 `GET /api/v1/torrents/{id}/status` 在原有字段之外新增两个数组，`files` 的 payload/piece 语义不变：
 
@@ -442,9 +444,11 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 | `subtitle_name_conflict` | `409` | 目标视频的字幕名称有歧义（同名 stem 或多个 torrent 争用同一 root 名称） |
 | `subtitle_payload_conflict` | `409` | 目标路径属于 torrent payload |
 | `torrent_deleting` | `409` | 任务正在删除（含 `delete_failed`），不能再上传 |
-| `subtitle_storage_unavailable` | `503` | 字幕存储目录不可用或不是受管理的目录 |
-| `subtitle_storage_full` | `507` | 字幕存储空间不足 |
-| `subtitle_write_failed` | `500` | 写入失败（含客户端中断） |
+| `subtitle_storage_unavailable` | `503` | 存储不可写：目录缺失/不是受管理目录，或 create/write/rename 返回 `EROFS`、`EACCES`、`EPERM` |
+| `subtitle_storage_full` | `507` | 任一 I/O 阶段返回 `ENOSPC` 或 `EDQUOT` |
+| `subtitle_write_failed` | `500` | 其他写入失败（含客户端中断） |
+
+`POST /api/v1/torrents` 也会返回 `subtitle_namespace_conflict`（`409`）：新增任务会让已有 single-file 视频改名，或新任务的 root 名称正好是已有管理字幕的路径。此时没有发布 registry、metainfo 或任何可见状态；删除其中一个任务后即可重新添加。
 
 `413` 表示请求体超过 `http.max_upload_bytes`（该上限同时约束 `.torrent` 与字幕上传）。错误信息不会回显宿主路径。
 
@@ -949,9 +953,11 @@ golangci-lint run ./...
 | `409` + `subtitle_payload_conflict` | 目标路径是种子自带文件。选择另一个视频，或换一个不含该字幕的种子 |
 | `409` + `subtitle_name_conflict` | 同目录存在同名 stem 的多个视频，或 single-file torrent 的挂载名已被 hash 消歧 |
 | `409` + `torrent_deleting` | 任务正在删除或处于 `delete_failed`。先完成删除 |
-| `503` + `subtitle_storage_unavailable` | `.metadata/subtitles` 缺失、不可写，或被替换成符号链接/普通文件。修复目录后重试 |
-| `507` + `subtitle_storage_full` | 磁盘或配额耗尽。释放空间后重试 |
+| `409` + `subtitle_namespace_conflict`（来自 `POST /api/v1/torrents`） | 新任务会让已有 single-file 视频改名，或新任务的 root 名称正好是已有字幕路径。删除其中一个任务后重新添加 |
+| `503` + `subtitle_storage_unavailable` | `.metadata/subtitles` 缺失、不可写、被替换成符号链接/普通文件，或写入遇到 `EROFS`/`EACCES`。修复目录与权限后重试 |
+| `507` + `subtitle_storage_full` | create/write/fsync/rename 任一阶段返回 `ENOSPC` 或 `EDQUOT`。释放磁盘或配额后重试；失败时旧字幕保持完整且临时文件已清理 |
 | `delete_failed` + `error_code=subtitle_cleanup_failed` | 任务已隐藏但字幕目录未清理。修复权限/空间后再次 `DELETE` 同一任务（复用同一 operation id），或重启进程让其自动重试一次 |
+| 重启时 daemon 拒绝启动并报 subtitle 匹配错误 | 字幕目录里存在无法唯一对应视频的普通文件（例如手工放入或从别处复制）。删掉该文件后重启；TorrentFS 不会收编不受管理的 sidecar |
 | 上传成功但播放器仍显示旧字幕 | 播放器缓存或未重扫。替换使用原子 rename 且新 `open` 一定读到新内容，但进程外的播放器不会因此收到通知 |
 | `docker cp` 写 `/mnt/...` 失败 | 预期行为：FUSE 挂载点只读。请用 API/UI 上传 |
 

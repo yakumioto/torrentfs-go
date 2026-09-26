@@ -82,6 +82,29 @@ describe('UploadSubtitleDialog', () => {
     expect(await screen.findByText('Show/Season 1/E01.srt')).toBeInTheDocument();
   });
 
+  it.each(['Movie.2026.ass', 'Movie.2026.vtt'])('previews the real mount path for %s', async (fileName) => {
+    renderDialog({ fetchMock: vi.fn(), targets: [TARGETS[0]] });
+
+    // Before a file is chosen the preview shows the server's default target.
+    expect(screen.getByText('Show/Movie.2026.srt')).toBeInTheDocument();
+
+    fireEvent.change(fileInput(), { target: { files: [new File(['x'], fileName)] } });
+
+    expect(await screen.findByText(`Show/${fileName}`)).toBeInTheDocument();
+    expect(screen.getAllByText(fileName).length).toBeGreaterThanOrEqual(1);
+    // The old preview kept predicting the default .srt path.
+    expect(screen.queryByText('Show/Movie.2026.srt')).not.toBeInTheDocument();
+  });
+
+  it('previews the nested mount path for a chosen extension', async () => {
+    renderDialog({ fetchMock: vi.fn() });
+    fireEvent.change(screen.getByLabelText('目标视频'), { target: { value: 'Season 1/E01.mp4' } });
+    fireEvent.change(fileInput(), { target: { files: [new File(['x'], 'E01.vtt')] } });
+
+    expect(await screen.findByText('Show/Season 1/E01.vtt')).toBeInTheDocument();
+    expect(screen.queryByText('Show/Season 1/E01.srt')).not.toBeInTheDocument();
+  });
+
   it('rejects a mismatched basename and a non-lowercase extension before upload', async () => {
     const fetchMock = vi.fn();
     renderDialog({ fetchMock, targets: [TARGETS[0]] });

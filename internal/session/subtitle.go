@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/sys/unix"
 
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 )
@@ -29,6 +30,9 @@ const (
 	SubtitleCodeTorrentDeleting    = "torrent_deleting"
 	SubtitleCodeCleanupFailed      = "subtitle_cleanup_failed"
 	SubtitleCodeUploadTooLarge     = "subtitle_upload_too_large"
+	// SubtitleCodeNamespaceConflict is reported when an add is refused because it
+	// would break an existing managed subtitle's mount path.
+	SubtitleCodeNamespaceConflict = "subtitle_namespace_conflict"
 )
 
 var (
@@ -42,6 +46,9 @@ var (
 	ErrSubtitleWriteFailed        = errors.New("subtitle write failed")
 	ErrSubtitleCleanupFailed      = errors.New("subtitle cleanup failed")
 	ErrSubtitleUploadTooLarge     = errors.New("subtitle upload is too large")
+	// ErrSubtitleNamespaceConflict means adding a torrent would change or shadow
+	// an existing managed subtitle's mount path.
+	ErrSubtitleNamespaceConflict = errors.New("subtitle namespace conflict")
 )
 
 var subtitleCodeMessages = map[string]string{
@@ -134,6 +141,60 @@ var videoExtensions = map[string]struct{}{
 
 var subtitleExtensions = map[string]struct{}{".srt": {}, ".ass": {}, ".vtt": {}}
 
+// Upload staging stages, named so a fault can be attributed to one of them.
+const (
+	subtitleStageCreate = "create"
+	subtitleStageWrite  = "write"
+	subtitleStageSync   = "sync"
+	subtitleStageRename = "rename"
+)
+
+// subtitleIOFault, when set, forces the named upload stage to fail. It is a
+// test-only seam: production never sets it.
+var subtitleIOFault func(stage string) error
+
+func subtitleStageFault(stage string) error {
+	if subtitleIOFault == nil {
+		return nil
+	}
+	return subtitleIOFault(stage)
+}
+
+// subtitleIOError keeps the failing stage's cause while mapping it onto a
+// stable code, so a full disk is reported as one and a broken store as another,
+// and callers can still tell ENOSPC from EACCES with errors.Is.
+func subtitleIOError(stage string, err error) error {
+	switch {
+	case isStorageFull(err):
+		return newSubtitleError(SubtitleCodeStorageFull, fmt.Errorf("subtitle %s: %w", stage, err))
+	case isStorageUnavailable(err):
+		return newSubtitleError(SubtitleCodeStorageUnavailable, fmt.Errorf("subtitle %s: %w", stage, err))
+	default:
+		return newSubtitleError(SubtitleCodeWriteFailed, fmt.Errorf("subtitle %s: %w", stage, err))
+	}
+}
+
+// subtitleStoreError covers the pre-write store checks: a full disk is still a
+// full disk, while any other failure means the managed store is unusable.
+func subtitleStoreError(err error) error {
+	if isStorageFull(err) {
+		return newSubtitleError(SubtitleCodeStorageFull, fmt.Errorf("subtitle store: %w", err))
+	}
+	return newSubtitleError(SubtitleCodeStorageUnavailable, fmt.Errorf("subtitle store: %w", err))
+}
+
+// isStorageFull reports whether err means the store ran out of space or quota.
+func isStorageFull(err error) bool {
+	return errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT)
+}
+
+// isStorageUnavailable reports whether err means the store cannot be written at
+// all, which is an operator-fixable permission or filesystem condition rather
+// than a transient write failure.
+func isStorageUnavailable(err error) bool {
+	return errors.Is(err, unix.EROFS) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
+}
+
 // subtitleCleanupHook, when set, forces the subtitle cleanup stage of a
 // deletion to fail. It is a test-only seam: production never sets it.
 var subtitleCleanupHook func(metainfo.Hash) error
@@ -199,14 +260,21 @@ func subtitleExtension(name string) (string, bool) {
 	return ext, ok
 }
 
+// videoExtension reports whether name carries a supported video extension. The
+// comparison is case-insensitive, and the returned extension is the file's own
+// spelling, so callers must not use it to cut bytes off the name.
 func videoExtension(name string) (string, bool) {
-	ext := strings.ToLower(path.Ext(name))
-	_, ok := videoExtensions[ext]
+	ext := path.Ext(name)
+	_, ok := videoExtensions[strings.ToLower(ext)]
 	return ext, ok
 }
 
-func basenameStem(name, ext string) string {
-	return strings.TrimSuffix(path.Base(name), ext)
+// basenameStem is the basename with its final extension removed, keeping the
+// original case: the extension is cut by its actual length, never by a
+// lowercased copy, so "Movie.MKV" has stem "Movie" and not "Movie.MKV".
+func basenameStem(name string) string {
+	base := path.Base(name)
+	return strings.TrimSuffix(base, path.Ext(base))
 }
 
 func subtitleTargetPath(videoPath, subtitleName string) string {
@@ -253,14 +321,13 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 	rootName, _ := filesystem.RootNameFor(current, allViews)
 	candidates := make([]videoCandidate, 0)
 	for _, file := range st.tor.Files() {
-		videoExt, ok := videoExtension(file.DisplayPath())
-		if !ok || validateSubtitleRelativePath(file.DisplayPath()) != nil {
+		if _, ok := videoExtension(file.DisplayPath()); !ok || validateSubtitleRelativePath(file.DisplayPath()) != nil {
 			continue
 		}
 		base := path.Base(file.DisplayPath())
 		candidates = append(candidates, videoCandidate{
 			path:       file.DisplayPath(),
-			stem:       basenameStem(base, videoExt),
+			stem:       basenameStem(base),
 			directory:  path.Dir(file.DisplayPath()),
 			rootName:   rootName,
 			single:     current.SingleFile,
@@ -286,8 +353,7 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 			nameConflict = true
 		}
 		base := path.Base(candidate.path)
-		videoExt, _ := videoExtension(base)
-		expectedBasename := basenameStem(base, videoExt)
+		expectedBasename := basenameStem(base)
 		defaultPath := subtitleTargetPath(candidate.path, expectedBasename+".srt")
 		if candidate.single {
 			if _, exists := rootNames[path.Base(defaultPath)]; exists && path.Base(defaultPath) != candidate.rootName {
@@ -432,10 +498,8 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		s.mu.RUnlock()
 		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeNameConflict, ErrSubtitleNameConflict)
 	}
-	videoBase := path.Base(videoPath)
-	videoExt, _ := videoExtension(videoBase)
-	expected := basenameStem(videoBase, videoExt)
-	if basenameStem(fileName, ext) != expected {
+	expected := basenameStem(videoPath)
+	if basenameStem(fileName) != expected {
 		s.mu.RUnlock()
 		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeNameMismatch, ErrSubtitleNameMismatch)
 	}
@@ -467,58 +531,73 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	root := s.subtitleDir(hash)
 	dir := filepath.Dir(filepath.Join(root, filepath.FromSlash(relPath)))
 	if err := ensureManagedParents(root, path.Dir(relPath)); err != nil {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeStorageUnavailable, ErrSubtitleStorageUnavailable)
+		return SubtitleUploadResponse{}, subtitleStoreError(err)
 	}
 	if info, statErr := os.Lstat(filepath.Join(root, filepath.FromSlash(relPath))); statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeStorageUnavailable, ErrSubtitleStorageUnavailable)
+		return SubtitleUploadResponse{}, subtitleStoreError(fmt.Errorf("subtitle path %q is not a regular file", relPath))
 	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeStorageUnavailable, ErrSubtitleStorageUnavailable)
+		return SubtitleUploadResponse{}, subtitleStoreError(statErr)
 	}
 
 	// os.CreateTemp names the staging file itself (0600), so the destination
 	// directory never receives a client-influenced name.
+	if err := subtitleStageFault(subtitleStageCreate); err != nil {
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
+	}
 	file, err := os.CreateTemp(dir, ".torrentfs-subtitle-*.tmp")
 	if err != nil {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeStorageUnavailable, ErrSubtitleStorageUnavailable)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageCreate, err)
 	}
 	tmp := file.Name()
 	cleanup := func() {
 		_ = file.Close()
 		_ = os.Remove(tmp)
 	}
+	if err := subtitleStageFault(subtitleStageWrite); err != nil {
+		cleanup()
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageWrite, err)
+	}
 	limited := io.LimitReader(&contextReader{ctx: ctx, reader: src}, maxBytes+1)
 	written, copyErr := io.Copy(file, limited)
 	if copyErr != nil {
 		cleanup()
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageWrite, copyErr)
 	}
 	if written > maxBytes {
 		cleanup()
 		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeUploadTooLarge, ErrSubtitleUploadTooLarge)
 	}
+	if err := subtitleStageFault(subtitleStageSync); err != nil {
+		cleanup()
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
+	}
 	if err := file.Sync(); err != nil {
 		cleanup()
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeStorageFull, ErrSubtitleStorageFull)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	if err := file.Chmod(0o444); err != nil {
 		cleanup()
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageSync, err)
 	}
 	destination := filepath.Join(root, filepath.FromSlash(relPath))
+	if err := subtitleStageFault(subtitleStageRename); err != nil {
+		_ = os.Remove(tmp)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
+	}
 	if err := os.Rename(tmp, destination); err != nil {
 		_ = os.Remove(tmp)
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
 	if err := syncDirectory(dir); err != nil {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
 	stat, err := os.Stat(destination)
 	if err != nil {
-		return SubtitleUploadResponse{}, newSubtitleError(SubtitleCodeWriteFailed, ErrSubtitleWriteFailed)
+		return SubtitleUploadResponse{}, subtitleIOError(subtitleStageRename, err)
 	}
 	updatedAt := stat.ModTime().UTC()
 	record := managedSubtitle{VideoPath: videoPath, Path: relPath, Format: strings.TrimPrefix(ext, "."), Size: stat.Size(), UpdatedAt: updatedAt}
@@ -561,6 +640,77 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	}
 }
 
+// subtitleNamespaceConflictLocked reports why exposing one more torrent at the
+// mount root would break an existing managed subtitle's correspondence. Root
+// names are assigned by hash order, so a new single-file torrent can rename an
+// older video out from under its subtitle, and a new root name can shadow a
+// subtitle entry outright. Both cases are refused before the torrent is
+// published, instead of silently renaming or hiding either side.
+func (s *Session) subtitleNamespaceConflictLocked(candidate metainfo.Hash, name string, single bool) error {
+	existing := make([]filesystem.TorrentView, 0)
+	for _, view := range s.filesystemViewsLocked() {
+		if view.Hash != candidate {
+			existing = append(existing, view)
+		}
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	projected := append(append([]filesystem.TorrentView{}, existing...), filesystem.TorrentView{
+		Hash:       candidate,
+		Name:       name,
+		SingleFile: single,
+	})
+	rootNames := make(map[string]struct{}, len(projected))
+	for _, view := range projected {
+		if rootName, ok := filesystem.RootNameFor(view, projected); ok {
+			rootNames[rootName] = struct{}{}
+		}
+	}
+	for _, view := range existing {
+		if !view.SingleFile || len(s.subtitles[view.Hash]) == 0 {
+			continue
+		}
+		rootName, ok := filesystem.RootNameFor(view, projected)
+		if !ok || rootName != view.Name {
+			return fmt.Errorf("%w: torrent %s would be renamed at the mount root", ErrSubtitleNamespaceConflict, view.Hash)
+		}
+		for relPath := range s.subtitles[view.Hash] {
+			if _, shadowed := rootNames[relPath]; !strings.Contains(relPath, "/") && shadowed {
+				return fmt.Errorf("%w: root name %q is already a managed subtitle", ErrSubtitleNamespaceConflict, relPath)
+			}
+		}
+	}
+	return nil
+}
+
+// subtitleVideoFor resolves the single video a stored subtitle belongs to. The
+// sidecar must sit in that video's directory and carry exactly that video's
+// expected basename; a sidecar that matches no video, or more than one, is
+// rejected instead of being adopted, so a host-planted file is never exposed
+// and a legal subtitle is never claimed by its directory neighbour.
+func subtitleVideoFor(mapping map[string]SubtitleTarget, relPath string) (string, error) {
+	stem := basenameStem(relPath)
+	if stem == "" {
+		return "", fmt.Errorf("session: subtitle %s has no basename", relPath)
+	}
+	dir := path.Dir(relPath)
+	videoPath := ""
+	for candidatePath, candidate := range mapping {
+		if path.Dir(candidatePath) != dir || candidate.ExpectedBasename != stem {
+			continue
+		}
+		if videoPath != "" {
+			return "", fmt.Errorf("session: subtitle %s matches more than one video", relPath)
+		}
+		videoPath = candidatePath
+	}
+	if videoPath == "" {
+		return "", fmt.Errorf("session: subtitle %s matches no video basename", relPath)
+	}
+	return videoPath, nil
+}
+
 func (s *Session) loadManagedSubtitles() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -598,19 +748,13 @@ func (s *Session) loadManagedSubtitles() error {
 			if !ok {
 				return fmt.Errorf("session: subtitle %s has unsupported format", relPath)
 			}
-			var target SubtitleTarget
-			var videoPath string
-			for candidatePath, candidate := range mapping {
-				if subtitleTargetPath(candidatePath, path.Base(relPath)) == relPath {
-					if videoPath != "" {
-						return fmt.Errorf("session: subtitle %s has ambiguous video", relPath)
-					}
-					videoPath = candidatePath
-					target = candidate
-				}
+			videoPath, err := subtitleVideoFor(mapping, relPath)
+			if err != nil {
+				return err
 			}
-			if videoPath == "" || !target.Uploadable {
-				return fmt.Errorf("session: subtitle %s has no unique target", relPath)
+			target := mapping[videoPath]
+			if !target.Uploadable {
+				return fmt.Errorf("session: subtitle %s has no uploadable target", relPath)
 			}
 			info, err := os.Stat(filepath.Join(s.subtitleDir(hash), filepath.FromSlash(relPath)))
 			if err != nil {

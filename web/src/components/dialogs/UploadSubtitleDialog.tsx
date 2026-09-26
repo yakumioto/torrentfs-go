@@ -5,7 +5,7 @@ import type { ApiClient } from '../../api/client';
 import { useUploadSubtitle } from '../../queries/hooks';
 import type { Subtitle, SubtitleTarget } from '../../types/api';
 import { userFacingSubtitleError } from '../../utils/user-facing-error';
-import { subtitleBasenameMismatch, subtitleExtension, subtitleTargetPath } from './subtitle-name';
+import { mountPathForSelection, subtitleBasenameMismatch, subtitleExtension, subtitleTargetPath } from './subtitle-name';
 import styles from './UploadSubtitleDialog.module.css';
 
 const FILE_ACCEPT = '.srt,.ass,.vtt';
@@ -129,8 +129,14 @@ export function UploadSubtitleDialog({
         />
         {target !== undefined && (
           <div className={styles.preview}>
-            <div className={styles.previewRow}><span className={styles.previewLabel}>将写入</span><span className="text-mono">{relativePath === '' ? subtitleTargetPath(target.video_path, `${target.expected_basename}.srt`) : relativePath}</span></div>
-            <div className={styles.previewRow}><span className={styles.previewLabel}>挂载路径</span><span className="text-mono">{target.mount_path}</span></div>
+            <div className={styles.previewRow}>
+              <span className={styles.previewLabel}>将写入</span>
+              <span className="text-mono">{file === null ? subtitleTargetPath(target.video_path, `${target.expected_basename}.srt`) : relativePath}</span>
+            </div>
+            <div className={styles.previewRow}>
+              <span className={styles.previewLabel}>挂载路径</span>
+              <span className="text-mono">{file === null ? target.mount_path : mountPathForSelection(target.mount_path, file.name)}</span>
+            </div>
           </div>
         )}
         {replacing && <Alert color="yellow" variant="light" title="将替换现有字幕">该路径已有由 TorrentFS 管理的字幕，提交后会原子替换为新内容。</Alert>}

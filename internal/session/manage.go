@@ -166,6 +166,20 @@ func (s *Session) addManagedLocked(ctx context.Context, hash metainfo.Hash, spec
 		return nil, ErrDeleting
 	}
 
+	// A torrent that is about to become visible must not rename an older video
+	// out from under its managed subtitle: root names are assigned by hash
+	// order, so this is checked before anything is published.
+	if data != nil && st.Info() != nil {
+		if err := s.subtitleNamespaceConflictLocked(hash, st.Name(), !st.Info().IsDir()); err != nil {
+			if clientNew {
+				st.tor.Drop()
+			}
+			s.mu.Unlock()
+			logFailure(err)
+			return nil, err
+		}
+	}
+
 	var publishedFinal, publishedPending bool
 	if data != nil {
 		publishedFinal, _, err = s.publishMetainfo(ctx, hash, data)
@@ -302,6 +316,21 @@ func (s *Session) startMetadataFetch(hash metainfo.Hash, st *Torrent) {
 			return
 		}
 		created, spec, err := s.publishMetainfo(ctx, hash, buf.Bytes())
+		if err == nil && st.Info() != nil {
+			// The magnet is only now taking a root name, so the namespace guard
+			// runs here too: a resolved torrent must not break an existing
+			// subtitle's correspondence.
+			if guardErr := s.subtitleNamespaceConflictLocked(hash, st.Name(), !st.Info().IsDir()); guardErr != nil {
+				s.mu.Unlock()
+				if created {
+					if cleanupErr := s.removeFinalMetainfo(hash); cleanupErr != nil {
+						s.logger.Error("metadata namespace cleanup failed", "hash", hash.HexString(), "err", cleanupErr)
+					}
+				}
+				s.recordMetadataFetchFailure(hash, guardErr)
+				return
+			}
+		}
 		if err == nil {
 			entry := cloneRegistryEntry(s.states[hash])
 			if entry == nil {

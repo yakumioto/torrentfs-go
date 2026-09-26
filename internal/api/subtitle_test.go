@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -318,6 +321,116 @@ func TestOperationExposesCleanupErrorCode(t *testing.T) {
 	if _, ok := raw["error_code"]; ok {
 		t.Fatalf("healthy operation exposed error_code: %v", raw)
 	}
+}
+
+// TestAddTorrentRejectedWhenItWouldBreakSubtitleNamespace drives the real
+// session through the API: the torrent that would rename an already-subtitled
+// video is refused with 409 and a stable code, and nothing is published.
+func TestAddTorrentRejectedWhenItWouldBreakSubtitleNamespace(t *testing.T) {
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
+	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	cfg := config.Default()
+	sess, err := session.New(cfg, torrentsDir)
+	if err != nil {
+		t.Fatalf("session.New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	srv, err := api.New(cfg, sess)
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+
+	addTorrent := func(data []byte) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		part, err := writer.CreateFormFile("file", "payload.torrent")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write(data); err != nil {
+			t.Fatalf("write torrent part: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", &buf)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		rec := do(t, srv, req)
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec, body.ID
+	}
+
+	existing := buildTestTorrent(t, "Movie.mkv", []byte("original video"))
+	addRec, id := addTorrent(existing)
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add status = %d, want 201; body %s", addRec.Code, addRec.Body.String())
+	}
+	if rec := do(t, srv, subtitleRequest(t, id, "Movie.mkv", "Movie.srt", "managed\n")); rec.Code != http.StatusCreated {
+		t.Fatalf("subtitle upload status = %d, want 201; body %s", rec.Code, rec.Body.String())
+	}
+
+	// A same-named single-file torrent whose hash sorts first would take the
+	// plain root name away from the subtitled video.
+	var colliding []byte
+	for i := 0; i < 2000; i++ {
+		candidate := buildTestTorrent(t, "Movie.mkv", []byte(fmt.Sprintf("colliding video %d", i)))
+		if torrentInfoHash(t, candidate).HexString() < id {
+			colliding = candidate
+			break
+		}
+	}
+	if colliding == nil {
+		t.Fatal("no colliding torrent with a lower info hash was found")
+	}
+
+	rec, _ := addTorrent(colliding)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("colliding add status = %d, want 409; body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode conflict body: %v", err)
+	}
+	if body["code"] != session.SubtitleCodeNamespaceConflict {
+		t.Fatalf("conflict body = %v, want code %s", body, session.SubtitleCodeNamespaceConflict)
+	}
+	if listed := sess.ListTorrents(); len(listed) != 1 {
+		t.Fatalf("ListTorrents after the refused add = %+v, want only the original torrent", listed)
+	}
+	// The existing pair is still intact and exposed through the API.
+	statusRec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+id+"/status", nil))
+	var status struct {
+		Subtitles []struct {
+			VideoPath string `json:"video_path"`
+			MountPath string `json:"mount_path"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].VideoPath != "Movie.mkv" || status.Subtitles[0].MountPath != "Movie.srt" {
+		t.Fatalf("subtitles after the refused add = %+v, want the original pair", status.Subtitles)
+	}
+}
+
+// torrentInfoHash returns the v1 info hash of an encoded .torrent.
+func torrentInfoHash(t *testing.T, data []byte) metainfo.Hash {
+	t.Helper()
+	mi, err := metainfo.Load(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("load metainfo: %v", err)
+	}
+	return mi.HashInfoBytes()
 }
 
 // TestUploadSubtitleEndToEndCarriesCodes drives the real session so the codes
