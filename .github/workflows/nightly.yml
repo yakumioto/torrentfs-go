@@ -178,11 +178,22 @@ jobs:
           container="torrentfs-nightly-default-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
-          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
-            'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && \
-             test -r /etc/torrentfs/runtime-identity && \
-             command -v smbd >/dev/null && command -v smbpasswd >/dev/null && command -v testparm >/dev/null && \
-             testparm -s /etc/samba/torrentfs-smb.conf >/dev/null'
+          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '
+            test -r /etc/torrentfs/torrentfs.toml ||
+              { printf "static image is missing readable torrentfs.toml\\n" >&2; exit 1; }
+            test -d /torrents ||
+              { printf "static image is missing /torrents\\n" >&2; exit 1; }
+            test ! -e /etc/torrentfs/runtime-identity ||
+              { printf "static image unexpectedly contains runtime identity\\n" >&2; exit 1; }
+            command -v smbd >/dev/null ||
+              { printf "static image is missing smbd\\n" >&2; exit 1; }
+            command -v smbpasswd >/dev/null ||
+              { printf "static image is missing smbpasswd\\n" >&2; exit 1; }
+            command -v testparm >/dev/null ||
+              { printf "static image is missing testparm\\n" >&2; exit 1; }
+            testparm -s /etc/samba/torrentfs-smb.conf >/dev/null ||
+              { printf "static image has invalid Samba configuration\\n" >&2; exit 1; }
+          '
           test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]'
           docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' | grep -q '445/tcp'
           docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
@@ -234,6 +245,20 @@ jobs:
             timeout 5s docker logs --tail 200 "$container" 2>&1 || true
             exit 1
           fi
+          docker exec "$container" /bin/sh -c '
+            test -r /etc/torrentfs/runtime-identity ||
+              { printf "runtime identity was not created after entrypoint startup\\n" >&2; exit 1; }
+            expected="$(printf "uid=1000\\ngid=1000\\nuser=torrentfs\\ngroup=torrentfs")"
+            actual="$(cat /etc/torrentfs/runtime-identity)"
+            test "$actual" = "$expected" ||
+              { printf "runtime identity contents mismatch: %s\\n" "$actual" >&2; exit 1; }
+            actual_stat="$(stat -c "%u:%g %a" /etc/torrentfs/runtime-identity)"
+            test "$actual_stat" = "0:0 444" ||
+              { printf "runtime identity ownership/mode mismatch: %s\\n" "$actual_stat" >&2; exit 1; }
+            actual_account="$(id -u torrentfs):$(id -g torrentfs)"
+            test "$actual_account" = "1000:1000" ||
+              { printf "torrentfs default identity mismatch: %s\\n" "$actual_account" >&2; exit 1; }
+          '
           # The default image still must not start Samba or open 445 implicitly.
           docker exec "$container" /bin/sh -c 'test ! -e /run/samba/smbd.pid'
           docker kill --signal TERM "$container" >/dev/null
@@ -275,11 +300,22 @@ jobs:
           container="torrentfs-nightly-default-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
-          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c \
-            'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && \
-             test -r /etc/torrentfs/runtime-identity && \
-             command -v smbd >/dev/null && command -v smbpasswd >/dev/null && command -v testparm >/dev/null && \
-             testparm -s /etc/samba/torrentfs-smb.conf >/dev/null'
+          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '
+            test -r /etc/torrentfs/torrentfs.toml ||
+              { printf "static image is missing readable torrentfs.toml\\n" >&2; exit 1; }
+            test -d /torrents ||
+              { printf "static image is missing /torrents\\n" >&2; exit 1; }
+            test ! -e /etc/torrentfs/runtime-identity ||
+              { printf "static image unexpectedly contains runtime identity\\n" >&2; exit 1; }
+            command -v smbd >/dev/null ||
+              { printf "static image is missing smbd\\n" >&2; exit 1; }
+            command -v smbpasswd >/dev/null ||
+              { printf "static image is missing smbpasswd\\n" >&2; exit 1; }
+            command -v testparm >/dev/null ||
+              { printf "static image is missing testparm\\n" >&2; exit 1; }
+            testparm -s /etc/samba/torrentfs-smb.conf >/dev/null ||
+              { printf "static image has invalid Samba configuration\\n" >&2; exit 1; }
+          '
           test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]'
           docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' | grep -q '445/tcp'
           docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
@@ -331,6 +367,20 @@ jobs:
             timeout 5s docker logs --tail 200 "$container" 2>&1 || true
             exit 1
           fi
+          docker exec "$container" /bin/sh -c '
+            test -r /etc/torrentfs/runtime-identity ||
+              { printf "runtime identity was not created after entrypoint startup\\n" >&2; exit 1; }
+            expected="$(printf "uid=1000\\ngid=1000\\nuser=torrentfs\\ngroup=torrentfs")"
+            actual="$(cat /etc/torrentfs/runtime-identity)"
+            test "$actual" = "$expected" ||
+              { printf "runtime identity contents mismatch: %s\\n" "$actual" >&2; exit 1; }
+            actual_stat="$(stat -c "%u:%g %a" /etc/torrentfs/runtime-identity)"
+            test "$actual_stat" = "0:0 444" ||
+              { printf "runtime identity ownership/mode mismatch: %s\\n" "$actual_stat" >&2; exit 1; }
+            actual_account="$(id -u torrentfs):$(id -g torrentfs)"
+            test "$actual_account" = "1000:1000" ||
+              { printf "torrentfs default identity mismatch: %s\\n" "$actual_account" >&2; exit 1; }
+          '
           # The default image still must not start Samba or open 445 implicitly.
           docker exec "$container" /bin/sh -c 'test ! -e /run/samba/smbd.pid'
           docker kill --signal TERM "$container" >/dev/null
