@@ -10,6 +10,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/time/rate"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
@@ -260,6 +261,32 @@ func UnderlyingClientForTest(s *Session) *torrent.Client {
 
 // PrefetchSnapshot is the test-visible copy of the coordinator's state.
 type PrefetchSnapshot = prefetchSnapshot
+
+// UploadRateLimitForTest returns the limit on the session's aggregate upload
+// limiter and whether the session manages one at all. Test-only.
+func (s *Session) UploadRateLimitForTest() (rate.Limit, bool) {
+	if s.uploadRate == nil {
+		return rate.Inf, false
+	}
+	return s.uploadRate.limiter.Limit(), true
+}
+
+// UploadRateScheduledForTest reports whether the session runs a boundary
+// scheduler for a configured upload window. Test-only.
+func (s *Session) UploadRateScheduledForTest() bool {
+	return s.uploadRate != nil && s.uploadRate.policy.scheduled
+}
+
+// ApplyUploadRatePolicyForTest applies the configured upload schedule as if the
+// process-local clock read t, returning the resulting limit. It drives exactly
+// the code path a window boundary uses. Test-only.
+func (s *Session) ApplyUploadRatePolicyForTest(t time.Time) (rate.Limit, bool) {
+	if s.uploadRate == nil {
+		return rate.Inf, false
+	}
+	s.uploadRate.apply(t)
+	return s.uploadRate.limiter.Limit(), true
+}
 
 // EvictPiecesForTest drops every piece of the torrent except the ones in keep
 // from the session's cache, simulating the LRU reclaiming a read window. It

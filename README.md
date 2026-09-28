@@ -543,8 +543,20 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 | `[proxy]` | `socks5_url` | 可选 `socks5://` 或 `socks5h://` 出站代理 |
 | `[cache]` | `capacity_bytes` | 内存 piece cache 硬上限，默认 2 GiB；必须为正数 |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
+| `[upload]` | `rate_limit_bytes_per_second`, `schedule.start`, `schedule.end` | BitTorrent peer payload 上传限速和可选的每日时段；`0` 表示不限速 |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
 | `[mount]` | `allow_other` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载 |
+
+上传限速示例（limit 为 `0` 时不限速，等于内置默认）：
+
+```toml
+[upload]
+rate_limit_bytes_per_second = 1048576
+
+[upload.schedule]
+start = "08:00"
+end = "22:00"
+```
 
 重要配置关系：
 
@@ -556,10 +568,15 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 - `disable_ipv4` 和 `disable_ipv6` 最多只能启用一个；同时禁用会留下没有传输协议的 session。
 - `cache.capacity_bytes` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，避免进程被 OOM kill。
 - `mount.allow_other` 默认关闭。启用后所有本机 UID 都可能读取挂载；非 root 挂载还需要 `/etc/fuse.conf` 中允许 `user_allow_other`。
+- `upload.rate_limit_bytes_per_second` 限制的是一个 session 内所有 torrent 和 peer 合计的 BitTorrent payload 上传速率，单位是 bytes/s（不是 bits/s），既不约束 `http.max_upload_bytes` 覆盖的 `.torrent`/字幕请求体，也不涵盖 tracker、握手等协议开销。`0` 表示不限速，也是默认值。
+- `upload.schedule` 描述一个每日同一自然日窗口，按半开区间 `[start, end)` 解释：`08:00` 整开始限速，`22:00` 整恢复不限速。时间按进程本地时区（`time.Local`，容器中通常是 UTC）的 24 小时制 `HH:MM`、分钟精度解析；`start` 与 `end` 必须成对出现且 `start < end`，不支持跨午夜、星期或多窗口，`start == end` 也会被拒绝。全天限速请只设置正数 rate 而省略整个 schedule。
+- `upload.schedule` 存在时 `rate_limit_bytes_per_second` 必须为正数；rate 为负数、缺单侧边界、时间格式非法或窗口逆序都会在启动校验阶段失败，避免静默采用意外时段。
+- 配置只在启动时读取，没有热重载。配置了 schedule 时，运行中的 session 会在每个时段边界自动切换限速，切换只调整同一个 limiter，不重建 client/torrent，也不中断正在进行的上传；进程被挂起或晚唤醒时按当前本地时间重新判定，而不是机械翻转旧状态。
+- 底层是 token bucket，允许客户端为发送一个完整请求 chunk 所需的有界 burst，因此该字段描述的是持续聚合速率，而不是每个瞬时网络包的硬上限；边界前已进入发送缓冲的 chunk 可能短暂跨越边界。
 
 ### 环境变量与校验
 
-当前实际读取的 21 个受支持环境变量包括 19 个普通 field binding，以及一组供 HTTP 与 SMB 共用的特殊凭据变量；未列出的 TOML key 没有自动生成的环境变量：
+当前实际读取的 24 个受支持环境变量包括 22 个普通 field binding，以及一组供 HTTP 与 SMB 共用的特殊凭据变量；未列出的 TOML key 没有自动生成的环境变量：
 
 | 环境变量 | TOML key | 格式 |
 | --- | --- | --- |
@@ -577,6 +594,9 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `identity.extended_handshake_client_version` | 字符串 |
 | `TORRENTFS_HTTP_LISTEN_ADDR` | `http.listen_addr` | 字符串；空值关闭 HTTP |
 | `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 十进制整数 |
+| `TORRENTFS_UPLOAD_RATE_LIMIT_BYTES_PER_SECOND` | `upload.rate_limit_bytes_per_second` | 十进制整数；`0` 表示不限速 |
+| `TORRENTFS_UPLOAD_SCHEDULE_START` | `upload.schedule.start` | `HH:MM`；空值清除文件中的该侧 |
+| `TORRENTFS_UPLOAD_SCHEDULE_END` | `upload.schedule.end` | `HH:MM`；空值清除文件中的该侧 |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
 | `TORRENTFS_USERNAME` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的用户名 |
 | `TORRENTFS_PASSWORD` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的单行明文密码 |
@@ -603,6 +623,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 - `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 `bootstrap_nodes` 项都必须是合法且端口在 `1..65535` 的 `host:port`。
 - `cache.capacity_bytes` 必须大于零；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
 - `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，日志 level/format 只能使用上表值。
+- `upload.rate_limit_bytes_per_second` 不能为负数；`upload.schedule.start` 与 `upload.schedule.end` 必须同时设置、严格使用 `HH:MM`（`8:00`、`24:00`、`08:60` 都非法）、且 `start < end`；配置了 schedule 却没有正数 rate 会在启动时失败。
 - HTTP listener 为空表示关闭；非空值必须是合法的 `host:port`。非 loopback listener 必须同时启用完整认证配置。
 - 认证关闭时 TOML 中的 username、password hash 和 hash file 必须全为空；认证开启且未使用共享 pair 时，`password_hash` 与 `password_hash_file` 必须恰好设置一个。
 - TOML hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。共享密码位于进程环境中，容器 metadata 也可能可见，不应将 Docker environment 当作 secret store。
