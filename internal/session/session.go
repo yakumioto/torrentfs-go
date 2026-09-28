@@ -95,7 +95,9 @@ type Session struct {
 
 	// stateDir holds the durable per-torrent state sidecars that let the
 	// session resume an interrupted deletion after a restart.
-	stateDir string
+	stateDir       string
+	categoriesPath string
+	categories     map[string]CategoryView
 
 	// states and operations back the torrent management API. states mirrors
 	// the durable sidecars; operations are in-memory deletion records.
@@ -278,6 +280,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		instanceLock:    instanceLock,
 		dhtRecorder:     dhtRecorder,
 		stateDir:        stateDir,
+		categoriesPath:  filepath.Join(metadataDir, "categories.json"),
+		categories:      make(map[string]CategoryView),
 		states:          make(map[metainfo.Hash]*registryEntry),
 		operations:      make(map[string]*Operation),
 		activeOps:       make(map[metainfo.Hash]string),
@@ -290,6 +294,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		stage string
 		fn    func() error
 	}{
+		{stage: "category-restore", fn: s.loadCategories},
 		{stage: "state-restore", fn: s.loadRegistry},
 		{stage: "legacy-migration", fn: s.migrateLegacyLayoutOnce},
 		{stage: "delete-resume", fn: s.resumeDeletions},
@@ -418,6 +423,7 @@ func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	s.torrents = make(map[metainfo.Hash]*Torrent)
 	s.subtitles = make(map[metainfo.Hash]map[string]managedSubtitle)
+	s.categories = make(map[string]CategoryView)
 	s.states = make(map[metainfo.Hash]*registryEntry)
 	s.operations = make(map[string]*Operation)
 	s.activeOps = make(map[metainfo.Hash]string)

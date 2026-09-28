@@ -6,6 +6,8 @@
 
 认证后的 HTTP API 和 Web UI 还可以为视频上传**受管理的字幕**：字幕写入 `torrents-dir/.metadata/subtitles`，再由只读 FUSE 投影到视频旁边。挂载点本身仍然完全只读，客户端不能通过 FUSE、SMB 或 `docker cp` 写入任何内容。
 
+任务还可以通过 API 或 Web UI 归入分类。分类名称同时是稳定标识和 FUSE 根目录下的单层目录名；分类可创建、归类和解除归类，但本版本不支持重命名、删除、多级分类或一个任务多个分类。
+
 ## 项目定位与设计原则
 
 - **挂载点只承载数据**：FUSE 文件系统是只读的，不提供管理用的 `metadata/` 或 `stats/` 控制目录；添加、删除、字幕上传和状态查询都通过 HTTP API 完成。
@@ -29,6 +31,7 @@ cmd/torrentfs          CLI、配置加载、进程生命周期和优雅退出
 <torrents-dir>
 ├── <infohash>.torrent  API 创建的 canonical metainfo
 └── .metadata/
+    ├── categories.json
     ├── pending/<infohash>.magnet
     ├── state/<infohash>.json
     └── subtitles/<infohash>/<torrent-relative path>
@@ -138,17 +141,23 @@ torrentfs -mountpoint <dir> [-config <file>] <torrents-dir>
 
 ```text
 <mount>/
-├── <single-name>       # 没有目录结构的 single-file torrent，直接是普通文件
-└── <multi-name>/       # multi-file torrent，保留 torrent 的目录结构
-    └── <relative-file>
+├── <single-name>       # 未分类 single-file torrent，直接是普通文件
+├── <multi-name>/       # 未分类 multi-file torrent
+│   └── <relative-file>
+└── <category>/          # 已创建的分类，即使为空也会出现
+    ├── <single-name>    # 分类内 single-file torrent
+    └── <multi-name>/    # 分类内 multi-file torrent
+        └── <relative-file>
 ```
 
 挂载点只呈现 torrent 数据：
 
 - 所有节点都是只读的，创建、写入、删除和重命名会失败。
 - 不会挂载 `.metadata`，也没有 `metadata/` 或 `stats/` 管理目录。
-- torrent 的显示名称发生冲突时会追加 hash 前缀以区分。
-- single-file torrent 不会额外包一层目录，因此播放器可以直接打开例如 `<mount>/movie.mp4`。
+- torrent 的显示名称发生冲突时会在各自父目录内追加 hash 前缀以区分；不同分类中的同名任务互不影响。
+- single-file torrent 不会额外包一层目录，因此未分类播放器可以直接打开例如 `<mount>/movie.mp4`，分类任务对应 `<mount>/<category>/movie.mp4`。
+- `.metadata/categories.json` 中的空分类也会显示为根目录；分类名称是单层目录名，创建时不能遮蔽已有未分类 torrent 或 root-level managed subtitle。
+- 解除归类使用空字符串，只改变虚拟路径和 sidecar，不移动 payload、piece cache 或 subtitle 文件。
 
 managed subtitle 以只读文件的形式合并进同一棵树：
 
@@ -172,7 +181,10 @@ HTTP 服务和 Web UI 共用同一个 listener。默认地址是 `http://127.0.0
 | `POST` | `/api/v1/auth/login` | 使用配置的用户名和密码换取 Bearer token | `200` |
 | `POST` | `/api/v1/auth/logout` | 撤销当前 Bearer token | `204` |
 | `POST` | `/api/v1/torrents` | 通过 JSON 磁力链接或 multipart 上传添加 torrent | `201` |
-| `GET` | `/api/v1/torrents` | 列出所有任务 | `200` |
+| `GET` | `/api/v1/torrents` | 列出所有任务（每项始终包含 `category`，未分类为 `""`） | `200` |
+| `GET` | `/api/v1/categories` | 列出分类，按名称排序 | `200` |
+| `POST` | `/api/v1/categories` | 创建分类 `{"name":"movies"}` | `201` |
+| `PUT` | `/api/v1/torrents/{id}/category` | 设置分类 `{"category":"movies"}`；空字符串解除归类 | `200` |
 | `GET` | `/api/v1/stats` | 查询本次后端 Session 的全局缓存与传输统计 | `200` |
 | `GET` | `/api/v1/torrents/{id}` | 查询单个任务的汇总状态 | `200` |
 | `GET` | `/api/v1/torrents/{id}/status` | 查询 piece、文件范围和网络诊断快照 | `200` |
@@ -258,7 +270,23 @@ token_ttl = "30m"
 
    不要手动设置 `Content-Type: multipart/form-data`。`curl` 必须自动生成包含 boundary 的 header；手动覆盖它会使服务无法解析表单。上传请求默认最多 10 MiB，可通过 `http.max_upload_bytes` 调整。
 
-5. 查看运行时统计、汇总和详细 status。把 `<torrent-id>` 替换为添加响应中的 `id`：
+5. 创建分类并归类任务。分类名称必须是去除首尾空白后仍相同的单个路径组件，不能包含 `/`、`\\` 或 NUL；分类创建后即使为空也会出现在 FUSE 根目录：
+
+   ```sh
+   curl --fail --request POST "$BASE_URL/api/v1/categories" \
+     --header "Authorization: Bearer $TOKEN" \
+     --header 'Content-Type: application/json' \
+     --data '{"name":"movies"}'
+
+   curl --fail --request PUT "$BASE_URL/api/v1/torrents/$TORRENT_ID/category" \
+     --header "Authorization: Bearer $TOKEN" \
+     --header 'Content-Type: application/json' \
+     --data '{"category":"movies"}'
+   ```
+
+   解除归类时发送 `{"category":""}`。分类和 torrent sidecar 都是原子写入；unknown category/torrent 返回 `404`，重复分类、删除中的任务或命名空间冲突返回 `409`。
+
+6. 查看运行时统计、汇总和详细 status。把 `<torrent-id>` 替换为添加响应中的 `id`：
 
    ```sh
    curl --fail "$BASE_URL/api/v1/stats" \
@@ -280,6 +308,7 @@ token_ttl = "30m"
        "id": "<info-hash>",
        "info_hash": "<info-hash>",
        "name": "example",
+       "category": "movies",
        "state": "ready",
        "total_bytes": 262144,
        "downloaded_bytes": 262144,
@@ -310,7 +339,7 @@ token_ttl = "30m"
 
    `files` 中的 piece 范围是半开区间 `[piece_start, piece_end)`，指向同一份绝对、从零开始的 `pieces` 数组。`network` 是当前 raw API 已返回的诊断字段；Web UI 尚未提供 peer/DHT 面板。
 
-6. 删除任务并轮询 operation。删除不是同步完成的：
+7. 删除任务并轮询 operation。删除不是同步完成的：
 
    ```sh
    DELETE_RESPONSE="$({ curl --fail --request DELETE "$BASE_URL/api/v1/torrents/$TORRENT_ID" \
@@ -324,7 +353,7 @@ token_ttl = "30m"
 
    删除响应为 `202`，初始 operation 状态通常为 `deleting`；随后轮询到 `deleted` 或 `delete_failed`。根目录中的非 registry `.torrent` 文件不会参与删除保护。
 
-7. 收藏与批量清理。收藏标记持久化在任务的 sidecar 中，且**只会让任务豁免批量清理** —— 单个 `DELETE` 仍可删除已收藏任务：
+8. 收藏与批量清理。收藏标记持久化在任务的 sidecar 中，且**只会让任务豁免批量清理** —— 单个 `DELETE` 仍可删除已收藏任务：
 
    ```sh
    curl --fail --request PUT "$BASE_URL/api/v1/torrents/$TORRENT_ID/favorite" \
@@ -617,6 +646,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 <torrents-dir>/
 ├── <info-hash>.torrent          # API 管理的 canonical metainfo
 └── .metadata/
+    ├── categories.json             # 分类名称与创建时间；不存在表示尚无分类
     ├── pending/<info-hash>.magnet # 尚未解析完成的磁力意图
     ├── state/<info-hash>.json      # 每个任务的 registry entry
     ├── subtitles/<info-hash>/…     # 该任务的 managed subtitles，镜像 torrent 相对路径
@@ -627,6 +657,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 
 - piece 数据、piece completion、cache hit 计数和临时读取优先级都只在内存中；重启不会从磁盘 rehash 或恢复 piece。
 - registry 是任务集合的唯一事实来源；启动不会扫描根目录猜测任务。根目录中手工放置的 `.torrent` 文件会被忽略，不会进入 API/FUSE，也不会阻止删除。
+- 分类索引使用 `categories.json`，分类名称同时是稳定标识和 FUSE 单层目录名；新安装没有该文件时恢复为空分类集合。分类索引与每个任务 sidecar 都通过临时文件、`fsync` 和原子 rename 写入；旧 sidecar 缺少 `category` 字段时按未分类恢复，非空悬空引用会使启动失败。
 - 上传内容会先校验 info hash，再以 `<info-hash>.torrent` 原子发布；磁力链接先写入 `.metadata/pending/<info-hash>.magnet`，metadata 完成后发布最终文件并清理 pending。
 - 首次启动会把当前版本可识别的旧 flat metainfo 和 magnet intent 文件一次性迁移到新布局；目标 hash 冲突、损坏或非 canonical 历史文件会使启动明确失败。写入 `layout_version` 后不再读取旧位置。
 - managed subtitle 与 torrent 自带文件分开保存：`subtitle` 只保存在 `.metadata/subtitles/<info-hash>/` 下，并按 torrent 相对路径镜像目录结构。启动时只为 `ready` 任务扫描并校验这份 overlay；`deleting`/`delete_failed` 任务的 hash 不会进入可见 index。

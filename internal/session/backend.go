@@ -103,6 +103,7 @@ func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
 		view := filesystem.TorrentView{
 			Name:       t.Name(),
 			Hash:       hash,
+			Category:   entry.Category,
 			CreatedAt:  entry.CreatedAt,
 			SingleFile: !t.Info().IsDir(),
 		}
@@ -270,8 +271,8 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 			break
 		}
 	}
-	rootName, _ := filesystem.RootNameFor(currentView, allViews)
-	view.Subtitles = s.subtitlesLocked(hash, rootName, currentView.SingleFile)
+	categories := s.categoryNamesLocked()
+	view.Subtitles = s.subtitlesLocked(hash, currentView, allViews, categories)
 
 	pieceCount := info.NumPieces()
 	view.MetainfoReady = true

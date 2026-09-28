@@ -219,6 +219,81 @@ func TestFuseSmokeMountsAndReads(t *testing.T) {
 	}
 }
 
+func TestFuseCategorizedSingleFileMovesLive(t *testing.T) {
+	requireFuse(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	movie := []byte("movie payload")
+	plain := []byte("plain payload")
+	moviePath, movieHash := buildSingleFileTorrent(t, work, "Movie1.mp4", movie)
+	plainPath, plainHash := buildSingleFileTorrent(t, work, "plain.txt", plain)
+	sess, err := session.New(testConfig(), testTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	for _, item := range []struct {
+		path string
+		hash metainfo.Hash
+		data []byte
+	}{{moviePath, movieHash, movie}, {plainPath, plainHash, plain}} {
+		if _, err := sess.AddTorrentAndPersist(ctx, session.Source{MetainfoPath: item.path}); err != nil {
+			t.Fatalf("AddTorrentAndPersist(%s): %v", item.path, err)
+		}
+		st, ok := sess.Torrent(item.hash)
+		if !ok {
+			t.Fatalf("torrent %s not registered", item.hash)
+		}
+		seedPieces(t, sess, item.hash, item.data)
+		waitCached(t, ctx, st)
+	}
+
+	server, err := filesystem.Mount(mnt, sess, &fs.Options{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	defer func() { _ = server.Unmount() }()
+	oldPath := filepath.Join(mnt, "Movie1.mp4")
+	plainMountPath := filepath.Join(mnt, "plain.txt")
+	if got, err := os.ReadFile(oldPath); err != nil || !bytes.Equal(got, movie) {
+		t.Fatalf("old movie path read = %q/%v, want movie payload", got, err)
+	}
+	if got, err := os.ReadFile(plainMountPath); err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("unclassified path read = %q/%v, want plain payload", got, err)
+	}
+	if _, err := sess.CreateCategory(ctx, "movies"); err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	if _, err := sess.SetTorrentCategory(ctx, movieHash.HexString(), "movies"); err != nil {
+		t.Fatalf("SetTorrentCategory: %v", err)
+	}
+	newPath := filepath.Join(mnt, "movies", "Movie1.mp4")
+	if err := waitFor(ctx, func() bool {
+		_, oldErr := os.Stat(oldPath)
+		got, newErr := os.ReadFile(newPath)
+		return errors.Is(oldErr, syscall.ENOENT) && newErr == nil && bytes.Equal(got, movie)
+	}); err != nil {
+		t.Fatalf("categorized path transition: %v", err)
+	}
+	if got, err := os.ReadFile(plainMountPath); err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("unclassified path after move = %q/%v, want plain payload", got, err)
+	}
+	if err := server.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+}
+
 func waitFor(ctx context.Context, condition func() bool) error {
 	if condition() {
 		return nil

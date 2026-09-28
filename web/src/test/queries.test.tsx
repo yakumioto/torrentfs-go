@@ -11,6 +11,7 @@ import type { Operation } from '../types/api';
 describe('query contracts', () => {
   it('keeps the planned cache key shapes', () => {
     expect(queryKeys.torrents).toEqual(['torrents']);
+    expect(queryKeys.categories).toEqual(['categories']);
     expect(queryKeys.runtimeStats).toEqual(['runtime-stats']);
     expect(queryKeys.torrent('abc')).toEqual(['torrent', 'abc']);
     expect(queryKeys.torrentStatus('abc')).toEqual(['torrent-status', 'abc']);

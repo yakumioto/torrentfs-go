@@ -310,18 +310,10 @@ func subtitleTargetPath(videoPath, subtitleName string) string {
 	return dir + "/" + subtitleName
 }
 
-func mountPath(rootName, relPath string, single bool) string {
-	if single {
-		return relPath
-	}
-	return rootName + "/" + relPath
-}
-
 type videoCandidate struct {
 	path       string
 	stem       string
 	directory  string
-	rootName   string
 	single     bool
 	uploadable bool
 }
@@ -343,7 +335,8 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 	if !found {
 		return nil, fmt.Errorf("session: torrent %s is not ready", hash)
 	}
-	rootName, _ := filesystem.RootNameFor(current, allViews)
+	categories := s.categoryNamesLocked()
+	rootName, _ := filesystem.RootNameForWithCategories(current, allViews, categories)
 	candidates := make([]videoCandidate, 0)
 	for _, file := range st.tor.Files() {
 		if _, ok := videoExtension(file.DisplayPath()); !ok || validateSubtitleRelativePath(file.DisplayPath()) != nil {
@@ -354,16 +347,39 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 			path:       file.DisplayPath(),
 			stem:       basenameStem(base),
 			directory:  path.Dir(file.DisplayPath()),
-			rootName:   rootName,
 			single:     current.SingleFile,
 			uploadable: true,
 		})
 	}
 	result := make(map[string]SubtitleTarget, len(candidates))
-	rootNames := make(map[string]struct{}, len(allViews))
+	torrentNames := make(map[string]map[string]struct{}, len(categories)+1)
+	subtitleNames := make(map[string]map[string]metainfo.Hash, len(categories)+1)
+	if len(categories) > 0 {
+		torrentNames[""] = make(map[string]struct{}, len(categories))
+		for _, category := range categories {
+			torrentNames[""][category] = struct{}{}
+		}
+	}
 	for _, view := range allViews {
-		if name, ok := filesystem.RootNameFor(view, allViews); ok {
-			rootNames[name] = struct{}{}
+		name, ok := filesystem.RootNameForWithCategories(view, allViews, categories)
+		if !ok {
+			continue
+		}
+		if torrentNames[view.Category] == nil {
+			torrentNames[view.Category] = make(map[string]struct{})
+		}
+		torrentNames[view.Category][name] = struct{}{}
+		if !view.SingleFile {
+			continue
+		}
+		for _, subtitle := range view.Subtitles {
+			if strings.Contains(subtitle.Path, "/") {
+				continue
+			}
+			if subtitleNames[view.Category] == nil {
+				subtitleNames[view.Category] = make(map[string]metainfo.Hash)
+			}
+			subtitleNames[view.Category][subtitle.Path] = view.Hash
 		}
 	}
 	for _, candidate := range candidates {
@@ -374,24 +390,29 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 			}
 		}
 		nameConflict := matching > 1
-		if candidate.single && candidate.rootName != candidate.path {
+		if candidate.single && rootName != candidate.path {
 			nameConflict = true
 		}
 		base := path.Base(candidate.path)
 		expectedBasename := basenameStem(base)
 		defaultPath := subtitleTargetPath(candidate.path, expectedBasename+".srt")
 		if candidate.single {
-			if _, exists := rootNames[path.Base(defaultPath)]; exists && path.Base(defaultPath) != candidate.rootName {
+			name := path.Base(defaultPath)
+			if _, exists := torrentNames[current.Category][name]; exists && name != rootName {
+				nameConflict = true
+			}
+			if owner, exists := subtitleNames[current.Category][name]; exists && owner != hash {
 				nameConflict = true
 			}
 		}
+		mount, _ := filesystem.TorrentMountPath(current, allViews, categories, defaultPath)
 		reason := ""
 		if nameConflict {
 			reason = SubtitleCodeNameConflict
 		}
 		result[candidate.path] = SubtitleTarget{
 			VideoPath:        candidate.path,
-			MountPath:        mountPath(candidate.rootName, defaultPath, candidate.single),
+			MountPath:        mount,
 			ExpectedBasename: expectedBasename,
 			Uploadable:       !nameConflict,
 			Reason:           reason,
@@ -440,7 +461,7 @@ func (s *Session) subtitleViewsLocked(hash metainfo.Hash) []filesystem.SubtitleV
 	return out
 }
 
-func (s *Session) subtitlesLocked(hash metainfo.Hash, rootName string, single bool) []Subtitle {
+func (s *Session) subtitlesLocked(hash metainfo.Hash, current filesystem.TorrentView, allViews []filesystem.TorrentView, categories []string) []Subtitle {
 	records := s.subtitles[hash]
 	if len(records) == 0 {
 		return []Subtitle{}
@@ -453,11 +474,12 @@ func (s *Session) subtitlesLocked(hash metainfo.Hash, rootName string, single bo
 	out := make([]Subtitle, 0, len(paths))
 	for _, relPath := range paths {
 		record := records[relPath]
+		mount, _ := filesystem.TorrentMountPath(current, allViews, categories, record.Path)
 		out = append(out, Subtitle{
 			TorrentID: hash.HexString(),
 			VideoPath: record.VideoPath,
 			Path:      record.Path,
-			MountPath: mountPath(rootName, record.Path, single),
+			MountPath: mount,
 			Format:    record.Format,
 			Size:      record.Size,
 			UpdatedAt: record.UpdatedAt,
@@ -550,7 +572,7 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 			break
 		}
 	}
-	rootName, _ := filesystem.RootNameFor(current, allViews)
+	categories := s.categoryNamesLocked()
 	_, replacing := s.subtitles[hash][relPath]
 	s.mu.RUnlock()
 
@@ -662,11 +684,12 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 	}
 	s.subtitles[hash][relPath] = record
 	s.mu.Unlock()
+	mount, _ := filesystem.TorrentMountPath(current, allViews, categories, relPath)
 	return SubtitleUploadResponse{
 		TorrentID: hash.HexString(),
 		VideoPath: videoPath,
 		Path:      relPath,
-		MountPath: mountPath(rootName, relPath, current.SingleFile),
+		MountPath: mount,
 		Format:    record.Format,
 		Size:      record.Size,
 		UpdatedAt: record.UpdatedAt,
@@ -695,16 +718,10 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	}
 }
 
-// subtitleNamespaceConflictLocked reports why exposing one more torrent at the
-// mount root would break an existing managed subtitle's correspondence. Root
-// names are assigned by hash order, so a new single-file torrent can rename an
-// older video out from under its subtitle, and a new root name can shadow a
-// subtitle entry outright. Both cases are refused before the torrent is
-// published, instead of silently renaming or hiding either side.
-//
-// Callers must hold s.mu (the subtitle index is read) and rootNamespaceMu (a
-// subtitle upload in flight must not be invisible to this decision).
-func (s *Session) subtitleNamespaceConflictLocked(candidate metainfo.Hash, name string, single bool) error {
+// subtitleNamespaceConflictLocked reports why exposing one more torrent would
+// break an existing managed subtitle's correspondence. Callers hold both the
+// root namespace and session locks.
+func (s *Session) subtitleNamespaceConflictLocked(candidate metainfo.Hash, name string, single bool, category string) error {
 	views := s.filesystemViewsLocked()
 	existing := make([]filesystem.TorrentView, 0, len(views)+1)
 	protected := false
@@ -717,36 +734,52 @@ func (s *Session) subtitleNamespaceConflictLocked(candidate metainfo.Hash, name 
 			protected = true
 		}
 	}
-	// Without an existing single-file subtitle there is nothing to protect, and
-	// the projected layout is not worth computing.
 	if !protected {
 		return nil
 	}
-	projected := append(existing, filesystem.TorrentView{Hash: candidate, Name: name, SingleFile: single})
+	projected := append(existing, filesystem.TorrentView{Hash: candidate, Name: name, Category: category, SingleFile: single})
 	return s.subtitleLayoutConflictLocked(projected)
 }
 
-// subtitleLayoutConflictLocked validates one whole mount-root layout: every
-// single-file torrent with managed subtitles must keep its own root name, and
-// no root entry may shadow a root-level subtitle path.
+// subtitleLayoutConflictLocked validates every category's virtual layout:
+// single-file torrents with managed subtitles must keep their own visible name,
+// and no torrent may shadow a root-level managed subtitle in the same group.
 func (s *Session) subtitleLayoutConflictLocked(views []filesystem.TorrentView) error {
-	rootNames := make(map[string]struct{}, len(views))
-	for _, view := range views {
-		if rootName, ok := filesystem.RootNameFor(view, views); ok {
-			rootNames[rootName] = struct{}{}
+	categories := s.categoryNamesLocked()
+	rootNames := make(map[string]map[string]metainfo.Hash, len(categories)+1)
+	for _, category := range categories {
+		rootNames[category] = make(map[string]metainfo.Hash)
+	}
+	if len(categories) > 0 {
+		rootNames[""] = make(map[string]metainfo.Hash, len(categories))
+		for _, category := range categories {
+			rootNames[""][category] = metainfo.Hash{}
 		}
+	}
+	for _, view := range views {
+		rootName, ok := filesystem.RootNameForWithCategories(view, views, categories)
+		if !ok {
+			continue
+		}
+		if rootNames[view.Category] == nil {
+			rootNames[view.Category] = make(map[string]metainfo.Hash)
+		}
+		rootNames[view.Category][rootName] = view.Hash
 	}
 	for _, view := range views {
 		if !view.SingleFile || len(s.subtitles[view.Hash]) == 0 {
 			continue
 		}
-		rootName, ok := filesystem.RootNameFor(view, views)
+		rootName, ok := filesystem.RootNameForWithCategories(view, views, categories)
 		if !ok || rootName != view.Name {
-			return fmt.Errorf("%w: torrent %s would be renamed at the mount root", ErrSubtitleNamespaceConflict, view.Hash)
+			return fmt.Errorf("%w: torrent %s would be renamed in category %q", ErrSubtitleNamespaceConflict, view.Hash, view.Category)
 		}
 		for relPath := range s.subtitles[view.Hash] {
-			if _, shadowed := rootNames[relPath]; !strings.Contains(relPath, "/") && shadowed {
-				return fmt.Errorf("%w: root name %q is already a managed subtitle", ErrSubtitleNamespaceConflict, relPath)
+			if strings.Contains(relPath, "/") {
+				continue
+			}
+			if owner, shadowed := rootNames[view.Category][relPath]; shadowed && owner != view.Hash {
+				return fmt.Errorf("%w: root name %q is already occupied in category %q", ErrSubtitleNamespaceConflict, relPath, view.Category)
 			}
 		}
 	}

@@ -20,6 +20,7 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
     id: 'torrent-1',
     info_hash: 'abc123',
     name: 'Alpha archive',
+    category: '',
     state: 'ready',
     total_bytes: 100,
     downloaded_bytes: 0,

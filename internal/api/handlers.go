@@ -17,6 +17,7 @@ type torrentResponse struct {
 	ID              string    `json:"id"`
 	InfoHash        string    `json:"info_hash"`
 	Name            string    `json:"name"`
+	Category        string    `json:"category"`
 	State           string    `json:"state"`
 	TotalBytes      int64     `json:"total_bytes"`
 	DownloadedBytes int64     `json:"downloaded_bytes"`
@@ -25,6 +26,15 @@ type torrentResponse struct {
 	CreatedAt       time.Time `json:"created_at"`
 	Favorite        bool      `json:"favorite"`
 	Error           string    `json:"error,omitempty"`
+}
+
+type categoryResponse struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func newCategoryResponse(category session.CategoryView) categoryResponse {
+	return categoryResponse{Name: category.Name, CreatedAt: category.CreatedAt}
 }
 
 // maxOlderThanDays bounds the prune window. time.Duration is int64
@@ -136,6 +146,7 @@ func newTorrentResponse(view session.TorrentView) torrentResponse {
 		ID:              view.ID,
 		InfoHash:        view.InfoHash,
 		Name:            view.Name,
+		Category:        view.Category,
 		State:           string(view.State),
 		TotalBytes:      view.TotalBytes,
 		DownloadedBytes: view.DownloadedBytes,
@@ -285,6 +296,80 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) handleListCategories(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.backend.(CategoryBackend)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "categories unavailable")
+		return
+	}
+	categories := backend.ListCategories()
+	out := make([]categoryResponse, 0, len(categories))
+	for _, category := range categories {
+		out = append(out, newCategoryResponse(category))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.backend.(CategoryBackend)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "categories unavailable")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	var body struct {
+		Name *string `json:"name"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		if isTooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Name == nil {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	category, err := backend.CreateCategory(r.Context(), *body.Name)
+	if err != nil {
+		writeSessionError(w, "create category", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, newCategoryResponse(category))
+}
+
+func (s *Server) handleSetTorrentCategory(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.backend.(CategoryBackend)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "categories unavailable")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	var body struct {
+		Category *string `json:"category"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		if isTooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Category == nil {
+		writeError(w, http.StatusBadRequest, "category is required")
+		return
+	}
+	view, err := backend.SetTorrentCategory(r.Context(), r.PathValue("id"), *body.Category)
+	if err != nil {
+		writeSessionError(w, "set torrent category", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newTorrentResponse(view))
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newRuntimeStatsResponse(s.backend.RuntimeStats()))
 }
@@ -415,6 +500,14 @@ func readUploadedTorrent(r *http.Request) ([]byte, error) {
 
 func writeSessionError(w http.ResponseWriter, action string, err error) {
 	switch {
+	case errors.Is(err, session.ErrCategoryExists):
+		writeError(w, http.StatusConflict, "category already exists")
+	case errors.Is(err, session.ErrCategoryNamespaceConflict):
+		writeError(w, http.StatusConflict, "category name conflicts with an existing mount entry")
+	case errors.Is(err, session.ErrUnknownCategory):
+		writeError(w, http.StatusNotFound, "unknown category")
+	case errors.Is(err, session.ErrInvalidCategory):
+		writeError(w, http.StatusBadRequest, "invalid category name")
 	case errors.Is(err, session.ErrDeleting):
 		writeError(w, http.StatusConflict, "torrent is being deleted")
 	case errors.Is(err, session.ErrSubtitleNamespaceConflict):

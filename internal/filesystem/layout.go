@@ -98,7 +98,7 @@ func lookupChildWithSubtitles(files []FileView, subtitles []SubtitleView, relPre
 	return fsEntry{}, false
 }
 
-// rootEntry is one immediate child of the mount root.
+// rootEntry is one immediate child of a torrent or category directory.
 type rootEntry struct {
 	Name       string
 	View       TorrentView
@@ -106,19 +106,23 @@ type rootEntry struct {
 	Size       int64
 	ModifiedAt time.Time
 	IsSubtitle bool
+	IsCategory bool
 }
 
 // isDir reports whether the entry is a directory entry. Only a single-file
 // torrent root is a regular file; every multi-file torrent root is a directory.
 func (e rootEntry) isDir() bool {
+	if e.IsCategory {
+		return true
+	}
 	_, single := mediaRoot(e.View)
 	return !single
 }
 
-// mediaRoot returns the file a torrent view exposes directly at the mount
-// root, when it has one. A single-file torrent (and only that) is exposed as
-// one regular file; mislabelled views without exactly one file fall back to
-// the directory layout.
+// mediaRoot returns the file a torrent view exposes directly at the mount root,
+// when it has one. A single-file torrent (and only that) is exposed as one
+// regular file; mislabelled views without exactly one file fall back to the
+// directory layout.
 func mediaRoot(view TorrentView) (FileView, bool) {
 	if view.SingleFile && len(view.Files) == 1 {
 		return view.Files[0], true
@@ -126,16 +130,26 @@ func mediaRoot(view TorrentView) (FileView, bool) {
 	return FileView{}, false
 }
 
-// rootEntries returns the sorted top-level torrent entries, one per torrent.
-// Torrents sharing a display name are disambiguated by appending a hash prefix
-// to the later ones. Assignment order is deterministic (torrents are visited
-// in hash order) so the same set always maps to the same names.
+// rootEntries returns the sorted top-level torrent entries for the unclassified
+// group without category-directory reservations.
 func rootEntries(views []TorrentView) []rootEntry {
-	ordered := slices.Clone(views)
+	return rootEntriesForCategory(views, "", nil)
+}
+
+func rootEntriesForCategory(views []TorrentView, category string, reserved map[string]bool) []rootEntry {
+	ordered := make([]TorrentView, 0, len(views))
+	for _, view := range views {
+		if view.Category == category {
+			ordered = append(ordered, view)
+		}
+	}
 	slices.SortFunc(ordered, func(a, b TorrentView) int {
 		return strings.Compare(a.Hash.HexString(), b.Hash.HexString())
 	})
-	used := make(map[string]bool)
+	used := make(map[string]bool, len(reserved)+len(ordered))
+	for name := range reserved {
+		used[name] = true
+	}
 	entries := make([]rootEntry, 0, len(ordered))
 	for _, v := range ordered {
 		name := uniqueTorrentName(v, used)
@@ -147,9 +161,79 @@ func rootEntries(views []TorrentView) []rootEntry {
 	return entries
 }
 
-// uniqueTorrentName returns a mount root child name for v that is not in
-// used, and records it. The torrent's own name is preferred; on collision a
-// hash prefix is appended, extended until the name is free.
+func categoryReservations(categories []string) map[string]bool {
+	reserved := make(map[string]bool, len(categories))
+	for _, category := range categories {
+		reserved[category] = true
+	}
+	return reserved
+}
+
+// RootNameFor returns the mount-visible name assigned to view in its category
+// group without reserving category directory names.
+func RootNameFor(view TorrentView, views []TorrentView) (string, bool) {
+	return RootNameForWithCategories(view, views, nil)
+}
+
+// RootNameForWithCategories returns the mount-visible name assigned to view,
+// reserving category directory names for unclassified torrents.
+func RootNameForWithCategories(view TorrentView, views []TorrentView, categories []string) (string, bool) {
+	reserved := map[string]bool(nil)
+	if view.Category == "" {
+		reserved = categoryReservations(categories)
+	}
+	for _, entry := range rootEntriesForCategory(views, view.Category, reserved) {
+		if entry.View.Hash == view.Hash {
+			return entry.Name, true
+		}
+	}
+	return "", false
+}
+
+// TorrentMountPath returns the complete mount path for relPath in view.
+func TorrentMountPath(view TorrentView, views []TorrentView, categories []string, relPath string) (string, bool) {
+	rootName, ok := RootNameForWithCategories(view, views, categories)
+	if !ok {
+		return "", false
+	}
+	mountPath := relPath
+	if view.SingleFile {
+		if file, single := mediaRoot(view); single && relPath == file.Path {
+			mountPath = rootName
+		}
+	} else {
+		mountPath = rootName + "/" + relPath
+	}
+	if view.Category != "" {
+		return view.Category + "/" + mountPath, true
+	}
+	return mountPath, true
+}
+
+// CategoryNameConflicts reports whether name would replace an existing root
+// entry or root-level managed subtitle when published as a category directory.
+func CategoryNameConflicts(name string, views []TorrentView, categories []string) bool {
+	for _, entry := range rootEntriesForCategory(views, "", categoryReservations(categories)) {
+		if entry.Name == name {
+			return true
+		}
+	}
+	for _, view := range views {
+		if view.Category != "" || !view.SingleFile {
+			continue
+		}
+		for _, subtitle := range view.Subtitles {
+			if !strings.Contains(subtitle.Path, "/") && subtitle.Path == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// uniqueTorrentName returns a mount child name for v that is not in used, and
+// records it. The torrent's own name is preferred; on collision a hash prefix
+// is appended, extended until the name is free.
 func uniqueTorrentName(v TorrentView, used map[string]bool) string {
 	if !used[v.Name] {
 		used[v.Name] = true
@@ -170,18 +254,10 @@ func uniqueTorrentName(v TorrentView, used map[string]bool) string {
 	}
 }
 
-// RootNameFor returns the mount-visible root name assigned to view.
-func RootNameFor(view TorrentView, views []TorrentView) (string, bool) {
-	for _, entry := range rootEntries(views) {
-		if entry.View.Hash == view.Hash {
-			return entry.Name, true
-		}
-	}
-	return "", false
-}
-
 // torrentKey is the inode identity of a torrent's top directory.
 func torrentKey(hash metainfo.Hash) string { return "t/" + hash.HexString() }
+
+func categoryKey(category string) string { return "c/" + category }
 
 // fileKey is the inode identity of a leaf file inside a torrent.
 func fileKey(hash metainfo.Hash, displayPath string) string {

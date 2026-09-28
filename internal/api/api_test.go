@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -53,9 +54,18 @@ type fakeBackend struct {
 	setFavoriteValue bool
 	setFavoriteView  session.TorrentView
 	setFavoriteErr   error
-	pruneOlderThan   time.Duration
-	pruneResult      session.PruneResult
-	pruneErr         error
+
+	categories         []session.CategoryView
+	createCategoryName string
+	createCategoryView session.CategoryView
+	createCategoryErr  error
+	setCategoryID      string
+	setCategoryValue   string
+	setCategoryView    session.TorrentView
+	setCategoryErr     error
+	pruneOlderThan     time.Duration
+	pruneResult        session.PruneResult
+	pruneErr           error
 
 	runtimeStats session.RuntimeStatsView
 	ops          map[string]session.Operation
@@ -128,6 +138,33 @@ func (f *fakeBackend) SetFavorite(_ context.Context, id string, favorite bool) (
 		return session.TorrentView{}, f.setFavoriteErr
 	}
 	return f.setFavoriteView, nil
+}
+
+func (f *fakeBackend) ListCategories() []session.CategoryView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.categories
+}
+
+func (f *fakeBackend) CreateCategory(_ context.Context, name string) (session.CategoryView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createCategoryName = name
+	if f.createCategoryErr != nil {
+		return session.CategoryView{}, f.createCategoryErr
+	}
+	return f.createCategoryView, nil
+}
+
+func (f *fakeBackend) SetTorrentCategory(_ context.Context, id, category string) (session.TorrentView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCategoryID = id
+	f.setCategoryValue = category
+	if f.setCategoryErr != nil {
+		return session.TorrentView{}, f.setCategoryErr
+	}
+	return f.setCategoryView, nil
 }
 
 func (f *fakeBackend) DeleteUnfavoritedOlderThan(_ context.Context, olderThan time.Duration) (session.PruneResult, error) {
@@ -324,6 +361,7 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 		ID:              "abc",
 		InfoHash:        "abc",
 		Name:            "task",
+		Category:        "movies",
 		State:           session.StateReady,
 		TotalBytes:      100,
 		DownloadedBytes: 2048,
@@ -344,7 +382,7 @@ func TestListTorrentsReturnsFields(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("list length = %d, want 1", len(got))
 	}
-	for _, key := range []string{"id", "info_hash", "name", "state", "total_bytes", "downloaded_bytes", "uploaded_bytes", "cached_bytes", "created_at", "favorite"} {
+	for _, key := range []string{"id", "info_hash", "name", "category", "state", "total_bytes", "downloaded_bytes", "uploaded_bytes", "cached_bytes", "created_at", "favorite"} {
 		if _, ok := got[0][key]; !ok {
 			t.Fatalf("list entry missing %q: %v", key, got[0])
 		}
@@ -718,6 +756,87 @@ func TestSetFavoriteMapsUnknownTorrentTo404(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	if rec := do(t, srv, req); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCategoryEndpoints(t *testing.T) {
+	id := strings.Repeat("a", 40)
+	createdAt := time.Date(2026, 9, 28, 8, 0, 0, 0, time.UTC)
+	backend := &fakeBackend{
+		categories:         []session.CategoryView{{Name: "movies", CreatedAt: createdAt}},
+		createCategoryView: session.CategoryView{Name: "series", CreatedAt: createdAt},
+		setCategoryView:    session.TorrentView{ID: id, InfoHash: id, Name: "Movie1.mp4", Category: "movies", State: session.StateReady},
+	}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/categories", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list categories status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var listed []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode categories: %v", err)
+	}
+	if len(listed) != 1 || listed[0]["name"] != "movies" {
+		t.Fatalf("categories = %v, want movies", listed)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/categories", strings.NewReader(`{"name":"series"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = do(t, srv, req)
+	if rec.Code != http.StatusCreated || backend.createCategoryName != "series" {
+		t.Fatalf("create category status/name = %d/%q, want 201/series; body %s", rec.Code, backend.createCategoryName, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/torrents/"+id+"/category", strings.NewReader(`{"category":"movies"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = do(t, srv, req)
+	if rec.Code != http.StatusOK || backend.setCategoryID != id || backend.setCategoryValue != "movies" {
+		t.Fatalf("set category status/call = %d/%q/%q, want 200/%s/movies; body %s", rec.Code, backend.setCategoryID, backend.setCategoryValue, id, rec.Body.String())
+	}
+	var updated map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated torrent: %v", err)
+	}
+	if updated["category"] != "movies" {
+		t.Fatalf("updated category = %v, want movies", updated["category"])
+	}
+}
+
+func TestCategoryEndpointRejectsMissingFieldsAndMapsErrors(t *testing.T) {
+	id := strings.Repeat("b", 40)
+	tests := []struct {
+		name string
+		path string
+		body string
+		want int
+		err  error
+	}{
+		{name: "create missing", path: "/api/v1/categories", body: `{}`, want: http.StatusBadRequest},
+		{name: "assign missing", path: "/api/v1/torrents/" + id + "/category", body: `{}`, want: http.StatusBadRequest},
+		{name: "invalid category", path: "/api/v1/categories", body: `{"name":"a/b"}`, want: http.StatusBadRequest, err: session.ErrInvalidCategory},
+		{name: "unknown category", path: "/api/v1/torrents/" + id + "/category", body: `{"category":"missing"}`, want: http.StatusNotFound, err: session.ErrUnknownCategory},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &fakeBackend{}
+			if tt.err != nil {
+				if errors.Is(tt.err, session.ErrInvalidCategory) {
+					backend.createCategoryErr = tt.err
+				} else {
+					backend.setCategoryErr = tt.err
+				}
+			}
+			srv := newTestServer(t, backend, nil)
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			if strings.Contains(tt.path, "/torrents/") {
+				req.Method = http.MethodPut
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if rec := do(t, srv, req); rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tt.want, rec.Body.String())
+			}
+		})
 	}
 }
 

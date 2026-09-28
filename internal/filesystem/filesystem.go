@@ -43,6 +43,8 @@ type SubtitleStat struct {
 type TorrentView struct {
 	Name string
 	Hash metainfo.Hash
+	// Category is the optional top-level directory containing this torrent.
+	Category string
 	// CreatedAt is the durable time when the torrent was added to the session.
 	CreatedAt  time.Time
 	Files      []FileView
@@ -73,6 +75,12 @@ type Backend interface {
 	// OpenFile returns a handle for reading the file at the given display path
 	// inside the torrent identified by hash.
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
+}
+
+// CategoryBackend is an optional Backend extension that supplies every
+// persisted category, including categories with no visible torrents.
+type CategoryBackend interface {
+	Categories() []string
 }
 
 // SubtitleSnapshot is one opened managed subtitle: the file itself plus the

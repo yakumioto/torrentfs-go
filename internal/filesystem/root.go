@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -11,7 +12,7 @@ import (
 )
 
 // rootNode is the mount root. Its children are dynamically read from the
-// Backend and expose torrent data only.
+// Backend and expose torrent data and persisted category directories only.
 type rootNode struct {
 	fs.Inode
 	state *fsState
@@ -21,25 +22,44 @@ func (n *rootNode) torrentViews() []TorrentView {
 	return n.state.backend.Torrents()
 }
 
+func (n *rootNode) categoryNames() []string {
+	provider, ok := n.state.backend.(CategoryBackend)
+	if !ok {
+		return nil
+	}
+	categories := slices.Clone(provider.Categories())
+	sort.Strings(categories)
+	return categories
+}
+
 func (n *rootNode) children() []rootEntry {
-	entries := rootEntries(n.torrentViews())
+	entries := rootEntriesForCategory(n.torrentViews(), "", categoryReservations(n.categoryNames()))
 	slices.SortFunc(entries, func(a, b rootEntry) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 	return entries
 }
 
-// visibleChildren returns the mount root's children: one entry per torrent,
-// plus the managed subtitles of single-file torrents. A multi-file torrent's
-// subtitles live inside its directory instead, so only root-level subtitle
-// paths are lifted here.
+func (n *rootNode) categoryEntries() []rootEntry {
+	categories := n.categoryNames()
+	entries := make([]rootEntry, 0, len(categories))
+	for _, category := range categories {
+		entries = append(entries, rootEntry{Name: category, IsCategory: true})
+	}
+	return entries
+}
+
+// visibleChildren returns the mount root's children: unclassified torrents,
+// category directories, plus managed subtitles of unclassified single-file
+// torrents. A multi-file torrent's subtitles live inside its directory.
 func (n *rootNode) visibleChildren() []rootEntry {
-	entries := n.children()
+	torrents := n.children()
+	entries := append(torrents, n.categoryEntries()...)
 	used := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		used[entry.Name] = true
 	}
-	for _, entry := range entries {
+	for _, entry := range torrents {
 		if _, single := mediaRoot(entry.View); !single {
 			continue
 		}
@@ -77,6 +97,14 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	for _, c := range n.visibleChildren() {
 		if c.Name != name {
 			continue
+		}
+		if c.IsCategory {
+			out.Mode = 0o555
+			child := &categoryNode{state: n.state, category: c.Name}
+			return n.NewInode(ctx, child, fs.StableAttr{
+				Mode: syscall.S_IFDIR,
+				Ino:  n.state.inoFor(categoryKey(c.Name)),
+			}), 0
 		}
 		if c.IsSubtitle {
 			out.Mode = 0o444
