@@ -6,7 +6,7 @@ import { useAuth } from '../../app/auth-context';
 import { useCategories, useSetTorrentCategory } from '../../queries/hooks';
 import { userFacingError } from '../../utils/user-facing-error';
 
-const UNCLASSIFIED = '__unclassified__';
+const UNCLASSIFIED = '';
 
 export function CategoryAssignmentDialog({ torrent, opened, onClose }: { torrent: Torrent; opened: boolean; onClose: () => void }) {
   const auth = useAuth();
@@ -40,11 +40,8 @@ export function CategoryAssignmentDialog({ torrent, opened, onClose }: { torrent
         <NativeSelect
           label="所属分类"
           data={options}
-          value={selected || UNCLASSIFIED}
-          onChange={(event) => {
-            const value = event.currentTarget.value;
-            setSelected(value === UNCLASSIFIED ? '' : value);
-          }}
+          value={selected}
+          onChange={(event) => setSelected(event.currentTarget.value)}
           disabled={categories.isPending || update.isPending}
         />
         {categories.error !== null && categories.error !== undefined && (

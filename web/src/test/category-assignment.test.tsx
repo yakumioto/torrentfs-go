@@ -26,7 +26,7 @@ const torrent: Torrent = {
   favorite: false,
 };
 
-function renderDialog(fetchMock: ReturnType<typeof vi.fn>) {
+function renderDialog(fetchMock: ReturnType<typeof vi.fn>, torrentValue: Torrent = torrent) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
     api,
@@ -46,7 +46,7 @@ function renderDialog(fetchMock: ReturnType<typeof vi.fn>) {
     <MantineProvider theme={theme} defaultColorScheme="light">
       <QueryClientProvider client={queryClient}>
         <AuthContext.Provider value={auth}>
-          <CategoryAssignmentDialog torrent={torrent} opened onClose={vi.fn()} />
+          <CategoryAssignmentDialog torrent={torrentValue} opened onClose={vi.fn()} />
         </AuthContext.Provider>
       </QueryClientProvider>
     </MantineProvider>,
@@ -88,5 +88,54 @@ describe('category assignment dialog', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT')).toBe(true));
     const put = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT');
     expect((put?.[1] as RequestInit).body).toBe(JSON.stringify({ category: 'movies' }));
+  });
+
+  it('submits a legal __unclassified__ category without treating it as the unclassified option', async () => {
+    const category = '__unclassified__';
+    const updated = { ...torrent, category };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse(updated));
+      }
+      if (url.endsWith('/categories')) {
+        return Promise.resolve(jsonResponse([{ name: category, created_at: '2026-09-28T08:00:00Z' }]));
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+    renderDialog(fetchMock);
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '所属分类' })).not.toBeDisabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '所属分类' }), { target: { value: category } });
+    fireEvent.click(screen.getByRole('button', { name: '保存分类' }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT')).toBe(true));
+    const put = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT');
+    expect((put?.[1] as RequestInit).body).toBe(JSON.stringify({ category }));
+  });
+
+  it('submits an empty category when restoring an assigned torrent to unclassified', async () => {
+    const category = '__unclassified__';
+    const assigned = { ...torrent, category };
+    const updated = { ...torrent, category: '' };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse(updated));
+      }
+      if (url.endsWith('/categories')) {
+        return Promise.resolve(jsonResponse([{ name: category, created_at: '2026-09-28T08:00:00Z' }]));
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+    renderDialog(fetchMock, assigned);
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '所属分类' })).not.toBeDisabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '所属分类' }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存分类' }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT')).toBe(true));
+    const put = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/category') && init?.method === 'PUT');
+    expect((put?.[1] as RequestInit).body).toBe(JSON.stringify({ category: '' }));
   });
 });
