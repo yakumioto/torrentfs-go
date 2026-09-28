@@ -64,7 +64,11 @@ afterEach(() => {
 
 describe('UploadRateSettingsDialog', () => {
   it('loads the current settings from the daemon', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(scheduledSettings)));
+    // The mock declares the fetch signature so mock.calls is typed as
+    // [RequestInfo | URL, RequestInit?] instead of an empty tuple.
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      () => Promise.resolve(jsonResponse(scheduledSettings)),
+    );
     renderDialog(fetchMock);
 
     await waitFor(() => expect(screen.getByLabelText('上传上限（B/s）')).toHaveValue('1048576'));
@@ -79,7 +83,11 @@ describe('UploadRateSettingsDialog', () => {
   });
 
   it('states the time semantics the daemon applies', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(scheduledSettings)));
+    // The mock declares the fetch signature so mock.calls is typed as
+    // [RequestInfo | URL, RequestInit?] instead of an empty tuple.
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      () => Promise.resolve(jsonResponse(scheduledSettings)),
+    );
     renderDialog(fetchMock);
 
     await waitFor(() => expect(screen.getByLabelText('开始时间')).toBeInTheDocument());
@@ -149,7 +157,11 @@ describe('UploadRateSettingsDialog', () => {
   });
 
   it('disables saving when the window is reversed', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(scheduledSettings)));
+    // The mock declares the fetch signature so mock.calls is typed as
+    // [RequestInfo | URL, RequestInit?] instead of an empty tuple.
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      () => Promise.resolve(jsonResponse(scheduledSettings)),
+    );
     renderDialog(fetchMock);
 
     await waitFor(() => expect(screen.getByLabelText('开始时间')).toBeInTheDocument());
@@ -161,7 +173,7 @@ describe('UploadRateSettingsDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
 
     await waitFor(() => expect(screen.getByLabelText('开始时间')).toBeInTheDocument());
-    const puts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    const puts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
     expect(puts).toHaveLength(0);
   });
 
