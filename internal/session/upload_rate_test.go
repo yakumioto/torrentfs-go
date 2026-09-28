@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,103 @@ func TestUploadRatePolicyBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireZone loads a tzdata zone, skipping when the host carries no tzdata so
+// the DST cases never turn an environment gap into a failure.
+func requireZone(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Skipf("zone %s is unavailable on this host: %v", name, err)
+	}
+	return loc
+}
+
+// TestUploadRatePolicySpringForward covers the DST gap: on the transition day
+// the 02:00 boundary never exists, so the window opens at the first minute the
+// clock shows (03:00) instead of resolving the missing 02:00 to an instant
+// before the window and waiting for the next day's boundary.
+func TestUploadRatePolicySpringForward(t *testing.T) {
+	loc := requireZone(t, "America/New_York")
+	// US DST starts 2026-03-08: 02:00 EST jumps straight to 03:00 EDT.
+	before := time.Date(2026, 3, 8, 1, 0, 0, 0, loc)
+	boundary := time.Date(2026, 3, 8, 3, 0, 0, 0, loc)
+	if offsetOf(t, before) == offsetOf(t, boundary) {
+		t.Skip("zone has no spring-forward transition at the expected instant")
+	}
+
+	policy := scheduledUploadPolicy(t, "02:00", "22:00")
+	if policy.limitedAt(before) {
+		t.Fatal("policy is limited before the window opens")
+	}
+	got := policy.nextTransition(before)
+	if !got.Equal(boundary) {
+		t.Fatalf("nextTransition(%s) = %s, want the first existing window minute %s", before.Format(time.RFC3339), got.Format(time.RFC3339), boundary.Format(time.RFC3339))
+	}
+	if !policy.limitedAt(got) {
+		t.Fatalf("policy is not limited at the resolved boundary %s", got.Format(time.RFC3339))
+	}
+	// No state change may hide between the two instants.
+	for probe := before.Add(time.Minute); probe.Before(got); probe = probe.Add(time.Minute) {
+		if policy.limitedAt(probe) {
+			t.Fatalf("policy is limited at %s, before the resolved boundary", probe.Format(time.RFC3339))
+		}
+	}
+	// The window still closes on the ordinary end boundary that day.
+	if end := policy.nextTransition(got); !end.Equal(time.Date(2026, 3, 8, 22, 0, 0, 0, loc)) {
+		t.Fatalf("nextTransition(%s) = %s, want the same-day end boundary", got.Format(time.RFC3339), end.Format(time.RFC3339))
+	}
+}
+
+// TestUploadRatePolicyFallBack covers the repeated hour: when the clock falls
+// back to 01:00 it leaves a window that opened at 01:30, so the state flips
+// there rather than at the day's 02:30 that a date-based reconstruction picks.
+func TestUploadRatePolicyFallBack(t *testing.T) {
+	loc := requireZone(t, "America/New_York")
+	// US DST ends 2026-11-01: 02:00 EDT falls back to 01:00 EST.
+	early := time.Date(2026, 11, 1, 1, 0, 0, 0, loc) // 01:00 EDT, still -04:00
+	late := time.Date(2026, 11, 1, 3, 0, 0, 0, loc)  // 03:00 EST, already -05:00
+	if offsetOf(t, early) == offsetOf(t, late) {
+		t.Skip("zone has no fall-back transition at the expected instant")
+	}
+
+	policy := scheduledUploadPolicy(t, "01:30", "02:30")
+	// The repeated 01:00-01:59 hour is ambiguous in local terms, so the instants
+	// under test are built from UTC and viewed in the zone.
+	beforeWindow := time.Date(2026, 11, 1, 4, 30, 0, 0, time.UTC).In(loc)
+	open := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(loc)   // 01:30 EDT, first occurrence
+	inside := time.Date(2026, 11, 1, 5, 45, 0, 0, time.UTC).In(loc) // 01:45 EDT
+	flip := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC).In(loc)    // fall-back instant, back to 01:00 EST
+	last := time.Date(2026, 11, 1, 7, 30, 0, 0, time.UTC).In(loc)   // 02:30 EST, the day's end
+
+	if got := policy.nextTransition(beforeWindow); !got.Equal(open) {
+		t.Fatalf("nextTransition(%s) = %s, want the first occurrence %s", beforeWindow.Format(time.RFC3339), got.Format(time.RFC3339), open.Format(time.RFC3339))
+	}
+	if !policy.limitedAt(flip.Add(-time.Minute)) {
+		t.Fatalf("policy should be limited at %s, just before the fall-back instant", flip.Add(-time.Minute).Format(time.RFC3339))
+	}
+	if policy.limitedAt(flip) {
+		t.Fatalf("policy should be unlimited at the fall-back instant %s", flip.Format(time.RFC3339))
+	}
+	if got := policy.nextTransition(inside); !got.Equal(flip) {
+		t.Fatalf("nextTransition(%s) = %s, want the fall-back instant %s", inside.Format(time.RFC3339), got.Format(time.RFC3339), flip.Format(time.RFC3339))
+	}
+	// When the repeated hour lands back inside the window there is no change at
+	// the fall-back instant; the boundary stays the ordinary window end.
+	spansRepeat := scheduledUploadPolicy(t, "00:30", "02:30")
+	if !spansRepeat.limitedAt(flip) {
+		t.Fatalf("a window spanning the repeat should still be limited at %s", flip.Format(time.RFC3339))
+	}
+	if got := spansRepeat.nextTransition(inside); !got.Equal(last) {
+		t.Fatalf("nextTransition for a window spanning the repeat = %s, want %s", got.Format(time.RFC3339), last.Format(time.RFC3339))
+	}
+}
+
+func offsetOf(t *testing.T, at time.Time) int {
+	t.Helper()
+	_, offset := at.Zone()
+	return offset
 }
 
 func TestUploadRatePolicyWithoutSchedule(t *testing.T) {
@@ -161,6 +259,77 @@ func TestUploadRateControllerSwitchesAtBoundaries(t *testing.T) {
 	}
 	if controller.limitedNow() {
 		t.Fatal("controller is still limited after the window closes")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller did not exit after cancellation")
+	}
+}
+
+// TestUploadRateControllerUsesOneSnapshotPerRound pins the boundary-round
+// invariant: a single clock reading decides both the state to apply and the
+// next boundary. A clock that crosses the start boundary between two reads must
+// not be able to skip the window, so the wait armed from the 07:59 snapshot has
+// to target the 08:00 start (one minute) and not the 22:00 window end.
+func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
+	policy := scheduledUploadPolicy(t, "08:00", "22:00")
+	controller := newUploadRateController(policy, logging.Discard())
+
+	loc := time.FixedZone("test", 8*60*60)
+	snapshots := []time.Time{
+		time.Date(2026, 3, 1, 7, 59, 0, 0, loc),
+		time.Date(2026, 3, 1, 8, 0, 1, 0, loc),
+	}
+	var reads atomic.Int64
+	controller.now = func() time.Time {
+		index := int(reads.Add(1)) - 1
+		if index >= len(snapshots) {
+			index = len(snapshots) - 1
+		}
+		return snapshots[index]
+	}
+	waits := make(chan time.Duration, 4)
+	release := make(chan struct{})
+	controller.wait = func(ctx context.Context, d time.Duration) bool {
+		waits <- d
+		select {
+		case <-ctx.Done():
+			return false
+		case <-release:
+			return true
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.run(ctx)
+	}()
+
+	if got := <-waits; got != time.Minute {
+		t.Fatalf("first wait = %s, want 1m to the start boundary; a second, later clock read would have targeted the 22:00 end instead", got)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("clock reads in the first round = %d, want exactly one snapshot per round", got)
+	}
+	if controller.limitedNow() {
+		t.Fatal("state at the 07:59 snapshot must be unlimited")
+	}
+
+	release <- struct{}{}
+	if got := <-waits; got != 13*time.Hour+59*time.Minute+59*time.Second {
+		t.Fatalf("second wait = %s, want 13h59m59s to the end boundary", got)
+	}
+	if got := reads.Load(); got != 2 {
+		t.Fatalf("clock reads after the second round = %d, want 2", got)
+	}
+	if !controller.limitedNow() {
+		t.Fatal("state at the 08:00:01 snapshot must be limited")
 	}
 
 	cancel()

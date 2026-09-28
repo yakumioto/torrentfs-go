@@ -78,24 +78,49 @@ func (p uploadRatePolicy) effectiveLimit(t time.Time) rate.Limit {
 	return p.limit
 }
 
-// nextTransition returns the next instant at which limitedAt changes, or the
-// zero time when no window is configured. Boundaries fall on whole minutes, so
-// a wakeup can re-read the clock and still land on the right state.
+// nextTransition returns the earliest instant after t at which the limit in
+// force differs from the limit at t, or the zero time when no window is
+// configured.
+//
+// The boundary is found by searching the time line for the first instant whose
+// state differs, rather than by rebuilding it from the local date. A DST
+// transition breaks the date-based reconstruction: a spring-forward gap removes
+// whole wall-clock times, so the boundary minute may not exist (the window
+// really starts at the first minute the clock shows), and a fall-back hour
+// shows the same wall clock twice, so a reconstruction can pick the wrong
+// occurrence and skip the change for an hour. Searching the instant keeps this
+// aligned with limitedAt for every zone, including both DST directions.
 func (p uploadRatePolicy) nextTransition(t time.Time) time.Time {
 	if !p.scheduled {
 		return time.Time{}
 	}
-	year, month, day := t.Date()
-	start := time.Date(year, month, day, p.startMinute/60, p.startMinute%60, 0, 0, t.Location())
-	end := time.Date(year, month, day, p.endMinute/60, p.endMinute%60, 0, 0, t.Location())
-	switch {
-	case t.Before(start):
-		return start
-	case t.Before(end):
-		return end
-	default:
-		return start.AddDate(0, 0, 1)
+	const (
+		probeStep    = time.Minute
+		maxLookahead = 26 * time.Hour
+	)
+	want := p.limitedAt(t)
+	previous := t
+	for probe := t.Add(probeStep); probe.Sub(t) <= maxLookahead; probe = probe.Add(probeStep) {
+		if p.limitedAt(probe) == want {
+			previous = probe
+			continue
+		}
+		// The change lies in (previous, probe]. Zone offsets and wall-clock
+		// minutes both advance in whole seconds, so a second-resolution scan
+		// finds the first changed instant without assuming the interval holds
+		// only one flip.
+		for candidate := previous.Add(time.Second); !candidate.After(probe); candidate = candidate.Add(time.Second) {
+			if p.limitedAt(candidate) != want {
+				return candidate
+			}
+		}
+		return probe
 	}
+	// A validated window always flips inside the lookahead, so this is only
+	// reachable for a policy the constructor rejects. Re-evaluating at the
+	// horizon keeps a hypothetical bad policy self-correcting instead of
+	// stopping the scheduler.
+	return t.Add(maxLookahead)
 }
 
 // uploadRateController owns one session's private upload limiter and keeps it in
@@ -151,19 +176,26 @@ func (c *uploadRateController) start(ctx context.Context, bgMu *sync.Mutex, bgWg
 
 // run applies the current policy and then re-evaluates it at every boundary
 // until ctx ends.
+//
+// Each round takes a single reading of the clock and derives both the state to
+// apply and the next boundary from that one snapshot. Reading the clock twice
+// could straddle a boundary: the state would be applied from the earlier read
+// while the next wake-up was computed from the later one, which lands after the
+// whole window and leaves the limit wrong until the boundary after that.
 func (c *uploadRateController) run(ctx context.Context) {
-	c.apply(c.now())
 	for {
-		next := c.policy.nextTransition(c.now())
+		now := c.now()
+		c.apply(now)
+		next := c.policy.nextTransition(now)
 		if next.IsZero() {
 			return
 		}
-		if !c.wait(ctx, next.Sub(c.now())) {
+		if !c.wait(ctx, next.Sub(now)) {
 			return
 		}
-		// A late or early wakeup must land on the policy that applies now, not
-		// the one that applied when the timer was armed.
-		c.apply(c.now())
+		// A late or early wakeup is handled by the next round: it re-reads the
+		// clock and applies the policy that holds then, not the one that held
+		// when the timer was armed.
 	}
 }
 
