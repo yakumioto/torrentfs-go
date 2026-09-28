@@ -176,34 +176,6 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_UPLOAD_RATE_LIMIT_BYTES_PER_SECOND",
-		field: "upload.rate_limit_bytes_per_second",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvInt64(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Upload.RateLimitBytesPerSecond = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_UPLOAD_SCHEDULE_START",
-		field: "upload.schedule.start",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Upload.Schedule.Start = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_UPLOAD_SCHEDULE_END",
-		field: "upload.schedule.end",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Upload.Schedule.End = raw
-			return nil
-		},
-	},
-	{
 		name:  "TORRENTFS_HTTP_AUTH_TOKEN_TTL",
 		field: "http.auth.token_ttl",
 		apply: func(cfg *Config, raw string) error {

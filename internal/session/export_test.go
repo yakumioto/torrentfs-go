@@ -263,29 +263,34 @@ func UnderlyingClientForTest(s *Session) *torrent.Client {
 type PrefetchSnapshot = prefetchSnapshot
 
 // UploadRateLimitForTest returns the limit on the session's aggregate upload
-// limiter and whether the session manages one at all. Test-only.
-func (s *Session) UploadRateLimitForTest() (rate.Limit, bool) {
-	if s.uploadRate == nil {
-		return rate.Inf, false
-	}
-	return s.uploadRate.limiter.Limit(), true
+// limiter and the limiter pointer itself, so a test can prove two sessions do
+// not share one. Test-only.
+func (s *Session) UploadRateLimitForTest() (rate.Limit, *rate.Limiter) {
+	return s.uploadRate.limiter.Limit(), s.uploadRate.limiter
 }
 
-// UploadRateScheduledForTest reports whether the session runs a boundary
-// scheduler for a configured upload window. Test-only.
-func (s *Session) UploadRateScheduledForTest() bool {
-	return s.uploadRate != nil && s.uploadRate.policy.scheduled
+// SetUploadRatePolicyForTest installs policy and applies the limit in force at
+// when, exactly as a boundary or a settings update does, without touching the
+// persisted sidecar. It lets a test pin a policy to a fixed clock. Test-only.
+func (s *Session) SetUploadRatePolicyForTest(settings UploadRateSettings, when time.Time) error {
+	normalized, policy, err := validateUploadRateSettings(settings)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploadRateSettings = normalized
+	s.uploadRate.setPolicy(policy, when)
+	return nil
 }
 
-// ApplyUploadRatePolicyForTest applies the configured upload schedule as if the
-// process-local clock read t, returning the resulting limit. It drives exactly
-// the code path a window boundary uses. Test-only.
-func (s *Session) ApplyUploadRatePolicyForTest(t time.Time) (rate.Limit, bool) {
-	if s.uploadRate == nil {
-		return rate.Inf, false
-	}
-	s.uploadRate.apply(t)
-	return s.uploadRate.limiter.Limit(), true
+// SetUploadRateDirSyncHookForTest makes the directory sync that follows the
+// atomic rename fail, so a test can exercise the published-but-unconfirmed
+// path. It returns a restore function. Test-only.
+func SetUploadRateDirSyncHookForTest(fn func(string) error) func() {
+	previous := atomicSyncDirectoryHook
+	atomicSyncDirectoryHook = fn
+	return func() { atomicSyncDirectoryHook = previous }
 }
 
 // EvictPiecesForTest drops every piece of the torrent except the ones in keep

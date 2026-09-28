@@ -33,6 +33,8 @@ type Backend interface {
 	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
+	UploadRateSettings() session.UploadRateSettings
+	SetUploadRateSettings(ctx context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error)
 }
 
 // Server is the torrent management HTTP service.
@@ -94,6 +96,8 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/torrents", s.handleAdd)
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
+	mux.HandleFunc("GET /api/v1/settings/upload-rate", s.handleGetUploadRateSettings)
+	mux.HandleFunc("PUT /api/v1/settings/upload-rate", s.handleSetUploadRateSettings)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)

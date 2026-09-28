@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Header } from './Header';
 import styles from './AppLayout.module.css';
 import { AddTorrentDialog } from '../dialogs/AddTorrentDialog';
+import { UploadRateSettingsDialog } from '../dialogs/UploadRateSettingsDialog';
 import { useAuth } from '../../app/auth-context';
 
 export interface AppOutletContext {
@@ -14,11 +15,12 @@ export function AppLayout() {
   const auth = useAuth();
   const navigate = useNavigate();
   const [addOpen, setAddOpen] = useState(false);
+  const [uploadRateOpen, setUploadRateOpen] = useState(false);
 
   return (
     <AppShell header={{ height: 56 }} className={styles.frame}>
       <AppShell.Header className={styles.header}>
-        <Header onAdd={() => setAddOpen(true)} />
+        <Header onAdd={() => setAddOpen(true)} onOpenUploadRateSettings={() => setUploadRateOpen(true)} />
       </AppShell.Header>
       <AppShell.Main className={styles.main}>
         <div className={styles.container}>
@@ -38,6 +40,7 @@ export function AppLayout() {
           }
         }}
       />
+      <UploadRateSettingsDialog opened={uploadRateOpen} onClose={() => setUploadRateOpen(false)} />
     </AppShell>
   );
 }

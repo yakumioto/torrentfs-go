@@ -8,20 +8,23 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
 
 const testUploadRate = 1 << 20
 
+func settingsForWindow(start, end string) UploadRateSettings {
+	return UploadRateSettings{
+		RateLimitBytesPerSecond: testUploadRate,
+		Schedule:                &UploadRateSchedule{Start: start, End: end},
+	}
+}
+
 func scheduledUploadPolicy(t *testing.T, start, end string) uploadRatePolicy {
 	t.Helper()
-	policy, err := newUploadRatePolicy(config.Upload{
-		RateLimitBytesPerSecond: testUploadRate,
-		Schedule:                config.UploadSchedule{Start: start, End: end},
-	})
+	_, policy, err := validateUploadRateSettings(settingsForWindow(start, end))
 	if err != nil {
-		t.Fatalf("newUploadRatePolicy: %v", err)
+		t.Fatalf("validateUploadRateSettings: %v", err)
 	}
 	return policy
 }
@@ -90,6 +93,12 @@ func requireZone(t *testing.T, name string) *time.Location {
 		t.Skipf("zone %s is unavailable on this host: %v", name, err)
 	}
 	return loc
+}
+
+func offsetOf(t *testing.T, at time.Time) int {
+	t.Helper()
+	_, offset := at.Zone()
+	return offset
 }
 
 // TestUploadRatePolicySpringForward covers the DST gap: on the transition day
@@ -172,16 +181,10 @@ func TestUploadRatePolicyFallBack(t *testing.T) {
 	}
 }
 
-func offsetOf(t *testing.T, at time.Time) int {
-	t.Helper()
-	_, offset := at.Zone()
-	return offset
-}
-
 func TestUploadRatePolicyWithoutSchedule(t *testing.T) {
-	policy, err := newUploadRatePolicy(config.Upload{RateLimitBytesPerSecond: testUploadRate})
+	_, policy, err := validateUploadRateSettings(UploadRateSettings{RateLimitBytesPerSecond: testUploadRate})
 	if err != nil {
-		t.Fatalf("newUploadRatePolicy: %v", err)
+		t.Fatalf("validateUploadRateSettings: %v", err)
 	}
 	if !policy.enabled() || policy.scheduled {
 		t.Fatalf("policy = %+v, want an enabled all-day limit", policy)
@@ -194,15 +197,51 @@ func TestUploadRatePolicyWithoutSchedule(t *testing.T) {
 		t.Fatalf("nextTransition = %s, want zero without a window", next)
 	}
 
-	disabled, err := newUploadRatePolicy(config.Upload{})
+	_, disabled, err := validateUploadRateSettings(UploadRateSettings{})
 	if err != nil {
-		t.Fatalf("newUploadRatePolicy: %v", err)
+		t.Fatalf("validateUploadRateSettings: %v", err)
 	}
 	if disabled.enabled() {
 		t.Fatalf("policy = %+v, want upload limiting disabled", disabled)
 	}
 	if got := disabled.effectiveLimit(when); got != rate.Inf {
 		t.Fatalf("disabled effectiveLimit = %v, want rate.Inf", got)
+	}
+}
+
+// scriptedWait records the boundary a round armed and blocks until the runner is
+// woken or the context ends. It mirrors the production wait while letting a test
+// observe each round without sleeping.
+type scriptedWait struct {
+	nexts   chan time.Time
+	nows    chan time.Time
+	rounds  chan struct{}
+	release chan struct{}
+}
+
+func newScriptedWait() *scriptedWait {
+	return &scriptedWait{
+		nexts:   make(chan time.Time, 8),
+		nows:    make(chan time.Time, 8),
+		rounds:  make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *scriptedWait) wait(ctx context.Context, next, now time.Time, wake <-chan struct{}) bool {
+	s.nexts <- next
+	s.nows <- now
+	select {
+	case s.rounds <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-wake:
+		return true
+	case <-s.release:
+		return true
 	}
 }
 
@@ -214,18 +253,9 @@ func TestUploadRateControllerSwitchesAtBoundaries(t *testing.T) {
 
 	loc := time.FixedZone("test", 8*60*60)
 	current := time.Date(2026, 3, 1, 7, 0, 0, 0, loc)
-	waits := make(chan time.Duration, 4)
-	release := make(chan struct{})
 	controller.now = func() time.Time { return current }
-	controller.wait = func(ctx context.Context, d time.Duration) bool {
-		waits <- d
-		select {
-		case <-ctx.Done():
-			return false
-		case <-release:
-			return true
-		}
-	}
+	waits := newScriptedWait()
+	controller.wait = waits.wait
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -236,26 +266,26 @@ func TestUploadRateControllerSwitchesAtBoundaries(t *testing.T) {
 	}()
 
 	// The first wait is armed only after the startup policy has been applied.
-	if got := <-waits; got != time.Hour {
-		t.Fatalf("wait before 08:00 = %s, want 1h", got)
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 1, 8, 0, 0, 0, loc)) {
+		t.Fatalf("first boundary = %s, want the 08:00 start", got.Format(time.RFC3339))
 	}
 	if controller.limitedNow() {
 		t.Fatal("controller is limited before the window opens")
 	}
 
 	current = time.Date(2026, 3, 1, 8, 0, 0, 0, loc)
-	release <- struct{}{}
-	if got := <-waits; got != 14*time.Hour {
-		t.Fatalf("wait after 08:00 = %s, want 14h", got)
+	waits.release <- struct{}{}
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 1, 22, 0, 0, 0, loc)) {
+		t.Fatalf("boundary after 08:00 = %s, want 22:00", got.Format(time.RFC3339))
 	}
 	if !controller.limitedNow() || controller.limiter.Limit() != rate.Limit(testUploadRate) {
 		t.Fatalf("limit at 08:00 = %v, want %d", controller.limiter.Limit(), testUploadRate)
 	}
 
 	current = time.Date(2026, 3, 1, 22, 0, 0, 0, loc)
-	release <- struct{}{}
-	if got := <-waits; got != 10*time.Hour {
-		t.Fatalf("wait after 22:00 = %s, want 10h", got)
+	waits.release <- struct{}{}
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 2, 8, 0, 0, 0, loc)) {
+		t.Fatalf("boundary after 22:00 = %s, want the next day's 08:00", got.Format(time.RFC3339))
 	}
 	if controller.limitedNow() {
 		t.Fatal("controller is still limited after the window closes")
@@ -273,7 +303,7 @@ func TestUploadRateControllerSwitchesAtBoundaries(t *testing.T) {
 // invariant: a single clock reading decides both the state to apply and the
 // next boundary. A clock that crosses the start boundary between two reads must
 // not be able to skip the window, so the wait armed from the 07:59 snapshot has
-// to target the 08:00 start (one minute) and not the 22:00 window end.
+// to target the 08:00 start and not the 22:00 window end.
 func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
 	policy := scheduledUploadPolicy(t, "08:00", "22:00")
 	controller := newUploadRateController(policy, logging.Discard())
@@ -291,17 +321,8 @@ func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
 		}
 		return snapshots[index]
 	}
-	waits := make(chan time.Duration, 4)
-	release := make(chan struct{})
-	controller.wait = func(ctx context.Context, d time.Duration) bool {
-		waits <- d
-		select {
-		case <-ctx.Done():
-			return false
-		case <-release:
-			return true
-		}
-	}
+	waits := newScriptedWait()
+	controller.wait = waits.wait
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -311,8 +332,8 @@ func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
 		controller.run(ctx)
 	}()
 
-	if got := <-waits; got != time.Minute {
-		t.Fatalf("first wait = %s, want 1m to the start boundary; a second, later clock read would have targeted the 22:00 end instead", got)
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 1, 8, 0, 0, 0, loc)) {
+		t.Fatalf("first boundary = %s, want 08:00; a second, later clock read would have armed 22:00 instead", got.Format(time.RFC3339))
 	}
 	if got := reads.Load(); got != 1 {
 		t.Fatalf("clock reads in the first round = %d, want exactly one snapshot per round", got)
@@ -321,9 +342,9 @@ func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
 		t.Fatal("state at the 07:59 snapshot must be unlimited")
 	}
 
-	release <- struct{}{}
-	if got := <-waits; got != 13*time.Hour+59*time.Minute+59*time.Second {
-		t.Fatalf("second wait = %s, want 13h59m59s to the end boundary", got)
+	waits.release <- struct{}{}
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 1, 22, 0, 0, 0, loc)) {
+		t.Fatalf("second boundary = %s, want 22:00", got.Format(time.RFC3339))
 	}
 	if got := reads.Load(); got != 2 {
 		t.Fatalf("clock reads after the second round = %d, want 2", got)
@@ -340,24 +361,98 @@ func TestUploadRateControllerUsesOneSnapshotPerRound(t *testing.T) {
 	}
 }
 
-func TestUploadRateControllerWithoutScheduleExits(t *testing.T) {
-	policy, err := newUploadRatePolicy(config.Upload{RateLimitBytesPerSecond: testUploadRate})
+// TestUploadRateControllerWaitsForWakeWithoutBoundary covers a policy with no
+// upcoming boundary: the runner must not arm a timer, and an update must still
+// take effect immediately through the wake channel.
+func TestUploadRateControllerWaitsForWakeWithoutBoundary(t *testing.T) {
+	_, disabled, err := validateUploadRateSettings(UploadRateSettings{})
 	if err != nil {
-		t.Fatalf("newUploadRatePolicy: %v", err)
+		t.Fatalf("validateUploadRateSettings: %v", err)
 	}
-	controller := newUploadRateController(policy, logging.Discard())
+	controller := newUploadRateController(disabled, logging.Discard())
+	waits := newScriptedWait()
+	controller.wait = waits.wait
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		controller.run(context.Background())
+		controller.run(ctx)
 	}()
+
+	if got := <-waits.nexts; !got.IsZero() {
+		t.Fatalf("boundary for a disabled policy = %s, want none", got.Format(time.RFC3339))
+	}
+	if controller.limitedNow() {
+		t.Fatal("disabled policy must start unlimited")
+	}
+
+	_, allDay, err := validateUploadRateSettings(UploadRateSettings{RateLimitBytesPerSecond: testUploadRate})
+	if err != nil {
+		t.Fatalf("validateUploadRateSettings: %v", err)
+	}
+	controller.setPolicy(allDay, time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC))
+
+	if got := <-waits.nexts; !got.IsZero() {
+		t.Fatalf("boundary after the update = %s, want none for an all-day limit", got.Format(time.RFC3339))
+	}
+	if !controller.limitedNow() || controller.limiter.Limit() != rate.Limit(testUploadRate) {
+		t.Fatalf("limit after the update = %v, want %d", controller.limiter.Limit(), testUploadRate)
+	}
+
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("controller loop did not exit without a schedule")
+		t.Fatal("controller did not exit after cancellation")
 	}
-	if controller.limiter.Limit() != rate.Limit(testUploadRate) {
-		t.Fatalf("limit = %v, want %d", controller.limiter.Limit(), testUploadRate)
+}
+
+// TestUploadRateControllerRearmsTimerOnScheduleUpdate proves an update replaces
+// the armed boundary: the runner must wake, apply the new limit, and re-arm for
+// the new policy instead of sleeping until the old policy's boundary.
+func TestUploadRateControllerRearmsTimerOnScheduleUpdate(t *testing.T) {
+	policy := scheduledUploadPolicy(t, "08:00", "22:00")
+	controller := newUploadRateController(policy, logging.Discard())
+
+	loc := time.FixedZone("test", 8*60*60)
+	current := time.Date(2026, 3, 1, 7, 0, 0, 0, loc)
+	controller.now = func() time.Time { return current }
+	waits := newScriptedWait()
+	controller.wait = waits.wait
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.run(ctx)
+	}()
+
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 1, 8, 0, 0, 0, loc)) {
+		t.Fatalf("initial boundary = %s, want 08:00", got.Format(time.RFC3339))
+	}
+
+	// A window that already closed at 07:00 leaves the limit unlimited now and
+	// arms the next day's window instead of the old 08:00 boundary.
+	_, updated, err := validateUploadRateSettings(settingsForWindow("06:00", "07:00"))
+	if err != nil {
+		t.Fatalf("validateUploadRateSettings: %v", err)
+	}
+	controller.setPolicy(updated, current)
+
+	if got := <-waits.nexts; !got.Equal(time.Date(2026, 3, 2, 6, 0, 0, 0, loc)) {
+		t.Fatalf("boundary after the update = %s, want the new policy's next opening", got.Format(time.RFC3339))
+	}
+	if controller.limitedNow() {
+		t.Fatal("the updated window is already closed at 07:00, want unlimited")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller did not exit after cancellation")
 	}
 }

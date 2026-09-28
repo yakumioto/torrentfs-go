@@ -38,9 +38,6 @@ var (
 	errExposedNoAuth        = errors.New("exposing a non-loopback address requires enabled http.auth")
 	errLogLevel             = errors.New("must be one of debug, info, warn, error")
 	errLogFormat            = errors.New("must be one of text, json")
-	errNonNegative          = errors.New("must not be negative")
-	errUploadScheduleTime   = errors.New("must use 24-hour HH:MM")
-	errUploadScheduleOrder  = errors.New("start must be before end")
 )
 
 const (
@@ -89,21 +86,6 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 	}
 }
 
-// ParseUploadScheduleTime parses a schedule boundary as minutes after midnight.
-func ParseUploadScheduleTime(raw string) (int, error) {
-	if len(raw) != 5 || raw[2] != ':' ||
-		raw[0] < '0' || raw[0] > '9' || raw[1] < '0' || raw[1] > '9' ||
-		raw[3] < '0' || raw[3] > '9' || raw[4] < '0' || raw[4] > '9' {
-		return 0, errUploadScheduleTime
-	}
-	hour := int(raw[0]-'0')*10 + int(raw[1]-'0')
-	minute := int(raw[3]-'0')*10 + int(raw[4]-'0')
-	if hour > 23 || minute > 59 {
-		return 0, errUploadScheduleTime
-	}
-	return hour*60 + minute, nil
-}
-
 // Config holds torrentfs runtime settings.
 type Config struct {
 	Connections Connections `toml:"connections"`
@@ -111,23 +93,8 @@ type Config struct {
 	Cache       Cache       `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
 	HTTP        HTTP        `toml:"http"`
-	Upload      Upload      `toml:"upload"`
 	Log         Log         `toml:"log"`
 	Mount       Mount       `toml:"mount"`
-}
-
-// Upload groups aggregate BitTorrent peer payload upload settings.
-type Upload struct {
-	// RateLimitBytesPerSecond is the session-wide upload rate in bytes per second.
-	// Zero disables upload limiting.
-	RateLimitBytesPerSecond int64          `toml:"rate_limit_bytes_per_second"`
-	Schedule                UploadSchedule `toml:"schedule"`
-}
-
-// UploadSchedule describes one same-day half-open upload-limited window.
-type UploadSchedule struct {
-	Start string `toml:"start"`
-	End   string `toml:"end"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -314,42 +281,6 @@ func (c Config) Validate() error {
 		default:
 			return invalid("log.format", errLogFormat)
 		}
-	}
-	if err := validateUpload(c.Upload); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateUpload(upload Upload) error {
-	if upload.RateLimitBytesPerSecond < 0 {
-		return invalid("upload.rate_limit_bytes_per_second", errNonNegative)
-	}
-
-	hasStart := upload.Schedule.Start != ""
-	hasEnd := upload.Schedule.End != ""
-	if !hasStart && !hasEnd {
-		return nil
-	}
-	if upload.RateLimitBytesPerSecond <= 0 {
-		return invalid("upload.rate_limit_bytes_per_second", errPositive)
-	}
-	if !hasStart {
-		return invalid("upload.schedule.start", errRequired)
-	}
-	if !hasEnd {
-		return invalid("upload.schedule.end", errRequired)
-	}
-	start, err := ParseUploadScheduleTime(upload.Schedule.Start)
-	if err != nil {
-		return invalid("upload.schedule.start", err)
-	}
-	end, err := ParseUploadScheduleTime(upload.Schedule.End)
-	if err != nil {
-		return invalid("upload.schedule.end", err)
-	}
-	if start >= end {
-		return invalid("upload.schedule.end", errUploadScheduleOrder)
 	}
 	return nil
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"golang.org/x/time/rate"
 
-	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -27,29 +26,26 @@ const (
 	uploadRateTestBurstBytes     = 64 << 10
 )
 
-// uploadRateWindow builds a same-day upload window that opens at the current
-// local minute, plus one instant inside it and one after it. The real close
-// boundary is an hour away, so the session's own scheduler cannot race the
-// assertions. It skips when the local clock leaves no room on this day.
-func uploadRateWindow(t *testing.T) (start, end string, inside, outside time.Time) {
+// uploadRateWindows returns one same-day schedule that contains the current
+// minute and one that already closed, both built from the running clock so the
+// assertions never depend on when the suite runs. It skips when the local clock
+// leaves no room for either window on this day.
+func uploadRateWindows(t *testing.T) (open, closed *session.UploadRateSchedule) {
 	t.Helper()
 	const windowMinutes = 60
 	now := time.Now()
-	openMinute := now.Hour()*60 + now.Minute()
-	if openMinute+windowMinutes >= 24*60 {
-		t.Skipf("local time %s leaves no room for a same-day upload window", now.Format("15:04"))
+	minute := now.Hour()*60 + now.Minute()
+	if minute < windowMinutes || minute+windowMinutes >= 24*60 {
+		t.Skipf("local time %s leaves no room for both same-day upload windows", now.Format("15:04"))
 	}
-	start = fmt.Sprintf("%02d:%02d", openMinute/60, openMinute%60)
-	closeMinute := openMinute + windowMinutes
-	end = fmt.Sprintf("%02d:%02d", closeMinute/60, closeMinute%60)
-	inside = time.Date(now.Year(), now.Month(), now.Day(), openMinute/60, openMinute%60, 0, 0, time.Local).
-		Add(20 * time.Minute)
-	outside = inside.Add(windowMinutes * time.Minute)
-	return start, end, inside, outside
+	format := func(value int) string { return fmt.Sprintf("%02d:%02d", value/60, value%60) }
+	open = &session.UploadRateSchedule{Start: format(minute), End: format(minute + windowMinutes)}
+	closed = &session.UploadRateSchedule{Start: format(minute - windowMinutes), End: format(minute)}
+	return open, closed
 }
 
-// uploadRateSwarm is a loopback seeder under a rate window and an unlimited
-// leecher that reads the payload it uploads.
+// uploadRateSwarm is a loopback seeder under a persisted upload-limit window and
+// an unlimited leecher that reads the payload it uploads.
 type uploadRateSwarm struct {
 	ctx            context.Context
 	seeder         *session.Session
@@ -58,13 +54,17 @@ type uploadRateSwarm struct {
 	leecherTorrent *session.Torrent
 	hash           metainfo.Hash
 	content        []byte
-	inside         time.Time
-	outside        time.Time
+
+	openWindow   *session.UploadRateSchedule
+	closedWindow *session.UploadRateSchedule
 
 	readDone chan error
 	readBuf  []byte
 }
 
+// newUploadRateSwarm seeds pieces on the seeder and installs the limiting window
+// through the public settings API, so the persistence and application paths are
+// the same ones the Web UI uses.
 func newUploadRateSwarm(t *testing.T, size int) *uploadRateSwarm {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -78,12 +78,11 @@ func newUploadRateSwarm(t *testing.T, size int) *uploadRateSwarm {
 	}
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 	hashHex := hash.HexString()
-	start, end, inside, outside := uploadRateWindow(t)
+	open, closed := uploadRateWindows(t)
 
-	seederCfg := testConfig()
-	seederCfg.Upload.RateLimitBytesPerSecond = uploadRateTestBytesPerSecond
-	seederCfg.Upload.Schedule = config.UploadSchedule{Start: start, End: end}
-	seeder := newLivingSession(t, seederCfg, filepath.Join(work, "seeder-data"), func(cc *session.TorrentClientConfig) {
+	seeder := newLivingSession(t, testConfig(), filepath.Join(work, "seeder-data"), func(cc *session.TorrentClientConfig) {
+		// A small burst keeps a limited transfer slow enough to observe while
+		// still fitting one request chunk.
 		cc.UploadRateLimiter.SetBurst(uploadRateTestBurstBytes)
 	})
 	leecher := newLivingSession(t, testConfig(), filepath.Join(work, "leecher-data"), nil)
@@ -95,6 +94,13 @@ func newUploadRateSwarm(t *testing.T, size int) *uploadRateSwarm {
 			t.Errorf("close seeder: %v", err)
 		}
 	})
+
+	if _, err := seeder.SetUploadRateSettings(ctx, session.UploadRateSettings{
+		RateLimitBytesPerSecond: uploadRateTestBytesPerSecond,
+		Schedule:                open,
+	}); err != nil {
+		t.Fatalf("SetUploadRateSettings: %v", err)
+	}
 
 	if err := seeder.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("seeder AddTorrent: %v", err)
@@ -116,10 +122,8 @@ func newUploadRateSwarm(t *testing.T, size int) *uploadRateSwarm {
 	if err := waitFor(ctx, func() bool { return tracker.peerCount(hashHex) >= 2 }); err != nil {
 		t.Fatalf("seeder and leecher never connected: %v", err)
 	}
-	// Pin the policy to a known in-window instant so the assertions do not
-	// depend on when the suite runs.
-	if limit, managed := seeder.ApplyUploadRatePolicyForTest(inside); !managed || limit != rate.Limit(uploadRateTestBytesPerSecond) {
-		t.Fatalf("in-window limit = %v (managed=%t), want %d", limit, managed, uploadRateTestBytesPerSecond)
+	if limit, _ := seeder.UploadRateLimitForTest(); limit != rate.Limit(uploadRateTestBytesPerSecond) {
+		t.Fatalf("in-window limit = %v, want %d", limit, uploadRateTestBytesPerSecond)
 	}
 
 	return &uploadRateSwarm{
@@ -130,23 +134,23 @@ func newUploadRateSwarm(t *testing.T, size int) *uploadRateSwarm {
 		leecherTorrent: leecherTorrent,
 		hash:           hash,
 		content:        content,
-		inside:         inside,
-		outside:        outside,
+		openWindow:     open,
+		closedWindow:   closed,
 	}
 }
 
-// startRead begins reading the whole payload through the leecher. The read
-// stays pending until enough payload has been uploaded to satisfy it.
+// startRead begins reading the whole payload through the leecher. The read stays
+// pending until enough payload has been uploaded to satisfy it.
 func (s *uploadRateSwarm) startRead(t *testing.T) {
 	t.Helper()
 	reader, err := s.leecher.OpenFile(s.hash, "payload.bin")
 	if err != nil {
 		t.Fatalf("leecher OpenFile: %v", err)
 	}
-	s.readBuf = make([]byte, len(s.content))
+	s.readBuf = make([]byte, int(s.leecherTorrent.Length()))
 	s.readDone = make(chan error, 1)
 	go func() {
-		_, err := io.ReadFull(io.NewSectionReader(reader, 0, int64(len(s.content))), s.readBuf)
+		_, err := io.ReadFull(io.NewSectionReader(reader, 0, int64(len(s.readBuf))), s.readBuf)
 		if err == nil && !bytes.Equal(s.readBuf, s.content) {
 			err = errors.New("read payload differs from the seeder content")
 		}
@@ -173,16 +177,16 @@ func (s *uploadRateSwarm) waitForFirstUpload(t *testing.T) {
 	}
 }
 
-// TestUploadRateLimitDelaysPeerPayload proves the configured limit is enforced
-// on real peer payload: a one-second sample stays well below what loopback
-// delivers unlimited, and the payload is still incomplete while limited.
+// TestUploadRateLimitDelaysPeerPayload proves the persisted limit is enforced on
+// real peer payload: a one-second sample stays well below what loopback delivers
+// unlimited, and the payload is still incomplete while limited.
 func TestUploadRateLimitDelaysPeerPayload(t *testing.T) {
 	swarm := newUploadRateSwarm(t, 1<<20)
 	swarm.startRead(t)
 	swarm.waitForFirstUpload(t)
 
-	if limit, managed := swarm.seeder.UploadRateLimitForTest(); !managed || limit != rate.Limit(uploadRateTestBytesPerSecond) {
-		t.Fatalf("seeder limit during the sample = %v (managed=%t), want %d", limit, managed, uploadRateTestBytesPerSecond)
+	if limit, _ := swarm.seeder.UploadRateLimitForTest(); limit != rate.Limit(uploadRateTestBytesPerSecond) {
+		t.Fatalf("seeder limit during the sample = %v, want %d", limit, uploadRateTestBytesPerSecond)
 	}
 	before := swarm.seeder.RuntimeStats().UploadedBytes
 	time.Sleep(time.Second)
@@ -197,25 +201,27 @@ func TestUploadRateLimitDelaysPeerPayload(t *testing.T) {
 		t.Fatalf("the whole payload transferred while limited (%d bytes)", cached)
 	}
 
-	if limit, _ := swarm.seeder.ApplyUploadRatePolicyForTest(swarm.outside); limit != rate.Inf {
-		t.Fatalf("out-of-window limit = %v, want rate.Inf", limit)
+	// Turning the limit off through the settings API is the same path the Web UI
+	// takes, and it must release the upload without restarting anything.
+	if _, err := swarm.seeder.SetUploadRateSettings(swarm.ctx, session.UploadRateSettings{}); err != nil {
+		t.Fatalf("disable upload limiting: %v", err)
+	}
+	if limit, _ := swarm.seeder.UploadRateLimitForTest(); limit != rate.Inf {
+		t.Fatalf("limit after disabling = %v, want rate.Inf", limit)
 	}
 	swarm.waitRead(t)
 }
 
-// TestUploadRateScheduleSwitchKeepsUploadRunning proves a boundary switch does
-// not restart or interrupt work: a read that began while limited finishes
-// across the switch on the same session and torrent, with the counters still
-// growing.
+// TestUploadRateScheduleSwitchKeepsUploadRunning proves a window change does not
+// restart or interrupt work: a read that began while limited finishes across the
+// switch on the same session and torrent, with the counters still growing and
+// the new window persisted.
 func TestUploadRateScheduleSwitchKeepsUploadRunning(t *testing.T) {
 	swarm := newUploadRateSwarm(t, 1<<20)
 	swarm.startRead(t)
 	swarm.waitForFirstUpload(t)
 
 	limited := swarm.seeder.RuntimeStats()
-	if limit, managed := swarm.seeder.UploadRateLimitForTest(); !managed || limit != rate.Limit(uploadRateTestBytesPerSecond) {
-		t.Fatalf("seeder limit at switch time = %v (managed=%t), want %d", limit, managed, uploadRateTestBytesPerSecond)
-	}
 	if int64(len(swarm.content)) <= limited.UploadedBytes {
 		t.Fatalf("seeder had already uploaded the whole payload (%d bytes) before the switch", limited.UploadedBytes)
 	}
@@ -227,8 +233,20 @@ func TestUploadRateScheduleSwitchKeepsUploadRunning(t *testing.T) {
 	default:
 	}
 
-	if limit, _ := swarm.seeder.ApplyUploadRatePolicyForTest(swarm.outside); limit != rate.Inf {
-		t.Fatalf("out-of-window limit = %v, want rate.Inf", limit)
+	// The new window closed at the current minute, so the payload is unlimited
+	// from now on while the schedule stays configured.
+	applied, err := swarm.seeder.SetUploadRateSettings(swarm.ctx, session.UploadRateSettings{
+		RateLimitBytesPerSecond: uploadRateTestBytesPerSecond,
+		Schedule:                swarm.closedWindow,
+	})
+	if err != nil {
+		t.Fatalf("SetUploadRateSettings: %v", err)
+	}
+	if applied.Schedule == nil || applied.Schedule.End != swarm.closedWindow.End {
+		t.Fatalf("applied settings = %+v, want the closed window", applied)
+	}
+	if limit, _ := swarm.seeder.UploadRateLimitForTest(); limit != rate.Inf {
+		t.Fatalf("limit outside the window = %v, want rate.Inf", limit)
 	}
 	swarm.waitRead(t)
 

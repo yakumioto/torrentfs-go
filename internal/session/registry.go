@@ -115,35 +115,58 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
-func writeFileAtomic(path string, data []byte) error {
+// writeFileAtomicPublished writes data through a temporary file, an fsync and an
+// atomic rename, reporting whether the rename committed. Once published is true
+// the new content is visible to every reader and to a restart even if the
+// following directory sync failed, so a caller that owns in-memory state must
+// adopt the new content instead of treating the error as "nothing changed".
+func writeFileAtomicPublished(path string, data []byte) (bool, error) {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".torrentfs-state-*.tmp")
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return false, err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return false, err
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return false, err
 	}
-	if err := syncDirectory(dir); err != nil {
-		return fmt.Errorf("sync directory %q: %w", dir, err)
+	if err := syncWrittenDirectory(dir); err != nil {
+		return true, fmt.Errorf("sync directory %q: %w", dir, err)
 	}
-	return nil
+	return true, nil
+}
+
+// atomicSyncDirectoryHook lets a test make the post-rename directory sync fail
+// so the published-but-unconfirmed path is reachable. Production leaves it nil.
+var atomicSyncDirectoryHook func(string) error
+
+func syncWrittenDirectory(dir string) error {
+	if atomicSyncDirectoryHook != nil {
+		return atomicSyncDirectoryHook(dir)
+	}
+	return syncDirectory(dir)
+}
+
+// writeFileAtomic is the error-only form of writeFileAtomicPublished, kept for
+// callers whose state does not need to distinguish a commit from a failure.
+func writeFileAtomic(path string, data []byte) error {
+	_, err := writeFileAtomicPublished(path, data)
+	return err
 }
 
 func renameNoReplace(oldPath, newPath string) error {

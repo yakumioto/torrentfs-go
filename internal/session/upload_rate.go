@@ -2,15 +2,12 @@ package session
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
 	"golang.org/x/time/rate"
-
-	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 // uploadRatePolicy is the compiled aggregate peer upload rule: one bytes/second
@@ -29,31 +26,32 @@ type uploadRatePolicy struct {
 	endLabel    string
 }
 
-// newUploadRatePolicy compiles a validated upload configuration. A non-positive
-// rate compiles to the disabled policy. The error path exists for callers that
-// skip validation; Load and newWithClientConfig validate first.
-func newUploadRatePolicy(upload config.Upload) (uploadRatePolicy, error) {
-	if upload.RateLimitBytesPerSecond <= 0 {
-		return uploadRatePolicy{}, nil
+// compileUploadRatePolicy compiles normalized settings into the runtime rule. A
+// non-positive rate compiles to the disabled policy. Validation has already
+// rejected a malformed window, so a boundary that does not parse is a disabled
+// policy rather than a second, competing error path.
+func compileUploadRatePolicy(settings UploadRateSettings) uploadRatePolicy {
+	if settings.RateLimitBytesPerSecond <= 0 {
+		return uploadRatePolicy{}
 	}
-	policy := uploadRatePolicy{limit: rate.Limit(upload.RateLimitBytesPerSecond)}
-	if upload.Schedule.Start == "" && upload.Schedule.End == "" {
-		return policy, nil
+	policy := uploadRatePolicy{limit: rate.Limit(settings.RateLimitBytesPerSecond)}
+	if settings.Schedule == nil {
+		return policy
 	}
-	start, err := config.ParseUploadScheduleTime(upload.Schedule.Start)
+	start, err := parseUploadScheduleTime(settings.Schedule.Start)
 	if err != nil {
-		return uploadRatePolicy{}, fmt.Errorf("upload.schedule.start: %w", err)
+		return uploadRatePolicy{}
 	}
-	end, err := config.ParseUploadScheduleTime(upload.Schedule.End)
+	end, err := parseUploadScheduleTime(settings.Schedule.End)
 	if err != nil {
-		return uploadRatePolicy{}, fmt.Errorf("upload.schedule.end: %w", err)
+		return uploadRatePolicy{}
 	}
 	policy.scheduled = true
 	policy.startMinute = start
 	policy.endMinute = end
-	policy.startLabel = upload.Schedule.Start
-	policy.endLabel = upload.Schedule.End
-	return policy, nil
+	policy.startLabel = settings.Schedule.Start
+	policy.endLabel = settings.Schedule.End
+	return policy
 }
 
 // enabled reports whether any upload limiting is configured.
@@ -126,15 +124,31 @@ func (p uploadRatePolicy) nextTransition(t time.Time) time.Time {
 // uploadRateController owns one session's private upload limiter and keeps it in
 // step with the daily window. A transition changes only the limiter's limit:
 // the client, its torrents and every in-flight upload keep running.
+//
+// The policy can be replaced at runtime from the settings API, so the controller
+// runs for the whole session lifetime and guards the policy with its own mutex.
 type uploadRateController struct {
 	limiter *rate.Limiter
-	policy  uploadRatePolicy
 	logger  *slog.Logger
+
+	// mu guards policy. Lock order across the package is Session.mu ->
+	// controller.mu; the runner never takes Session.mu, and waiters hold no
+	// lock while they sleep.
+	mu     sync.Mutex
+	policy uploadRatePolicy
+	// wake has capacity one: an update makes the sleeping runner re-read the
+	// policy immediately instead of waiting for a boundary of the old one.
+	wake chan struct{}
 
 	// now and wait are seams the tests use to drive boundaries without sleeping.
 	now  func() time.Time
-	wait func(ctx context.Context, d time.Duration) bool
+	wait uploadRateWaitFunc
 }
+
+// uploadRateWaitFunc blocks until the next boundary, a wake signal, or ctx ends.
+// It reports false only when ctx ended. A zero next means the policy has no
+// upcoming boundary (disabled or all-day), so the wait ends only on a wake.
+type uploadRateWaitFunc func(ctx context.Context, next, now time.Time, wake <-chan struct{}) bool
 
 // newUploadRateController builds the private limiter with the limit in force at
 // construction, so the client never starts under a stale policy. A zero burst
@@ -143,28 +157,26 @@ func newUploadRateController(policy uploadRatePolicy, logger *slog.Logger) *uplo
 	now := time.Now()
 	return &uploadRateController{
 		limiter: rate.NewLimiter(policy.effectiveLimit(now), 0),
-		policy:  policy,
 		logger:  logger,
+		policy:  policy,
+		wake:    make(chan struct{}, 1),
 		now:     time.Now,
-		wait:    waitFor,
+		wait:    waitForBoundary,
 	}
 }
 
 // configure attaches the private limiter to the client configuration. It must
 // run before the client is created; the client keeps the pointer, so later
-// SetLimit calls are visible to it. The default unlimited limiter is left
-// untouched, which keeps an unconfigured session byte-for-byte unchanged.
+// SetLimit calls are visible to it. Every session installs its own limiter, even
+// with limiting disabled, because the settings API can enable it later without
+// replacing the pointer the client already holds.
 func (c *uploadRateController) configure(cfg *torrent.ClientConfig) {
 	cfg.UploadRateLimiter = c.limiter
 }
 
-// start registers the boundary scheduler on the session's background lifecycle.
-// Only a configured window needs a goroutine: without one the limit applies
-// from startup to shutdown.
+// start registers the scheduler on the session's background lifecycle. It runs
+// for the whole session because the policy can change at any time.
 func (c *uploadRateController) start(ctx context.Context, bgMu *sync.Mutex, bgWg *sync.WaitGroup) {
-	if !c.policy.scheduled {
-		return
-	}
 	bgMu.Lock()
 	bgWg.Add(1)
 	bgMu.Unlock()
@@ -174,8 +186,28 @@ func (c *uploadRateController) start(ctx context.Context, bgMu *sync.Mutex, bgWg
 	}()
 }
 
-// run applies the current policy and then re-evaluates it at every boundary
-// until ctx ends.
+// setPolicy installs policy and applies the limit in force at when, then wakes
+// the runner so it arms a boundary for the new policy instead of sleeping until
+// one of the old policy's boundaries. Callers hold Session.mu, which orders
+// concurrent updates against each other and against Close.
+func (c *uploadRateController) setPolicy(policy uploadRatePolicy, when time.Time) {
+	c.mu.Lock()
+	c.policy = policy
+	c.applyLocked(when)
+	c.mu.Unlock()
+	c.signalWake()
+}
+
+// signalWake wakes the runner without blocking when a signal is already pending.
+func (c *uploadRateController) signalWake() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+// run applies the current policy and then re-evaluates it at every boundary or
+// update until ctx ends.
 //
 // Each round takes a single reading of the clock and derives both the state to
 // apply and the next boundary from that one snapshot. Reading the clock twice
@@ -185,12 +217,11 @@ func (c *uploadRateController) start(ctx context.Context, bgMu *sync.Mutex, bgWg
 func (c *uploadRateController) run(ctx context.Context) {
 	for {
 		now := c.now()
-		c.apply(now)
-		next := c.policy.nextTransition(now)
-		if next.IsZero() {
-			return
-		}
-		if !c.wait(ctx, next.Sub(now)) {
+		c.mu.Lock()
+		policy := c.policy
+		c.applyLocked(now)
+		c.mu.Unlock()
+		if !c.wait(ctx, policy.nextTransition(now), now, c.wake) {
 			return
 		}
 		// A late or early wakeup is handled by the next round: it re-reads the
@@ -199,10 +230,12 @@ func (c *uploadRateController) run(ctx context.Context) {
 	}
 }
 
-// apply moves the limiter to the limit in force at when. It logs only a real
-// change so a re-evaluation at startup does not repeat the ready record.
-func (c *uploadRateController) apply(when time.Time) {
-	limit := c.policy.effectiveLimit(when)
+// applyLocked moves the limiter to the limit the current policy puts in force at
+// when. It logs only a real change so a re-evaluation at startup does not repeat
+// the ready record. The caller holds c.mu.
+func (c *uploadRateController) applyLocked(when time.Time) {
+	policy := c.policy
+	limit := policy.effectiveLimit(when)
 	if limit == c.limiter.Limit() {
 		return
 	}
@@ -211,10 +244,10 @@ func (c *uploadRateController) apply(when time.Time) {
 	c.limiter.SetLimit(limit)
 	c.logger.Info("upload rate limit changed",
 		"limited", limit != rate.Inf,
-		"rate_limit_bytes_per_second", int64(c.policy.limit),
-		"schedule_start", c.policy.startLabel,
-		"schedule_end", c.policy.endLabel,
-		"next_boundary", c.policy.nextTransition(when),
+		"rate_limit_bytes_per_second", int64(policy.limit),
+		"schedule_start", policy.startLabel,
+		"schedule_end", policy.endLabel,
+		"next_boundary", policy.nextTransition(when),
 	)
 }
 
@@ -223,14 +256,28 @@ func (c *uploadRateController) limitedNow() bool {
 	return c.limiter.Limit() != rate.Inf
 }
 
-// waitFor blocks for d and reports whether the wait completed before ctx ended.
-func waitFor(ctx context.Context, d time.Duration) bool {
+// waitForBoundary sleeps until the next boundary, a wake signal, or ctx ends.
+func waitForBoundary(ctx context.Context, next, now time.Time, wake <-chan struct{}) bool {
+	if next.IsZero() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-wake:
+			return true
+		}
+	}
+	d := next.Sub(now)
+	if d < 0 {
+		d = 0
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false
 	case <-timer.C:
+		return true
+	case <-wake:
 		return true
 	}
 }

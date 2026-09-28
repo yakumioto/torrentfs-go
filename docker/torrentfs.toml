@@ -28,19 +28,6 @@ bootstrap_nodes = []
 [proxy]
 socks5_url = ""
 
-[upload]
-# Aggregate peer payload upload rate in bytes per second, summed over all
-# torrents and peers. 0 keeps the image unlimited. HTTP request bodies are
-# capped separately by http.max_upload_bytes.
-rate_limit_bytes_per_second = 0
-
-[upload.schedule]
-# Optional daily window in the process-local time zone, 24-hour HH:MM, half-open
-# [start, end); outside it uploads are unlimited. Both bounds must be set
-# together and start must be before end. The image's zone is usually UTC.
-start = ""
-end = ""
-
 [cache]
 # 2 GiB suits a host with about 4 GB of RAM. Override for smaller containers:
 # set this to roughly 50-60% of the container memory limit.

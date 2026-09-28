@@ -61,24 +61,6 @@ bootstrap_nodes = []
 # Empty disables SOCKS5. Use socks5:// or socks5h://, optionally with auth.
 socks5_url = ""
 
-[upload]
-# Aggregate BitTorrent peer payload upload rate in bytes per second (not bits),
-# summed over every torrent and peer in this session. HTTP request bodies are
-# capped separately by http.max_upload_bytes. 0 disables upload limiting, which
-# is the default; the process reads this only at startup.
-rate_limit_bytes_per_second = 0
-
-[upload.schedule]
-# Optional daily window in the process-local time zone, minute precision,
-# 24-hour HH:MM. Within [start, end) the rate above applies; outside it uploads
-# are unlimited. Both bounds must be set together, start must be before end, and
-# the window may not cross midnight. Omit both for an all-day limit. The
-# schedule is fixed at startup; the running session switches at each boundary
-# without restarting or interrupting an in-flight upload. A container's local
-# zone is usually UTC.
-start = ""
-end = ""
-
 [cache]
 # Hard upper bound on the in-memory piece cache, in bytes. The default is
 # 2147483648 (2 GiB), which suits a host with about 4 GB of RAM; size it at

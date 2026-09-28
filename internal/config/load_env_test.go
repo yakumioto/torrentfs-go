@@ -39,9 +39,6 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION": "torrentfs-test/1.0",
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES":                      "2048",
-		"TORRENTFS_UPLOAD_RATE_LIMIT_BYTES_PER_SECOND":         "524288",
-		"TORRENTFS_UPLOAD_SCHEDULE_START":                      "07:30",
-		"TORRENTFS_UPLOAD_SCHEDULE_END":                        "21:45",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
 		httpUsernameEnvironment:                                "alice",
 		httpPasswordEnvironment:                                "password",
@@ -88,9 +85,6 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if got.HTTP.ListenAddr != "127.0.0.1:9090" || got.HTTP.MaxUploadBytes != 2048 {
 		t.Fatalf("http = %+v", got.HTTP)
 	}
-	if got.Upload.RateLimitBytesPerSecond != 524288 || got.Upload.Schedule != (UploadSchedule{Start: "07:30", End: "21:45"}) {
-		t.Fatalf("upload = %+v", got.Upload)
-	}
 	if !got.HTTP.Auth.Enabled || got.HTTP.Auth.Username != "alice" || got.HTTP.Auth.PasswordHashFile != "" || got.HTTP.Auth.PasswordHash == "password" {
 		t.Fatalf("auth = %+v", got.HTTP.Auth)
 	}
@@ -111,8 +105,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 22 {
-		t.Fatalf("environment binding count = %d, want 22", len(environmentBindings))
+	if len(environmentBindings) != 19 {
+		t.Fatalf("environment binding count = %d, want 19", len(environmentBindings))
 	}
 	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
 		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)
@@ -218,7 +212,6 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 		{name: "port", env: "TORRENTFS_CONNECTIONS_LISTEN_PORT", raw: "not-a-port", field: "connections.listen_port"},
 		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY_BYTES", raw: "not-a-capacity", field: "cache.capacity_bytes"},
 		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_BYTES", raw: "not-a-limit", field: "http.max_upload_bytes"},
-		{name: "upload rate", env: "TORRENTFS_UPLOAD_RATE_LIMIT_BYTES_PER_SECOND", raw: "not-a-rate", field: "upload.rate_limit_bytes_per_second"},
 		{name: "bool", env: "TORRENTFS_HTTP_AUTH_ENABLED", raw: "not-a-bool", field: "http.auth.enabled"},
 		{name: "mount bool", env: "TORRENTFS_MOUNT_ALLOW_OTHER", raw: "not-a-bool", field: "mount.allow_other"},
 		{name: "duration", env: "TORRENTFS_HTTP_AUTH_TOKEN_TTL", raw: "not-a-duration", field: "http.auth.token_ttl"},

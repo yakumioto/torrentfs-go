@@ -493,7 +493,7 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/<torrent-id>/subtitles" \
 | `413` | body 超过限制；登录 body 上限固定为 8 KiB，`.torrent` 与字幕上传上限由 `http.max_upload_bytes` 控制 |
 | `415` | 添加 torrent 时使用了 JSON 或 multipart 之外的 media type；字幕名称不匹配或扩展名不受支持 |
 | `500` | 未分类的内部 session/API 错误 |
-| `503` | 字幕存储目录不可用（缺失、被替换为符号链接或普通文件） |
+| `503` | 字幕存储目录不可用（缺失、被替换为符号链接或普通文件）；上传限速设置未写入或无法确认持久性 |
 | `507` | 字幕存储空间不足 |
 
 受保护 API 的 `401` 响应包含 `WWW-Authenticate: Bearer`。未知路由或方法可能由标准 HTTP handler 返回 `404`/`405`，不要把它们当作 SPA 页面或统一的业务 JSON 错误。
@@ -508,6 +508,7 @@ HTTP 服务启用时，同一个 listener 同时提供嵌入式 Web UI 和 `/api
 - 任务详情页头部提供“上传字幕”入口：选择服务端给出的目标视频、选择一个字幕文件、预览将写入的 torrent 相对路径和 FUSE 挂载路径，随后看到“字幕已上传”或“字幕已替换”。名称不匹配、扩展名不规范、目标属于 payload、任务正在删除、存储权限或空间问题都会显示可操作的提示。按钮不可用时旁边始终说明原因（无受支持视频、名称冲突、元数据未就绪或任务正在删除）。
 - 文件 tab 里另有独立的“已管理字幕”列表（目标视频、挂载路径、格式、大小、更新时间），它与 payload 文件表分开，不参与 piece 覆盖统计。
 - 删除由 UI 发起后会轮询 operation；请求失败、连接断开和 session 过期会显示对应的错误或重新登录状态。删除弹窗会明确说明 managed subtitles 一并清理，字幕清理失败时提示修复存储后再次删除以重试。
+- 顶部 Header 的齿轮按钮打开“上传限速设置”对话框（不新增路由）：启用开关、整数上传上限（B/s，并提示 1 MiB/s = 1048576 B/s）、可选的“仅在指定时段限速”开关与两个原生时间输入。保存成功后立即生效；写入失败会说明当前设置未改变，rename 之后目录同步失败则提示“新规则已生效但无法确认重启后仍能恢复”并提供重新读取入口。
 - 查询默认每 5 秒刷新；浏览器页面不可见时不会在后台继续刷新。
 - 认证开启时，UI 把 opaque Bearer token 放在当前 tab 的 `sessionStorage` 中；服务端 token 仍只存在 daemon 内存中。服务重启或 token 过期后需要重新登录。
 
@@ -543,20 +544,8 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 | `[proxy]` | `socks5_url` | 可选 `socks5://` 或 `socks5h://` 出站代理 |
 | `[cache]` | `capacity_bytes` | 内存 piece cache 硬上限，默认 2 GiB；必须为正数 |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
-| `[upload]` | `rate_limit_bytes_per_second`, `schedule.start`, `schedule.end` | BitTorrent peer payload 上传限速和可选的每日时段；`0` 表示不限速 |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
 | `[mount]` | `allow_other` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载 |
-
-上传限速示例（limit 为 `0` 时不限速，等于内置默认）：
-
-```toml
-[upload]
-rate_limit_bytes_per_second = 1048576
-
-[upload.schedule]
-start = "08:00"
-end = "22:00"
-```
 
 重要配置关系：
 
@@ -568,15 +557,12 @@ end = "22:00"
 - `disable_ipv4` 和 `disable_ipv6` 最多只能启用一个；同时禁用会留下没有传输协议的 session。
 - `cache.capacity_bytes` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，避免进程被 OOM kill。
 - `mount.allow_other` 默认关闭。启用后所有本机 UID 都可能读取挂载；非 root 挂载还需要 `/etc/fuse.conf` 中允许 `user_allow_other`。
-- `upload.rate_limit_bytes_per_second` 限制的是一个 session 内所有 torrent 和 peer 合计的 BitTorrent payload 上传速率，单位是 bytes/s（不是 bits/s），既不约束 `http.max_upload_bytes` 覆盖的 `.torrent`/字幕请求体，也不涵盖 tracker、握手等协议开销。`0` 表示不限速，也是默认值。
-- `upload.schedule` 描述一个每日同一自然日窗口，按半开区间 `[start, end)` 解释：`08:00` 整开始限速，`22:00` 整恢复不限速。时间按进程本地时区（`time.Local`，容器中通常是 UTC）的 24 小时制 `HH:MM`、分钟精度解析；`start` 与 `end` 必须成对出现且 `start < end`，不支持跨午夜、星期或多窗口，`start == end` 也会被拒绝。全天限速请只设置正数 rate 而省略整个 schedule。
-- `upload.schedule` 存在时 `rate_limit_bytes_per_second` 必须为正数；rate 为负数、缺单侧边界、时间格式非法或窗口逆序都会在启动校验阶段失败，避免静默采用意外时段。
-- 配置只在启动时读取，没有热重载。配置了 schedule 时，运行中的 session 会在每个时段边界自动切换限速，切换只调整同一个 limiter，不重建 client/torrent，也不中断正在进行的上传；进程被挂起或晚唤醒时按当前本地时间重新判定，而不是机械翻转旧状态。
-- 底层是 token bucket，允许客户端为发送一个完整请求 chunk 所需的有界 burst，因此该字段描述的是持续聚合速率，而不是每个瞬时网络包的硬上限；边界前已进入发送缓冲的 chunk 可能短暂跨越边界。
+- 静态 TOML/env 只在启动时读取，没有热重载；上传限速设置不属于静态配置，它由 Web UI/API 写入并立即生效，详见下文「上传限速设置」。
+- 底层的上传限速是 token bucket，允许客户端为发送一个完整请求 chunk 所需的有界 burst，因此描述的是持续聚合速率，而不是每个瞬时网络包的硬上限；边界前已进入发送缓冲的 chunk 可能短暂跨越边界。
 
 ### 环境变量与校验
 
-当前实际读取的 24 个受支持环境变量包括 22 个普通 field binding，以及一组供 HTTP 与 SMB 共用的特殊凭据变量；未列出的 TOML key 没有自动生成的环境变量：
+当前实际读取的 21 个受支持环境变量包括 19 个普通 field binding，以及一组供 HTTP 与 SMB 共用的特殊凭据变量；未列出的 TOML key 没有自动生成的环境变量：
 
 | 环境变量 | TOML key | 格式 |
 | --- | --- | --- |
@@ -594,9 +580,6 @@ end = "22:00"
 | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `identity.extended_handshake_client_version` | 字符串 |
 | `TORRENTFS_HTTP_LISTEN_ADDR` | `http.listen_addr` | 字符串；空值关闭 HTTP |
 | `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 十进制整数 |
-| `TORRENTFS_UPLOAD_RATE_LIMIT_BYTES_PER_SECOND` | `upload.rate_limit_bytes_per_second` | 十进制整数；`0` 表示不限速 |
-| `TORRENTFS_UPLOAD_SCHEDULE_START` | `upload.schedule.start` | `HH:MM`；空值清除文件中的该侧 |
-| `TORRENTFS_UPLOAD_SCHEDULE_END` | `upload.schedule.end` | `HH:MM`；空值清除文件中的该侧 |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
 | `TORRENTFS_USERNAME` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的用户名 |
 | `TORRENTFS_PASSWORD` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的单行明文密码 |
@@ -623,12 +606,38 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 - `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 `bootstrap_nodes` 项都必须是合法且端口在 `1..65535` 的 `host:port`。
 - `cache.capacity_bytes` 必须大于零；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
 - `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，日志 level/format 只能使用上表值。
-- `upload.rate_limit_bytes_per_second` 不能为负数；`upload.schedule.start` 与 `upload.schedule.end` 必须同时设置、严格使用 `HH:MM`（`8:00`、`24:00`、`08:60` 都非法）、且 `start < end`；配置了 schedule 却没有正数 rate 会在启动时失败。
 - HTTP listener 为空表示关闭；非空值必须是合法的 `host:port`。非 loopback listener 必须同时启用完整认证配置。
 - 认证关闭时 TOML 中的 username、password hash 和 hash file 必须全为空；认证开启且未使用共享 pair 时，`password_hash` 与 `password_hash_file` 必须恰好设置一个。
 - TOML hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。共享密码位于进程环境中，容器 metadata 也可能可见，不应将 Docker environment 当作 secret store。
 
 `TORRENTFS_FUSE_REQUIRED` 不是 daemon 配置，而是测试门禁。`TORRENTFS_PATHS_DATA_DIR` 是已移除的历史变量，不会恢复旧的磁盘 payload 路径。
+
+## 上传限速设置
+
+上传限速限制的是一个 Session 内所有 torrent 和 peer 合计的 BitTorrent payload 上传速率，单位是 **bytes/s**（不是 bits/s）。它不约束 `http.max_upload_bytes` 覆盖的 `.torrent`/字幕请求体，也不涵盖 tracker、握手等协议开销。
+
+这项设置**不是静态配置**：它没有 TOML key 和环境变量，由 Web UI（Header 齿轮 → “上传限速设置”）或同等的 HTTP API 写入，保存在当前 `torrents-dir` 的 `.metadata/upload_rate.json`，并在下次启动创建 BitTorrent client 之前自动加载。
+
+```text
+GET /api/v1/settings/upload-rate
+PUT /api/v1/settings/upload-rate
+```
+
+```json
+{ "rate_limit_bytes_per_second": 1048576,
+  "schedule": { "start": "08:00", "end": "22:00" } }
+```
+
+- `rate_limit_bytes_per_second = 0` 且 `schedule = null`：不限速（默认）。
+- rate 为正数且 `schedule = null`：全天限速。
+- rate 为正数且 schedule 非空：只在窗口内限速，窗口外不限速。
+- 时段按**服务端本地时间**（`time.Local`，容器中通常是 UTC）解释，使用 24 小时制 `HH:MM`、分钟精度和半开区间 `[start, end)`：`08:00` 整开始限速，`22:00` 整恢复不限速。
+- `start` 与 `end` 必须同时提供且 `start < end`，只支持同一自然日内的单窗口；不支持跨午夜、星期、节假日或多窗口。schedule 存在时 rate 必须为正数，非法取值返回 `400`。
+- 保存会立即生效，无需重启：daemon 在原地调整同一个上传限速器，不重建 client/torrent，也不中断正在进行的上传；时段切换同样如此，并已处理夏令时造成的缺失/重复小时。
+- 每个 `torrents-dir` 独立保存自己的设置。文件缺失等于不限速（旧部署升级路径），首次 UI 保存才创建该文件。
+- 保存先写临时文件、`fsync`、再原子 rename；rename 之后目录 `fsync` 失败时新规则**已经生效**，接口返回 `503` + `upload_rate_settings_durability_unconfirmed`（`applied: true`），表示重启后可能恢复为旧值。rename 之前失败返回 `503` + `upload_rate_settings_storage_unavailable`（`applied: false`），此时磁盘与运行中的限速都保持不变。
+- `.metadata/upload_rate.json` 是版本化的内部状态（`version: 1`）：文件损坏、含未知字段或版本不受支持时**启动会明确失败**，而不是静默退回不限速；删除或修复该文件即可恢复为默认不限速。
+- HTTP/Web UI 被禁用时没有前端入口，但已保存的设置仍会在 headless 启动时自动加载；此时只能通过手工编辑该文件（并重启）修改。
 
 ## 持久化状态与限制
 
@@ -641,6 +650,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
     ├── pending/<info-hash>.magnet # 尚未解析完成的磁力意图
     ├── state/<info-hash>.json      # 每个任务的 registry entry
     ├── subtitles/<info-hash>/…     # 该任务的 managed subtitles，镜像 torrent 相对路径
+    ├── upload_rate.json            # 该 torrents 目录的上传限速设置
     ├── layout_version              # 一次性旧布局迁移标记
     ├── peer_id                     # 该 torrents 目录的 20 字节 peer identity
     └── instance.lock               # 进程运行期间的独占锁
@@ -653,7 +663,7 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 - managed subtitle 与 torrent 自带文件分开保存：`subtitle` 只保存在 `.metadata/subtitles/<info-hash>/` 下，并按 torrent 相对路径镜像目录结构。启动时只为 `ready` 任务扫描并校验这份 overlay；`deleting`/`delete_failed` 任务的 hash 不会进入可见 index。
 - 启动扫描会清理上次崩溃留下的内部临时文件；发现不受管理的符号链接、设备或特殊文件，以及无法唯一对应视频的 sidecar，会让启动明确失败，而不是把不受信任的内容暴露到挂载点。
 - 删除任务（包括 prune）会同步清理 `.metadata/subtitles/<info-hash>`；只有该目录已不存在且父目录完成 `fsync` 后，operation 才会进入 `deleted`。
-- 配置只在启动时读取，修改 TOML 或环境变量后需要重启进程。
+- 静态 TOML/env 配置只在启动时读取，修改后需要重启进程；上传限速设置由 Web UI/API 持久化并实时应用，重启时自动恢复，详见「上传限速设置」。
 - 一个 `torrents` 目录同时只能由一个 torrentfs 进程使用。
 
 ## Docker
