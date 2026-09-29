@@ -71,7 +71,7 @@ describe('UploadRateSettingsDialog', () => {
     );
     renderDialog(fetchMock);
 
-    await waitFor(() => expect(screen.getByLabelText('上传上限（B/s）')).toHaveValue('1048576'));
+    await waitFor(() => expect(screen.getByLabelText('上传上限（带单位）')).toHaveValue('1MiB/s'));
     expect(screen.getByLabelText('开始时间')).toHaveValue('08:00');
     expect(screen.getByLabelText('结束时间')).toHaveValue('22:00');
     expect(screen.getByRole('switch', { name: '启用上传限速' })).toBeChecked();
@@ -80,6 +80,30 @@ describe('UploadRateSettingsDialog', () => {
     const [url, init] = settingsRequest(fetchMock);
     expect(url).toBe('/api/v1/settings/upload-rate');
     expect(init.method ?? 'GET').toBe('GET');
+  });
+
+  it('parses human-readable rates and blocks missing units', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'PUT') {
+        return Promise.resolve(jsonResponse({ rate_limit_bytes_per_second: 32_000_000, schedule: null }));
+      }
+      return Promise.resolve(jsonResponse(disabledSettings));
+    });
+    renderDialog(fetchMock);
+
+    await waitForLoadedForm();
+    fireEvent.click(screen.getByRole('switch', { name: '启用上传限速' }));
+    fireEvent.change(screen.getByLabelText('上传上限（带单位）'), { target: { value: '32MB' } });
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText('上传上限（带单位）'), { target: { value: '32MB/s' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已保存并立即生效'));
+
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
+    expect(putCall?.[1]?.body).toBe(JSON.stringify({ rate_limit_bytes_per_second: 32_000_000, schedule: null }));
   });
 
   it('states the time semantics the daemon applies', async () => {
@@ -107,7 +131,7 @@ describe('UploadRateSettingsDialog', () => {
     await waitForLoadedForm();
     expect(screen.getByRole('switch', { name: '启用上传限速' })).not.toBeChecked();
     fireEvent.click(screen.getByRole('switch', { name: '启用上传限速' }));
-    fireEvent.change(screen.getByLabelText('上传上限（B/s）'), { target: { value: '2048' } });
+    fireEvent.change(screen.getByLabelText('上传上限（带单位）'), { target: { value: '2KiB/s' } });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已保存并立即生效'));
@@ -140,7 +164,7 @@ describe('UploadRateSettingsDialog', () => {
     expect(screen.getByRole('switch', { name: '启用上传限速' })).not.toBeChecked();
     fireEvent.click(screen.getByRole('switch', { name: '启用上传限速' }));
     fireEvent.click(screen.getByRole('switch', { name: '仅在指定时段限速' }));
-    fireEvent.change(screen.getByLabelText('上传上限（B/s）'), { target: { value: '1048576' } });
+    fireEvent.change(screen.getByLabelText('上传上限（带单位）'), { target: { value: '1MiB/s' } });
     fireEvent.change(screen.getByLabelText('开始时间'), { target: { value: '08:00' } });
     fireEvent.change(screen.getByLabelText('结束时间'), { target: { value: '22:00' } });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
@@ -200,6 +224,8 @@ describe('UploadRateSettingsDialog', () => {
   });
 
   it('tells the user the new limit is already in force when durability is unconfirmed', async () => {
+    const reloadedSettings = { rate_limit_bytes_per_second: 2_000_000, schedule: null };
+    let getCount = 0;
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if ((init?.method ?? 'GET') === 'PUT') {
         return Promise.resolve(jsonResponse(
@@ -207,7 +233,9 @@ describe('UploadRateSettingsDialog', () => {
           503,
         ));
       }
-      return Promise.resolve(jsonResponse(disabledSettings));
+      const response = getCount === 0 ? disabledSettings : reloadedSettings;
+      getCount += 1;
+      return Promise.resolve(jsonResponse(response));
     });
     renderDialog(fetchMock);
 
@@ -217,6 +245,8 @@ describe('UploadRateSettingsDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('新规则已生效'));
-    expect(screen.getByRole('button', { name: '重新读取当前设置' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重新读取当前设置' }));
+    await waitFor(() => expect(screen.getByLabelText('上传上限（带单位）')).toHaveValue('2MB/s'));
+    expect(screen.getByRole('switch', { name: '启用上传限速' })).toBeChecked();
   });
 });

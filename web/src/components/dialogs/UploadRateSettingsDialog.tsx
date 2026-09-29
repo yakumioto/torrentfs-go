@@ -1,8 +1,10 @@
-import { Button, Group, Loader, Modal, NumberInput, Stack, Switch, TextInput } from '@mantine/core';
+import { Button, Group, Loader, Modal, Stack, Switch, TextInput } from '@mantine/core';
 import { IconAlertTriangle } from '@tabler/icons-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../app/auth-context';
 import { useSetUploadRateSettings, useUploadRateSettings } from '../../queries/hooks';
+import type { UploadRateSettings } from '../../types/api';
+import { formatUploadRate, parseUploadRate } from '../../utils/quantities';
 import { uploadRateSettingsApplied, userFacingUploadRateError } from '../../utils/user-facing-error';
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -15,21 +17,54 @@ function minutesOfDay(value: string): number | undefined {
   return Number(hour) * 60 + Number(minute);
 }
 
+function uploadRateInputError(result: ReturnType<typeof parseUploadRate>): string {
+  if ('value' in result) {
+    return result.value > 0 ? '' : '请输入大于 0 的速率。';
+  }
+  switch (result.error) {
+    case 'missing_rate_suffix':
+      return '请输入带单位的速率，例如 1MiB/s。';
+    case 'missing_unit':
+      return '速率必须包含字节单位，例如 32MB/s。';
+    case 'unknown_unit':
+      return '仅支持 B、KB、MB、GB、TB、KiB、MiB、GiB 或 TiB。';
+    case 'overflow':
+      return '速率超出浏览器可精确编辑的范围。';
+    case 'empty':
+    case 'invalid_format':
+      return '请输入整数速率，例如 1MiB/s；不支持小数或科学计数法。';
+  }
+}
+
 export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean; onClose: () => void }) {
   const auth = useAuth();
   const query = useUploadRateSettings(auth.api, opened);
   const save = useSetUploadRateSettings(auth.api);
 
   const [enabled, setEnabled] = useState(false);
-  const [rate, setRate] = useState<number | string>(1048576);
+  const [rate, setRate] = useState('1MiB/s');
+  const [rateReadError, setRateReadError] = useState<string | undefined>();
   const [scheduled, setScheduled] = useState(false);
   const [start, setStart] = useState('08:00');
   const [end, setEnd] = useState('22:00');
   const [loaded, setLoaded] = useState(false);
 
-  // Seed the form from the daemon once per open so a reopened dialog never shows
-  // a stale draft over the value a restart would restore. Every state write here
-  // is guarded by `loaded`, so the effect cannot feed itself.
+  const seedForm = useCallback((settings: UploadRateSettings, resetMutation = true) => {
+    if (resetMutation) {
+      save.reset();
+    }
+    setEnabled(settings.rate_limit_bytes_per_second > 0);
+    const formattedRate = settings.rate_limit_bytes_per_second > 0
+      ? formatUploadRate(settings.rate_limit_bytes_per_second)
+      : '1MiB/s';
+    setRate(formattedRate ?? '');
+    setRateReadError(formattedRate === undefined ? '当前设置超过浏览器可精确编辑范围，无法无损编辑。' : undefined);
+    setScheduled(settings.schedule !== null);
+    setStart(settings.schedule?.start ?? '08:00');
+    setEnd(settings.schedule?.end ?? '22:00');
+    setLoaded(true);
+  }, [save]);
+
   useEffect(() => {
     if (!opened) {
       setLoaded(false);
@@ -39,17 +74,14 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
     if (settings === undefined || loaded) {
       return;
     }
-    save.reset();
-    setEnabled(settings.rate_limit_bytes_per_second > 0);
-    setRate(settings.rate_limit_bytes_per_second > 0 ? settings.rate_limit_bytes_per_second : 1048576);
-    setScheduled(settings.schedule !== null);
-    setStart(settings.schedule?.start ?? '08:00');
-    setEnd(settings.schedule?.end ?? '22:00');
-    setLoaded(true);
-  }, [opened, query.data, loaded, save]);
+    seedForm(settings);
+  }, [opened, query.data, loaded, seedForm]);
 
-  const rateValue = Number(rate);
-  const rateValid = Number.isInteger(rateValue) && rateValue > 0;
+  const parsedRate = parseUploadRate(rate);
+  const rateValid = !enabled || (rateReadError === undefined && 'value' in parsedRate && parsedRate.value > 0);
+  const rateError = enabled && !rateValid
+    ? rateReadError ?? uploadRateInputError(parsedRate)
+    : undefined;
   const startMinutes = minutesOfDay(start);
   const endMinutes = minutesOfDay(end);
   const scheduleValid = startMinutes !== undefined && endMinutes !== undefined && startMinutes < endMinutes;
@@ -60,10 +92,18 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
     onClose();
   };
 
+  const reload = async () => {
+    const result = await query.refetch();
+    if (result.data !== undefined) {
+      seedForm(result.data);
+    }
+  };
+
   const submit = () => {
-    if (!formValid) {
+    if (!formValid || (enabled && !('value' in parsedRate))) {
       return;
     }
+    const rateValue = 'value' in parsedRate ? parsedRate.value : 0;
     save.mutate({
       settings: enabled
         ? {
@@ -71,6 +111,8 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
           schedule: scheduled ? { start, end } : null,
         }
         : { rate_limit_bytes_per_second: 0, schedule: null },
+    }, {
+      onSuccess: (saved) => seedForm(saved, false),
     });
   };
 
@@ -81,7 +123,7 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
     <Modal opened={opened} onClose={close} title="上传限速设置" centered closeButtonProps={{ 'aria-label': '关闭弹窗' }}>
       <Stack gap="md">
         <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>
-          限制所有任务合计的 BitTorrent 上传速率，单位为 <strong>B/s</strong>（1 MiB/s = 1048576 B/s）。
+          限制所有任务合计的 BitTorrent 上传速率。请输入带字节单位的形式，例如 <strong>1MiB/s</strong> 或 <strong>32MB/s</strong>。
           该上限只约束对 peer 的数据上传，不影响网页上传的 .torrent 或字幕大小。
         </p>
 
@@ -102,17 +144,17 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
         />
 
         {enabled && (
-          <NumberInput
-            label="上传上限（B/s）"
-            aria-label="上传上限（B/s）"
-            description="1 MiB/s = 1048576 B/s"
-            min={1}
-            allowDecimal={false}
-            allowNegative={false}
+          <TextInput
+            label="上传上限（带单位）"
+            aria-label="上传上限（带单位）"
+            description="例如 1MiB/s 或 32MB/s；必须使用字节单位"
             disabled={query.isLoading}
             value={rate}
-            onChange={setRate}
-            error={rateValid ? undefined : '请输入大于 0 的整数速率'}
+            onChange={(event) => {
+              setRateReadError(undefined);
+              setRate(event.currentTarget.value);
+            }}
+            error={rateError}
           />
         )}
 
@@ -165,7 +207,7 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
               <Button
                 variant="subtle"
                 size="compact-sm"
-                onClick={() => void query.refetch()}
+                onClick={() => void reload()}
               >
                 重新读取当前设置
               </Button>

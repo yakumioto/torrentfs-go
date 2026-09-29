@@ -299,15 +299,17 @@ environment variables > TOML file > built-in defaults
 
 The TOML decoder rejects unknown fields. There is no automatic environment variable for every TOML key; only documented bindings are read. An empty HTTP listener disables HTTP. A non-loopback HTTP listener requires complete authentication.
 
+`cache.capacity_bytes` and `http.max_upload_bytes` must use an integer with an explicit byte unit in TOML and their corresponding environment variables. `B`, `KB`, `MB`, `GB`, and `TB` use decimal multiples of 1000; `KiB`, `MiB`, `GiB`, and `TiB` use binary multiples of 1024. For example, `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483648` bytes. Units are case-sensitive; bare numbers, fractions, bits units, and scientific notation are rejected, so old bare-number configurations must be migrated before startup.
+
 ### Main TOML sections
 
 | Section | Common keys | Notes |
 | --- | --- | --- |
-| `[http]` | `listen_addr`, `max_upload_bytes` | HTTP/UI listener; default `127.0.0.1:8080`, upload default 10 MiB |
+| `[http]` | `listen_addr`, `max_upload_bytes` | HTTP/UI listener; default `127.0.0.1:8080`, upload default `10MiB` |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | Single-user bcrypt authentication and in-memory Bearer tokens |
 | `[connections]` | `listen_host`, `listen_port`, `disable_ipv4`, `disable_ipv6`, `no_port_forwarding`, `bootstrap_nodes` | Peer listener, address families, NAT mapping, and DHT bootstrap |
 | `[proxy]` | `socks5_url` | Optional `socks5://` or `socks5h://` proxy |
-| `[cache]` | `capacity_bytes` | Positive in-memory piece-cache limit; default 2 GiB |
+| `[cache]` | `capacity_bytes` | Positive in-memory piece-cache limit; default `2GiB`, bounded for safe watermark arithmetic |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | Tracker and peer identity values |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`, `text`/`json`, and source locations |
 | `[mount]` | `allow_other` | Whether other local UIDs may read the FUSE mount |
@@ -340,13 +342,15 @@ The ordinary field bindings are:
 | `TORRENTFS_LOG_FORMAT` | `log.format` |
 | `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` |
 
+`TORRENTFS_CACHE_CAPACITY_BYTES` and `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` use the same explicit SI/IEC byte syntax as TOML, for example `1GiB` or `10MiB`; they reject bare numbers and values that cannot be represented exactly by the runtime integer.
+
 `TORRENTFS_USERNAME` and `TORRENTFS_PASSWORD` are the special shared HTTP/SMB credential pair, not automatic bindings for arbitrary TOML keys. `TORRENTFS_SMB_ENABLED` is consumed by the Docker entrypoint. `PUID` and `PGID` select the container runtime identity and are not Go configuration variables.
 
 `TORRENTFS_PATHS_DATA_DIR` is a removed historical variable and does not restore a disk payload path. The cache capacity must be positive; the two address families cannot both be disabled; peer ports must be in `0..65535`; and a non-loopback HTTP listener must have authentication enabled. Static TOML and ordinary environment variables are read at startup and are not hot-reloaded.
 
 ### Upload-rate settings
 
-Upload limiting applies to aggregate BitTorrent payload uploads in a session and is measured in bytes per second. It does not limit HTTP request bodies, tracker traffic, or protocol overhead. It is managed through the API/UI rather than static TOML:
+Upload limiting applies to aggregate BitTorrent payload uploads in a session and is measured in bytes per second. It does not limit HTTP request bodies, tracker traffic, or protocol overhead. It is managed through the API/UI rather than static TOML. The Web UI accepts exact values such as `1MiB/s` and `32MB/s`, then sends the normalized integer bytes-per-second value; the API and sidecar file remain machine-readable numeric contracts:
 
 ```text
 GET /api/v1/settings/upload-rate

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -19,7 +20,7 @@ var (
 
 	errRequired             = errors.New("value is required")
 	errPortRange            = errors.New("must be between 0 and 65535")
-	errCapacityRange        = errors.New("must be a positive number of bytes")
+	errCapacityRange        = errors.New("must be between 1 and the cache watermark safety limit")
 	errProxyURL             = errors.New("must be a valid URL")
 	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
 	errProxyHost            = errors.New("must include a proxy host")
@@ -245,7 +246,7 @@ func (c Config) Validate() error {
 			return invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err))
 		}
 	}
-	if c.Cache.CapacityBytes <= 0 {
+	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
 		return invalid("cache.capacity_bytes", errCapacityRange)
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {

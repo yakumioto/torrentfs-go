@@ -156,6 +156,8 @@ func TestPutUploadRateSettingsRejectsInvalidBody(t *testing.T) {
 	}{
 		{name: "malformed json", body: `{"rate_limit_bytes_per_second":`},
 		{name: "wrong type", body: `{"rate_limit_bytes_per_second":"fast"}`},
+		{name: "missing rate", body: `{}`},
+		{name: "null rate", body: `{"rate_limit_bytes_per_second":null}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
