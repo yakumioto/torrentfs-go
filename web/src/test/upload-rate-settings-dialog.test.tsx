@@ -249,4 +249,40 @@ describe('UploadRateSettingsDialog', () => {
     await waitFor(() => expect(screen.getByLabelText('上传上限（带单位）')).toHaveValue('2MB/s'));
     expect(screen.getByRole('switch', { name: '启用上传限速' })).toBeChecked();
   });
+
+  it('keeps the draft and applied warning when the reload read fails', async () => {
+    let getCount = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'PUT') {
+        return Promise.resolve(jsonResponse(
+          { error: 'durability', code: 'upload_rate_settings_durability_unconfirmed', applied: true },
+          503,
+        ));
+      }
+      getCount += 1;
+      // The first read seeds the form; the explicit reload afterwards fails.
+      if (getCount === 1) {
+        return Promise.resolve(jsonResponse(disabledSettings));
+      }
+      return Promise.resolve(jsonResponse({ error: 'read failed' }, 400));
+    });
+    renderDialog(fetchMock);
+
+    await waitForLoadedForm();
+    expect(screen.getByRole('switch', { name: '启用上传限速' })).not.toBeChecked();
+    fireEvent.click(screen.getByRole('switch', { name: '启用上传限速' }));
+    fireEvent.change(screen.getByLabelText('上传上限（带单位）'), { target: { value: '2MB/s' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => expect(screen.getByText(/新规则已生效/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '重新读取当前设置' }));
+
+    await waitFor(() => expect(screen.getByText(/无法读取当前设置/)).toBeInTheDocument());
+    // The failed read must not be applied: a cached "unlimited" value would
+    // otherwise flip the switch off and drop the draft and the warning.
+    expect(screen.getByText(/新规则已生效/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: '启用上传限速' })).toBeChecked();
+    expect(screen.getByLabelText('上传上限（带单位）')).toHaveValue('2MB/s');
+    expect(screen.getByRole('button', { name: '重新读取当前设置' })).toBeInTheDocument();
+  });
 });

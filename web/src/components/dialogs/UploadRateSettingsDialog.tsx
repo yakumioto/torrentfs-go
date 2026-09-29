@@ -92,9 +92,13 @@ export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean;
     onClose();
   };
 
+  // A failed refetch still resolves with the previously cached data, so the
+  // form may only be reseeded when the read actually succeeded. Otherwise a
+  // transient read failure would silently replace the user's draft and clear
+  // the "already applied" warning with a stale value.
   const reload = async () => {
     const result = await query.refetch();
-    if (result.data !== undefined) {
+    if (result.isSuccess && result.data !== undefined) {
       seedForm(result.data);
     }
   };
