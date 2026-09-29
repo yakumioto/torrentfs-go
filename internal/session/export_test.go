@@ -10,6 +10,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/time/rate"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
@@ -260,6 +261,37 @@ func UnderlyingClientForTest(s *Session) *torrent.Client {
 
 // PrefetchSnapshot is the test-visible copy of the coordinator's state.
 type PrefetchSnapshot = prefetchSnapshot
+
+// UploadRateLimitForTest returns the limit on the session's aggregate upload
+// limiter and the limiter pointer itself, so a test can prove two sessions do
+// not share one. Test-only.
+func (s *Session) UploadRateLimitForTest() (rate.Limit, *rate.Limiter) {
+	return s.uploadRate.limiter.Limit(), s.uploadRate.limiter
+}
+
+// SetUploadRatePolicyForTest installs policy and applies the limit in force at
+// when, exactly as a boundary or a settings update does, without touching the
+// persisted sidecar. It lets a test pin a policy to a fixed clock. Test-only.
+func (s *Session) SetUploadRatePolicyForTest(settings UploadRateSettings, when time.Time) error {
+	normalized, policy, err := validateUploadRateSettings(settings)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploadRateSettings = normalized
+	s.uploadRate.setPolicy(policy, when)
+	return nil
+}
+
+// SetUploadRateDirSyncHookForTest makes the directory sync that follows the
+// atomic rename fail, so a test can exercise the published-but-unconfirmed
+// path. It returns a restore function. Test-only.
+func SetUploadRateDirSyncHookForTest(fn func(string) error) func() {
+	previous := atomicSyncDirectoryHook
+	atomicSyncDirectoryHook = fn
+	return func() { atomicSyncDirectoryHook = previous }
+}
 
 // EvictPiecesForTest drops every piece of the torrent except the ones in keep
 // from the session's cache, simulating the LRU reclaiming a read window. It

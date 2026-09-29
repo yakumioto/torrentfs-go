@@ -1,5 +1,5 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconBox, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
+import { IconBox, IconLogout, IconPlus, IconRefresh, IconSettings } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -8,7 +8,7 @@ import { queryKeys } from '../../queries/keys';
 import { ConnectionPill } from './ConnectionPill';
 import styles from './Header.module.css';
 
-export function Header({ onAdd }: { onAdd: () => void }) {
+export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void; onOpenUploadRateSettings: () => void }) {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -36,6 +36,17 @@ export function Header({ onAdd }: { onAdd: () => void }) {
           <Tooltip label="刷新数据">
             <ActionIcon type="button" variant="subtle" color="gray" onClick={refresh} aria-label="刷新数据">
               <IconRefresh size={18} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label="上传限速设置">
+            <ActionIcon
+              type="button"
+              variant="subtle"
+              color="gray"
+              onClick={onOpenUploadRateSettings}
+              aria-label="上传限速设置"
+            >
+              <IconSettings size={18} />
             </ActionIcon>
           </Tooltip>
           <Tooltip label="添加任务">

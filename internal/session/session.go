@@ -111,6 +111,13 @@ type Session struct {
 	bgMu     sync.Mutex
 	bgWg     sync.WaitGroup
 
+	// uploadRate owns the private aggregate upload limiter and the goroutine that
+	// switches it at each window boundary or settings update. uploadRateSettings
+	// is the normalized sidecar state that the settings API reads back. Both are
+	// guarded by mu.
+	uploadRate         *uploadRateController
+	uploadRateSettings UploadRateSettings
+
 	// metadataFetches tracks the per-hash magnet metadata-persist workers so a
 	// deletion can cancel exactly its own hash and wait for it to exit.
 	fetchMu         sync.Mutex
@@ -190,6 +197,15 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("acquire-instance-lock", err)
 		return nil, err
 	}
+	// Upload settings are read before anything else is opened: a sidecar that
+	// cannot be understood must fail startup rather than start with a limit the
+	// operator believes is in force.
+	uploadSettings, uploadPolicy, err := loadUploadRateSettings(metadataDir)
+	if err != nil {
+		releaseInstanceLock(instanceLock)
+		logInitFailure("load-upload-rate-settings", err)
+		return nil, err
+	}
 	// The store handle is opened once here and reused for every later subtitle
 	// operation. Anything the session publishes or reads afterwards is resolved
 	// from this handle, so replacing the store's path cannot redirect it.
@@ -235,6 +251,14 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("configure-proxy", err)
 		return nil, err
 	}
+	// Every session gets a limiter private to itself: the client's own default
+	// limiter is a shared pointer, so mutating it would change every other
+	// client in the process, and the settings API can enable limiting long after
+	// startup. Replacing the pointer later would race the client, so it is
+	// installed once, here, with the limit the restored settings put in force
+	// now.
+	uploadRate := newUploadRateController(uploadPolicy, logger)
+	uploadRate.configure(cc)
 	if customize != nil {
 		customize(cc)
 	}
@@ -288,8 +312,14 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		lastOps:         make(map[metainfo.Hash]string),
 		opLocks:         make(map[metainfo.Hash]*sync.Mutex),
 		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
+		uploadRate:      uploadRate,
+
+		uploadRateSettings: uploadSettings,
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
+	// The scheduler joins the existing background lifecycle, so Close cancels it
+	// and waits before the client is torn down.
+	s.uploadRate.start(s.bgCtx, &s.bgMu, &s.bgWg)
 	startup := []struct {
 		stage string
 		fn    func() error
@@ -319,8 +349,18 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		"listen_port", cfg.Connections.ListenPort,
 		"effective_listen_port", s.EffectiveListenPort(),
 		"listen_addrs", strings.Join(s.listenAddrs(), ","),
+		"upload_rate_limit_bytes_per_second", uploadSettings.RateLimitBytesPerSecond,
+		"upload_schedule_start", scheduleStartLabel(uploadSettings),
+		"upload_schedule_end", scheduleEndLabel(uploadSettings),
+		"upload_limited_now", s.uploadLimitedNow(),
 	)
 	return s, nil
+}
+
+// uploadLimitedNow reports whether the session's upload limiter is currently
+// limited.
+func (s *Session) uploadLimitedNow() bool {
+	return s.uploadRate.limitedNow()
 }
 
 // EffectiveListenPort returns the port the client actually listens on. With a

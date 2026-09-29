@@ -107,3 +107,22 @@ export interface LoginResponse {
   token_type: 'Bearer' | string;
   expires_in: number;
 }
+
+/**
+ * One same-day upload window in the daemon's local time, minute precision and
+ * half-open: start is included and end is not.
+ */
+export interface UploadRateSchedule {
+  start: string;
+  end: string;
+}
+
+/**
+ * Session-wide aggregate upload limit. `rate_limit_bytes_per_second` is bytes
+ * per second across every torrent and peer; zero disables limiting. A null
+ * schedule applies the limit around the clock.
+ */
+export interface UploadRateSettings {
+  rate_limit_bytes_per_second: number;
+  schedule: UploadRateSchedule | null;
+}

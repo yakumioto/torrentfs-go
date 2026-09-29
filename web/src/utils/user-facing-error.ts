@@ -34,6 +34,29 @@ export function userFacingError(error: unknown, fallback = '后台服务暂时�
   return fallback;
 }
 
+/**
+ * Upload-rate save failures are mapped by stable code. "Applied but durability
+ * unconfirmed" must not read like a plain failure: the new limit is already in
+ * force, only the restart-recovery guarantee is unproven.
+ */
+const UPLOAD_RATE_CODE_MESSAGES: Record<string, string> = {
+  invalid_upload_rate_settings: '设置内容无效，请检查上传上限和时段后重试。',
+  upload_rate_settings_storage_unavailable: '设置未能写入，当前限速未改变；请检查 .metadata 目录权限和磁盘空间后重试。',
+  upload_rate_settings_durability_unconfirmed: '新规则已生效，但无法确认重启后仍能恢复；请重新打开设置确认当前状态。',
+};
+
+export function userFacingUploadRateError(error: unknown, fallback = '上传限速设置保存失败，请稍后重试。'): string {
+  if (error instanceof ApiError) {
+    return UPLOAD_RATE_CODE_MESSAGES[error.code] ?? fallback;
+  }
+  return fallback;
+}
+
+/** True when the daemon already applied the new settings despite the error. */
+export function uploadRateSettingsApplied(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'upload_rate_settings_durability_unconfirmed';
+}
+
 export function userFacingSubtitleError(error: unknown, fallback = '后台服务未能完成字幕上传，请稍后重试。'): string {
   if (error instanceof ApiError) {
     return SUBTITLE_CODE_MESSAGES[error.code] ?? fallback;

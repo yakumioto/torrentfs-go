@@ -136,6 +136,36 @@ describe('Header refresh control', () => {
     expect(navigationError.mock.calls.flat().some((value) => String(value).includes('Not implemented: navigation'))).toBe(false);
   });
 
+  it('opens the upload rate settings dialog from the header gear', async () => {
+    const torrent = makeTorrent();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url.endsWith('/stats')) {
+        return Promise.resolve(jsonResponse(makeRuntimeStats()));
+      }
+      if (url.endsWith('/settings/upload-rate')) {
+        return Promise.resolve(jsonResponse({ rate_limit_bytes_per_second: 0, schedule: null }));
+      }
+      if (url.endsWith('/torrents')) {
+        return Promise.resolve(jsonResponse([torrent]));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderApp('/', fetchMock);
+    await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '上传限速设置' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('上传限速设置');
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/settings/upload-rate'))).toBe(true);
+    // The settings entry is a dialog, not a route.
+    expect(window.location.pathname).toBe('/');
+  });
+
   it('refreshes only the active status query on detail pages', async () => {
     const torrent = makeTorrent({ name: 'Detail torrent', cached_bytes: 100 });
     const status = makeStatus(torrent);

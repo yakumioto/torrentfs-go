@@ -40,6 +40,28 @@ describe('ApiClient', () => {
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('/api/v1/stats');
   });
 
+  it('reads upload rate settings from the settings endpoint', async () => {
+    const settings = { rate_limit_bytes_per_second: 1048576, schedule: { start: '08:00', end: '22:00' } };
+    vi.mocked(fetch).mockResolvedValue(response(settings));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.getUploadRateSettings()).resolves.toEqual(settings);
+    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/settings/upload-rate');
+    expect(request.method ?? 'GET').toBe('GET');
+  });
+
+  it('writes upload rate settings as JSON with the bearer header', async () => {
+    const settings = { rate_limit_bytes_per_second: 0, schedule: null };
+    vi.mocked(fetch).mockResolvedValue(response(settings));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.setUploadRateSettings(settings)).resolves.toEqual(settings);
+    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/settings/upload-rate');
+    expect(request.method).toBe('PUT');
+    expect(request.body).toBe(JSON.stringify(settings));
+    expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
+  });
+
   it('lets fetch set multipart boundaries', async () => {
     vi.mocked(fetch).mockResolvedValue(response({ id: 'a' }));
     const api = new ApiClient({ getToken: () => 'opaque' });

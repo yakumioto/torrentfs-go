@@ -1,4 +1,5 @@
 import { MantineProvider } from '@mantine/core';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -29,16 +30,21 @@ function LocationDisplay() {
 }
 
 function renderLayout() {
+  // AppLayout owns the layout-level dialogs, so the tree needs a query client
+  // even though these cases only drive the add-task navigation.
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
-    <MantineProvider theme={theme} defaultColorScheme="light">
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route path="*" element={<LocationDisplay />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
-    </MantineProvider>,
+    <QueryClientProvider client={queryClient}>
+      <MantineProvider theme={theme} defaultColorScheme="light">
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route element={<AppLayout />}>
+              <Route path="*" element={<LocationDisplay />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>
+    </QueryClientProvider>,
   );
 }
 
