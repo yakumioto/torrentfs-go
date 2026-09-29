@@ -41,6 +41,7 @@ type TorrentView struct {
 	ID         string
 	InfoHash   string
 	Name       string
+	Category   string
 	State      TorrentState
 	TotalBytes int64
 	// DownloadedBytes is useful torrent payload read since this torrent's
@@ -92,6 +93,9 @@ type registryEntry struct {
 	// Favorite is a plain bool so sidecars written before the field existed
 	// decode to false instead of failing validation.
 	Favorite bool `json:"favorite,omitempty"`
+	// Category is empty for an unclassified torrent. The omitempty tag keeps
+	// sidecars written before categories were introduced byte-compatible.
+	Category string `json:"category,omitempty"`
 }
 
 func cloneRegistryEntry(entry *registryEntry) *registryEntry {
@@ -269,6 +273,11 @@ func (s *Session) writeRegistryEntryLocked(entry *registryEntry) error {
 	if !validTorrentState(entry.State) || entry.State == StateDeleted {
 		return fmt.Errorf("session: invalid state %q for %s", entry.State, hash)
 	}
+	if entry.Category != "" {
+		if _, ok := s.categories[entry.Category]; !ok {
+			return fmt.Errorf("session: state %s references unknown category %q", hash, entry.Category)
+		}
+	}
 	if entry.CreatedAt.IsZero() {
 		return fmt.Errorf("session: state %s has no created_at", hash)
 	}
@@ -366,6 +375,11 @@ func (s *Session) loadRegistry() error {
 		hash, err := validateRegistryEntry(name, &entry)
 		if err != nil {
 			return fmt.Errorf("session: state %q: %w", name, err)
+		}
+		if entry.Category != "" {
+			if _, ok := s.categories[entry.Category]; !ok {
+				return fmt.Errorf("session: state %q references unknown category %q", name, entry.Category)
+			}
 		}
 		if entry.State == StateDeleting && entry.OperationID == "" {
 			opID, err := newOperationID()

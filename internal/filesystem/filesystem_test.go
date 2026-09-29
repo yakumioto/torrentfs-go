@@ -19,12 +19,15 @@ import (
 
 type fakeBackend struct {
 	views         []TorrentView
+	categories    []string
 	data          map[string][]byte
 	subtitle      map[string][]byte
 	subtitleMtime map[string]time.Time
 }
 
 func (b *fakeBackend) Torrents() []TorrentView { return b.views }
+
+func (b *fakeBackend) Categories() []string { return b.categories }
 
 func (b *fakeBackend) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error) {
 	data, ok := b.data[hash.HexString()+"\x00"+path]
@@ -685,5 +688,79 @@ func TestTorrentNodesAreReadOnlyAndOpenData(t *testing.T) {
 	out, status := result.Bytes(buf)
 	if status != fuse.OK || string(out) != "content" {
 		t.Fatalf("read result = %q status=%v, want content/OK", out, status)
+	}
+}
+
+func TestCategoryDirectoryAndEmptyCategory(t *testing.T) {
+	backend := &fakeBackend{
+		categories: []string{"movies", "empty"},
+		views: []TorrentView{
+			{Name: "Movie1.mp4", Category: "movies", Hash: hashN(1), SingleFile: true},
+			{Name: "plain.txt", Hash: hashN(2), SingleFile: true},
+		},
+	}
+	backend.addFile(&backend.views[0], "Movie1.mp4", []byte("movie"))
+	backend.addFile(&backend.views[1], "plain.txt", []byte("plain"))
+	root := &rootNode{state: newFSState(backend)}
+	_ = fs.NewNodeFS(root, nil)
+	rootChildren := root.visibleChildren()
+	rootNames := make([]string, len(rootChildren))
+	for i, entry := range rootChildren {
+		rootNames[i] = entry.Name
+	}
+	if !reflect.DeepEqual(rootNames, []string{"empty", "movies", "plain.txt"}) {
+		t.Fatalf("root children = %v, want empty/movies/plain.txt", rootNames)
+	}
+	if _, errno := root.Lookup(context.Background(), "Movie1.mp4", &fuse.EntryOut{}); errno != syscall.ENOENT {
+		t.Fatalf("categorized torrent at root errno = %v, want ENOENT", errno)
+	}
+	inode, errno := root.Lookup(context.Background(), "movies", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("category Lookup errno = %v", errno)
+	}
+	category, ok := inode.Operations().(*categoryNode)
+	if !ok {
+		t.Fatalf("category node = %T, want *categoryNode", inode.Operations())
+	}
+	fileInode, errno := category.Lookup(context.Background(), "Movie1.mp4", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("categorized file Lookup errno = %v", errno)
+	}
+	file, ok := fileInode.Operations().(*torrentFileNode)
+	if !ok {
+		t.Fatalf("categorized file node = %T, want *torrentFileNode", fileInode.Operations())
+	}
+	handle, _, errno := file.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("categorized file Open errno = %v", errno)
+	}
+	read, ok := handle.(*readHandle)
+	if !ok {
+		t.Fatalf("categorized file handle = %T, want *readHandle", handle)
+	}
+	buf := make([]byte, 5)
+	result, errno := read.Read(context.Background(), buf, 0)
+	if errno != 0 {
+		t.Fatalf("categorized file Read errno = %v", errno)
+	}
+	data, resultStatus := result.Bytes(buf)
+	if resultStatus != fuse.OK || string(data) != "movie" {
+		t.Fatalf("categorized file read = %q, status=%v", data, resultStatus)
+	}
+	if _, errno := category.Mkdir(context.Background(), "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
+		t.Fatalf("category Mkdir errno = %v, want EROFS", errno)
+	}
+}
+
+func TestCategoryMountPathAndReservedRootNames(t *testing.T) {
+	views := []TorrentView{
+		{Name: "Movie1.mp4", Category: "movies", Hash: hashN(1), Files: []FileView{{Path: "Movie1.mp4"}}, SingleFile: true},
+		{Name: "movies", Hash: hashN(2), Files: []FileView{{Path: "movies"}}, SingleFile: true},
+	}
+	if got, ok := TorrentMountPath(views[0], views, []string{"movies"}, "Movie1.mp4"); !ok || got != "movies/Movie1.mp4" {
+		t.Fatalf("categorized mount path = %q/%v, want movies/Movie1.mp4/true", got, ok)
+	}
+	if got, ok := TorrentMountPath(views[1], views, []string{"movies"}, "movies"); !ok || got == "movies" {
+		t.Fatalf("reserved root name = %q/%v, want hash-disambiguated path", got, ok)
 	}
 }

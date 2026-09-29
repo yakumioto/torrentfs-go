@@ -132,3 +132,29 @@ describe('ApiClient favorite and prune calls', () => {
     expect(request.body).toBe(JSON.stringify({ older_than_days: 30 }));
   });
 });
+
+describe('ApiClient category calls', () => {
+  it('lists and creates categories', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response([{ name: 'movies', created_at: '2026-09-28T08:00:00Z' }]))
+      .mockResolvedValueOnce(response({ name: 'series', created_at: '2026-09-28T08:01:00Z' }, { status: 201 }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.listCategories()).resolves.toHaveLength(1);
+    await expect(api.createCategory('series')).resolves.toMatchObject({ name: 'series' });
+    const post = vi.mocked(fetch).mock.calls[1];
+    expect(String(post[0])).toBe('/api/v1/categories');
+    expect((post[1] as RequestInit).method).toBe('POST');
+    expect((post[1] as RequestInit).body).toBe(JSON.stringify({ name: 'series' }));
+  });
+
+  it('sends a torrent category assignment and supports clearing it', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ id: 'abc', category: 'movies' }))
+      .mockResolvedValueOnce(response({ id: 'abc', category: '' }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await api.setTorrentCategory('abc/def', 'movies');
+    await api.setTorrentCategory('abc/def', '');
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('/api/v1/torrents/abc%2Fdef/category');
+    expect((vi.mocked(fetch).mock.calls[1][1] as RequestInit).body).toBe(JSON.stringify({ category: '' }));
+  });
+});

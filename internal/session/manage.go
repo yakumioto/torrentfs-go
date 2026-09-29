@@ -453,6 +453,7 @@ func (s *Session) buildViewWithCached(hash metainfo.Hash, st *Torrent, entry *re
 	view := TorrentView{ID: hash.HexString(), InfoHash: hash.HexString(), State: StateAdding}
 	if entry != nil {
 		view.Name = entry.Name
+		view.Category = entry.Category
 		view.CreatedAt = entry.CreatedAt
 		view.Error = entry.Error
 		view.State = entry.State
