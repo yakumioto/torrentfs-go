@@ -544,8 +544,10 @@ The image creates `/torrents` with permissive initial mode only when no bind mou
 This mode is optional and has more host-specific requirements than container-local SMB. `/srv/mnt` must support recursive shared propagation, and the host must allow the FUSE and `SYS_ADMIN` operations:
 
 ```bash
-mkdir -p /srv/mnt
-# Prepare /srv/torrents for the selected non-root PUID:PGID first.
+mkdir -p /srv/torrents /srv/mnt
+# The entrypoint does not chown either bind source.
+sudo chown "$PUID:$PGID" /srv/torrents /srv/mnt
+
 docker run --detach --name torrentfs-fuse \
   --env PUID --env PGID \
   --device /dev/fuse \
