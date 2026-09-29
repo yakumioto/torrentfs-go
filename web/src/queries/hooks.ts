@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
 import type {
+  Category,
   Operation,
   PruneResult,
   RuntimeStats,
@@ -34,6 +35,16 @@ export function useTorrentList(api: ApiClient, enabled: boolean) {
     select: sortTorrents,
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+export function useCategories(api: ApiClient, enabled: boolean) {
+  return useQuery<Category[]>({
+    queryKey: queryKeys.categories,
+    queryFn: ({ signal }) => api.listCategories(signal),
+    enabled,
     retry: shouldRetry,
     retryDelay,
   });
@@ -249,6 +260,34 @@ export function useDeleteTorrent(api: ApiClient) {
     onSuccess: (operation: Operation) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
       queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);
+    },
+  });
+}
+
+export function useCreateCategory(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, signal }: { name: string; signal?: AbortSignal }) => api.createCategory(name, signal),
+    onSuccess: (category: Category) => {
+      queryClient.setQueryData<Category[]>(queryKeys.categories, (current) => {
+        const next = [...(current ?? []), category];
+        next.sort((a, b) => a.name.localeCompare(b.name));
+        return next;
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.categories });
+    },
+  });
+}
+
+export function useSetTorrentCategory(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, category, signal }: { id: string; category: string; signal?: AbortSignal }) =>
+      api.setTorrentCategory(id, category, signal),
+    onSuccess: (torrent: Torrent) => {
+      queryClient.setQueryData(queryKeys.torrent(torrent.id), torrent);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrentStatus(torrent.id) });
     },
   });
 }

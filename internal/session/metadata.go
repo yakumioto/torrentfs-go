@@ -215,7 +215,11 @@ func (s *Session) publishGuardedMetainfo(ctx context.Context, hash metainfo.Hash
 	if err != nil {
 		return false, nil, fmt.Errorf("session: read metainfo %s: %w", hash, err)
 	}
-	if err := s.subtitleNamespaceConflictLocked(hash, name, single); err != nil {
+	category := ""
+	if entry := s.states[hash]; entry != nil {
+		category = entry.Category
+	}
+	if err := s.subtitleNamespaceConflictLocked(hash, name, single, category); err != nil {
 		return false, nil, err
 	}
 	return s.publishMetainfo(ctx, hash, data)

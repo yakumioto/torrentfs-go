@@ -1,5 +1,6 @@
 export const queryKeys = {
   torrents: ['torrents'] as const,
+  categories: ['categories'] as const,
   runtimeStats: ['runtime-stats'] as const,
   uploadRateSettings: ['upload-rate-settings'] as const,
   torrent: (id: string) => ['torrent', id] as const,

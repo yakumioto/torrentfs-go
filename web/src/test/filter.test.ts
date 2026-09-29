@@ -7,6 +7,7 @@ function torrent(overrides: Partial<Torrent> = {}): Torrent {
     id: 'id',
     info_hash: 'ABC123',
     name: 'Ubuntu image',
+    category: '',
     state: 'ready',
     total_bytes: 100,
     downloaded_bytes: 0,

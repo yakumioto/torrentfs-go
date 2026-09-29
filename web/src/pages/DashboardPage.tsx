@@ -1,10 +1,11 @@
 import { Button, Group, Skeleton, TextInput } from '@mantine/core';
-import { IconPlus, IconSearch, IconTrashX, IconX } from '@tabler/icons-react';
+import { IconFolderPlus, IconPlus, IconSearch, IconTrashX, IconX } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
 import { userFacingError } from '../utils/user-facing-error';
 import type { AppOutletContext } from '../components/layout/AppLayout';
+import { CategoryManagementDialog } from '../components/dialogs/CategoryManagementDialog';
 import { PruneTorrentsDialog } from '../components/dialogs/PruneTorrentsDialog';
 import { TorrentList } from '../components/torrents/TorrentList';
 import { useRuntimeStats, useTorrentList } from '../queries/hooks';
@@ -35,6 +36,7 @@ export function DashboardPage() {
   const [filter, setFilter] = useState<TorrentFilter>('all');
   const [sort, setSort] = useState<TorrentSort>(DEFAULT_TORRENT_SORT);
   const [pruneOpen, setPruneOpen] = useState(false);
+  const [categoryOpen, setCategoryOpen] = useState(false);
   const query = useTorrentList(auth.api, auth.isReady && visible);
   const statsQuery = useRuntimeStats(auth.api, auth.isReady && visible);
   const sourceTorrents = query.data;
@@ -67,6 +69,9 @@ export function DashboardPage() {
           <p className={styles.subtitle}>集中管理任务，查看全局缓存与本次后端启动以来的传输统计。</p>
         </div>
         <Group gap="xs" className={styles.headingActions}>
+          <Button variant="light" color="torrent" leftSection={<IconFolderPlus size={17} />} onClick={() => setCategoryOpen(true)}>
+            新建分类
+          </Button>
           <Button variant="light" color="torrent" leftSection={<IconTrashX size={17} />} onClick={() => setPruneOpen(true)}>
             批量清理
           </Button>
@@ -177,6 +182,7 @@ export function DashboardPage() {
         onSortKeyChange={changeSortKey}
         onSortDirectionToggle={toggleSortDirection}
       />
+      <CategoryManagementDialog opened={categoryOpen} onClose={() => setCategoryOpen(false)} />
       <PruneTorrentsDialog opened={pruneOpen} onClose={() => setPruneOpen(false)} />
     </div>
   );

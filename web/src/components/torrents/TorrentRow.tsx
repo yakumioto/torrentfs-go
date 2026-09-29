@@ -1,10 +1,11 @@
-import { ActionIcon, Menu, Tooltip } from '@mantine/core';
-import { IconDots, IconExternalLink, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
+import { ActionIcon, Badge, Menu, Tooltip } from '@mantine/core';
+import { IconDots, IconExternalLink, IconFolder, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { Torrent } from '../../types/api';
 import { useAuth } from '../../app/auth-context';
 import { useSetFavorite } from '../../queries/hooks';
+import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
@@ -15,6 +16,7 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
   const navigate = useNavigate();
   const favorite = useSetFavorite(auth.api);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [categoryOpen, setCategoryOpen] = useState(false);
   const disabled = torrent.state === 'deleting';
   const name = torrent.name || '未命名任务';
   const favoriteLabel = torrent.favorite ? `取消收藏 ${name}` : `收藏 ${name}`;
@@ -27,6 +29,7 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
       <Link className={styles.main} to={`/torrents/${encodeURIComponent(torrent.id)}`} aria-label={`打开任务详情：${name}`}>
         <div className={styles.name}>
           <span className={styles.title}>{name}</span>
+          {torrent.category && <Badge size="xs" variant="light" color="torrent" leftSection={<IconFolder size={11} />}>{torrent.category}</Badge>}
           <span className={styles.hash}>{torrent.info_hash || '信息哈希等待生成'}</span>
         </div>
         <div className={`${styles.size} text-mono`}>
@@ -79,6 +82,9 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
             <Menu.Item leftSection={<IconExternalLink size={15} />} onClick={() => navigate(`/torrents/${encodeURIComponent(torrent.id)}`)}>
               查看详情
             </Menu.Item>
+            <Menu.Item leftSection={<IconFolder size={15} />} onClick={() => setCategoryOpen(true)}>
+              设置分类
+            </Menu.Item>
             <Menu.Divider />
             <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={openDelete}>
               删除任务
@@ -86,6 +92,11 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
           </Menu.Dropdown>
         </Menu>
       </div>
+      <CategoryAssignmentDialog
+        torrent={torrent}
+        opened={categoryOpen}
+        onClose={() => setCategoryOpen(false)}
+      />
       <DeleteTorrentDialog
         torrent={torrent}
         opened={deleteOpen}

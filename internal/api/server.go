@@ -37,6 +37,14 @@ type Backend interface {
 	SetUploadRateSettings(ctx context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error)
 }
 
+// CategoryBackend is the optional category management surface. Keeping it
+// separate lets existing payload-only API fakes continue to serve legacy routes.
+type CategoryBackend interface {
+	ListCategories() []session.CategoryView
+	CreateCategory(ctx context.Context, name string) (session.CategoryView, error)
+	SetTorrentCategory(ctx context.Context, id, category string) (session.TorrentView, error)
+}
+
 // Server is the torrent management HTTP service.
 // Option configures an API Server.
 type Option func(*serverOptions)
@@ -95,6 +103,8 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/torrents", s.handleAdd)
 	mux.HandleFunc("GET /api/v1/torrents", s.handleList)
+	mux.HandleFunc("GET /api/v1/categories", s.handleListCategories)
+	mux.HandleFunc("POST /api/v1/categories", s.handleCreateCategory)
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
 	mux.HandleFunc("GET /api/v1/settings/upload-rate", s.handleGetUploadRateSettings)
 	mux.HandleFunc("PUT /api/v1/settings/upload-rate", s.handleSetUploadRateSettings)
@@ -103,6 +113,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/subtitles", s.handleUploadSubtitle)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/favorite", s.handleSetFavorite)
+	mux.HandleFunc("PUT /api/v1/torrents/{id}/category", s.handleSetTorrentCategory)
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.handler = dispatchAPIAndStatic(s.authenticate(mux), web.Handler())

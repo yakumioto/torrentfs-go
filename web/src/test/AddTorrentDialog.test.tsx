@@ -14,6 +14,7 @@ function torrent(id = 'torrent-1'): Torrent {
     id,
     info_hash: `abc123-${id}`,
     name: 'Example torrent',
+    category: '',
     state: 'adding',
     total_bytes: 100,
     downloaded_bytes: 0,

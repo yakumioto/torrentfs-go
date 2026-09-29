@@ -1,4 +1,5 @@
 import type {
+  Category,
   LoginResponse,
   Operation,
   PruneResult,
@@ -56,6 +57,26 @@ export class ApiClient {
 
   listTorrents(signal?: AbortSignal): Promise<Torrent[]> {
     return this.request<Torrent[]>('/torrents', { signal });
+  }
+
+  listCategories(signal?: AbortSignal): Promise<Category[]> {
+    return this.request<Category[]>('/categories', { signal });
+  }
+
+  createCategory(name: string, signal?: AbortSignal): Promise<Category> {
+    return this.request<Category>('/categories', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+      signal,
+    });
+  }
+
+  setTorrentCategory(id: string, category: string, signal?: AbortSignal): Promise<Torrent> {
+    return this.request<Torrent>(`/torrents/${encodeURIComponent(id)}/category`, {
+      method: 'PUT',
+      body: JSON.stringify({ category }),
+      signal,
+    });
   }
 
   getRuntimeStats(signal?: AbortSignal): Promise<RuntimeStats> {

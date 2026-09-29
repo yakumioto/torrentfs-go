@@ -1,7 +1,13 @@
+export interface Category {
+  name: string;
+  created_at: string;
+}
+
 export interface Torrent {
   id: string;
   info_hash: string;
   name: string;
+  category: string;
   state: string;
   total_bytes: number;
   downloaded_bytes: number;
