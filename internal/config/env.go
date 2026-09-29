@@ -111,7 +111,7 @@ var environmentBindings = []envBinding{
 		name:  "TORRENTFS_CACHE_CAPACITY_BYTES",
 		field: "cache.capacity_bytes",
 		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvInt64(raw)
+			value, err := ParseByteQuantity(raw)
 			if err != nil {
 				return err
 			}
@@ -155,7 +155,7 @@ var environmentBindings = []envBinding{
 		name:  "TORRENTFS_HTTP_MAX_UPLOAD_BYTES",
 		field: "http.max_upload_bytes",
 		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvInt64(raw)
+			value, err := ParseByteQuantity(raw)
 			if err != nil {
 				return err
 			}
@@ -283,14 +283,6 @@ func parseEnvInt(raw string) (int, error) {
 		return 0, errors.New("must be a base-10 integer")
 	}
 	return int(value), nil
-}
-
-func parseEnvInt64(raw string) (int64, error) {
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, errors.New("must be a base-10 integer")
-	}
-	return value, nil
 }
 
 func parseEnvBool(raw string) (bool, error) {

@@ -64,7 +64,7 @@ listen_port = 23456
 socks5_url = "socks5h://user:password@proxy.example:1080"
 
 [cache]
-capacity_bytes = 8192
+capacity_bytes = "8192B"
 
 [identity]
 tracker_user_agent = "torrentfs-test/1.0"
@@ -113,7 +113,7 @@ func TestLoadHTTPSection(t *testing.T) {
 	path := writeConfig(t, `
 [http]
 listen_addr = "127.0.0.1:9000"
-max_upload_bytes = 2048
+max_upload_bytes = "2048B"
 
 [http.auth]
 enabled = true
@@ -685,6 +685,55 @@ func TestValidateAcceptsProxyURLs(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate(%q): %v", raw, err)
 		}
+	}
+}
+
+func TestLoadHumanReadableQuantities(t *testing.T) {
+	path := writeConfig(t, `[cache]
+capacity_bytes = "32MB"
+
+[http]
+max_upload_bytes = "8GB"
+
+[http.auth]
+token_ttl = "30m"
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.CapacityBytes != 32_000_000 {
+		t.Fatalf("Cache.CapacityBytes = %d, want 32000000", cfg.Cache.CapacityBytes)
+	}
+	if cfg.HTTP.MaxUploadBytes != 8_000_000_000 {
+		t.Fatalf("HTTP.MaxUploadBytes = %d, want 8000000000", cfg.HTTP.MaxUploadBytes)
+	}
+	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 30*time.Minute {
+		t.Fatalf("TokenTTL = %s, want 30m", cfg.HTTP.Auth.TokenTTL)
+	}
+}
+
+func TestLoadRejectsByteQuantityWithoutUnit(t *testing.T) {
+	for _, body := range []string{
+		"[cache]\ncapacity_bytes = 32\n",
+		"[http]\nmax_upload_bytes = \"32\"\n",
+	} {
+		_, err := config.Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatalf("Load(%q) succeeded", body)
+		}
+		if !strings.Contains(err.Error(), "byte quantity") && !strings.Contains(err.Error(), "byte unit") {
+			t.Fatalf("Load(%q) error = %q, want a byte-unit hint", body, err)
+		}
+	}
+}
+
+func TestValidateRejectsCacheWatermarkOverflow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cache.CapacityBytes = 9223372036854775807/7 + 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted a cache capacity that overflows watermark calculation")
 	}
 }
 

@@ -23,9 +23,9 @@
 # disables both. The default binds loopback only; non-loopback listeners require
 # http.auth. Static UI files are public; /api/ remains protected when auth is on.
 listen_addr = "127.0.0.1:8080"
-# Maximum size of an uploaded request body in bytes (10 MiB default). It caps
-# both a .torrent upload and a managed subtitle upload.
-max_upload_bytes = 10485760
+# Maximum size of an uploaded request body (10MiB default). It caps both a
+# .torrent upload and a managed subtitle upload. Use B/KB/MB/GB/TB or KiB/MiB/GiB/TiB.
+max_upload_bytes = "10MiB"
 
 [http.auth]
 # Login returns an in-memory opaque Bearer token when enabled.
@@ -62,13 +62,13 @@ bootstrap_nodes = []
 socks5_url = ""
 
 [cache]
-# Hard upper bound on the in-memory piece cache, in bytes. The default is
-# 2147483648 (2 GiB), which suits a host with about 4 GB of RAM; size it at
-# roughly 50-60% of a container's memory limit. This is a cap, not a
-# reservation: the cache fills lazily, so a small workload never reaches it.
+# Hard upper bound on the in-memory piece cache. The default is 2GiB, which
+# suits a host with about 4 GB of RAM; size it at roughly 50-60% of a
+# container's memory limit. Use an integer with an SI or IEC byte unit. This is
+# a cap, not a reservation: the cache fills lazily, so a small workload never reaches it.
 # Eviction starts at 7/8 of this value and reclaims down to 3/4, so a read
 # window always has headroom. Zero or negative is rejected at startup.
-capacity_bytes = 2147483648
+capacity_bytes = "2GiB"
 
 [identity]
 # User-Agent for HTTP tracker announces. Explicit empty values use the anacrolix default.

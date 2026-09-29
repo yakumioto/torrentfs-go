@@ -28,11 +28,18 @@ type uploadRateScheduleBody struct {
 	End   string `json:"end"`
 }
 
-// uploadRateSettingsBody is the wire contract for reading and writing upload
-// rate settings. The stored schema's version field is deliberately absent so it
-// never becomes part of the public contract.
+// uploadRateSettingsBody is the wire response contract. The stored schema's
+// version field is deliberately absent so it never becomes part of the public
+// contract.
 type uploadRateSettingsBody struct {
 	RateLimitBytesPerSecond int64                   `json:"rate_limit_bytes_per_second"`
+	Schedule                *uploadRateScheduleBody `json:"schedule"`
+}
+
+// uploadRateSettingsRequest keeps the rate pointer-valued so a missing or null
+// field cannot be mistaken for an explicit request to disable limiting.
+type uploadRateSettingsRequest struct {
+	RateLimitBytesPerSecond *int64                  `json:"rate_limit_bytes_per_second"`
 	Schedule                *uploadRateScheduleBody `json:"schedule"`
 }
 
@@ -44,8 +51,8 @@ func newUploadRateSettingsBody(settings session.UploadRateSettings) uploadRateSe
 	return body
 }
 
-func (b uploadRateSettingsBody) toSession() session.UploadRateSettings {
-	settings := session.UploadRateSettings{RateLimitBytesPerSecond: b.RateLimitBytesPerSecond}
+func (b uploadRateSettingsRequest) toSession() session.UploadRateSettings {
+	settings := session.UploadRateSettings{RateLimitBytesPerSecond: *b.RateLimitBytesPerSecond}
 	if b.Schedule != nil {
 		settings.Schedule = &session.UploadRateSchedule{Start: b.Schedule.Start, End: b.Schedule.End}
 	}
@@ -58,7 +65,7 @@ func (s *Server) handleGetUploadRateSettings(w http.ResponseWriter, _ *http.Requ
 
 func (s *Server) handleSetUploadRateSettings(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadRateSettingsBodyBytes)
-	var body uploadRateSettingsBody
+	var body uploadRateSettingsRequest
 	if err := decodeJSON(r.Body, &body); err != nil {
 		if isTooLarge(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
@@ -66,6 +73,11 @@ func (s *Server) handleSetUploadRateSettings(w http.ResponseWriter, r *http.Requ
 		}
 		writeUploadRateSettingsFailure(w, http.StatusBadRequest, UploadRateSettingsCodeInvalid, false,
 			"上传限速设置格式无效")
+		return
+	}
+	if body.RateLimitBytesPerSecond == nil {
+		writeUploadRateSettingsFailure(w, http.StatusBadRequest, UploadRateSettingsCodeInvalid, false,
+			"上传限速设置必须包含 rate_limit_bytes_per_second")
 		return
 	}
 	applied, err := s.backend.SetUploadRateSettings(r.Context(), body.toSession())

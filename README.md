@@ -583,15 +583,17 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 
 配置优先级按字段合并：环境变量 > TOML 文件 > 内置默认值。仓库只为下表列出的受支持字段提供精确的 `TORRENTFS_` 环境变量映射，不会自动为每个 TOML key 生成变量；嵌套 section 用下划线连接，例如 `http.auth.token_ttl` 对应 `TORRENTFS_HTTP_AUTH_TOKEN_TTL`。未列出的变量会被忽略。
 
+`cache.capacity_bytes` 和 `http.max_upload_bytes` 在 TOML 与对应环境变量中都必须写成带单位的整数。`B`、`KB`、`MB`、`GB`、`TB` 使用十进制倍率 1000，`KiB`、`MiB`、`GiB`、`TiB` 使用二进制倍率 1024；例如 `32MB = 32000000` bytes、`8GB = 8000000000` bytes、`2GiB = 2147483648` bytes。单位区分大小写，不接受裸数字、小数、bits 单位或科学计数法；旧裸数字配置需要改写后才能启动。
+
 ### 主要配置项
 
 | Section | 常用 key | 说明 |
 | --- | --- | --- |
-| `[http]` | `listen_addr`, `max_upload_bytes` | HTTP/Web listener；默认 `127.0.0.1:8080`，上传默认上限 10 MiB；为空则禁用 HTTP |
+| `[http]` | `listen_addr`, `max_upload_bytes` | HTTP/Web listener；默认 `127.0.0.1:8080`，上传默认上限 `10MiB`；为空则禁用 HTTP |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | 单用户 bcrypt 登录和内存 Bearer token |
 | `[connections]` | `listen_host`, `listen_port`, `disable_ipv4`, `disable_ipv6`, `no_port_forwarding`, `bootstrap_nodes` | peer listener、地址族、UPnP/NAT-PMP 和 DHT bootstrap |
 | `[proxy]` | `socks5_url` | 可选 `socks5://` 或 `socks5h://` 出站代理 |
-| `[cache]` | `capacity_bytes` | 内存 piece cache 硬上限，默认 2 GiB；必须为正数 |
+| `[cache]` | `capacity_bytes` | 内存 piece cache 硬上限，默认 `2GiB`；必须为正数且不超过水位计算安全上限 |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
 | `[mount]` | `allow_other` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载 |
@@ -623,12 +625,12 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `connections.bootstrap_nodes` | 逗号分隔的 `host:port` 列表 |
 | `TORRENTFS_MOUNT_ALLOW_OTHER` | `mount.allow_other` | Go boolean |
 | `TORRENTFS_PROXY_SOCKS5_URL` | `proxy.socks5_url` | 字符串 |
-| `TORRENTFS_CACHE_CAPACITY_BYTES` | `cache.capacity_bytes` | 十进制整数 |
+| `TORRENTFS_CACHE_CAPACITY_BYTES` | `cache.capacity_bytes` | 带单位字节，如 `1GiB` 或 `32MB` |
 | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `identity.tracker_user_agent` | 字符串 |
 | `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | `identity.peer_id_prefix` | 字符串 |
 | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `identity.extended_handshake_client_version` | 字符串 |
 | `TORRENTFS_HTTP_LISTEN_ADDR` | `http.listen_addr` | 字符串；空值关闭 HTTP |
-| `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 十进制整数 |
+| `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` | `http.max_upload_bytes` | 带单位字节，如 `10MiB` 或 `32MB` |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
 | `TORRENTFS_USERNAME` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的用户名 |
 | `TORRENTFS_PASSWORD` | HTTP/SMB 共享凭据 | HTTP 开启认证或 SMB 时必填的单行明文密码 |
@@ -641,8 +643,8 @@ go run ./cmd/torrentfs -config ./torrentfs.local.toml "$PWD/torrents"
 
 ```sh
 TORRENTFS_HTTP_LISTEN_ADDR=127.0.0.1:8080 \
-TORRENTFS_HTTP_MAX_UPLOAD_BYTES=10485760 \
-TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
+TORRENTFS_HTTP_MAX_UPLOAD_BYTES=10MiB \
+TORRENTFS_CACHE_CAPACITY_BYTES=1GiB \
 ./torrentfs "$PWD/torrents"
 ```
 
@@ -653,8 +655,8 @@ TORRENTFS_CACHE_CAPACITY_BYTES=1073741824 \
 - HTTP auth 启用且共享凭据完整时，pair 原子覆盖 TOML 中的 username、password hash 和 hash file；启动时生成 cost-10 bcrypt hash，最终配置不保存明文密码。HTTP 环境密码按 UTF-8 bytes 计数，最多 72 bytes，不能截断。
 - HTTP auth 关闭时，Go 配置层忽略共享凭据 pair，以便 SMB-only 启动；如果 TOML 本身仍含 credentials，仅把 auth 关闭不会自动清空，仍会按现有校验失败。
 - `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 `bootstrap_nodes` 项都必须是合法且端口在 `1..65535` 的 `host:port`。
-- `cache.capacity_bytes` 必须大于零；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
-- `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，日志 level/format 只能使用上表值。
+- `cache.capacity_bytes` 必须大于零且不超过现有水位计算的安全上限；piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。`proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host/port；校验错误不会把 proxy 凭据写入错误信息。
+- `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。`http.max_upload_bytes` 必须大于零，`http.auth.token_ttl` 使用 Go duration（如 `30m`、`1h30m`）且不超过 24 小时，日志 level/format 只能使用上表值。
 - HTTP listener 为空表示关闭；非空值必须是合法的 `host:port`。非 loopback listener 必须同时启用完整认证配置。
 - 认证关闭时 TOML 中的 username、password hash 和 hash file 必须全为空；认证开启且未使用共享 pair 时，`password_hash` 与 `password_hash_file` 必须恰好设置一个。
 - TOML hash file 必须是非空的普通非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。共享密码位于进程环境中，容器 metadata 也可能可见，不应将 Docker environment 当作 secret store。
@@ -677,6 +679,7 @@ PUT /api/v1/settings/upload-rate
   "schedule": { "start": "08:00", "end": "22:00" } }
 ```
 
+- Web UI 的上传上限输入使用带单位的形式，如 `1MiB/s` 或 `32MB/s`；它会无损转换为 API 所需的整数 bytes/s。HTTP API 和 `.metadata/upload_rate.json` 仍使用规范化数字，不接受把单位字符串直接写入该机器协议。
 - `rate_limit_bytes_per_second = 0` 且 `schedule = null`：不限速（默认）。
 - rate 为正数且 `schedule = null`：全天限速。
 - rate 为正数且 schedule 非空：只在窗口内限速，窗口外不限速。
