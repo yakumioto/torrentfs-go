@@ -1,12 +1,30 @@
 # torrentfs
 
-`torrentfs` 将 BitTorrent 内容挂载为只读的 FUSE 文件系统，并提供一个用于管理 torrent 的 HTTP API 和嵌入式 Web UI。
+[English](README.en.md)
 
-它管理一个已有的、可读写的 `torrents` 目录；torrent 任务只能通过 HTTP API 添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
+`torrentfs` 是一个用 Go 编写的只读 BitTorrent 文件系统：它按需从 peers 获取内容，将 torrent 文件投射为 FUSE 文件树，并通过 HTTP API 和嵌入式 Web UI 管理任务。
+
+它管理一个已有的、可读写的 `torrents` 目录；torrent 任务只能通过 HTTP API 或 Web UI 添加磁力链接或上传 `.torrent` 文件。单文件 torrent 直接呈现为挂载点下的文件，多文件 torrent 保留其目录结构。读取所需的 piece 保存在有界的内存缓存中，不会把 piece 数据写回磁盘。
 
 认证后的 HTTP API 和 Web UI 还可以为视频上传**受管理的字幕**：字幕写入 `torrents-dir/.metadata/subtitles`，再由只读 FUSE 投影到视频旁边。挂载点本身仍然完全只读，客户端不能通过 FUSE、SMB 或 `docker cp` 写入任何内容。
 
 任务还可以通过 API 或 Web UI 归入分类。分类名称同时是稳定标识和 FUSE 根目录下的单层目录名；分类可创建、归类和解除归类，但本版本不支持重命名、删除、多级分类或一个任务多个分类。
+
+适合以下场景：已有播放器、索引器或命令行工具需要像读取本地文件一样按需读取 BitTorrent 内容；Docker 用户希望通过 SMB 暴露一个只读共享；运营者需要用 Web UI/API 管理任务、分类、收藏和字幕。
+
+不适合以下场景：需要把完整下载内容持久化到磁盘的下载器、需要通过 HTTP 直接下载/播放 torrent 内容的服务，或需要从挂载点写入文件的应用。`ready` 只表示元信息可用，不表示所有内容已经下载完成。
+
+## 目录
+
+- [项目定位与设计原则](#项目定位与设计原则)
+- [快速开始](#快速开始)
+- [HTTP API](#http-api)
+- [Web UI](#web-ui)
+- [配置](#配置)
+- [Docker](#docker)
+- [持久化状态与限制](#持久化状态与限制)
+- [构建、测试与贡献](#构建测试与贡献)
+- [许可证](#许可证)
 
 ## 项目定位与设计原则
 
@@ -208,6 +226,8 @@ curl --fail "$BASE_URL/api/v1/torrents"
 启用认证时，只有 `POST /api/v1/auth/login` 不需要 token；其他 `/api/` 请求都必须带且只能带一个 `Authorization: Bearer <token>` header。静态 Web shell 和 assets 的 `GET`/`HEAD` 仍然公开，这只允许浏览器加载 UI，不会公开 torrent 数据。
 
 配置认证时必须设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。后者应指向一个普通、非符号链接且只允许文件所有者读取的文件；配置值不能是明文密码。例如：
+
+Docker 镜像还支持成对的 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 环境变量。认证已启用且这两个变量同时存在时，启动时会把明文密码在进程内生成 bcrypt hash，并覆盖 TOML 中的用户名和 hash 来源；两个变量必须同时提供、都不能为空，密码最多 72 个 UTF-8 bytes。SMB 模式也使用这组变量，但 SMB 另外要求用户名解析为镜像内的 torrentfs runtime Unix 账户。环境变量可能出现在 Docker metadata 中，不应当作 secret store。
 
 ```toml
 [http]
@@ -701,6 +721,178 @@ PUT /api/v1/settings/upload-rate
 
 Dockerfile 使用 Node 22.23.2 构建 Web UI，再使用 Go 1.27 编译包含 `web/dist` 的 `CGO_ENABLED=0` 二进制；运行阶段是安装了 `fuse3`、CA certificates 和 `passwd` 的 Debian bookworm-slim。
 
+### 推荐：从空目录启动 HTTP 管理和容器内 FUSE/SMB
+
+下面的流程适合 Linux 上的 rootful Docker。它把 FUSE 和 Samba 都留在同一个容器的 mount namespace 内，宿主机只需要访问 HTTP 管理端口和 SMB 共享，不需要处理宿主 FUSE 的 mount propagation。需要 Docker Engine、`/dev/fuse`、`SYS_ADMIN`、`NET_BIND_SERVICE`，以及宿主安全策略允许 FUSE；某些启用 AppArmor 的系统还需要调整或使用下面示例中的 `apparmor=unconfined`。主流程只向本机发布端口。
+
+#### 1. 构建镜像
+
+使用仓库自己的 Dockerfile 构建，宿主机不需要预先安装 Node.js 或 Go：
+
+```bash
+git clone https://github.com/yakumioto/torrentfs-go.git
+cd torrentfs-go
+docker build -t torrentfs .
+```
+
+仓库的 nightly workflow 使用具体的日期、提交和 run id 生成 GHCR tag，并没有可据此保证存在的浮动 `latest` 或 `nightly` tag。未核实具体发布 tag 前，使用本地构建是最确定的路径。
+
+#### 2. 准备运行身份和持久化目录
+
+入口脚本必须以 root 启动，之后以 `PUID:PGID` 运行 torrentfs 和 smbd。不要给 `docker run` 传 `--user`；用非零的 `PUID` 和 `PGID` 配置运行身份。下面是 Bash 示例：非 root 主机用户复用自己的数字身份，root 主机用户选择专用的非 root 身份。
+
+```bash
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+if [[ "$HOST_UID" == 0 || "$HOST_GID" == 0 ]]; then
+  PUID=1500
+  PGID=1500
+else
+  PUID="$HOST_UID"
+  PGID="$HOST_GID"
+fi
+export PUID PGID
+
+# 对新目录设置权限；已有目录先检查其中的数据和权限，不要盲目递归 chown。
+sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
+```
+
+入口不会替 bind mount 自动执行 `chown`。`/srv/torrents` 必须允许该身份读、写和遍历，因为 `torrents-dir/.metadata`、canonical metainfo、registry、字幕和锁文件都要持久化在这里。piece payload 本身只在内存 cache 中，不要把 `/torrents` 作为只读挂载。
+
+#### 3. 启动 HTTP、FUSE 和 SMB
+
+HTTP 和 SMB 共用一组凭据。SMB 要求用户名是镜像内解析到运行 UID 的 Unix 账户；使用动态运行身份时，固定的账户名 `torrentfs` 最简单。`read -r -s -p` 是 Bash 写法，不是通用 POSIX `sh` 写法。
+
+```bash
+export TORRENTFS_USERNAME=torrentfs
+read -r -s -p 'Shared HTTP/SMB password: ' TORRENTFS_PASSWORD
+printf '\n'
+export TORRENTFS_PASSWORD
+
+docker run --detach --name torrentfs \
+  --publish 127.0.0.1:8080:8080 \
+  --publish 127.0.0.1:445:445 \
+  --env PUID --env PGID \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --cap-add NET_BIND_SERVICE \
+  --security-opt apparmor=unconfined \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+  --env TORRENTFS_HTTP_AUTH_ENABLED=true \
+  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_USERNAME \
+  --env TORRENTFS_PASSWORD \
+  torrentfs
+```
+
+不要添加 `-mountpoint`：SMB 模式的入口脚本固定在容器内部使用 `/share`，并在确认 FUSE 挂载成功后启动只监听 TCP 445 的 Samba。`/share` 不需要 bind 到宿主机，`/torrents` 也不会被共享，因为它包含可写的管理状态。
+
+上面的 `127.0.0.1` 绑定只允许本机访问。若要让可信 LAN 客户端访问，改为明确的 LAN 地址并配置防火墙；HTTP 服务不提供 TLS，应放在 TLS reverse proxy 后面，不要直接公开到不受信任的网络。需要接受入站 peer 时，镜像 TOML 的 peer port 是固定的 `6881`，应在同一条 `docker run` 中同时加入 `--publish 6881:6881/tcp --publish 6881:6881/udp`；只发布一个协议或只发布 HTTP 都不够。宿主端口已被占用时先选择合适的绑定，不要假设换 SMB 端口后所有客户端仍能透明使用标准共享。
+
+密码通过 Docker environment 传入，拥有 `docker inspect` 权限者可能看到它；这不是 secret store。不要把真实长期凭据提交到 shell 历史、README 或镜像层。
+
+#### 4. 登录并添加 torrent
+
+浏览器打开 `http://127.0.0.1:8080/`，使用上面的 `torrentfs` 用户名登录。通过 Dashboard 上传自己的 `.torrent` 文件或添加有可用来源的 magnet；不要把 `.torrent` 复制到 `/torrents`，服务不会扫描根目录并自动创建任务。
+
+也可以用 `curl` 和 `jq` 走同一组管理 API。以下命令依赖 `curl`、`jq`，并假定前面的密码变量仍在当前 Bash 中：
+
+```bash
+BASE_URL=http://127.0.0.1:8080
+LOGIN_BODY="$(jq -n \
+  --arg username "$TORRENTFS_USERNAME" \
+  --arg password "$TORRENTFS_PASSWORD" \
+  '{username: $username, password: $password}')"
+TOKEN="$(curl --fail --silent --show-error \
+  --request POST "$BASE_URL/api/v1/auth/login" \
+  --header 'Content-Type: application/json' \
+  --data "$LOGIN_BODY" | jq -r .token)"
+
+# 添加 magnet；它可能先处于 adding，直到 peers 返回 metainfo。
+MAGNET_URI='magnet:?xt=urn:btih:<info-hash>'
+TORRENT_ID="$(curl --fail --silent --show-error \
+  --request POST "$BASE_URL/api/v1/torrents" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "$(jq -n --arg magnet_uri "$MAGNET_URI" '{magnet_uri: $magnet_uri}')" \
+  | jq -r .id)"
+
+# 或上传本地 .torrent；curl 会自动生成 multipart boundary。
+TORRENT_ID="$(curl --fail --silent --show-error \
+  --request POST "$BASE_URL/api/v1/torrents" \
+  --header "Authorization: Bearer $TOKEN" \
+  --form "file=@$PWD/example.torrent" \
+  | jq -r .id)"
+
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/torrents/$TORRENT_ID/status" | jq
+```
+
+受保护 API 需要 `Authorization: Bearer <token>`；登录成功后 token 只在 daemon 内存中保存，容器重启后需要重新登录。`adding` 表示 magnet 还没有 metainfo；`ready` 表示元信息已经可以建立文件视图，但读取时仍可能等待 peers，绝不等同于整个 torrent 已经下载完成。
+
+#### 5. 通过 SMB 读取只读文件
+
+共享名固定为 `torrentfs`。SMB 地址是 `smb://127.0.0.1/torrentfs`；Linux/macOS 等客户端的 `smbclient` 命令使用等价的 `//127.0.0.1/torrentfs`，Windows 使用 `\\主机\\torrentfs`。客户端凭据文件只在本地临时保存：
+
+```bash
+cat > ./torrentfs.smb-credentials <<EOF
+username=$TORRENTFS_USERNAME
+password=$TORRENTFS_PASSWORD
+EOF
+chmod 600 ./torrentfs.smb-credentials
+
+smbclient //127.0.0.1/torrentfs \
+  -A ./torrentfs.smb-credentials -m SMB3 -c 'ls'
+# 把 payload.bin 替换为 ls 输出中的真实路径。
+smbclient //127.0.0.1/torrentfs \
+  -A ./torrentfs.smb-credentials -m SMB3 \
+  -c 'get payload.bin ./payload.bin'
+
+rm -f ./torrentfs.smb-credentials
+```
+
+单文件 torrent 通常直接出现在共享根目录，多文件 torrent 保留目录树；分类会增加一层分类目录。共享是只读的，`put`、删除和改名都应失败；`.metadata` 不会暴露给 SMB。读取需要的 piece 会进入内存 cache，cache 被淘汰或容器重启后会重新从 peers 获取。
+
+#### 6. 查看日志、停止和恢复
+
+```bash
+docker logs -f torrentfs
+docker stop --time 60 torrentfs
+docker start torrentfs
+```
+
+保持同一个 `/srv/torrents` bind mount，重启后任务、metainfo、分类、收藏和 managed subtitles 可以恢复；Bearer token 和 piece cache 是进程内状态，不会恢复。入口脚本给 Samba 最多 10 秒、torrentfs 最多 45 秒的正常退出时间，60 秒的 Docker stop timeout 覆盖这两个窗口。测试完成后可执行 `docker rm -f torrentfs`，并取消当前 shell 中的凭据变量。
+
+#### 7. 外置 TOML 和其他 Docker 模式
+
+要覆盖镜像自带配置并保留默认命令，可以把文件挂到 `/etc/torrentfs/torrentfs.toml`：
+
+```bash
+docker run --detach --name torrentfs \
+  --env PUID --env PGID \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src="$PWD/torrentfs.toml",dst=/etc/torrentfs/torrentfs.toml,readonly \
+  torrentfs
+```
+
+也可以挂到其他位置，但这会替换镜像的默认 `CMD`，必须同时传完整的 `-config` 和 positional `torrents` 目录；不能省略最后的 `/torrents`：
+
+```bash
+docker run --detach --name torrentfs \
+  --env PUID --env PGID \
+  --mount type=bind,src=/srv/torrents,dst=/torrents \
+  --mount type=bind,src="$PWD/torrentfs.toml",dst=/config.toml,readonly \
+  torrentfs -config /config.toml /torrents
+```
+
+外置 TOML 仍必须遵守监听和认证校验；`0.0.0.0:8080` 等非 loopback listener 必须配完整认证。若 TOML 把 `connections.listen_port` 改为 `0`，不要继续宣称 `6881` 端口映射可用。
+
+- **HTTP-only**：不传 `/dev/fuse`、`SYS_ADMIN` 或 SMB 开关，只启动 HTTP 管理服务。它适合管理任务，但不提供 torrent 内容的通用 HTTP 下载/播放端点；要从空目录完成添加后读取，使用本节的 SMB 或下面的 FUSE 模式。
+- **宿主 FUSE**：下面的“Docker FUSE 挂载”示例把 `/mnt` 以 `rshared` bind 到宿主，需要宿主 mount propagation 和 rootful Docker 条件。若要从空目录开始添加任务，应保留一个带认证的 HTTP 管理入口；不要把关闭 HTTP 的示例当成完整的首次使用流程。
+- **单容器 SMB**：SMB 模式固定使用容器内 `/share`，不需要宿主 `/mnt`、`rshared` 或跨容器挂载传播；不要把两种模式的挂载说明混用。
+
 ### 镜像默认行为
 
 ```sh
@@ -763,30 +955,40 @@ SMB 与组合模式的真实协议检查使用：
 
 它覆盖 SMB-only、HTTP+SMB 共用同一组明文凭据、错误密码、guest 拒绝、只读和日志不泄密。
 
-### 构建并运行 HTTP 服务
+### 独立 HTTP-only 容器
 
-公开容器 listener 前必须配置认证。下面的命令从交互式输入读取一组共享明文凭据；Docker `--env NAME` 形式只把已导出的变量传入容器，不把密码字面量放入命令行：
+如果只需要管理 API/Web UI，可以不授予 FUSE 设备和 capability。公开容器 listener 仍必须配置认证，并且 `/torrents` 要预先对 `PUID:PGID` 可写；从空目录添加后没有内容访问端点：
 
-```sh
-mkdir -p /srv/torrents
+```bash
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+if [[ "$HOST_UID" == 0 || "$HOST_GID" == 0 ]]; then
+  PUID=1500
+  PGID=1500
+else
+  PUID="$HOST_UID"
+  PGID="$HOST_GID"
+fi
+export PUID PGID
+sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
+
 export TORRENTFS_USERNAME=alice
-read -r -s -p 'HTTP password: ' TORRENTFS_PASSWORD; printf '\n'
+read -r -s -p 'HTTP password: ' TORRENTFS_PASSWORD
+printf '\n'
 export TORRENTFS_PASSWORD
 
-docker run --rm \
-  --publish 8080:8080 \
-  --env PUID=1000 --env PGID=1000 \
+docker run --detach --name torrentfs-http \
+  --publish 127.0.0.1:8080:8080 \
+  --env PUID --env PGID \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
-
-unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
 ```
 
-镜像内置的默认命令使用 `/torrents` 和 `/etc/torrentfs/torrentfs.toml`；环境变量会覆盖内置 TOML。`-p`/`--publish` 只发布端口，不会改变 daemon 实际监听的地址。
+`--publish` 只发布端口，不会改变 daemon 的监听地址；镜像默认命令仍使用 `/torrents` 和 `/etc/torrentfs/torrentfs.toml`。密码不要写进命令行或镜像层。
 
 ### Docker FUSE 挂载
 
