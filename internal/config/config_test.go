@@ -64,7 +64,7 @@ listen_port = 23456
 socks5_url = "socks5h://user:password@proxy.example:1080"
 
 [cache]
-capacity_bytes = "8192B"
+capacity = "8192B"
 
 [identity]
 tracker_user_agent = "torrentfs-test/1.0"
@@ -113,7 +113,7 @@ func TestLoadHTTPSection(t *testing.T) {
 	path := writeConfig(t, `
 [http]
 listen_addr = "127.0.0.1:9000"
-max_upload_bytes = "2048B"
+max_upload_size = "2048B"
 
 [http.auth]
 enabled = true
@@ -255,6 +255,28 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("Load unknown section error = %q, want unknown key details", err)
+	}
+}
+
+func TestLoadRejectsUnitSuffixedKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		body  string
+		field string
+	}{
+		{name: "cache", body: "[cache]\ncapacity_bytes = \"2GiB\"\n", field: "capacity_bytes"},
+		{name: "upload", body: "[http]\nmax_upload_bytes = \"10MiB\"\n", field: "max_upload_bytes"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, tt.body))
+			var strictErr *toml.StrictMissingError
+			if !errors.As(err, &strictErr) {
+				t.Fatalf("Load error = %v, want *toml.StrictMissingError", err)
+			}
+			if !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("Load error = %q, want rejected key %q", err, tt.field)
+			}
+		})
 	}
 }
 
@@ -444,14 +466,14 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 			setup: func(cfg *config.Config) {
 				cfg.Cache.CapacityBytes = -1
 			},
-			field: "cache.capacity_bytes",
+			field: "cache.capacity",
 		},
 		{
 			name: "zero cache",
 			setup: func(cfg *config.Config) {
 				cfg.Cache.CapacityBytes = 0
 			},
-			field: "cache.capacity_bytes",
+			field: "cache.capacity",
 		},
 		{
 			name: "wrong proxy scheme",
@@ -486,7 +508,7 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 			setup: func(cfg *config.Config) {
 				cfg.HTTP.MaxUploadBytes = 0
 			},
-			field: "http.max_upload_bytes",
+			field: "http.max_upload_size",
 		},
 		{
 			name: "non-loopback address without token",
@@ -690,10 +712,10 @@ func TestValidateAcceptsProxyURLs(t *testing.T) {
 
 func TestLoadHumanReadableQuantities(t *testing.T) {
 	path := writeConfig(t, `[cache]
-capacity_bytes = "32MB"
+capacity = "32MB"
 
 [http]
-max_upload_bytes = "8GB"
+max_upload_size = "8GB"
 
 [http.auth]
 token_ttl = "30m"
@@ -715,17 +737,28 @@ token_ttl = "30m"
 }
 
 func TestLoadRejectsByteQuantityWithoutUnit(t *testing.T) {
-	for _, body := range []string{
-		"[cache]\ncapacity_bytes = 32\n",
-		"[http]\nmax_upload_bytes = \"32\"\n",
+	for _, tt := range []struct {
+		name string
+		body string
+		key  string
+	}{
+		{name: "cache numeric", body: "[cache]\ncapacity = 32\n", key: "capacity"},
+		{name: "cache string", body: "[cache]\ncapacity = \"32\"\n", key: "capacity"},
+		{name: "upload numeric", body: "[http]\nmax_upload_size = 32\n", key: "max_upload_size"},
+		{name: "upload string", body: "[http]\nmax_upload_size = \"32\"\n", key: "max_upload_size"},
 	} {
-		_, err := config.Load(writeConfig(t, body))
-		if err == nil {
-			t.Fatalf("Load(%q) succeeded", body)
-		}
-		if !strings.Contains(err.Error(), "byte quantity") && !strings.Contains(err.Error(), "byte unit") {
-			t.Fatalf("Load(%q) error = %q, want a byte-unit hint", body, err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, tt.body))
+			if err == nil {
+				t.Fatal("Load succeeded")
+			}
+			if !strings.Contains(err.Error(), "byte quantity") && !strings.Contains(err.Error(), "byte unit") {
+				t.Fatalf("Load error = %q, want a byte-unit hint", err)
+			}
+			if !strings.Contains(err.Error(), tt.key+" =") {
+				t.Fatalf("Load error = %q, want TOML key %q", err, tt.key)
+			}
+		})
 	}
 }
 

@@ -33,12 +33,12 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
 		"TORRENTFS_MOUNT_ALLOW_OTHER":                          "true",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
-		"TORRENTFS_CACHE_CAPACITY_BYTES":                       "123456B",
+		"TORRENTFS_CACHE_CAPACITY":                             "123456B",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "torrentfs-test/1.0",
 		"TORRENTFS_IDENTITY_PEER_ID_PREFIX":                    "-TS1000-",
 		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION": "torrentfs-test/1.0",
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
-		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES":                      "2048B",
+		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE":                       "2048B",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
 		httpUsernameEnvironment:                                "alice",
 		httpPasswordEnvironment:                                "password",
@@ -122,16 +122,20 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 }
 
 func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
-	path := writeConfigFile(t, "[cache]\ncapacity_bytes = \"123B\"\n")
+	path := writeConfigFile(t, "[cache]\ncapacity = \"123B\"\n[http]\nmax_upload_size = \"1024B\"\n")
 
 	got, err := load(path, lookupEnvironment(map[string]string{
-		"TORRENTFS_CACHE_CAPACITY_BYTES": "456B",
+		"TORRENTFS_CACHE_CAPACITY":       "456B",
+		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE": "2048B",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if got.Cache.CapacityBytes != 456 {
 		t.Fatalf("CapacityBytes = %d, want environment value 456", got.Cache.CapacityBytes)
+	}
+	if got.HTTP.MaxUploadBytes != 2048 {
+		t.Fatalf("MaxUploadBytes = %d, want environment value 2048", got.HTTP.MaxUploadBytes)
 	}
 
 	defaults, err := load("", lookupEnvironment(nil))
@@ -152,6 +156,19 @@ func TestLoadIgnoresRemovedDataDirEnvironment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, Default()) {
 		t.Fatalf("config changed after removed environment variable: %+v", got)
+	}
+}
+
+func TestLoadIgnoresUnitSuffixedEnvironment(t *testing.T) {
+	got, err := load("", lookupEnvironment(map[string]string{
+		"TORRENTFS_CACHE_CAPACITY_BYTES":  "32MiB",
+		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES": "8GB",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !reflect.DeepEqual(got, Default()) {
+		t.Fatalf("config changed after removed environment variables: %+v", got)
 	}
 }
 
@@ -210,8 +227,8 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 		field string
 	}{
 		{name: "port", env: "TORRENTFS_CONNECTIONS_LISTEN_PORT", raw: "not-a-port", field: "connections.listen_port"},
-		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY_BYTES", raw: "not-a-capacity", field: "cache.capacity_bytes"},
-		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_BYTES", raw: "not-a-limit", field: "http.max_upload_bytes"},
+		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY", raw: "not-a-capacity", field: "cache.capacity"},
+		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_SIZE", raw: "not-a-limit", field: "http.max_upload_size"},
 		{name: "bool", env: "TORRENTFS_HTTP_AUTH_ENABLED", raw: "not-a-bool", field: "http.auth.enabled"},
 		{name: "mount bool", env: "TORRENTFS_MOUNT_ALLOW_OTHER", raw: "not-a-bool", field: "mount.allow_other"},
 		{name: "duration", env: "TORRENTFS_HTTP_AUTH_TOKEN_TTL", raw: "not-a-duration", field: "http.auth.token_ttl"},
@@ -248,8 +265,8 @@ func TestLoadEnvironmentByteQuantitiesRequireUnits(t *testing.T) {
 		name string
 		env  string
 	}{
-		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY_BYTES"},
-		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_BYTES"},
+		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY"},
+		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_SIZE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,8 +286,8 @@ func TestLoadEnvironmentByteQuantitiesRequireUnits(t *testing.T) {
 
 func TestLoadEnvironmentAcceptsHumanReadableByteQuantities(t *testing.T) {
 	got, err := load("", lookupEnvironment(map[string]string{
-		"TORRENTFS_CACHE_CAPACITY_BYTES":  "32MiB",
-		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES": "8GB",
+		"TORRENTFS_CACHE_CAPACITY":       "32MiB",
+		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE": "8GB",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)

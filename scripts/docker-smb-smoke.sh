@@ -412,7 +412,7 @@ start_app() {
 		--env "TORRENTFS_PASSWORD=$smb_password"
 		# The cache capacity accepts only a byte quantity with an explicit unit;
 		# CACHE_BYTES itself stays a plain number.
-		--env "TORRENTFS_CACHE_CAPACITY_BYTES=${CACHE_BYTES}B"
+		--env "TORRENTFS_CACHE_CAPACITY=${CACHE_BYTES}B"
 	)
 	if [[ "$http_auth" == true ]]; then
 		env_args+=(
