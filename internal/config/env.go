@@ -108,8 +108,8 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_CACHE_CAPACITY_BYTES",
-		field: "cache.capacity_bytes",
+		name:  "TORRENTFS_CACHE_CAPACITY",
+		field: "cache.capacity",
 		apply: func(cfg *Config, raw string) error {
 			value, err := ParseByteQuantity(raw)
 			if err != nil {
@@ -152,8 +152,8 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_HTTP_MAX_UPLOAD_BYTES",
-		field: "http.max_upload_bytes",
+		name:  "TORRENTFS_HTTP_MAX_UPLOAD_SIZE",
+		field: "http.max_upload_size",
 		apply: func(cfg *Config, raw string) error {
 			value, err := ParseByteQuantity(raw)
 			if err != nil {

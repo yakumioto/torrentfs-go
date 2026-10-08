@@ -20,7 +20,7 @@ runtime_gid=1000
 cat >"$work_dir/torrentfs.toml" <<'EOF'
 [http]
 listen_addr = "0.0.0.0:8080"
-max_upload_bytes = "10MiB"
+max_upload_size = "10MiB"
 
 [http.auth]
 enabled = true

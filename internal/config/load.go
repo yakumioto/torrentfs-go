@@ -35,10 +35,10 @@ func load(path string, lookup envLookup) (Config, error) {
 			if errors.As(err, &decodeErr) {
 				message := decodeErr.String()
 				if strings.Contains(message, "CapacityBytes") {
-					message += "; cache.capacity_bytes must be a quoted byte quantity such as 32MB or 2GiB"
+					message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
 				}
 				if strings.Contains(message, "MaxUploadBytes") {
-					message += "; http.max_upload_bytes must be a quoted byte quantity such as 10MiB or 32MB"
+					message += "; http.max_upload_size must be a quoted byte quantity such as 10MiB or 32MB"
 				}
 				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, message, err)
 			}
@@ -69,13 +69,13 @@ type fileConfig struct {
 }
 
 type fileCache struct {
-	CapacityBytes tomlByteQuantity `toml:"capacity_bytes"`
+	CapacityBytes tomlByteQuantity `toml:"capacity"`
 }
 
 type fileHTTP struct {
 	ListenAddr     string           `toml:"listen_addr"`
 	Auth           Auth             `toml:"auth"`
-	MaxUploadBytes tomlByteQuantity `toml:"max_upload_bytes"`
+	MaxUploadBytes tomlByteQuantity `toml:"max_upload_size"`
 }
 
 func newFileConfig(cfg Config) fileConfig {

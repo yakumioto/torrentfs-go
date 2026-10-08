@@ -107,7 +107,7 @@ type HTTP struct {
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
-	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+	MaxUploadBytes int64 `toml:"max_upload_size"`
 }
 
 // Log groups the process log settings.
@@ -185,7 +185,7 @@ type Proxy struct {
 // Cache groups in-memory piece cache settings.
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
-	CapacityBytes int64 `toml:"capacity_bytes"`
+	CapacityBytes int64 `toml:"capacity"`
 }
 
 // Identity groups the client identity values sent to trackers and peers.
@@ -247,7 +247,7 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
-		return invalid("cache.capacity_bytes", errCapacityRange)
+		return invalid("cache.capacity", errCapacityRange)
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
 		return invalid("proxy.socks5_url", err)
@@ -271,7 +271,7 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
-		return invalid("http.max_upload_bytes", errPositive)
+		return invalid("http.max_upload_size", errPositive)
 	}
 	if _, err := ParseLogLevel(c.Log.Level); err != nil {
 		return invalid("log.level", errLogLevel)

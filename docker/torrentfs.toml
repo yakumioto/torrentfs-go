@@ -5,7 +5,7 @@
 
 [http]
 listen_addr = "127.0.0.1:8080"
-max_upload_bytes = "10MiB"
+max_upload_size = "10MiB"
 
 [http.auth]
 enabled = false
@@ -31,7 +31,7 @@ socks5_url = ""
 [cache]
 # 2GiB suits a host with about 4 GB of RAM. Override for smaller containers:
 # use an integer with an SI or IEC byte unit, roughly 50-60% of the container memory limit.
-capacity_bytes = "2GiB"
+capacity = "2GiB"
 
 [identity]
 tracker_user_agent = "qBittorrent/4.4.0"
