@@ -306,6 +306,108 @@ func newProbedLoader(t *testing.T) (*pieceLoader, *blockingOperationReader, chan
 	return loader, reader, events
 }
 
+func TestOpenedFileReadTimeoutAndRetry(t *testing.T) {
+	for _, mode := range []string{"ReadAt", "context", "nil context"} {
+		t.Run(mode, func(t *testing.T) {
+			loader, reader, events := newProbedLoader(t)
+			opened := &openedFile{
+				file: &raFile{
+					loader:      loader,
+					cache:       cache.New(128),
+					torrentKey:  "read-timeout",
+					fileSize:    32,
+					pieceLength: 32,
+					torrentSize: 32,
+				},
+				readTimeout: 100 * time.Millisecond,
+			}
+			done := make(chan loaderReadResult, 1)
+			go func() {
+				buf := make([]byte, 32)
+				var n int
+				var err error
+				switch mode {
+				case "ReadAt":
+					n, err = opened.ReadAt(buf, 0)
+				case "context":
+					n, err = opened.ReadAtContext(context.Background(), buf, 0)
+				case "nil context":
+					n, err = opened.ReadAtContext(nil, buf, 0)
+				}
+				done <- loaderReadResult{n: n, err: err}
+			}()
+			waitProbeEvent(t, events, "reader-started", 0)
+			select {
+			case result := <-done:
+				if result.n != 0 || !errors.Is(result.err, context.DeadlineExceeded) {
+					t.Fatalf("expired read = %d, %v; want 0, DeadlineExceeded", result.n, result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("read did not stop at its configured timeout")
+			}
+
+			reader.releaseReads()
+			buf := make([]byte, 32)
+			if n, err := opened.ReadAt(buf, 0); n != len(buf) || err != nil {
+				t.Fatalf("retry on the same handle = %d, %v; want %d, nil", n, err, len(buf))
+			}
+			if !bytes.Equal(buf, blockingPattern(0, len(buf))) {
+				t.Fatal("retry content mismatch")
+			}
+		})
+	}
+}
+
+func TestOpenedFileCallerDeadlineDoesNotCancelAnotherRead(t *testing.T) {
+	loader, reader, events := newProbedLoader(t)
+	opened := &openedFile{
+		file: &raFile{
+			loader:      loader,
+			cache:       cache.New(128),
+			torrentKey:  "caller-deadline",
+			fileSize:    32,
+			pieceLength: 32,
+			torrentSize: 32,
+		},
+		readTimeout: time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := opened.ReadAtContext(ctx, make([]byte, 32), 0)
+		firstDone <- err
+	}()
+	waitProbeEvent(t, events, "reader-started", 0)
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := opened.ReadAt(make([]byte, 32), 0)
+		secondDone <- err
+	}()
+	waitProbeEvent(t, events, "admission-attempt", 0)
+	select {
+	case err := <-firstDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("caller deadline error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("read ignored the earlier caller deadline")
+	}
+	secondStarted := waitProbeEvent(t, events, "reader-started", 0)
+	if channelClosed(secondStarted.Done) {
+		t.Fatal("the first deadline cancelled the second operation")
+	}
+	reader.releaseReads()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second read failed after another request timed out: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second read did not finish")
+	}
+}
+
 type loaderReadResult struct {
 	n    int
 	err  error

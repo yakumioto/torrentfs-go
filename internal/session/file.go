@@ -448,19 +448,30 @@ var _ io.ReaderAt = (*raFile)(nil)
 var _ io.Closer = (*raFile)(nil)
 
 type openedFile struct {
-	file *raFile
-	once sync.Once
+	file        *raFile
+	readTimeout time.Duration
+	once        sync.Once
 }
 
 var _ io.ReaderAt = (*openedFile)(nil)
 var _ io.Closer = (*openedFile)(nil)
 
 func (f *openedFile) ReadAt(p []byte, off int64) (int, error) {
-	return f.file.ReadAt(p, off)
+	return f.ReadAtContext(context.Background(), p, off)
 }
 
 func (f *openedFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
-	return f.file.ReadAtContext(ctx, p, off)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, f.readTimeout)
+	defer cancel()
+	n, err := f.file.ReadAtContext(ctx, p, off)
+	// The loader's operation context can report cancellation for a request deadline.
+	if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = context.DeadlineExceeded
+	}
+	return n, err
 }
 
 func (f *openedFile) Close() error {

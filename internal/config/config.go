@@ -122,7 +122,8 @@ type Mount struct {
 	// AllowOther passes allow_other to the kernel, lifting FUSE's default
 	// restriction that only the mounting user may access the mount.
 	// It defaults to false.
-	AllowOther bool `toml:"allow_other"`
+	AllowOther  bool     `toml:"allow_other"`
+	ReadTimeout Duration `toml:"read_timeout"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -228,7 +229,8 @@ func Default() Config {
 			Format: defaultLogFormat,
 		},
 		Mount: Mount{
-			AllowOther: false,
+			AllowOther:  false,
+			ReadTimeout: Duration(30 * time.Second),
 		},
 	}
 }
@@ -248,6 +250,9 @@ func (c Config) Validate() error {
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
 		return invalid("cache.capacity", errCapacityRange)
+	}
+	if c.Mount.ReadTimeout <= 0 {
+		return invalid("mount.read_timeout", errPositive)
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
 		return invalid("proxy.socks5_url", err)

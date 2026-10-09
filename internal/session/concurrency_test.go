@@ -6,15 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -553,6 +559,217 @@ func TestFuseCloseFirstShutdownReleasesBlockedReads(t *testing.T) {
 	if f, err := os.Open(path); err == nil {
 		_ = f.Close()
 		t.Error("open after Session.Close and Unmount succeeded; want an error")
+	}
+}
+
+func TestFuseUnavailableTorrentDoesNotBlockHealthyTorrent(t *testing.T) {
+	requireFuse(t)
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	sess := newLoopbackSession(t, testConfig(), filepath.Join(work, "torrents"))
+
+	const blockedReads = 12 // Default FUSE background-read limit.
+	missingFiles := make(map[string][]byte, blockedReads)
+	for index := range blockedReads {
+		missingFiles[fmt.Sprintf("%03d.bin", index)] = bytes.Repeat([]byte{17}, testPieceLength)
+	}
+	missingPath, _, _ := buildMultiFileTorrent(t, work, "missing", missingFiles)
+	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: missingPath}); err != nil {
+		t.Fatalf("add unavailable torrent: %v", err)
+	}
+	healthy := bytes.Repeat([]byte{29}, testPieceLength)
+	webseed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "healthy.bin", time.Time{}, bytes.NewReader(healthy))
+	}))
+	t.Cleanup(webseed.Close)
+	healthyBytes, healthyHash := buildSingleFileTorrentBytes(t, "healthy.bin", healthy, nil)
+	mi, err := metainfo.Load(bytes.NewReader(healthyBytes))
+	if err != nil {
+		t.Fatalf("load healthy metainfo: %v", err)
+	}
+	mi.UrlList = []string{webseed.URL + "/healthy.bin"}
+	var encoded bytes.Buffer
+	if err := mi.Write(&encoded); err != nil {
+		t.Fatalf("write healthy metainfo: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, session.Source{Metainfo: encoded.Bytes()}); err != nil {
+		t.Fatalf("add healthy torrent: %v", err)
+	}
+	healthyTorrent := requireTorrent(t, sess, healthyHash)
+	if healthyTorrent.CachedBytes() != 0 {
+		t.Fatal("healthy torrent must download its data from the webseed")
+	}
+
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() {
+		unmountServer(t, server, mnt)
+		server.Wait()
+	})
+	missingReaders := make([]*os.File, blockedReads)
+	for index := range blockedReads {
+		file, err := os.Open(filepath.Join(mnt, "missing", fmt.Sprintf("%03d.bin", index)))
+		if err != nil {
+			t.Fatalf("open unavailable video %d: %v", index, err)
+		}
+		missingReaders[index] = file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	events := make(chan session.ReadProbeEvent, 256)
+	restoreProbe := session.SetReadProbe(events)
+	defer func() {
+		_ = sess.Close(context.Background())
+		restoreProbe()
+	}()
+	missingDone := readAtAsync(missingReaders[0], 0, concurrencyReadChunk)
+	started := waitProbeEvent(t, events, "reader-started", 0)
+	requireNoReadOutcome(t, missingDone, "unavailable torrent read")
+	for index := 1; index < blockedReads; index++ {
+		readAtAsync(missingReaders[index], 0, concurrencyReadChunk)
+		waitProbeEvent(t, events, "reader-started", int64(index*testPieceLength))
+	}
+
+	healthyDone := make(chan readOutcome, 1)
+	go func() {
+		file, err := os.Open(filepath.Join(mnt, "healthy.bin"))
+		if err != nil {
+			healthyDone <- readOutcome{err: err}
+			return
+		}
+		defer func() { _ = file.Close() }()
+		healthyDone <- <-readAtAsync(file, 0, concurrencyReadChunk)
+	}()
+	// The webseed scheduler runs on a five-second interval.
+	outcome := waitReadOutcomeWithin(t, healthyDone, "healthy torrent read while another torrent has no peers", 8*time.Second)
+	if outcome.err != nil {
+		t.Fatalf("healthy torrent read: %v", outcome.err)
+	}
+	if !bytes.Equal(outcome.data, healthy[:concurrencyReadChunk]) {
+		t.Fatal("healthy torrent content mismatch")
+	}
+	if probeDoneClosed(started.Done) {
+		t.Fatal("healthy torrent read cancelled the unavailable torrent read")
+	}
+}
+
+func TestFuseMissingReadTimesOutAndCanRetry(t *testing.T) {
+	requireFuse(t)
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	cfg := testConfig()
+	cfg.Mount.ReadTimeout = config.Duration(300 * time.Millisecond)
+	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
+	content := bytes.Repeat([]byte{31}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "timeout.bin", content, nil)
+	if err := sess.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	mnt := filepath.Join(work, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatalf("make mountpoint: %v", err)
+	}
+	server, err := filesystem.Mount(mnt, sess, nil)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() {
+		unmountServer(t, server, mnt)
+		server.Wait()
+	})
+	file, err := os.Open(filepath.Join(mnt, "timeout.bin"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	events := make(chan session.ReadProbeEvent, 32)
+	restoreProbe := session.SetReadProbe(events)
+	defer func() {
+		_ = sess.Close(context.Background())
+		restoreProbe()
+	}()
+
+	readStarted := time.Now()
+	firstDone := readAtAsync(file, 0, concurrencyReadChunk)
+	waitProbeEvent(t, events, "reader-started", 0)
+	outcome := waitReadOutcomeWithin(t, firstDone, "missing read timeout", 2*time.Second)
+	if elapsed := time.Since(readStarted); elapsed < time.Duration(cfg.Mount.ReadTimeout) {
+		t.Fatalf("missing read returned after %s, before its %s timeout", elapsed, cfg.Mount.ReadTimeout)
+	}
+	// Buffered FUSE reads can surface page-cache failures as EIO instead of ETIMEDOUT.
+	if !errors.Is(outcome.err, syscall.ETIMEDOUT) && !errors.Is(outcome.err, syscall.EIO) {
+		t.Fatalf("missing read error = %v, want ETIMEDOUT or EIO", outcome.err)
+	}
+	seedPieces(t, sess, hash, content)
+	outcome = waitReadOutcomeWithin(t, readAtAsync(file, 0, concurrencyReadChunk), "read after timeout", 2*time.Second)
+	if outcome.err != nil {
+		t.Fatalf("retry after timeout: %v", outcome.err)
+	}
+	if !bytes.Equal(outcome.data, content[:concurrencyReadChunk]) {
+		t.Fatal("retry after timeout returned incorrect content")
+	}
+}
+
+func TestSessionReadDeadlineKeepsSharedPieceFlight(t *testing.T) {
+	work := t.TempDir()
+	cfg := testConfig()
+	cfg.Mount.ReadTimeout = config.Duration(time.Second)
+	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
+	hash, content := seedPrefetchTorrent(t, sess, "shared.bin", 1)
+	first, err := sess.OpenFile(hash, "shared.bin")
+	if err != nil {
+		t.Fatalf("first OpenFile: %v", err)
+	}
+	t.Cleanup(func() { _ = first.(io.Closer).Close() })
+	second, err := sess.OpenFile(hash, "shared.bin")
+	if err != nil {
+		t.Fatalf("second OpenFile: %v", err)
+	}
+	t.Cleanup(func() { _ = second.(io.Closer).Close() })
+	events := make(chan session.ReadProbeEvent, 32)
+	restoreProbe := session.SetReadProbe(events)
+	defer func() {
+		_ = sess.Close(context.Background())
+		restoreProbe()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := first.(interface {
+			ReadAtContext(context.Context, []byte, int64) (int, error)
+		}).ReadAtContext(ctx, make([]byte, 64), 0)
+		firstDone <- err
+	}()
+	started := waitProbeEvent(t, events, "reader-started", 0)
+	secondDone := make(chan readOutcome, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, err := second.ReadAt(buf, 0)
+		secondDone <- readOutcome{data: buf[:n], err: err}
+	}()
+	waitProbeEvent(t, events, "admission-attempt", 0)
+	select {
+	case err := <-firstDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("first read error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first read did not honor its earlier deadline")
+	}
+	if probeDoneClosed(started.Done) {
+		t.Fatal("one read deadline cancelled the shared piece flight")
+	}
+	seedPieces(t, sess, hash, content)
+	outcome := waitReadOutcomeWithin(t, secondDone, "remaining shared-piece read", 2*time.Second)
+	if outcome.err != nil || !bytes.Equal(outcome.data, content[:64]) {
+		t.Fatalf("remaining read = %d bytes, %v; want original content", len(outcome.data), outcome.err)
 	}
 }
 

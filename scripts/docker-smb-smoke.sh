@@ -36,6 +36,7 @@ webseed_pid=''
 network_created=0
 image_built=0
 client_image_built=0
+cifs_available=0
 app_names=()
 
 fail() {
@@ -403,7 +404,7 @@ printf 'username=%s\npassword=%s\n' "$smb_user" "$smb_password" >"$credentials_f
 chmod 0400 "$credentials_file"
 
 start_app() {
-	local app="$1" app_torrents="$2" http_auth="${3:-true}"
+	local app="$1" app_torrents="$2" http_auth="${3:-true}" read_timeout="${4:-30s}"
 	local env_args=(
 		--env "PUID=$SMOKE_UID"
 		--env "PGID=$SMOKE_GID"
@@ -413,6 +414,7 @@ start_app() {
 		# The cache capacity accepts only a byte quantity with an explicit unit;
 		# CACHE_BYTES itself stays a plain number.
 		--env "TORRENTFS_CACHE_CAPACITY=${CACHE_BYTES}B"
+		--env "TORRENTFS_MOUNT_READ_TIMEOUT=$read_timeout"
 	)
 	if [[ "$http_auth" == true ]]; then
 		env_args+=(
@@ -616,6 +618,7 @@ else
 	else
 		actual_range="$(awk '{ print $1 }' "$range_output")"
 		[[ "$actual_range" == "$expected_range" ]] || fail "CIFS positional-read hash $actual_range differs from source $expected_range"
+		cifs_available=1
 		printf 'docker SMB smoke: CIFS positional read at offset %s passed\n' "$RANDOM_OFFSET"
 	fi
 fi
@@ -631,6 +634,141 @@ torrent_line="$(printf '%s\n' "$normal_logs" | grep -n 'torrentfs stopping' | he
 [[ -n "$smbd_line" && -n "$torrent_line" && "$smbd_line" -lt "$torrent_line" ]] ||
 	fail "normal shutdown order was not smbd before torrentfs: $normal_logs"
 printf 'docker SMB smoke: normal SIGTERM shutdown was bounded and ordered\n'
+
+if (( cifs_available )); then
+	concurrent_torrents="$work_dir/concurrent-torrents"
+	mkdir -p "$concurrent_torrents"
+	chmod 0777 "$concurrent_torrents"
+	python3 - "$concurrent_torrents" "$canonical_torrent" "$torrents_dir/.metadata/state/$torrent_hash.json" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import shutil
+import sys
+
+root, payload_torrent, payload_state = sys.argv[1:]
+metadata = os.path.join(root, ".metadata")
+state_dir = os.path.join(metadata, "state")
+for path in (metadata, state_dir, os.path.join(metadata, "pending")):
+    os.makedirs(path, mode=0o777, exist_ok=True)
+    os.chmod(path, 0o777)
+with open(os.path.join(metadata, "layout_version"), "w") as output:
+    output.write("2\n")
+shutil.copyfile(payload_torrent, os.path.join(root, os.path.basename(payload_torrent)))
+shutil.copyfile(payload_state, os.path.join(state_dir, os.path.basename(payload_state)))
+
+
+def bencode(value):
+    if isinstance(value, int):
+        return b"i" + str(value).encode() + b"e"
+    if isinstance(value, bytes):
+        return str(len(value)).encode() + b":" + value
+    if isinstance(value, list):
+        return b"l" + b"".join(bencode(item) for item in value) + b"e"
+    if isinstance(value, dict):
+        return b"d" + b"".join(bencode(key) + bencode(value[key]) for key in sorted(value)) + b"e"
+    raise TypeError(type(value))
+
+
+piece_length = 1 << 20
+files, pieces = [], []
+for index in range(16):
+    files.append({b"length": piece_length, b"path": [("video-%02d.bin" % index).encode()]})
+    pieces.append(hashlib.sha1(bytes([index + 1]) * piece_length).digest())
+info = {b"name": b"unavailable", b"files": files, b"piece length": piece_length, b"pieces": b"".join(pieces)}
+info_bytes = bencode(info)
+infohash = hashlib.sha1(info_bytes).hexdigest()
+with open(os.path.join(root, infohash + ".torrent"), "wb") as output:
+    output.write(bencode({b"info": info}))
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+with open(os.path.join(state_dir, infohash + ".json"), "w") as output:
+    json.dump({"id": infohash, "info_hash": infohash, "name": "unavailable", "state": "ready", "created_at": now, "updated_at": now}, output)
+PY
+	app_concurrent="${APP_PREFIX}-concurrent"
+	# Webseed dispatch runs every five seconds; shorter deadlines also cancel healthy reads.
+	start_app "$app_concurrent" "$concurrent_torrents" true 10s
+	expected_prefix="$(dd if="$webseed_dir/payload.bin" bs=64K count=4096 iflag=count_bytes status=none | sha256sum | awk '{ print $1 }')"
+	client_concurrent="${APP_PREFIX}-concurrent-client"
+	app_names+=("$client_concurrent")
+	bounded "$DOCKER_OP_TIMEOUT" 'start concurrent CIFS client' docker run --detach --privileged \
+		--name "$client_concurrent" --network "$NETWORK" \
+		--env "APP_HOST=$app_concurrent" \
+		--env "EXPECTED_PREFIX=$expected_prefix" \
+		--env "EXPECTED_RANGE=$expected_range" \
+		--env "RANDOM_OFFSET=$RANDOM_OFFSET" \
+		--env "RANDOM_LENGTH=$RANDOM_LENGTH" \
+		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
+		"$CLIENT_IMAGE" sh -ceu '
+		mkdir -p /mnt/torrentfs-client
+		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,ro"
+		trap "umount -l /mnt/torrentfs-client >/dev/null 2>&1 || true" EXIT
+		if ! timeout --kill-after=2 30 dd if=/mnt/torrentfs-client/payload.bin of=/tmp/prefix \
+			bs=64K count=4096 iflag=count_bytes status=none; then
+			printf "FAIL concurrent healthy prefix read\n"
+			exit 1
+		fi
+		[ "$(sha256sum /tmp/prefix | cut -d" " -f1)" = "$EXPECTED_PREFIX" ] || {
+			printf "FAIL concurrent healthy prefix hash\n"
+			exit 1
+		}
+		printf "CONTROL concurrent healthy prefix passed\n"
+		pids=""
+		# Client cancellation must not release stalled reads before the healthy-read deadline.
+		for index in $(seq 0 15); do
+			name="$(printf "video-%02d.bin" "$index")"
+			timeout --kill-after=2 60 dd if="/mnt/torrentfs-client/unavailable/$name" of=/dev/null \
+				bs=64K count=4096 iflag=count_bytes status=none >"/tmp/missing-$index.log" 2>&1 &
+			pids="$pids $!"
+		done
+		sleep 0.25
+		for pid in $pids; do
+			kill -0 "$pid" 2>/dev/null || {
+				printf "FAIL missing video read ended before the concurrent probe\n"
+				exit 1
+			}
+		done
+		printf "CONTROL 16 missing video reads pending\n"
+		if ! timeout --kill-after=2 30 dd if=/mnt/torrentfs-client/payload.bin of=/tmp/range \
+			bs=64K skip="$RANDOM_OFFSET" count="$RANDOM_LENGTH" iflag=skip_bytes,count_bytes status=none; then
+			printf "FAIL healthy cold read with missing reads pending failed or exceeded 30s\n"
+			exit 1
+		fi
+		[ "$(sha256sum /tmp/range | cut -d" " -f1)" = "$EXPECTED_RANGE" ] || {
+			printf "FAIL healthy cold read with missing reads pending returned wrong data\n"
+			exit 1
+		}
+		printf "PASS same-connection concurrent cold read\n"
+	' >/dev/null
+	concurrent_deadline=$((SECONDS + 90))
+	concurrent_passed=0
+	concurrent_output=''
+	while (( SECONDS < concurrent_deadline )); do
+		concurrent_output="$(logs "$client_concurrent")"
+		if [[ "$concurrent_output" == *'FAIL '* ]]; then
+			fail "same-connection concurrent read failed: $concurrent_output
+app logs:
+$(logs "$app_concurrent")"
+		fi
+		if [[ "$concurrent_output" == *'PASS same-connection concurrent cold read'* ]]; then
+			concurrent_passed=1
+			break
+		fi
+		concurrent_state="$(probe 'inspect concurrent client' docker inspect --format '{{.State.Status}}' "$client_concurrent")"
+		if [[ "$concurrent_state" == exited || "$concurrent_state" == dead ]]; then
+			fail "concurrent CIFS client exited without a successful read: $concurrent_output"
+		fi
+		sleep 0.2
+	done
+	(( concurrent_passed )) || fail "same-connection concurrent read exceeded 90s: $concurrent_output"
+	printf 'docker SMB smoke: same-connection cold read passed with 16 missing videos pending\n'
+	bounded "$DOCKER_OP_TIMEOUT" 'stop concurrent app' docker kill --signal TERM "$app_concurrent" >/dev/null
+	concurrent_status="$(bounded "$DOCKER_OP_TIMEOUT" 'wait for concurrent app' docker wait "$app_concurrent")"
+	[[ "$concurrent_status" == 0 ]] || fail "concurrent SMB shutdown returned $concurrent_status"
+	bounded 30 'remove concurrent client' docker rm -f "$client_concurrent" >/dev/null
+else
+	printf 'docker SMB smoke: same-connection concurrent-read check not run (CIFS unavailable or explicitly skipped)\n'
+fi
 
 printf 'docker SMB smoke: starting SMB-only share with HTTP auth disabled\n'
 smb_only_torrents="$work_dir/smb-only-torrents"

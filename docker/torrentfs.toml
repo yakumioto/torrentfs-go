@@ -47,3 +47,5 @@ add_source = false
 # Non-root deployments should leave this false unless /etc/fuse.conf contains
 # user_allow_other and the wider read access is intentional.
 allow_other = false
+# Upper bound per content read, not per playback session.
+read_timeout = "30s"
