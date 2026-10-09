@@ -642,7 +642,7 @@ func TestFuseUnavailableTorrentDoesNotBlockHealthyTorrent(t *testing.T) {
 			healthyDone <- readOutcome{err: err}
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		healthyDone <- <-readAtAsync(file, 0, concurrencyReadChunk)
 	}()
 	// The webseed scheduler runs on a five-second interval.

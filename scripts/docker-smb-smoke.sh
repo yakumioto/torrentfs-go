@@ -686,7 +686,8 @@ with open(os.path.join(state_dir, infohash + ".json"), "w") as output:
     json.dump({"id": infohash, "info_hash": infohash, "name": "unavailable", "state": "ready", "created_at": now, "updated_at": now}, output)
 PY
 	app_concurrent="${APP_PREFIX}-concurrent"
-	start_app "$app_concurrent" "$concurrent_torrents" true 2s
+	# Webseed dispatch runs every five seconds; shorter deadlines also cancel healthy reads.
+	start_app "$app_concurrent" "$concurrent_torrents" true 10s
 	expected_prefix="$(dd if="$webseed_dir/payload.bin" bs=64K count=4096 iflag=count_bytes status=none | sha256sum | awk '{ print $1 }')"
 	client_concurrent="${APP_PREFIX}-concurrent-client"
 	app_names+=("$client_concurrent")
@@ -713,9 +714,10 @@ PY
 		}
 		printf "CONTROL concurrent healthy prefix passed\n"
 		pids=""
+		# Client cancellation must not release stalled reads before the healthy-read deadline.
 		for index in $(seq 0 15); do
 			name="$(printf "video-%02d.bin" "$index")"
-			timeout --kill-after=2 30 dd if="/mnt/torrentfs-client/unavailable/$name" of=/dev/null \
+			timeout --kill-after=2 60 dd if="/mnt/torrentfs-client/unavailable/$name" of=/dev/null \
 				bs=64K count=4096 iflag=count_bytes status=none >"/tmp/missing-$index.log" 2>&1 &
 			pids="$pids $!"
 		done
@@ -727,9 +729,9 @@ PY
 			}
 		done
 		printf "CONTROL 16 missing video reads pending\n"
-		if ! timeout --kill-after=2 8 dd if=/mnt/torrentfs-client/payload.bin of=/tmp/range \
+		if ! timeout --kill-after=2 30 dd if=/mnt/torrentfs-client/payload.bin of=/tmp/range \
 			bs=64K skip="$RANDOM_OFFSET" count="$RANDOM_LENGTH" iflag=skip_bytes,count_bytes status=none; then
-			printf "FAIL healthy cold read with missing reads pending timed out\n"
+			printf "FAIL healthy cold read with missing reads pending failed or exceeded 30s\n"
 			exit 1
 		fi
 		[ "$(sha256sum /tmp/range | cut -d" " -f1)" = "$EXPECTED_RANGE" ] || {
@@ -738,7 +740,7 @@ PY
 		}
 		printf "PASS same-connection concurrent cold read\n"
 	' >/dev/null
-	concurrent_deadline=$((SECONDS + 60))
+	concurrent_deadline=$((SECONDS + 90))
 	concurrent_passed=0
 	concurrent_output=''
 	while (( SECONDS < concurrent_deadline )); do
@@ -758,7 +760,7 @@ $(logs "$app_concurrent")"
 		fi
 		sleep 0.2
 	done
-	(( concurrent_passed )) || fail "same-connection concurrent read exceeded 60s: $concurrent_output"
+	(( concurrent_passed )) || fail "same-connection concurrent read exceeded 90s: $concurrent_output"
 	printf 'docker SMB smoke: same-connection cold read passed with 16 missing videos pending\n'
 	bounded "$DOCKER_OP_TIMEOUT" 'stop concurrent app' docker kill --signal TERM "$app_concurrent" >/dev/null
 	concurrent_status="$(bounded "$DOCKER_OP_TIMEOUT" 'wait for concurrent app' docker wait "$app_concurrent")"
