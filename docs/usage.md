@@ -10,6 +10,8 @@
 
 磁力链接可能先处于 `adding`，直到 peers 提供元信息。`ready` 只表示 metainfo 可用、能够建立文件视图；不表示所有内容已下载或所有 piece 都在缓存中。读取仍可能等待 peers，缓存淘汰后也可能重新获取内容。
 
+每次前台内容读取最多等待 `mount.read_timeout`（默认 `30s`）。没有来源或来不及取得已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除种子或取消其他读取；这个期限不限制整个视频或文件句柄的播放时长。慢来源或大 piece 可调长该值，也可用 `TORRENTFS_MOUNT_READ_TIMEOUT` 覆盖，修改后重启，见[配置参考](configuration.md)。
+
 HTTP API/Web UI 只负责管理，没有通用 torrent 内容下载或播放端点。内容通过原生 FUSE、容器内 SMB 或宿主可见的 FUSE 读取。
 
 ## FUSE 文件布局
@@ -164,6 +166,7 @@ UI/API 禁用时，已保存的规则仍会在启动时加载，但没有在线�
 | API 返回 `401` | token 缺失、格式错误、过期或已撤销；重新登录 |
 | magnet 一直 `adding` | peers 尚未提供 metainfo，检查来源与网络可用性 |
 | `ready` 后读取等待 | 所需 piece 不在缓存，仍需 peers 提供，不代表完整下载已完成 |
+| 视频或封面显示超时或 I/O 错误 | 单次读取可能超过 `mount.read_timeout`，默认 `30s`；检查来源与网络，慢来源或大 piece 可调长配置后重启 |
 | 字幕上传 `413` | 请求超过 `http.max_upload_size`，默认 `10MiB`；调高配置后重启 |
 | `415` + `subtitle_name_mismatch` | basename 不严格对应或多了语言后缀，改名后重试 |
 | `415` + `subtitle_format_unsupported` | 扩展名不是小写 `.srt`/`.ass`/`.vtt` |

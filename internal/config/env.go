@@ -100,6 +100,18 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
+		name:  "TORRENTFS_MOUNT_READ_TIMEOUT",
+		field: "mount.read_timeout",
+		apply: func(cfg *Config, raw string) error {
+			value, err := parseEnvDuration(raw)
+			if err != nil {
+				return err
+			}
+			cfg.Mount.ReadTimeout = value
+			return nil
+		},
+	},
+	{
 		name:  "TORRENTFS_PROXY_SOCKS5_URL",
 		field: "proxy.socks5_url",
 		apply: func(cfg *Config, raw string) error {

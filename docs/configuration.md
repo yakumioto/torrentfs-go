@@ -34,7 +34,7 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 
 单位区分大小写，不接受裸数字、小数、bits 单位或科学计数法；旧裸数字配置需要改写后才能启动。
 
-`http.auth.token_ttl` 使用 Go duration，例如 `30m`、`1h30m`；必须为正数且不超过 24 小时。Web UI 上传限速输入使用 `1MiB/s`、`32MB/s` 等带单位形式，但 HTTP API 和内部状态文件仍使用整数 bytes/s，不能把单位字符串直接写入 API。
+`http.auth.token_ttl` 和 `mount.read_timeout` 使用 Go duration，例如 `30m`、`1h30m`、`250ms`；都必须为正数，`token_ttl` 还不超过 24 小时。Web UI 上传限速输入使用 `1MiB/s`、`32MB/s` 等带单位形式，但 HTTP API 和内部状态文件仍使用整数 bytes/s，不能把单位字符串直接写入 API。
 
 ## 主要配置项
 
@@ -47,7 +47,7 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 | `[cache]` | `capacity` | 内存 piece cache 硬上限，默认 `2GiB`；必须为正数且不超过水位计算安全上限 |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
-| `[mount]` | `allow_other` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载 |
+| `[mount]` | `allow_other`, `read_timeout` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载；单次前台内容读取的等待上限，默认 `30s` |
 
 本地内置默认值和镜像配置不同：本地 peer 端口为 `0`，地址族都启用；镜像 peer 端口为固定 `6881`，默认禁用 IPv6。两者都默认禁用 UPnP/NAT-PMP 自动端口映射；需要接受入站 peer 时应设置固定端口并同时发布 TCP 和 UDP。
 
@@ -90,6 +90,7 @@ token_ttl = "30m"
 | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `connections.no_port_forwarding` | Go boolean |
 | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `connections.bootstrap_nodes` | 逗号分隔的 `host:port` 列表 |
 | `TORRENTFS_MOUNT_ALLOW_OTHER` | `mount.allow_other` | Go boolean |
+| `TORRENTFS_MOUNT_READ_TIMEOUT` | `mount.read_timeout` | Go duration，如 `30s` |
 | `TORRENTFS_PROXY_SOCKS5_URL` | `proxy.socks5_url` | 字符串 |
 | `TORRENTFS_CACHE_CAPACITY` | `cache.capacity` | 带单位字节，如 `1GiB` 或 `32MB` |
 | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `identity.tracker_user_agent` | 字符串 |
@@ -123,6 +124,7 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 - `proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host；显式端口必须在 `1..65535`，校验错误不会回显 proxy 凭据。
 - `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。
 - `http.max_upload_size` 必须大于零；非空 HTTP listener 必须是合法的 `host:port`。
+- `mount.read_timeout` 必须为正数 Go duration。它限制**单次**前台内容读取的等待时间，不是整段播放或文件句柄的总时长：拿不到已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除 torrent 或取消其他读取。慢来源或大 piece 可以调长该值。
 - `[paths]`（包括 `paths.data_dir`）已移除；`TORRENTFS_PATHS_DATA_DIR` 会被忽略，不会恢复旧的磁盘 payload 路径。
 
 迁移旧字段时，将 `cache.capacity_bytes` / `http.max_upload_bytes` 改为 `cache.capacity` / `http.max_upload_size`，将 `TORRENTFS_CACHE_CAPACITY_BYTES` / `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` 改为 `TORRENTFS_CACHE_CAPACITY` / `TORRENTFS_HTTP_MAX_UPLOAD_SIZE`。旧 TOML key 不再接受，旧环境变量不再读取；值的 SI/IEC 单位规则不变。

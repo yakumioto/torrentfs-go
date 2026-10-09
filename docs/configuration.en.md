@@ -30,7 +30,7 @@ The TOML decoder rejects unknown fields. There is no automatic environment varia
 
 Examples: `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483648` bytes. Units are case-sensitive. Bare numbers, fractions, bit units, scientific notation, and values that cannot be represented exactly by the runtime integer are rejected.
 
-`http.auth.token_ttl` uses a positive Go duration such as `30m` or `1h30m`, with a maximum of 24 hours. Valid authenticated requests slide this inactivity window.
+`http.auth.token_ttl` and `mount.read_timeout` use a positive Go duration such as `30m`, `1h30m`, or `250ms`; `token_ttl` is additionally capped at 24 hours. Valid authenticated requests slide the token inactivity window.
 
 ## Main TOML sections
 
@@ -43,7 +43,7 @@ Examples: `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483
 | `[cache]` | `capacity` | In-memory piece-cache limit; default `2GiB` |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | Tracker and peer identity values |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`, `text`/`json`, and source locations |
-| `[mount]` | `allow_other` | Whether other local UIDs may read the FUSE mount |
+| `[mount]` | `allow_other`, `read_timeout` | Whether other local UIDs may read the FUSE mount; upper bound on one foreground content read, default `30s` |
 
 Native defaults use peer port `0`, both address families enabled, and automatic port forwarding disabled (`no_port_forwarding = true`). The Docker TOML instead fixes the peer port at `6881` and disables IPv6. Do not infer one set of defaults from the other.
 
@@ -90,6 +90,7 @@ Ordinary field bindings are explicit:
 | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `connections.no_port_forwarding` | Go boolean |
 | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `connections.bootstrap_nodes` | Comma-separated `host:port` list |
 | `TORRENTFS_MOUNT_ALLOW_OTHER` | `mount.allow_other` | Go boolean |
+| `TORRENTFS_MOUNT_READ_TIMEOUT` | `mount.read_timeout` | Go duration, e.g. `30s` |
 | `TORRENTFS_PROXY_SOCKS5_URL` | `proxy.socks5_url` | String |
 | `TORRENTFS_CACHE_CAPACITY` | `cache.capacity` | Explicit byte unit, e.g. `1GiB` or `32MB` |
 | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `identity.tracker_user_agent` | String |
@@ -124,6 +125,7 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 - `identity.peer_id_prefix` is at most 20 bytes, and the tracker User-Agent cannot contain CR/LF.
 - `http.max_upload_size` must be positive and caps both `.torrent` and subtitle uploads.
 - `mount.allow_other` defaults to false. Enabling it permits other local UIDs to read the mount; non-root mounts also require `user_allow_other` in `/etc/fuse.conf`. It never makes the mount writable.
+- `mount.read_timeout` must be a positive Go duration. It bounds a **single** foreground content read, not a whole playback session or file handle: when no verified piece arrives in time, only that read ends with a read error after the deadline (the client may report a timeout or an I/O error), without deleting the torrent or cancelling other reads. Raise it for slow swarms or large pieces.
 
 ## Migrating old configuration
 

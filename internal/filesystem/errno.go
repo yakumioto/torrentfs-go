@@ -52,7 +52,9 @@ func errnoFor(err error) syscall.Errno {
 		return syscall.EXDEV
 	case errors.Is(err, ErrClosed):
 		return syscall.EBADF
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded):
+		return syscall.ETIMEDOUT
+	case errors.Is(err, context.Canceled):
 		return syscall.EINTR
 	default:
 		return syscall.EIO

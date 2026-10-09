@@ -92,3 +92,5 @@ add_source = false
 # UID should be able to read the mounted data; non-root mounts also require
 # user_allow_other in /etc/fuse.conf.
 allow_other = false
+# Limits one read so missing peers cannot hold SMB requests indefinitely.
+read_timeout = "30s"

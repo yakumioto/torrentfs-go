@@ -147,6 +147,8 @@ func Mount(mnt string, backend Backend, opts *fs.Options) (*fuse.Server, error) 
 	if opts == nil {
 		opts = &fs.Options{}
 	}
+	// Peerless reads must not exhaust the mount-wide asynchronous read queue.
+	opts.SyncRead = true
 	zero := time.Duration(0)
 	opts.EntryTimeout = &zero
 	opts.AttrTimeout = &zero

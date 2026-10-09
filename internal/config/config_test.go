@@ -26,6 +26,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Mount.AllowOther {
 		t.Fatal("Default mount.allow_other = true, want false")
 	}
+	if time.Duration(cfg.Mount.ReadTimeout) != 30*time.Second {
+		t.Fatalf("Default mount.read_timeout = %s, want 30s", cfg.Mount.ReadTimeout)
+	}
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
@@ -106,6 +109,43 @@ allow_other = true
 	}
 	if cfg.Identity != wantIdentity {
 		t.Fatalf("Identity = %+v, want %+v", cfg.Identity, wantIdentity)
+	}
+}
+
+func TestLoadMountReadTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want time.Duration
+	}{
+		{name: "omitted section", body: "", want: 30 * time.Second},
+		{name: "omitted field", body: "[mount]\nallow_other = true\n", want: 30 * time.Second},
+		{name: "seconds", body: "[mount]\nread_timeout = \"30s\"\n", want: 30 * time.Second},
+		{name: "milliseconds", body: "[mount]\nread_timeout = \"250ms\"\n", want: 250 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Load(writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if time.Duration(cfg.Mount.ReadTimeout) != tt.want {
+				t.Fatalf("Mount.ReadTimeout = %s, want %s", cfg.Mount.ReadTimeout, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidMountReadTimeout(t *testing.T) {
+	for _, raw := range []string{"30", `"30"`, `"invalid"`, `""`, `"0s"`, `"-1s"`} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, "[mount]\nread_timeout = "+raw+"\n"))
+			if err == nil {
+				t.Fatal("Load succeeded")
+			}
+			if !strings.Contains(err.Error(), "read_timeout") {
+				t.Fatalf("Load error = %q, want read_timeout field", err)
+			}
+		})
 	}
 }
 
@@ -474,6 +514,20 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				cfg.Cache.CapacityBytes = 0
 			},
 			field: "cache.capacity",
+		},
+		{
+			name: "zero read timeout",
+			setup: func(cfg *config.Config) {
+				cfg.Mount.ReadTimeout = 0
+			},
+			field: "mount.read_timeout",
+		},
+		{
+			name: "negative read timeout",
+			setup: func(cfg *config.Config) {
+				cfg.Mount.ReadTimeout = config.Duration(-time.Second)
+			},
+			field: "mount.read_timeout",
 		},
 		{
 			name: "wrong proxy scheme",

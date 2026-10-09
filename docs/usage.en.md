@@ -10,6 +10,8 @@ Add a magnet or upload a `.torrent` through the Web UI or API. Arbitrary `.torre
 
 Read content through the FUSE tree or SMB share. The HTTP API manages tasks but has no generic content download or playback route. Reads fetch the needed pieces on demand; a player or indexer may wait when pieces are not cached or peers are unavailable. Random seeks fetch the corresponding pieces rather than requiring a sequential full download.
 
+Each foreground content read is bounded by `mount.read_timeout` (`30s` by default). If no source provides a verified piece in time, only that read ends with a read error after the deadline (the client may report a timeout or an I/O error); the torrent is not deleted and other reads are not cancelled. This is not a limit on the whole playback session or file handle. Raise it for slow swarms or large pieces, or override it with `TORRENTFS_MOUNT_READ_TIMEOUT`, then restart; see the [configuration guide](configuration.en.md).
+
 ## FUSE and SMB layout
 
 ```text
@@ -141,6 +143,7 @@ Static TOML/environment changes require restart. Upload-rate settings are the ex
 | `401` from the API | Missing, malformed, expired, or revoked Bearer token; log in again. |
 | Magnet remains `adding` | Peers have not supplied metainfo; check source availability and network conditions. |
 | A `ready` read waits | The required pieces are not cached; available peers still need to provide them. |
+| Video or cover reads report timeout or I/O errors | One read may have exceeded `mount.read_timeout`, default `30s`; check source/network availability, or increase the setting for slow swarms or large pieces and restart. |
 | `docker cp` into `/mnt` or `/share` fails | Expected: the projected tree is read-only. Use UI/API subtitle upload. |
 | Subtitle upload returns `413` | The body exceeds `http.max_upload_size`; adjust static configuration and restart. |
 | Subtitle upload returns `415` | Check the exact basename and lowercase `.srt`/`.ass`/`.vtt` extension. |
