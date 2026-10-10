@@ -56,7 +56,7 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)}
 	service := newTestService(t, clock, nil)
 
-	token, expiresAt, err := service.Login("alice", "password")
+	token, expiresAt, err := service.Login("password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	if expiresAt != clock.Now().Add(time.Minute) {
 		t.Fatalf("expiresAt = %s, want %s", expiresAt, clock.Now().Add(time.Minute))
 	}
-	secondToken, _, err := service.Login("alice", "password")
+	secondToken, _, err := service.Login("password")
 	if err != nil {
 		t.Fatalf("second Login: %v", err)
 	}
@@ -103,11 +103,11 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	}
 }
 
-func TestLoginRejectsInvalidCredentialsWithoutCreatingToken(t *testing.T) {
+func TestLoginRejectsInvalidPasswordsWithoutCreatingToken(t *testing.T) {
 	service := newTestService(t, &fakeClock{now: time.Now()}, nil)
-	for _, credentials := range [][2]string{{"unknown", "password"}, {"unknown", "dummy-password"}, {"alice", "wrong"}, {"", ""}} {
-		if _, _, err := service.Login(credentials[0], credentials[1]); !errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("Login(%q, %q) error = %v, want ErrInvalidCredentials", credentials[0], credentials[1], err)
+	for _, password := range []string{"wrong", "dummy-password", ""} {
+		if _, _, err := service.Login(password); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login(%q) error = %v, want ErrInvalidCredentials", password, err)
 		}
 	}
 	if len(service.tokens) != 0 {
@@ -118,7 +118,7 @@ func TestLoginRejectsInvalidCredentialsWithoutCreatingToken(t *testing.T) {
 func TestAuthenticateExpiresAndRevoke(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)}
 	service := newTestService(t, clock, nil)
-	token, _, err := service.Login("alice", "password")
+	token, _, err := service.Login("password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestAuthenticateExpiresAndRevoke(t *testing.T) {
 		t.Fatalf("token count after expiry = %d, want 0", len(service.tokens))
 	}
 
-	token, _, err = service.Login("alice", "password")
+	token, _, err = service.Login("password")
 	if err != nil {
 		t.Fatalf("second Login: %v", err)
 	}
@@ -158,7 +158,7 @@ func (failingReader) Read([]byte) (int, error) {
 
 func TestLoginReturnsRandomFailureWithoutFallback(t *testing.T) {
 	service := newTestService(t, &fakeClock{now: time.Now()}, failingReader{})
-	_, _, err := service.Login("alice", "password")
+	_, _, err := service.Login("password")
 	if err == nil || !strings.Contains(err.Error(), "generate authentication token") {
 		t.Fatalf("Login error = %v, want random generation error", err)
 	}
@@ -169,7 +169,7 @@ func TestLoginReturnsRandomFailureWithoutFallback(t *testing.T) {
 
 func TestCloseInvalidatesTokens(t *testing.T) {
 	service := newTestService(t, &fakeClock{now: time.Now()}, nil)
-	token, _, err := service.Login("alice", "password")
+	token, _, err := service.Login("password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -177,14 +177,14 @@ func TestCloseInvalidatesTokens(t *testing.T) {
 	if _, _, err := service.Authenticate(token, true); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("Authenticate after Close = %v, want ErrInvalidToken", err)
 	}
-	if _, _, err := service.Login("alice", "password"); err == nil {
+	if _, _, err := service.Login("password"); err == nil {
 		t.Fatal("Login after Close succeeded")
 	}
 }
 
 func TestConcurrentAuthenticationAndRevoke(t *testing.T) {
 	service := newTestService(t, &fakeClock{now: time.Now()}, nil)
-	token, _, err := service.Login("alice", "password")
+	token, _, err := service.Login("password")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestNewLoadsRestrictedPasswordHashFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New with hash file: %v", err)
 	}
-	if _, _, err := service.Login("alice", "password"); err != nil {
+	if _, _, err := service.Login("password"); err != nil {
 		t.Fatalf("Login with hash file: %v", err)
 	}
 }

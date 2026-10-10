@@ -13,7 +13,7 @@ function AuthProbe() {
   return (
     <div>
       <span data-testid="phase">{auth.phase}</span>
-      <button onClick={() => void auth.login('alice', 'secret')}>login</button>
+      <button onClick={() => void auth.login('secret')}>login</button>
       <button onClick={() => void auth.api.listTorrents().catch(() => undefined)}>request</button>
     </div>
   );
@@ -67,6 +67,7 @@ describe('AuthProvider', () => {
     await waitFor(() => expect(screen.getByTestId('phase')).toHaveTextContent('authenticated'));
     const loginRequest = vi.mocked(fetch).mock.calls[1][1] as RequestInit;
     expect(new Headers(loginRequest.headers).get('Authorization')).toBeNull();
+    expect(loginRequest.body).toBe(JSON.stringify({ password: 'secret' }));
     expect(loginRequest.cache).toBe('no-store');
   });
 

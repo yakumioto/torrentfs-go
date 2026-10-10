@@ -51,7 +51,7 @@ Native defaults use peer port `0`, both address families enabled, and automatic 
 
 An empty `http.listen_addr` disables HTTP and the Web UI. A non-empty listener must be a valid `host:port`; a non-loopback address requires complete authentication. HTTP has no TLS and should be placed behind a trusted TLS reverse proxy when exposed beyond the local machine.
 
-A TOML configuration uses exactly one bcrypt password source, never a plaintext password:
+Web/HTTP login verifies only the password; the configured username remains the account identifier and is also used for SMB login. A TOML configuration still sets that username and uses exactly one bcrypt password source, never a plaintext password:
 
 ```toml
 [http]

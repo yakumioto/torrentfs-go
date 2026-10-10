@@ -23,7 +23,6 @@ const (
 	tokenSize            = 32
 	minimumPasswordCost  = 10
 	maxPasswordHashBytes = 1024
-	dummyPasswordHash    = "$2a$10$abcdefghijklmnopqrstuubhYm9gDaOV4ioWHeT/xEMOT9t55kgc2"
 )
 
 var (
@@ -176,21 +175,16 @@ func readPasswordHashFile(path string) ([]byte, error) {
 }
 
 // Login verifies credentials, creates a random opaque token, and returns its expiry.
-func (s *Service) Login(username, password string) (string, time.Time, error) {
+func (s *Service) Login(password string) (string, time.Time, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return "", time.Time{}, errClosed
 	}
-	configuredUsername := s.username
 	passwordHash := s.passwordHash
 	s.mu.Unlock()
 
-	candidate := passwordHash
-	if username != configuredUsername {
-		candidate = []byte(dummyPasswordHash)
-	}
-	if err := bcrypt.CompareHashAndPassword(candidate, []byte(password)); err != nil || username != configuredUsername {
+	if err := bcrypt.CompareHashAndPassword(passwordHash, []byte(password)); err != nil {
 		return "", time.Time{}, ErrInvalidCredentials
 	}
 

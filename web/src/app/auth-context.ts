@@ -12,7 +12,7 @@ export interface AuthContextValue {
   sessionNotice: string;
   connectionError: string;
   loginExpiresIn?: number;
-  login: (username: string, password: string) => Promise<boolean>;
+  login: (password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   retryProbe: () => void;
 }

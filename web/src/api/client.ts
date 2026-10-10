@@ -36,10 +36,10 @@ export class ApiClient {
     this.onUnauthorized = options.onUnauthorized;
   }
 
-  async login(username: string, password: string, signal?: AbortSignal): Promise<LoginResponse> {
+  async login(password: string, signal?: AbortSignal): Promise<LoginResponse> {
     return this.request<LoginResponse>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ password }),
       cache: 'no-store',
       signal,
     }, { notifyUnauthorized: false, auth: false });

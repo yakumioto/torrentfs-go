@@ -10,14 +10,17 @@ function response(body: unknown, init: ResponseInit = {}) {
 }
 
 describe('ApiClient', () => {
-  it('sends login JSON without a bearer token and accepts a JSON response', async () => {
+  it('sends password-only login JSON without a bearer token and accepts a JSON response', async () => {
     vi.mocked(fetch).mockResolvedValue(response({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }));
     const api = new ApiClient({ getToken: () => 'must-not-send' });
-    await expect(api.login('alice', 'secret')).resolves.toMatchObject({ token: 'opaque' });
+    const controller = new AbortController();
+    await expect(api.login('secret', controller.signal)).resolves.toMatchObject({ token: 'opaque' });
     const request = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
     expect(new Headers(request.headers).get('Authorization')).toBeNull();
     expect(new Headers(request.headers).get('Content-Type')).toBe('application/json');
+    expect(request.body).toBe(JSON.stringify({ password: 'secret' }));
     expect(request.cache).toBe('no-store');
+    expect(request.signal).toBe(controller.signal);
   });
 
   it('adds the bearer header to management calls', async () => {
@@ -80,7 +83,7 @@ describe('ApiClient', () => {
     await expect(api.listTorrents()).rejects.toMatchObject({ status: 401, wwwAuthenticate: 'Bearer' });
     expect(onUnauthorized).toHaveBeenCalledOnce();
     expect(onUnauthorized).toHaveBeenCalledWith('opaque');
-    await expect(api.login('alice', 'wrong')).rejects.toBeInstanceOf(ApiError);
+    await expect(api.login('wrong')).rejects.toBeInstanceOf(ApiError);
     expect(onUnauthorized).toHaveBeenCalledOnce();
   });
 

@@ -10,7 +10,7 @@ Commands run from the repository root. Listener and credential configuration is 
 
 | Method | Path | Purpose | Success |
 | --- | --- | --- | --- |
-| `POST` | `/api/v1/auth/login` | Exchange configured credentials for a Bearer token | `200` |
+| `POST` | `/api/v1/auth/login` | Exchange the configured password for a Bearer token | `200` |
 | `POST` | `/api/v1/auth/logout` | Revoke the current token | `204` |
 | `POST` | `/api/v1/torrents` | Add a magnet JSON body or multipart `.torrent` upload | `201` |
 | `GET` | `/api/v1/torrents` | List tasks | `200` |
@@ -45,14 +45,13 @@ Tokens are opaque and stored only in daemon memory. Valid requests slide their i
 
 ### Login and logout
 
-A login request must use JSON. The following examples require `curl` and `jq` and assume that the shared username/password variables have been prepared as in the [deployment guide](deployment.en.md):
+A login request must use `application/json` and contain only the string field `password`; unknown fields, including `username`, return `400`. The following examples require `curl` and `jq` and assume that the shared password variable has been prepared as in the [deployment guide](deployment.en.md):
 
 ```sh
 BASE_URL=http://127.0.0.1:8080
 LOGIN_BODY="$(jq -n \
-  --arg username "$TORRENTFS_USERNAME" \
   --arg password "$TORRENTFS_PASSWORD" \
-  '{username: $username, password: $password}')"
+  '{password: $password}')"
 TOKEN="$(curl --fail --silent --show-error \
   --request POST "$BASE_URL/api/v1/auth/login" \
   --header 'Content-Type: application/json' \

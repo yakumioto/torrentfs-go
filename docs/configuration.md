@@ -57,7 +57,7 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 
 HTTP 默认只监听 loopback，认证关闭。绑定 `0.0.0.0`、空 host 或其他非 loopback 地址时，必须启用完整认证配置。服务没有 TLS，对外部署应放在可信的 TLS reverse proxy 后面并限制可访问网络。
 
-使用 TOML 认证时，设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
+Web/HTTP 登录仅校验密码；用户名仍用于配置账户标识和 SMB 登录。使用 TOML 认证时，仍需设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
 
 ```toml
 [http]
@@ -103,7 +103,7 @@ token_ttl = "30m"
 | `TORRENTFS_LOG_LEVEL` | `log.level` | `debug`/`info`/`warn`/`error` |
 | `TORRENTFS_LOG_FORMAT` | `log.format` | `text`/`json` |
 | `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` | Go boolean |
-| `TORRENTFS_USERNAME` | HTTP/SMB 共享用户名 | 字符串 |
+| `TORRENTFS_USERNAME` | 配置账户标识 / SMB 登录用户名 | 字符串 |
 | `TORRENTFS_PASSWORD` | HTTP/SMB 共享密码 | 明文字符串；见上文的限制 |
 
 例如，覆盖 listener、上传上限和 cache 容量：

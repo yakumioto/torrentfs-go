@@ -139,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => controller.abort();
   }, [executeProbe]);
 
-  const login = useCallback(async (username: string, password: string): Promise<boolean> => {
+  const login = useCallback(async (password: string): Promise<boolean> => {
     const revision = ++authRevisionRef.current;
     authActionRef.current = 'logging-in';
     probeControllerRef.current?.abort();
@@ -147,7 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionNotice('');
     setConnectionError('');
     try {
-      const response = await api.login(username, password);
+      const response = await api.login(password);
       if (revision !== authRevisionRef.current) {
         return false;
       }
@@ -165,9 +165,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
       if (error instanceof ApiError && error.status === 401) {
-        setLoginError('用户名或密码错误。');
+        setLoginError('密码错误。');
       } else {
-        setLoginError(userFacingError(error, '登录失败，请检查账号和密码后重试。'));
+        setLoginError(userFacingError(error, '登录失败，请检查密码后重试。'));
       }
       return false;
     } finally {

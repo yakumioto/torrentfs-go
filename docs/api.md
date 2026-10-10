@@ -8,7 +8,7 @@ HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`�
 
 | 方法 | 路径 | 用途 | 成功状态 |
 | --- | --- | --- | --- |
-| `POST` | `/api/v1/auth/login` | 使用配置凭据换取 Bearer token | `200` |
+| `POST` | `/api/v1/auth/login` | 使用配置密码换取 Bearer token | `200` |
 | `POST` | `/api/v1/auth/logout` | 撤销当前 token | `204` |
 | `POST` | `/api/v1/torrents` | 添加 JSON 磁力链接或 multipart `.torrent` | `201` |
 | `GET` | `/api/v1/torrents` | 列出任务；每项包含 `category`，未分类为 `""` | `200` |
@@ -39,16 +39,15 @@ curl --fail "$BASE_URL/api/v1/torrents"
 
 认证开启时，只有 `POST /api/v1/auth/login` 不需要 token；其他 `/api/` 请求必须且只能带一个 `Authorization: Bearer <token>` header。静态 Web shell/assets 的 `GET`/`HEAD` 仍公开，只允许加载 UI，不公开 torrent 数据。非 loopback listener 必须认证，具体 bcrypt 来源和共享环境凭据见[配置参考](configuration.md)。
 
-登录必须用 `application/json`。返回 `token`、`token_type`（`Bearer`）和 `expires_in`。token 是 opaque 内存 token，不使用 Cookie、URL 参数、JWT 或 refresh token；有效请求滑动过期窗口，重启全部失效。
+登录必须用 `application/json`，请求体只接受字符串字段 `password`；`username` 等未知字段返回 `400`。返回 `token`、`token_type`（`Bearer`）和 `expires_in`。token 是 opaque 内存 token，不使用 Cookie、URL 参数、JWT 或 refresh token；有效请求滑动过期窗口，重启全部失效。
 
-以下 Bash 流程需要 `curl` 和 `jq`，共享凭据变量应已设置。认证关闭时跳过登录，并省略其他请求的 Authorization header：
+以下 Bash 流程需要 `curl` 和 `jq`，共享密码变量应已设置。认证关闭时跳过登录，并省略其他请求的 Authorization header：
 
 ```bash
 BASE_URL=http://127.0.0.1:8080
 LOGIN_BODY="$(jq -n \
-  --arg username "$TORRENTFS_USERNAME" \
   --arg password "$TORRENTFS_PASSWORD" \
-  '{username: $username, password: $password}')"
+  '{password: $password}')"
 TOKEN="$(curl --fail --silent --show-error \
   --request POST "$BASE_URL/api/v1/auth/login" \
   --header 'Content-Type: application/json' \

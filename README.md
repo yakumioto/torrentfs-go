@@ -55,7 +55,7 @@ sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
 以上用于新目录；已有数据请先检查属主和权限。入口不会自动 `chown`，目标身份必须能读、写和遍历该目录。
 
-HTTP 和 SMB 共用一组凭据，SMB 用户名使用镜像内的运行账户 `torrentfs`：
+HTTP 和 SMB 共用密码；Web 登录仅需密码，SMB 用户名使用镜像内的运行账户 `torrentfs`：
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -92,9 +92,9 @@ SMB 模式自动管理容器内 `/share`，不要追加 `-mountpoint`，无需�
 
 ### 4. 添加任务并读取
 
-1. 打开 `http://127.0.0.1:8080/`，用 `torrentfs` 和刚才设置的密码登录。
+1. 打开 `http://127.0.0.1:8080/`，仅输入刚才设置的密码登录。
 2. 在 Web UI 上传自己的 `.torrent` 文件，或添加有可用来源的磁力链接。
-3. 用支持 SMB 的文件管理器或播放器打开 `smb://127.0.0.1/torrentfs`，使用相同凭据访问文件；Windows 路径为 `\\127.0.0.1\torrentfs`。
+3. 用支持 SMB 的文件管理器或播放器打开 `smb://127.0.0.1/torrentfs`，使用用户名 `torrentfs` 和同一密码访问文件；Windows 路径为 `\\127.0.0.1\torrentfs`。
 
 也可用 `smbclient` 交互验证，密码会提示输入：
 

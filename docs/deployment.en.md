@@ -131,7 +131,7 @@ Without a bind mount, the image creates `/torrents` with mode `0777` only to mak
 
 Use Linux rootful Docker with `/dev/fuse`, `SYS_ADMIN`, and `NET_BIND_SERVICE`. Host security policy must permit FUSE. The example disables the AppArmor profile; adjust this to the host's security policy where possible.
 
-HTTP and SMB share credentials. In SMB mode, the username must resolve to the container's runtime Unix account. `torrentfs` is the stable account name even when its numeric UID changes. The following prompt uses Bash syntax:
+HTTP and SMB share a password. Web login needs only the password; SMB also requires a username that resolves to the container's runtime Unix account. `torrentfs` is the stable account name even when its numeric UID changes. The following prompt uses Bash syntax:
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -158,7 +158,7 @@ docker run --detach --name torrentfs \
 
 Do not pass `-mountpoint`: the entrypoint owns `/share` and starts Samba only after the FUSE mount is ready. No host `/mnt`, `rshared`, or cross-container mount propagation is needed. `/torrents` and `.metadata` are never shared.
 
-Open `http://127.0.0.1:8080/`, log in as `torrentfs`, and add a magnet or `.torrent`. For a scripted login/add/status workflow, use the [API reference](api.en.md).
+Open `http://127.0.0.1:8080/`, log in with the configured password, and add a magnet or `.torrent`. For a scripted login/add/status workflow, use the [API reference](api.en.md).
 
 The share name is `torrentfs`. File managers use `smb://127.0.0.1/torrentfs`; Windows uses `\\host\torrentfs`. A client can verify reads with `smbclient` and a temporary credential file:
 

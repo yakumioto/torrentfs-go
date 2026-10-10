@@ -306,7 +306,7 @@ env_api_status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
 [[ "$env_api_status" == "401" ]] || fail "environment-only API status was $env_api_status, want 401"
 env_login_status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
 	--header 'Content-Type: application/json' \
-	--data '{"username":"alice","password":"password"}' \
+	--data '{"password":"password"}' \
 	--output "$work_dir/env-login.json" --write-out '%{http_code}' \
 	"$env_url/api/v1/auth/login")"
 [[ "$env_login_status" == "200" ]] || fail "environment-only login status was $env_login_status, want 200"
