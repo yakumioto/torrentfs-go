@@ -279,7 +279,7 @@ subtitle_login() {
 	curl --silent --show-error --fail --max-time "$PROBE_TIMEOUT" \
 		--request POST "$base/api/v1/auth/login" \
 		--header 'Content-Type: application/json' \
-		--data '{"username":"alice","password":"password"}' |
+		--data '{"password":"password"}' |
 		python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])'
 }
 

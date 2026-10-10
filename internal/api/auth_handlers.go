@@ -19,7 +19,6 @@ const (
 )
 
 type loginRequest struct {
-	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
@@ -67,7 +66,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, _, err := s.auth.Login(request.Username, request.Password)
+	token, _, err := s.auth.Login(request.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			writeError(w, http.StatusUnauthorized, "invalid credentials")

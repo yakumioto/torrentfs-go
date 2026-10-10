@@ -1,4 +1,4 @@
-import { Button, PasswordInput, TextInput } from '@mantine/core';
+import { Button, PasswordInput } from '@mantine/core';
 import { IconBox, IconKey, IconLock, IconRefresh } from '@tabler/icons-react';
 import { type FormEvent, useState } from 'react';
 import { useAuth } from '../app/auth-context';
@@ -7,14 +7,13 @@ import styles from './LoginPage.module.css';
 
 export function LoginPage() {
   const auth = useAuth();
-  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitting(true);
-    const success = await auth.login(username, password);
+    const success = await auth.login(password);
     setSubmitting(false);
     if (success) {
       setPassword('');
@@ -35,14 +34,6 @@ export function LoginPage() {
         <h2 id="login-title">登录 TorrentFS</h2>
         <p className={styles.copy}>连接到本地 TorrentFS 服务后即可查看和管理任务。</p>
         <form onSubmit={submit}>
-          <TextInput
-            label="用户名"
-            value={username}
-            onChange={(event) => setUsername(event.currentTarget.value)}
-            autoComplete="username"
-            required
-            mb="md"
-          />
           <PasswordInput
             label="密码"
             value={password}

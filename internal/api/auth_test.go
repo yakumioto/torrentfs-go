@@ -26,7 +26,7 @@ func dynamicAuth(cfg *config.Config) {
 
 func TestAuthDisabledLoginReturnsNotFound(t *testing.T) {
 	srv := newTestServer(t, &fakeBackend{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"password"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"password"}`))
 	req.Header.Set("Content-Type", "application/json")
 	if rec := do(t, srv, req); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
@@ -42,7 +42,7 @@ func TestLoginAndDynamicBearerAuthentication(t *testing.T) {
 		t.Fatalf("WWW-Authenticate = %q, want Bearer", got)
 	}
 
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"password"}`))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"password"}`))
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginRec := do(t, srv, loginReq)
 	if loginRec.Code != http.StatusOK {
@@ -102,7 +102,7 @@ func TestLoginExpiresInRoundsSubsecondTTLUp(t *testing.T) {
 				dynamicAuth(cfg)
 				cfg.HTTP.Auth.TokenTTL = config.Duration(tt.ttl)
 			})
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"password"}`))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"password"}`))
 			req.Header.Set("Content-Type", "application/json")
 			rec := do(t, srv, req)
 			if rec.Code != http.StatusOK {
@@ -122,7 +122,7 @@ func TestLoginExpiresInRoundsSubsecondTTLUp(t *testing.T) {
 }
 
 func TestLoginRejectsInvalidCredentialsAndStrictBodies(t *testing.T) {
-	badCredentials := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"wrong"}`))
+	badCredentials := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"wrong"}`))
 	badCredentials.Header.Set("Content-Type", "application/json")
 	srv := newTestServer(t, &fakeBackend{}, dynamicAuth)
 	rec := do(t, srv, badCredentials)
@@ -147,9 +147,17 @@ func TestLoginRejectsInvalidCredentialsAndStrictBodies(t *testing.T) {
 			wantStatus: http.StatusBadRequest},
 		{name: "malformed JSON", contentType: "application/json", body: `{`,
 			wantStatus: http.StatusBadRequest},
-		{name: "unknown field", contentType: "application/json", body: `{"username":"alice","password":"password","extra":true}`,
+		{name: "missing password", contentType: "application/json", body: `{}`,
+			wantStatus: http.StatusUnauthorized},
+		{name: "empty password", contentType: "application/json", body: `{"password":""}`,
+			wantStatus: http.StatusUnauthorized},
+		{name: "invalid password type", contentType: "application/json", body: `{"password":123}`,
 			wantStatus: http.StatusBadRequest},
-		{name: "trailing JSON", contentType: "application/json", body: `{"username":"alice","password":"password"}{}`,
+		{name: "username field", contentType: "application/json", body: `{"username":"alice","password":"password"}`,
+			wantStatus: http.StatusBadRequest},
+		{name: "unknown field", contentType: "application/json", body: `{"password":"password","extra":true}`,
+			wantStatus: http.StatusBadRequest},
+		{name: "trailing JSON", contentType: "application/json", body: `{"password":"password"}{}`,
 			wantStatus: http.StatusBadRequest},
 		{name: "oversized body", contentType: "application/json", body: strings.Repeat("x", 16<<10),
 			wantStatus: http.StatusRequestEntityTooLarge},
@@ -229,7 +237,7 @@ func TestNewRejectsInvalidAuthMaterial(t *testing.T) {
 
 func loginForTest(t *testing.T, srv *api.Server) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"alice","password":"password"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"password"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := do(t, srv, req)
 	if rec.Code != http.StatusOK {

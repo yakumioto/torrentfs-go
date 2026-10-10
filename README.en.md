@@ -55,7 +55,7 @@ sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
 This is for a new directory; inspect ownership and permissions before using existing data. The entrypoint does not chown bind mounts, and the selected identity must be able to read, write, and traverse the directory.
 
-HTTP and SMB share one credential pair. Use the container's runtime account name `torrentfs` for SMB:
+HTTP and SMB share a password. Web login needs only that password; SMB also uses the container's runtime account name `torrentfs`:
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -92,9 +92,9 @@ SMB mode owns the container-local `/share` mount: do not add `-mountpoint`, and 
 
 ### 4. Add a task and read
 
-1. Open `http://127.0.0.1:8080/` and log in as `torrentfs` with the password you just set.
+1. Open `http://127.0.0.1:8080/` and log in using only the password you just set.
 2. Upload your `.torrent` file in the Web UI or add a magnet with available sources.
-3. Open `smb://127.0.0.1/torrentfs` in an SMB-capable file manager or player, using the same credentials. The Windows path is `\\127.0.0.1\torrentfs`.
+3. Open `smb://127.0.0.1/torrentfs` in an SMB-capable file manager or player, using username `torrentfs` and the same password. The Windows path is `\\127.0.0.1\torrentfs`.
 
 Alternatively, use interactive `smbclient`; it will prompt for the password:
 

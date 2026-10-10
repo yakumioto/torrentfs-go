@@ -119,7 +119,7 @@ nightly workflow 的 GHCR tag 包含日期、提交和 run id，不保证浮动 
 
 入口不会自动 `chown` bind mount。目标身份必须能读、写和遍历 `/torrents`，因为 `.metadata`、canonical metainfo、registry、字幕和锁都需要持久化；piece payload 仍只在内存中。不要将 `/torrents` 挂成只读。无 bind mount 时镜像自带 `/torrents` 为 `0777`，仅保证默认容器可启动。
 
-[README](../README.md#快速开始) 提供运行身份、目录和共享凭据的准备命令。本文其他 Docker 示例沿用其中的 `PUID`、`PGID`、`TORRENTFS_USERNAME`、`TORRENTFS_PASSWORD` 和 `/srv/torrents`。
+[README](../README.md#快速开始) 提供运行身份、目录和共享凭据的准备命令。本文其他 Docker 示例沿用其中的 `PUID`、`PGID`、`TORRENTFS_USERNAME`、`TORRENTFS_PASSWORD` 和 `/srv/torrents`。Web 登录仅需密码；SMB 使用用户名和同一密码。
 
 可以通过 `/proc/<torrentfs-pid>/status` 检查实际服务身份；`docker exec torrentfs id` 默认看到 root shell，不代表 daemon 身份。
 

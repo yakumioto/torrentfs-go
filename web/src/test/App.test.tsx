@@ -67,8 +67,7 @@ function authorization(request: RequestInit | undefined): string | null {
   return new Headers(request?.headers).get('Authorization');
 }
 
-async function submitLogin(username = 'alice', password = 'secret') {
-  fireEvent.change(screen.getByRole('textbox', { name: '用户名' }), { target: { value: username } });
+async function submitLogin(password = 'secret') {
   const passwordInput = document.querySelector<HTMLInputElement>('input[type="password"]');
   if (passwordInput === null) {
     throw new Error('Password input is missing.');
@@ -88,16 +87,30 @@ afterEach(() => {
 });
 
 describe('App authentication flow', () => {
-  it('renders an actionable login page instead of exposing an unauthorized probe response', async () => {
+  it('renders a password-only login page instead of exposing an unauthorized probe response', async () => {
     const fetchMock = mockFetch(unauthorizedResponse());
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
 
+    expect(screen.queryByRole('textbox', { name: '用户名' })).not.toBeInTheDocument();
+    expect(document.querySelector('input[type="password"]')).toBeRequired();
     expect(screen.getByRole('status')).toHaveTextContent('需要登录或当前会话已过期，请重新登录后继续。');
     expect(screen.queryByText('无法连接 TorrentFS 服务')).not.toBeInTheDocument();
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not submit an empty password', async () => {
+    const fetchMock = mockFetch(unauthorizedResponse());
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
+    await submitLogin('');
+
+    expect(document.querySelector('input[type="password"]')).toBeInvalid();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument();
   });
 
   it('restores a valid session after an authenticated page is remounted', async () => {
@@ -192,14 +205,14 @@ describe('App authentication flow', () => {
     expect(authorization(fetchMock.mock.calls[7][1])).toBe('Bearer opaque-new');
   });
 
-  it('keeps invalid credentials separate from the session notice', async () => {
+  it('keeps invalid passwords separate from the session notice', async () => {
     const fetchMock = mockFetch(unauthorizedResponse(), unauthorizedResponse());
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
-    await submitLogin('alice', 'wrong');
+    await submitLogin('wrong');
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误。'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('密码错误。'));
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();

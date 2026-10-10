@@ -477,7 +477,7 @@ http_client_authenticate() {
 		[ "$status" = 401 ]
 		status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
 			--header "Content-Type: application/json" \
-			--data "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}" \
+			--data "{\"password\":\"$PASSWORD\"}" \
 			--output /dev/null --write-out "%{http_code}" "http://$APP:8080/api/v1/auth/login")"
 		[ "$status" = 200 ]
 	'

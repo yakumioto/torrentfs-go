@@ -68,7 +68,7 @@ api_status="$(curl --silent --show-error --dump-header "$api_headers" --output "
 grep -qi '^WWW-Authenticate: Bearer' "$api_headers"
 
 login_headers="$work_dir/login.headers"
-login_status="$(curl --silent --show-error --dump-header "$login_headers" --output "$work_dir/login.json" --write-out '%{http_code}' --header 'Content-Type: application/json' --data '{"username":"alice","password":"password"}' "$base_url/api/v1/auth/login")"
+login_status="$(curl --silent --show-error --dump-header "$login_headers" --output "$work_dir/login.json" --write-out '%{http_code}' --header 'Content-Type: application/json' --data '{"password":"password"}' "$base_url/api/v1/auth/login")"
 [[ "$login_status" == 200 ]]
 grep -qi '^Cache-Control: no-store' "$login_headers"
 token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$work_dir/login.json")"
