@@ -1,0 +1,52 @@
+# Requires Linux rootful Docker, /dev/fuse, and a host policy that permits FUSE.
+# Save as docker-compose.yaml; edit it and run these commands in its directory.
+# Choose an existing image tag from the project's GitHub Packages, set the required
+# password, and adjust PUID/PGID, the data directory and ports before starting.
+# For a NEW directory only (1000 must match PUID/PGID below):
+#   sudo install -d -o 1000 -g 1000 -m 0755 ./torrents
+# For existing data, inspect ownership/permissions; do not blindly change them.
+#   docker compose up -d
+#   docker compose logs -f torrentfs
+#
+# Bare port mappings listen on all host interfaces. Use HTTP/SMB only on trusted
+# networks with firewall protection. On hosts with public interfaces, explicitly
+# bind HTTP/SMB to a trusted LAN IP, e.g. "192.168.1.10:8080:8080/tcp" and
+# "192.168.1.10:445:445/tcp" instead of the bare mappings below.
+
+services:
+  torrentfs:
+    image: ghcr.io/yakumioto/torrentfs-go:REPLACE_WITH_PUBLISHED_TAG
+    restart: unless-stopped
+    stop_grace_period: 60s
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+      - NET_BIND_SERVICE
+    security_opt:
+      - apparmor=unconfined
+    ports:
+      - "445:445/tcp"
+      - "8080:8080/tcp"
+      # Keep BT TCP/UDP mappings and TORRENTFS_CONNECTIONS_LISTEN_PORT in sync.
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    volumes:
+      - type: bind
+        source: ./torrents
+        target: /torrents
+        bind:
+          create_host_path: false
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TORRENTFS_SMB_ENABLED: "true"
+      TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
+      TORRENTFS_HTTP_AUTH_ENABLED: "true"
+      TORRENTFS_USERNAME: "torrentfs"
+      # REQUIRED: a strong, single-line shared HTTP/SMB password; write literal $ as $$.
+      # Do not commit or share this file after filling in real credentials.
+      TORRENTFS_PASSWORD: ""
+      TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
+      TORRENTFS_CACHE_CAPACITY: "2GiB" # Adjust to the memory available to the container.
+      TORRENTFS_MOUNT_READ_TIMEOUT: "30s"

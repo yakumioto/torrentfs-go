@@ -11,6 +11,9 @@ coverage.*
 go.work
 go.work.sum
 
+# Compose data
+/torrents/
+
 # Editor / OS
 .DS_Store
 .idea/

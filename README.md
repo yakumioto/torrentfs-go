@@ -26,6 +26,8 @@
 
 缓存默认上限为 `2GiB`，小内存部署请先按[配置参考](docs/configuration.md)调整。其他运行方式见[部署指南](docs/deployment.md)。
 
+也可下载 [Compose 模板](docker-compose.yaml)，按模板注释填写实际镜像 tag 和密码、准备属主及权限正确的数据目录，再在文件所在目录运行 `docker compose up -d`。
+
 ### 1. 构建镜像
 
 ```bash

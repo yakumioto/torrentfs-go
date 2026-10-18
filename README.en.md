@@ -26,6 +26,8 @@ Requirements:
 
 The default cache limit is `2GiB`; adjust it for smaller hosts using the [configuration reference](docs/configuration.en.md). Other run modes are in the [deployment guide](docs/deployment.en.md).
 
+Alternatively, download the [Compose template](docker-compose.yaml), follow its comments to set a real image tag and password and prepare a data directory with the correct ownership and permissions, then run `docker compose up -d` from the file's directory.
+
 ### 1. Build the image
 
 ```bash
