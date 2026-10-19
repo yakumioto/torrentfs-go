@@ -10,11 +10,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -27,12 +28,13 @@ const usageText = `torrentfs mounts BitTorrent downloads as a read-only FUSE fil
 serves a torrent management HTTP API.
 
 Usage:
-  torrentfs -mountpoint <dir> [flags] <torrents-dir>
+  torrentfs [-mountpoint <dir>] [-strm-mountpoint <dir>] [flags] <torrents-dir>
 
 Flags:
-  -mountpoint <dir>  directory to mount on (required unless the HTTP API is enabled)
-  -config <file>     TOML configuration file
-  -h, --help         show this help and exit
+  -mountpoint <dir>       original-file mount (required unless the HTTP API is enabled)
+  -strm-mountpoint <dir>  optional STRM mount; requires strm.base_url and the HTTP API
+  -config <file>          TOML configuration file
+  -h, --help              show this help and exit
 
 Configuration precedence is TORRENTFS_* environment variables, then the TOML
 file, then built-in defaults. See the README for the complete environment
@@ -52,9 +54,14 @@ magnet intents, registry state, peer identity, the layout marker, and the
 instance lock; all of these paths are implementation details and are never
 mounted.
 
+The optional STRM mount replaces videos and ISO files with signed HTTP links;
+other files retain their original contents. It can be mounted alone or beside
+the original-file view. Its mountpoint and -mountpoint must not be the same or
+nested, including symbolic-link aliases.
+
 When http.listen_addr is set the management API is served; an enabled
-http.auth configuration is required for non-loopback listeners. Omitting
--mountpoint then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
+http.auth configuration is required for non-loopback listeners. Omitting both
+mountpoint flags then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
 `
 
 func main() {
@@ -69,8 +76,9 @@ func run(args []string, stderr io.Writer) int {
 	flags.Usage = func() { _, _ = io.WriteString(stderr, usageText) }
 
 	var (
-		mountpoint = flags.String("mountpoint", "", "directory to mount on")
-		configPath = flags.String("config", "", "TOML configuration file")
+		mountpoint     = flags.String("mountpoint", "", "directory to mount on")
+		strmMountpoint = flags.String("strm-mountpoint", "", "directory for the STRM mount")
+		configPath     = flags.String("config", "", "TOML configuration file")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -95,8 +103,13 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
+	*mountpoint, *strmMountpoint, err = validateMountpoints(*mountpoint, *strmMountpoint, cfg.STRM.BaseURL)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if *mountpoint == "" && !httpEnabled {
+	if *mountpoint == "" && *strmMountpoint == "" && !httpEnabled {
 		flags.Usage()
 		return 2
 	}
@@ -119,6 +132,7 @@ func run(args []string, stderr io.Writer) int {
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"mountpoint", *mountpoint,
+		"strm_mountpoint", *strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,
 		"mount_uid", os.Getuid(),
@@ -143,42 +157,40 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
+	sequence := shutdownSequence{logger: logger, sess: sess}
 	var apiServer *api.Server
 	if httpEnabled {
 		apiServer, err = api.New(cfg, sess, api.WithLogger(logger))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
-			if closeErr := sess.Close(context.Background()); closeErr != nil {
-				logger.Error("startup cleanup failed", "stage", "session", "err", closeErr)
-			}
+			sequence.run()
 			if errors.Is(err, config.ErrInvalid) {
 				return 2
 			}
 			return 1
 		}
+		sequence.api = apiServer
 	}
 
-	var server *fuse.Server
-	if *mountpoint != "" {
-		mountOpts := &fs.Options{
-			UID: uint32(os.Getuid()),
-			GID: uint32(os.Getgid()),
-		}
-		mountOpts.MountOptions.AllowOther = cfg.Mount.AllowOther
-		server, err = filesystem.Mount(*mountpoint, sess, mountOpts)
-		if err != nil {
-			logger.Error("fuse mount failed", "mountpoint", *mountpoint, "err", err)
-			_, _ = fmt.Fprintf(stderr, "torrentfs: mount %s: %v\n", *mountpoint, err)
-			if apiServer != nil {
-				if shutdownErr := apiServer.Shutdown(context.Background()); shutdownErr != nil {
-					logger.Error("startup cleanup failed", "stage", "http-api", "err", shutdownErr)
-				}
+	requests := []mountRequest{{mountpoint: *mountpoint, backend: sess}}
+	if *strmMountpoint != "" {
+		requests = append(requests, mountRequest{
+			mountpoint: *strmMountpoint,
+			backend:    filesystem.NewSTRMBackend(sess),
+		})
+	}
+	sequence.mounts, err = mountFilesystems(requests, cfg.Mount.AllowOther,
+		func(path string, backend filesystem.Backend, options *fs.Options) (mountUnmounter, error) {
+			server, mountErr := filesystem.Mount(path, backend, options)
+			if mountErr != nil {
+				logger.Error("fuse mount failed", "mountpoint", path, "err", mountErr)
 			}
-			if closeErr := sess.Close(context.Background()); closeErr != nil {
-				logger.Error("startup cleanup failed", "stage", "session", "err", closeErr)
-			}
-			return 1
-		}
+			return server, mountErr
+		})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		sequence.run()
+		return 1
 	}
 
 	serveErr := make(chan error, 1)
@@ -192,21 +204,11 @@ func run(args []string, stderr io.Writer) int {
 	case serveFailure = <-serveErr:
 	}
 
-	sequence := shutdownSequence{logger: logger}
-	if apiServer != nil {
-		sequence.api = apiServer
-	}
-	if sess != nil {
-		sequence.sess = sess
-	}
-	if server != nil {
-		sequence.mount = server
-	}
 	shutdown := sequence.run()
 	cancel()
 
 	if shutdown.unmount != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: unmount %s: %v\n", *mountpoint, shutdown.unmount)
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", shutdown.unmount)
 	}
 	if shutdown.api != nil && serveFailure == nil {
 		serveFailure = shutdown.api
@@ -238,6 +240,39 @@ type mountUnmounter interface {
 	Unmount() error
 }
 
+type mountRequest struct {
+	mountpoint string
+	backend    filesystem.Backend
+}
+
+type mountedFilesystem struct {
+	mountpoint string
+	server     mountUnmounter
+}
+
+// mountFilesystems keeps successful mounts even if a later mount fails, so the
+// caller can clean them up after stopping HTTP and closing the session.
+func mountFilesystems(requests []mountRequest, allowOther bool, mount func(string, filesystem.Backend, *fs.Options) (mountUnmounter, error)) ([]mountedFilesystem, error) {
+	var mounts []mountedFilesystem
+	for _, request := range requests {
+		if request.mountpoint == "" {
+			continue
+		}
+		// Mount modifies Options; each view needs its own options and inode space.
+		options := &fs.Options{
+			UID: uint32(os.Getuid()),
+			GID: uint32(os.Getgid()),
+		}
+		options.MountOptions.AllowOther = allowOther
+		server, err := mount(request.mountpoint, request.backend, options)
+		if err != nil {
+			return mounts, fmt.Errorf("mount %s: %w", request.mountpoint, err)
+		}
+		mounts = append(mounts, mountedFilesystem{mountpoint: request.mountpoint, server: server})
+	}
+	return mounts, nil
+}
+
 // defaultUnmountTimeout bounds the FUSE unmount stage. Unmount takes no
 // context and no timeout, and it ends only when the FUSE connection reaches
 // ENODEV. A peer mount namespace still holding a propagated copy of the mount
@@ -252,13 +287,13 @@ var errUnmountTimeout = errors.New("unmount did not complete")
 
 // shutdownSequence stops a running torrentfs instance. The order is fixed and
 // observable: stop the HTTP API, close the session, and only then unmount the
-// FUSE server. Closing the session first cancels and drains outstanding reads,
+// FUSE servers. Closing the session first cancels and drains outstanding reads,
 // so Unmount does not block on FUSE requests still waiting for data.
 type shutdownSequence struct {
 	logger *slog.Logger
 	api    httpShutdowner
 	sess   sessionCloser
-	mount  mountUnmounter
+	mounts []mountedFilesystem
 
 	// unmountTimeout overrides defaultUnmountTimeout; zero or negative uses
 	// the default. It is the seam unit tests use to inject a short deadline.
@@ -286,9 +321,7 @@ func (s shutdownSequence) run() shutdownResult {
 	if s.sess != nil {
 		result.close = s.sess.Close(context.Background())
 	}
-	if s.mount != nil {
-		result.unmount = s.unmount()
-	}
+	result.unmount = s.unmount()
 
 	var failures []error
 	var failedStages []string
@@ -312,23 +345,54 @@ func (s shutdownSequence) run() shutdownResult {
 	return result
 }
 
-// unmount runs the mount stage under a bounded wait. Unmount has no context,
-// so a deadline cannot cancel it: a peer mount namespace holding a propagated
-// copy leaves the FUSE connection alive and the call blocked in its event-loop
-// Wait. On expiry this returns a timeout error instead of hanging the shutdown
-// forever, and the caller must let the process exit to release the goroutine.
+// unmount starts every Unmount concurrently under one deadline. Unmount has no
+// context: a peer namespace holding a propagated copy leaves the call blocked
+// in its event-loop Wait. Expiry reports each pending path without waiting an
+// additional timeout for the next mount; process exit releases those goroutines.
 func (s shutdownSequence) unmount() error {
+	if len(s.mounts) == 0 {
+		return nil
+	}
+	type outcome struct {
+		index int
+		err   error
+	}
 	timeout := s.effectiveUnmountTimeout()
-	done := make(chan error, 1)
-	go func() { done <- s.mount.Unmount() }()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case err := <-done:
-		return err
-	case <-timer.C:
-		return fmt.Errorf("unmount did not return within %s: another mount namespace may still hold a propagated copy of the FUSE mount; check `findmnt -T <mountpoint>` and `fuser -vm <mountpoint>` and see README: %w", timeout, errUnmountTimeout)
+	done := make(chan outcome, len(s.mounts))
+	pending := make(map[int]bool, len(s.mounts))
+	failures := make([]error, len(s.mounts))
+	for index, mount := range s.mounts {
+		pending[index] = true
+		go func() { done <- outcome{index: index, err: mount.server.Unmount()} }()
 	}
+	recordOutcome := func(completed outcome) {
+		delete(pending, completed.index)
+		if completed.err != nil {
+			failures[completed.index] = fmt.Errorf("unmount %s: %w", s.mounts[completed.index].mountpoint, completed.err)
+		}
+	}
+	for len(pending) != 0 {
+		select {
+		case completed := <-done:
+			recordOutcome(completed)
+		case <-timer.C:
+			// Preserve results already queued when the shared deadline fired.
+			for len(pending) != 0 {
+				select {
+				case completed := <-done:
+					recordOutcome(completed)
+				default:
+					for index := range pending {
+						failures[index] = fmt.Errorf("unmount %s did not return within %s: another mount namespace may still hold a propagated copy of the FUSE mount; check `findmnt -T <mountpoint>` and `fuser -vm <mountpoint>` and see README: %w", s.mounts[index].mountpoint, timeout, errUnmountTimeout)
+					}
+					return errors.Join(failures...)
+				}
+			}
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (s shutdownSequence) effectiveUnmountTimeout() time.Duration {
@@ -336,6 +400,54 @@ func (s shutdownSequence) effectiveUnmountTimeout() time.Duration {
 		return s.unmountTimeout
 	}
 	return defaultUnmountTimeout
+}
+
+// validateMountpoints adds no checks to the original-file-only mode. STRM
+// requires existing, canonical directories so aliases cannot hide either view.
+func validateMountpoints(mountpoint, strmMountpoint, baseURL string) (string, string, error) {
+	if strmMountpoint == "" {
+		return mountpoint, strmMountpoint, nil
+	}
+	if baseURL == "" {
+		return "", "", errors.New("strm.base_url is required with -strm-mountpoint")
+	}
+	canonical := func(name, path string) (string, error) {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("%s %q: %w", name, path, err)
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err != nil {
+			return "", fmt.Errorf("%s %q must be an existing directory: %w", name, path, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return "", fmt.Errorf("%s %q: %w", name, path, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("%s %q must be an existing directory", name, path)
+		}
+		return resolved, nil
+	}
+	strmPath, err := canonical("STRM mountpoint", strmMountpoint)
+	if err != nil {
+		return "", "", err
+	}
+	if mountpoint == "" {
+		return "", strmPath, nil
+	}
+	filesPath, err := canonical("mountpoint", mountpoint)
+	if err != nil {
+		return "", "", err
+	}
+	contains := func(parent, child string) bool {
+		relative, err := filepath.Rel(parent, child)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+	}
+	if contains(filesPath, strmPath) || contains(strmPath, filesPath) {
+		return "", "", fmt.Errorf("mountpoints %q and %q must not be the same or nested", filesPath, strmPath)
+	}
+	return filesPath, strmPath, nil
 }
 
 func validateTorrentDir(path string) error {

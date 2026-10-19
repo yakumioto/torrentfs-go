@@ -41,6 +41,10 @@ services:
       PUID: "1000"
       PGID: "1000"
       TORRENTFS_SMB_ENABLED: "true"
+      # Optional second read-only SMB share (torrentfs-strm); disabled by default.
+      # Use a player-reachable LAN address/domain, not container-local localhost.
+      # TORRENTFS_STRM_ENABLED: "true"
+      # TORRENTFS_STRM_BASE_URL: "http://192.168.1.10:8080"
       TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
       TORRENTFS_HTTP_AUTH_ENABLED: "true"
       TORRENTFS_USERNAME: "torrentfs"

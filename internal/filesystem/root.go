@@ -124,15 +124,19 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			}), 0
 		}
 		if f, ok := mediaRoot(c.View); ok {
+			stat, err := n.state.fileStat(c.View.Hash, f.Path, f.Size, c.View.CreatedAt)
+			if err != nil {
+				return nil, errnoFor(err)
+			}
 			out.Mode = 0o444
-			out.Size = uint64(f.Size)
-			setCreatedAt(&out.Attr, c.View.CreatedAt)
+			out.Size = uint64(stat.Size)
+			setCreatedAt(&out.Attr, stat.CreatedAt)
 			child := &torrentFileNode{
 				state:     n.state,
 				hash:      c.View.Hash,
 				path:      f.Path,
-				size:      f.Size,
-				createdAt: c.View.CreatedAt,
+				size:      stat.Size,
+				createdAt: stat.CreatedAt,
 			}
 			return n.NewInode(ctx, child, fs.StableAttr{
 				Mode: syscall.S_IFREG,

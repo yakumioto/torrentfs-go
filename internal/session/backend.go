@@ -377,14 +377,3 @@ func filePieceRange(f *torrent.File, info *metainfo.Info, torrentLength int64, p
 	}
 	return first, last, nil
 }
-
-// fileByDisplayPath returns the torrent file with the given display path, or
-// nil when the torrent has no such file.
-func fileByDisplayPath(t *torrent.Torrent, displayPath string) *torrent.File {
-	for _, f := range t.Files() {
-		if f.DisplayPath() == displayPath {
-			return f
-		}
-	}
-	return nil
-}

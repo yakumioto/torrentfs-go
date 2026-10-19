@@ -2,7 +2,7 @@
 
 [简体中文](api.md) · [README](../README.en.md)
 
-The HTTP listener serves the embedded Web UI and `/api/v1`. The default address is `http://127.0.0.1:8080`. This is a management API, not a generic torrent content download or playback service. Use FUSE or SMB to read content.
+The HTTP listener serves the embedded Web UI and management/diagnostic API at `/api/v1`, defaulting to `http://127.0.0.1:8080`. Content is read through FUSE or SMB by default. Explicit STRM configuration additionally enables a separate signed `/stream/...` content endpoint.
 
 Commands run from the repository root. Listener and credential configuration is documented in the [configuration guide](configuration.en.md).
 
@@ -27,6 +27,7 @@ Commands run from the repository root. Listener and credential configuration is 
 | `PUT` | `/api/v1/torrents/{id}/favorite` | Set or clear the favorite flag | `200` |
 | `POST` | `/api/v1/torrents/prune` | Delete old non-favorite tasks | `200` |
 | `GET` | `/api/v1/operations/{id}` | Poll an asynchronous operation | `200` |
+| `GET` / `HEAD` | `/stream/{hash}/{signature}/{path...}` | Optional file-scoped signed content read, separate from management Bearer authentication | `200` / `206` / `304` |
 
 A torrent ID is its 40-character lowercase hexadecimal info hash. Operation IDs come from deletion responses. Business errors use `{"error":"..."}` JSON, but unknown paths and unmatched methods may be handled by the standard `net/http` router; not every error is JSON.
 
@@ -39,9 +40,9 @@ BASE_URL=http://127.0.0.1:8080
 curl --fail "$BASE_URL/api/v1/torrents"
 ```
 
-When authentication is enabled, only `POST /api/v1/auth/login` is unauthenticated. Other API requests require exactly one `Authorization: Bearer <token>` header. Static Web UI assets remain public so the browser can load the shell; this does not expose torrent data.
+When authentication is enabled, `POST /api/v1/auth/login` is the only unauthenticated `/api/` route. Other API requests require exactly one `Authorization: Bearer <token>` header; query and cookie authentication are not accepted. Static Web UI assets remain public so the browser can load the shell, but that does not grant access to torrent data. Explicitly enabled `/stream/...` is a separate file-scoped signature route outside the Bearer middleware, not a relaxation of management API authentication.
 
-Tokens are opaque and stored only in daemon memory. Valid requests slide their inactivity expiry; service restart invalidates all tokens. The service does not use cookies, URL tokens, JWTs, or refresh tokens. `token_ttl` is a positive Go duration no longer than 24 hours. Protected `401` responses include `WWW-Authenticate: Bearer`.
+Management tokens are opaque and stored only in daemon memory. Valid requests slide their inactivity expiry; service restart invalidates all tokens. The management API does not accept cookies or URL tokens and does not use JWTs or refresh tokens. `token_ttl` is a positive Go duration no longer than 24 hours. Protected `401` responses include `WWW-Authenticate: Bearer`.
 
 ### Login and logout
 
@@ -66,6 +67,43 @@ Logout revokes the current token and returns an empty `204` response:
 curl --fail --request POST "$BASE_URL/api/v1/auth/logout" \
   --header "Authorization: Bearer $TOKEN"
 ```
+
+## Signed HTTP content reads (STRM)
+
+`strm.base_url` is empty by default, so `/stream` and `/stream/*` return `404` rather than the SPA. A non-empty value enables separate `GET` / `HEAD` handlers. Obtain the URL from a generated `.strm` file; there is no additional login token or management link-export endpoint:
+
+```text
+<base_url>/stream/<40-character lowercase hexadecimal infohash>/<signature>/<original torrent-relative path, escaped per segment>
+```
+
+`signature` is the full HMAC-SHA256 binding a versioned domain, info hash, and **original torrent display path**, encoded as unpadded base64url (43 characters). The path is not a host path, category path, or STRM display name. Chinese characters, spaces, `%`, `#`, `?`, and `+` are escaped per component. The server decodes once and rejects empty components, `.`, `..`, NUL, backslashes, and encoded slashes. For example, `%252F` becomes a literal `%2F` in a filename, not a second-decoded `/`. A reverse proxy must strip any external prefix before forwarding `/stream/...`.
+
+The URL is a read-only file-scoped credential, without a management password, Bearer token, or Cookie. Its holder can read that file, not manage tasks or read other files. Only registered, ready, existing payload files are served. Restart and category changes preserve signatures; deleting the task or rotating the key invalidates old links. Key storage and rotation are in the [usage guide](usage.en.md). Protect full URLs and reverse-proxy logs, and use HTTPS outside a trusted LAN.
+
+Copy the exact URL from a `.strm` file without its trailing newline; do not construct the signature manually:
+
+```sh
+STREAM_URL='<copy-the-exact-signed-URL-from-a-strm-file>'
+curl --fail --head "$STREAM_URL"
+curl --fail --range 0-1023 "$STREAM_URL" --output ./range.bin
+```
+
+These requests have no `Authorization` header. Do not expose real links in shared logs, issue reports, or debugging output.
+
+- `http.ServeContent` handles full GET, HEAD, single/multipart Range, conditional requests, and `If-Range`. Satisfied ranges return `206`; unsatisfiable ranges return `416`. An `If-Range` mismatch falls back to the full response under standard semantics.
+- Responses use an explicit `Content-Type` (`application/octet-stream` for unknown extensions), ETag, Last-Modified, and Content-Length where applicable, plus `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`. Lengths and offsets are int64, including files larger than 4 GiB. MIME detection does not sniff content; HEAD, metadata, and bodyless conditional responses do not fetch payload.
+- Reads reuse the Session cache, readahead, and `mount.read_timeout`. Client cancellation cancels that request's reads and releases its reader. A read timeout or other read failure after the response starts aborts the transfer; it does not append JSON or guarantee a `504`. Clients must treat a truncated response as failure.
+
+| Status | Stream meaning |
+| --- | --- |
+| `200` / `206` | Full response / satisfied Range response |
+| `304` / `412` | Standard conditional-request outcome, depending on request headers |
+| `403` | Canonically formatted signature with a mismatched MAC, including cross-file/hash reuse |
+| `404` | Disabled, malformed path/signature format, or a valid signature for an unknown/not-ready task or file |
+| `405` | A method other than GET/HEAD while enabled; includes `Allow: GET, HEAD` |
+| `416` | Unsatisfiable Range |
+| `503` | HTTP is shutting down or the Session is closed |
+| `500` | Other open/metadata errors before content response headers are sent |
 
 ## Add and inspect a task
 
@@ -181,6 +219,8 @@ A new subtitle returns `201`; replacement returns `200`. Do not manually set the
 
 The target must be a supported payload video in a ready task. Paths must match the metainfo's slash-separated display path, not an absolute, host, or FUSE path. The video and subtitle basenames must match exactly. Supported subtitle extensions are lowercase `.srt`, `.ass`, and `.vtt`; language suffixes and uppercase extensions are rejected. The target must not collide with immutable payload, ambiguous video names, or a disambiguated single-file mount name.
 
+Video targets use the 14 case-insensitive extensions listed in the [usage guide](usage.en.md). ISO is a STRM-only addition, not a managed-subtitle video target.
+
 Use `subtitle_targets` from status to select a target. Each target provides `video_path`, `mount_path`, `expected_basename`, `uploadable`, and a stable reason when unavailable. Existing `subtitles` provide paths, format, size, and update time. The client must not infer uploadability independently.
 
 | Stable error code | HTTP | Meaning |
@@ -226,12 +266,15 @@ Task states and per-task handle lifetimes are explained in the [usage guide](usa
 | --- | --- |
 | `400` | Invalid JSON/multipart data, content type, magnet, path, or setting |
 | `401` | Missing, malformed, expired, or revoked token; invalid login credentials |
-| `404` | Unknown task/operation/category; unavailable login/logout when auth is disabled |
+| `403` | Canonically formatted but mismatched stream signature |
+| `404` | Unknown task/operation/category; unavailable login/logout when auth is disabled; disabled stream, malformed stream path/signature format, or unknown content |
+| `405` | Unsupported method; enabled streams accept only GET/HEAD |
 | `409` | Deletion or visible-namespace conflict |
 | `413` | Upload body exceeds its limit; login has a fixed 8 KiB limit |
 | `415` | Unsupported request media type or subtitle name/format |
+| `416` | Unsatisfiable stream Range |
 | `500` | Unclassified internal error |
-| `503` | Unavailable subtitle/settings storage or unconfirmed settings durability |
+| `503` | Unavailable subtitle/settings storage, unconfirmed settings durability, or stream service/Session shutdown |
 | `507` | Insufficient subtitle storage space or quota |
 
 Unknown routes and methods can produce router `404`/`405` responses rather than a SPA page or business JSON. Errors do not expose host storage paths.

@@ -25,6 +25,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/piecestore"
+	"github.com/yakumioto/torrentfs-go/internal/stream"
 )
 
 type lifecycle uint8
@@ -55,6 +56,8 @@ type Session struct {
 	cfg       config.Config
 	logger    *slog.Logger
 	startedAt time.Time
+	// streamSigner is immutable after startup; nil keeps content streaming off.
+	streamSigner *stream.Signer
 
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
@@ -206,6 +209,15 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("load-upload-rate-settings", err)
 		return nil, err
 	}
+	var streamSigner *stream.Signer
+	if cfg.STRM.BaseURL != "" {
+		streamSigner, err = resolveStreamSigner(metadataDir)
+		if err != nil {
+			releaseInstanceLock(instanceLock)
+			logInitFailure("resolve-stream-key", err)
+			return nil, err
+		}
+	}
 	// The store handle is opened once here and reused for every later subtitle
 	// operation. Anything the session publishes or reads afterwards is resolved
 	// from this handle, so replacing the store's path cannot redirect it.
@@ -290,6 +302,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cfg:             cfg,
 		logger:          logger,
 		startedAt:       startedAt,
+		streamSigner:    streamSigner,
 		pieceCache:      pieceCache,
 		pieceStore:      pieceStore,
 		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),

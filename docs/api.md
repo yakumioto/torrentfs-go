@@ -2,7 +2,7 @@
 
 [English](api.en.md) · [返回 README](../README.md)
 
-HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`。API 只提供任务管理和诊断，不提供 torrent 内容下载/播放端点；内容通过 FUSE/SMB 读取。
+HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`。`/api/v1` 提供任务管理和诊断；内容默认通过 FUSE/SMB 读取，显式配置 STRM 后另启用独立的签名 `/stream/...` 内容端点。
 
 ## 路由
 
@@ -25,6 +25,7 @@ HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`�
 | `PUT` | `/api/v1/torrents/{id}/favorite` | 设置或取消收藏 | `200` |
 | `POST` | `/api/v1/torrents/prune` | 批量删除早于 N 天的未收藏任务 | `200` |
 | `GET` | `/api/v1/operations/{id}` | 查询异步删除 operation | `200` |
+| `GET` / `HEAD` | `/stream/{hash}/{signature}/{path...}` | 可选、文件级签名内容读取，不走管理 API 的 Bearer 认证 | `200` / `206` / `304` |
 
 任务 `{id}` 是 40 个字符的小写十六进制 info hash。业务错误使用 `{"error":"..."}` JSON；未知路径和不匹配的方法由标准 `net/http` 路由处理，不能假设所有错误响应都是 JSON。
 
@@ -37,7 +38,7 @@ BASE_URL=http://127.0.0.1:8080
 curl --fail "$BASE_URL/api/v1/torrents"
 ```
 
-认证开启时，只有 `POST /api/v1/auth/login` 不需要 token；其他 `/api/` 请求必须且只能带一个 `Authorization: Bearer <token>` header。静态 Web shell/assets 的 `GET`/`HEAD` 仍公开，只允许加载 UI，不公开 torrent 数据。非 loopback listener 必须认证，具体 bcrypt 来源和共享环境凭据见[配置参考](configuration.md)。
+认证开启时，`/api/` 中只有 `POST /api/v1/auth/login` 不需要 token；其他 `/api/` 请求必须且只能带一个 `Authorization: Bearer <token>` header，不接受 query 或 Cookie 认证。静态 Web shell/assets 的 `GET`/`HEAD` 仍公开，加载 UI 本身不授权读取 torrent 数据。显式启用的 `/stream/...` 是独立的文件级签名路由，不走 Bearer 中间件，也不会放宽管理 API 的认证。非 loopback listener 必须认证，具体 bcrypt 来源和共享环境凭据见[配置参考](configuration.md)。
 
 登录必须用 `application/json`，请求体只接受字符串字段 `password`；`username` 等未知字段返回 `400`。返回 `token`、`token_type`（`Bearer`）和 `expires_in`。token 是 opaque 内存 token，不使用 Cookie、URL 参数、JWT 或 refresh token；有效请求滑动过期窗口，重启全部失效。
 
@@ -60,6 +61,43 @@ TOKEN="$(curl --fail --silent --show-error \
 curl --fail --request POST "$BASE_URL/api/v1/auth/logout" \
   --header "Authorization: Bearer $TOKEN"
 ```
+
+## 签名 HTTP 内容读取（STRM）
+
+`strm.base_url` 默认为空，`/stream` 和 `/stream/*` 默认返回 `404`，不会落到 SPA。非空时启用独立的 `GET` / `HEAD` 路由；URL 从生成的 `.strm` 文件取得，没有额外的登录 token 或管理链接导出接口：
+
+```text
+<base_url>/stream/<40位小写十六进制infohash>/<signature>/<原始torrent相对路径，逐段转义>
+```
+
+`signature` 是绑定版本域、info hash 和**原始 torrent display path** 的完整 HMAC-SHA256，使用无 padding 的 base64url（43 个字符）。路径不是宿主路径、分类路径或 STRM 展示名。中文、空格、`%`、`#`、`?`、`+` 按组件编码；服务仅解码一次，拒绝空组件、`.`、`..`、NUL、反斜杠和编码斜线。例如 `%252F` 解码为文件名中的字面 `%2F`，不能再次解码成 `/`。有外部反代前缀时，代理须先剥离该前缀再转发 `/stream/...`。
+
+该链接是只读文件级凭据，不含管理密码、不使用 Bearer token，也不需要 Cookie。持有链接者可读取对应文件，不能据此管理任务或读取其他文件。仅服务已注册、`ready` 且实际存在的 payload；重启和分类调整不影响签名，删除任务或轮换密钥后旧链接不可用。密钥文件与轮换说明见[使用指南](usage.md)；请保护完整 URL 和反代日志，外网使用 HTTPS。
+
+复制 `.strm` 中的完整 URL（不含末尾换行），不要手工构造签名：
+
+```sh
+STREAM_URL='<copy-the-exact-signed-URL-from-a-strm-file>'
+curl --fail --head "$STREAM_URL"
+curl --fail --range 0-1023 "$STREAM_URL" --output ./range.bin
+```
+
+这些请求不带 `Authorization`。避免在共享日志、工单或调试输出中暴露真实链接。
+
+- 全量 GET、HEAD、单/多 Range、条件请求和 `If-Range` 由 `http.ServeContent` 处理；匹配的 Range 返回 `206`，不可满足的 Range 返回 `416`。`If-Range` 不匹配时按标准语义回退为完整响应。
+- 响应使用显式 `Content-Type`（未知扩展名为 `application/octet-stream`），以及 ETag、Last-Modified 和适用的 Content-Length，并设置 `Cache-Control: private, no-store`、`Referrer-Policy: no-referrer`；偏移和长度使用 int64，支持大于 4GiB 的文件。不会为 MIME 嗅探额外读取首部；HEAD、元数据和无需 body 的条件响应不拉取 payload。
+- 内容复用 Session 的缓存、预读和 `mount.read_timeout`。客户端取消会取消该请求的读取并释放 reader；单次读取超时或其他读取错误若发生在响应已发出后，会中止传输，不追加 JSON，也不保证返回 `504`。客户端必须把截断响应视为失败。
+
+| 状态 | 流端点含义 |
+| --- | --- |
+| `200` / `206` | 完整响应 / 满足 Range 的部分响应 |
+| `304` / `412` | 标准条件请求结果，取决于条件 header |
+| `403` | 签名格式完整合法，但 MAC 不匹配，包括跨文件或跨 hash 使用 |
+| `404` | 未启用、路径或签名格式畸形；签名有效但任务/文件未知或未就绪 |
+| `405` | 启用后使用 GET/HEAD 以外的方法；带 `Allow: GET, HEAD` |
+| `416` | Range 不可满足 |
+| `503` | HTTP 正在关闭或 Session 已关闭 |
+| `500` | 其他打开/元数据错误，尚未发送内容响应 |
 
 ## 添加与查询
 
@@ -270,7 +308,7 @@ curl --fail --request PUT "$BASE_URL/api/v1/torrents/$TORRENT_ID/subtitles" \
 | 重启恢复 | 以目录、字幕扩展名和视频 expected basename 匹配唯一目标，不能唯一对应的 sidecar 会使启动失败 |
 | 新任务保护 | 新任务会让已有 single-file 视频改名或遮蔽字幕路径时，添加返回 `409`，不会发布 registry、metainfo 或可见状态 |
 
-并发、原子发布和 no-follow 存储保证见[开发指南](development.md)，播放器验证见[使用指南](usage.md)。
+ISO 只增加 STRM 视图支持，不属于 managed subtitle 的视频目标。并发、原子发布和 no-follow 存储保证见[开发指南](development.md)，播放器验证见[使用指南](usage.md)。
 
 ### 字幕错误码
 
@@ -319,12 +357,15 @@ rate 为 `0` 且 schedule 为 `null` 表示不限速；正 rate 且无 schedule 
 | --- | --- |
 | `400` | JSON/multipart、Content-Type、磁力链接、文件名或设置值无效 |
 | `401` | 认证缺失、格式错误、过期/撤销，或登录凭据错误 |
-| `404` | 未知 torrent/operation；认证关闭时 login/logout 不可用；静态 asset 不存在 |
+| `403` | 流端点的完整格式签名不匹配 |
+| `404` | 未知 torrent/operation；认证关闭时 login/logout 不可用；静态 asset 不存在；流未启用、路径/签名格式畸形或内容未知 |
+| `405` | 不支持的方法；启用的流端点仅接受 GET/HEAD |
 | `409` | 删除状态或 namespace/字幕目标冲突；`delete_failed` 时重新添加相同 info hash 也冲突 |
 | `413` | 超过 body 上限；登录固定为 `8KiB`，torrent/字幕由 `http.max_upload_size` 控制 |
 | `415` | 添加请求不是 JSON/multipart，或字幕名称/扩展名不受支持 |
+| `416` | 流请求的 Range 不可满足 |
 | `500` | 未分类的内部 session/API 错误 |
-| `503` | 字幕存储不可用，或上传限速写入失败/持久性未确认 |
+| `503` | 字幕存储不可用、上传限速写入失败/持久性未确认，或流服务/Session 正在关闭 |
 | `507` | 字幕存储空间不足 |
 
 受保护 API 的 `401` 带 `WWW-Authenticate: Bearer`。未知路径/方法可能返回标准 handler 的 `404`/`405`，不是 SPA 页面，也不保证业务 JSON 错误形状。

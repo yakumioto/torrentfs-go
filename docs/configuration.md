@@ -42,6 +42,7 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 | --- | --- | --- |
 | `[http]` | `listen_addr`, `max_upload_size` | HTTP/Web listener；默认 `127.0.0.1:8080`，上传上限默认 `10MiB`；listener 为空则禁用 HTTP |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | 单用户 bcrypt 登录和内存 Bearer token |
+| `[strm]` | `base_url` | 播放器可达的 HTTP(S) 直链基址；默认空值关闭流端点，非空要求启用 HTTP |
 | `[connections]` | `listen_host`, `listen_port`, `disable_ipv4`, `disable_ipv6`, `no_port_forwarding`, `bootstrap_nodes` | peer listener、地址族、UPnP/NAT-PMP 和 DHT bootstrap |
 | `[proxy]` | `socks5_url` | 可选 `socks5://` 或 `socks5h://` 出站代理 |
 | `[cache]` | `capacity` | 内存 piece cache 硬上限，默认 `2GiB`；必须为正数且不超过水位计算安全上限 |
@@ -79,6 +80,26 @@ token_ttl = "30m"
 
 `token_ttl` 是无活动过期窗口，有效的认证请求会滑动该窗口；token 只存在 daemon 内存中，重启后全部失效。登录和请求协议见 [API 参考](api.md)。
 
+## STRM 签名播放
+
+`strm.base_url` 默认为 `""`，此时 HTTP 流端点关闭。非空时启用签名内容读取，并要求 `http.listen_addr` 非空；即使不挂载第二视图，这个开关仍控制 HTTP 流能力。
+
+```toml
+[strm]
+# 示例域名；替换为播放器实际可达的地址。
+base_url = "https://media.example/torrentfs/"
+```
+
+- 必须是带 hostname 的绝对 `http://` 或 `https://` URL；显式端口为 `1..65535`。
+- 禁止 userinfo（包括用户名/密码）、query（包括裸 `?`）、fragment（包括裸 `#`）和 opaque URL；配置错误不会回显 URL 凭据。
+- 允许反向代理路径前缀，但拒绝空路径组件、`.`、`..`、NUL、反斜杠或编码斜线等歧义。构造链接时去掉基址末尾的单个 `/`，再追加 `/stream/...`。
+- 上例生成外部 `/torrentfs/stream/...` 链接；反代必须剥离 `/torrentfs`，将 `/stream/...` 转发给服务，并保留逐段路径转义，不要再次解码或清理文件名。
+- 基址必须从**播放器**可达，不能从容器地址、请求 Host 或登录 token 自动推断。远程播放不要填容器内部 `localhost`；外网必须使用 HTTPS。
+
+`TORRENTFS_STRM_BASE_URL` 覆盖该字段，显式空值可关闭流端点。基址变更需要重启；播放器可能缓存旧直链，需重新扫描或打开，不承诺热更新。原生 `-strm-mountpoint` 和 Docker 入口专用 `TORRENTFS_STRM_ENABLED` 控制第二视图是否挂载/共享，不替代 `base_url`：Docker 开关还要求 SMB 开启。完整组合与示例见[部署指南](deployment.md)。
+
+`/api/` 的 Bearer 认证规则保持不变；`/stream/...` 单独使用文件级 HMAC 签名，不要求播放器登录或添加 Bearer header。启用时首次创建 32 字节、`0600` 的 `.metadata/stream_key`，重启复用；它不是登录 token。保护签名链接和反代日志，密钥校验与轮换边界见[使用指南](usage.md)。
+
 ## 支持的环境变量
 
 | 环境变量 | TOML key / 用途 | 格式 |
@@ -100,6 +121,7 @@ token_ttl = "30m"
 | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `http.max_upload_size` | 带单位字节，如 `10MiB` 或 `32MB` |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
 | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `http.auth.token_ttl` | Go duration，如 `30m` |
+| `TORRENTFS_STRM_BASE_URL` | `strm.base_url` | 播放器可达的 HTTP(S) URL；默认空值关闭流端点 |
 | `TORRENTFS_LOG_LEVEL` | `log.level` | `debug`/`info`/`warn`/`error` |
 | `TORRENTFS_LOG_FORMAT` | `log.format` | `text`/`json` |
 | `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` | Go boolean |
@@ -115,7 +137,7 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 ./torrentfs "$PWD/torrents"
 ```
 
-`PUID`、`PGID` 和 `TORRENTFS_SMB_ENABLED` 由 Docker 入口处理，不是 daemon 的 TOML 配置。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
+`PUID`、`PGID`、`TORRENTFS_SMB_ENABLED` 和 `TORRENTFS_STRM_ENABLED` 由 Docker 入口处理，不是 daemon 的 TOML 配置。`TORRENTFS_STRM_ENABLED` 默认 `false`，只接受 `true`、`false`、`1`、`0`，启用时要求 SMB 开启并配置非空 `strm.base_url`。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
 
 ## 校验与旧配置迁移
 

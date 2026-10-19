@@ -13,6 +13,7 @@ Use it to let players, media libraries, indexers, or command-line tools read tor
 - **Web UI/API management:** add magnets or upload `.torrent` files and inspect tasks and cache state.
 - **Task and media management:** categories, favorites, age-based cleanup, subtitle upload/replacement, and scheduled upload limits.
 - **Docker + SMB:** FUSE and a read-only share in one container, without host mount propagation.
+- **Optional STRM view:** retain the original file share and add `.strm` files pointing to signed HTTP links; see the [deployment guide](docs/deployment.en.md).
 
 ## Quick start
 
@@ -113,7 +114,7 @@ A magnet may start in `adding`. `ready` means metainfo is available, but reads m
 - **FUSE and SMB are read-only:** upload subtitles through the UI/API, not with `docker cp`.
 - **Content cache is not persistent:** restarting clears the piece cache, but management state is restored. Metainfo is persisted at `torrents-dir/<infohash>.torrent`; other state lives under `torrents-dir/.metadata`.
 - **Add tasks through the UI/API:** copying `.torrent` files into the directory does not import them.
-- **HTTP is a management interface:** it has no torrent content download/playback endpoint, and this is not a downloader that persists complete payloads.
+- **HTTP is for management by default:** signed content reads require explicitly enabling STRM; this is not a downloader that persists complete payloads.
 - **Respect the network boundary:** non-loopback HTTP listeners require authentication; use a TLS reverse proxy and restrict access for exposed deployments.
 
 ## Documentation

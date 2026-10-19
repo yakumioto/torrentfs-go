@@ -37,6 +37,12 @@ password_hash_file = ""
 # A valid token request slides this inactivity window (30 minutes by default).
 token_ttl = "30m"
 
+[strm]
+# Empty disables signed HTTP streaming. Set a player-reachable HTTP(S) URL;
+# http.listen_addr must be enabled. Optional reverse proxy prefixes are supported.
+# Environment override: TORRENTFS_STRM_BASE_URL.
+base_url = ""
+
 [connections]
 # Empty listens on all suitable local interfaces.
 listen_host = ""

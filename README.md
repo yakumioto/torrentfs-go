@@ -13,6 +13,7 @@
 - **Web UI/API 管理**：添加磁力链接或上传 `.torrent`，查看任务与缓存状态。
 - **任务与媒体管理**：分类、收藏、批量清理、字幕上传/替换和按时段上传限速。
 - **Docker + SMB**：在同一容器内挂载 FUSE 并提供只读共享，无需宿主挂载传播。
+- **可选 STRM 视图**：保留原文件共享，另提供指向签名 HTTP 直链的 `.strm` 文件，见[部署指南](docs/deployment.md)。
 
 ## 快速开始
 
@@ -113,7 +114,7 @@ smbclient //127.0.0.1/torrentfs -U torrentfs -m SMB3
 - **挂载点和 SMB 只读**：字幕必须通过 UI/API 上传，不能用 `docker cp` 写入。
 - **内容缓存不持久化**：重启会清空 piece cache，但管理状态会恢复；metainfo 持久化在 `torrents-dir/<infohash>.torrent`，其他状态在 `torrents-dir/.metadata`。
 - **任务只通过 UI/API 添加**：手工复制 `.torrent` 到目录不会自动导入。
-- **HTTP 是管理接口**：不提供 torrent 内容下载或播放端点，也不是完整内容落盘的下载器。
+- **HTTP 默认用于管理**：显式启用 STRM 后才提供签名内容读取端点；不是将完整内容落盘的下载器。
 - **注意网络边界**：非本机 HTTP listener 必须认证；对外部署使用 TLS 反向代理并限制访问。
 
 ## 文档导航

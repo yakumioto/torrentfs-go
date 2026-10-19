@@ -94,6 +94,7 @@ type Config struct {
 	Cache       Cache       `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
 	HTTP        HTTP        `toml:"http"`
+	STRM        STRM        `toml:"strm"`
 	Log         Log         `toml:"log"`
 	Mount       Mount       `toml:"mount"`
 }
@@ -108,6 +109,13 @@ type HTTP struct {
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
 	MaxUploadBytes int64 `toml:"max_upload_size"`
+}
+
+// STRM groups the optional signed HTTP streaming settings.
+type STRM struct {
+	// BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
+	// proxy path prefix. Empty disables signed streaming links.
+	BaseURL string `toml:"base_url"`
 }
 
 // Log groups the process log settings.
@@ -277,6 +285,9 @@ func (c Config) Validate() error {
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
 		return invalid("http.max_upload_size", errPositive)
+	}
+	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {
+		return invalid("strm.base_url", err)
 	}
 	if _, err := ParseLogLevel(c.Log.Level); err != nil {
 		return invalid("log.level", errLogLevel)

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/auth"
@@ -68,7 +69,15 @@ type Server struct {
 	logger    *slog.Logger
 	handler   http.Handler
 	http      *http.Server
-	listener  net.Listener
+
+	mu       sync.RWMutex
+	listener net.Listener
+
+	streamEnabled bool
+	streamCtx     context.Context
+	streamCancel  context.CancelFunc
+	shutdownOnce  sync.Once
+	shutdownErr   error
 }
 
 // New builds a server for cfg. A listener is created only by Serve.
@@ -84,10 +93,11 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 		logger = logging.Discard()
 	}
 	s := &Server{
-		backend:   backend,
-		tokenTTL:  time.Duration(cfg.HTTP.Auth.TokenTTL),
-		maxUpload: cfg.HTTP.MaxUploadBytes,
-		logger:    logger,
+		backend:       backend,
+		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
+		maxUpload:     cfg.HTTP.MaxUploadBytes,
+		logger:        logger,
+		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	if cfg.HTTP.Auth.Enabled {
 		service, err := auth.New(cfg.HTTP.Auth)
@@ -116,7 +126,12 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/category", s.handleSetTorrentCategory)
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
-	s.handler = dispatchAPIAndStatic(s.authenticate(mux), web.Handler())
+	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
+	s.handler = dispatchAPIAndStatic(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
+	s.http = &http.Server{
+		Handler:           s.handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	return s, nil
 }
 
@@ -125,6 +140,8 @@ func (s *Server) Handler() http.Handler { return s.handler }
 
 // Addr reports the address Serve bound.
 func (s *Server) Addr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.listener == nil {
 		return ""
 	}
@@ -139,20 +156,16 @@ func (s *Server) Serve(ctx context.Context, listenAddr string) error {
 		s.logger.Error("http api listen failed", "addr", listenAddr, "err", err)
 		return fmt.Errorf("api: listen %s: %w", listenAddr, err)
 	}
+	s.mu.Lock()
 	s.listener = listener
+	s.mu.Unlock()
 	s.logger.Info("http api listening", "addr", listener.Addr().String())
-	s.http = &http.Server{
-		Handler:           s.handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
 
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.http.Shutdown(shutdownCtx)
+			_ = s.Shutdown(context.Background())
 		case <-done:
 		}
 	}()
@@ -167,24 +180,35 @@ func (s *Server) Serve(ctx context.Context, listenAddr string) error {
 	return err
 }
 
-// Shutdown stops the server gracefully.
+// Shutdown cancels streaming reads before draining requests. A bounded drain
+// followed by Close also releases a response blocked writing to a slow client;
+// cancelling a reader alone cannot interrupt that network write.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.logger.Info("http api shutting down")
-	var err error
-	if s.http != nil {
-		err = s.http.Shutdown(ctx)
-	}
-	if s.auth != nil {
-		s.auth.Close()
-	}
-	if err == nil {
-		s.logger.Info("http api shut down")
-	}
-	return err
+	s.shutdownOnce.Do(func() {
+		s.logger.Info("http api shutting down")
+		s.streamCancel()
+		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		s.shutdownErr = s.http.Shutdown(shutdownCtx)
+		if s.shutdownErr != nil {
+			s.shutdownErr = errors.Join(s.shutdownErr, s.http.Close())
+		}
+		if s.auth != nil {
+			s.auth.Close()
+		}
+		if s.shutdownErr == nil {
+			s.logger.Info("http api shut down")
+		}
+	})
+	return s.shutdownErr
 }
 
-func dispatchAPIAndStatic(apiHandler, staticHandler http.Handler) http.Handler {
+func dispatchAPIAndStatic(apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream" || strings.HasPrefix(r.URL.Path, "/stream/") {
+			streamHandler.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
 			apiHandler.ServeHTTP(w, r)
 			return

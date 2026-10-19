@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/media"
 )
 
 const (
@@ -133,12 +134,6 @@ func SubtitleErrorCode(err error) string {
 		return coded.ErrorCode()
 	}
 	return ""
-}
-
-var videoExtensions = map[string]struct{}{
-	".3gp": {}, ".avi": {}, ".flv": {}, ".m2ts": {}, ".m4v": {},
-	".mkv": {}, ".mov": {}, ".mp4": {}, ".mpeg": {}, ".mpg": {},
-	".mts": {}, ".ts": {}, ".webm": {}, ".wmv": {},
 }
 
 var subtitleExtensions = map[string]struct{}{".srt": {}, ".ass": {}, ".vtt": {}}
@@ -285,15 +280,6 @@ func subtitleExtension(name string) (string, bool) {
 	return ext, ok
 }
 
-// videoExtension reports whether name carries a supported video extension. The
-// comparison is case-insensitive, and the returned extension is the file's own
-// spelling, so callers must not use it to cut bytes off the name.
-func videoExtension(name string) (string, bool) {
-	ext := path.Ext(name)
-	_, ok := videoExtensions[strings.ToLower(ext)]
-	return ext, ok
-}
-
 // basenameStem is the basename with its final extension removed, keeping the
 // original case: the extension is cut by its actual length, never by a
 // lowercased copy, so "Movie.MKV" has stem "Movie" and not "Movie.MKV".
@@ -339,7 +325,7 @@ func (s *Session) subtitleTargetMapLocked(hash metainfo.Hash, st *Torrent) (map[
 	rootName, _ := filesystem.RootNameForWithCategories(current, allViews, categories)
 	candidates := make([]videoCandidate, 0)
 	for _, file := range st.tor.Files() {
-		if _, ok := videoExtension(file.DisplayPath()); !ok || validateSubtitleRelativePath(file.DisplayPath()) != nil {
+		if _, ok := media.VideoExtension(file.DisplayPath()); !ok || validateSubtitleRelativePath(file.DisplayPath()) != nil {
 			continue
 		}
 		base := path.Base(file.DisplayPath())

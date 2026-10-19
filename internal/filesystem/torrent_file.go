@@ -36,8 +36,12 @@ func (n *torrentFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fus
 		setModifiedAt(&out.Attr, stat.ModifiedAt)
 		return 0
 	}
-	out.Size = uint64(n.size)
-	setCreatedAt(&out.Attr, n.createdAt)
+	stat, err := n.state.fileStat(n.hash, n.path, n.size, n.createdAt)
+	if err != nil {
+		return errnoFor(err)
+	}
+	out.Size = uint64(stat.Size)
+	setCreatedAt(&out.Attr, stat.CreatedAt)
 	return 0
 }
 
@@ -90,7 +94,24 @@ func (n *torrentFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		// replacement, while a handle opened before it keeps reading the file it
 		// opened instead of a page cache another open has since refilled.
 		openFlags = fuse.FOPEN_DIRECT_IO
+	} else if backend, ok := n.state.backend.(FileSnapshotBackend); ok {
+		// Generated content can recover after a failed listing. The read bound
+		// must describe this open's bytes, not a stale inode or a separate stat.
+		snapshot, err := backend.OpenFileSnapshot(n.hash, n.path)
+		if err != nil {
+			return nil, 0, errnoFor(err)
+		}
+		ra, size = snapshot.Reader, snapshot.Size
+		if ra == nil || size < 0 {
+			if closer, ok := ra.(io.Closer); ok {
+				_ = closer.Close()
+			}
+			return nil, 0, errnoFor(ErrInvalidName)
+		}
 	} else {
+		if size < 0 {
+			return nil, 0, errnoFor(ErrInvalidName)
+		}
 		ra, err = n.state.backend.OpenFile(n.hash, n.path)
 		if err != nil {
 			return nil, 0, errnoFor(err)
