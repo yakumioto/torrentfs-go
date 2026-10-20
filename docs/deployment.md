@@ -27,7 +27,7 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 
 `torrents` 目录必须事先存在、可读写且不是符号链接。单个 `.torrent` 文件不能作为 positional 参数；程序不会替用户创建目录，也不会扫描目录中的任意 `.torrent` 文件来添加任务。
 
-### 三种运行模式
+### 运行模式
 
 不指定 `-config` 时，HTTP 默认监听 `127.0.0.1:8080`，认证关闭，peer 端口由客户端选择。
 
@@ -67,15 +67,28 @@ TORRENTFS_HTTP_LISTEN_ADDR= \
 
 `go run ./cmd/torrentfs ...` 可以替代 `./torrentfs ...`，但同样必须先生成 `web/dist`。通过 UI/API 添加任务后，单文件 torrent 直接出现在挂载点下，多文件 torrent 保留目录树，见[使用指南](usage.md)。
 
+### 可选 STRM 挂载
+
+原生运行使用 `-strm-mountpoint`，可单独提供，也可与 `-mountpoint` 一起使用。先配置非空 `strm.base_url`，并保持 HTTP listener 启用；两个目录都必须事先存在，规范化路径和符号链接别名后不能相同或互相嵌套。
+
+```sh
+mkdir -p "$PWD/mnt-strm"
+TORRENTFS_STRM_BASE_URL=https://media.example/torrentfs/ \
+  ./torrentfs -mountpoint "$PWD/mnt" -strm-mountpoint "$PWD/mnt-strm" "$PWD/torrents"
+```
+
+`media.example` 是占位域名：使用前配置播放器可达的 HTTPS 反代，把 `/torrentfs/stream/...` 剥离前缀后转发到本机默认 listener 的 `/stream/...`。若仅需 STRM 视图，省略 `-mountpoint "$PWD/mnt"`；若直接改为非 loopback HTTP 监听，仍须启用完整认证。基址不从 Host 推断，路径与播放器边界见[配置参考](configuration.md)和[使用指南](usage.md)。
+
 ### CLI 与退出
 
 ```text
-torrentfs [-config <file>] [-mountpoint <dir>] <torrents-dir>
+torrentfs [-config <file>] [-mountpoint <dir>] [-strm-mountpoint <dir>] <torrents-dir>
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `-mountpoint <dir>` | FUSE 挂载目录；HTTP listener 启用时可以省略 |
+| `-mountpoint <dir>` | 原文件 FUSE 挂载目录；可与 STRM 并用，HTTP listener 启用时可以省略 |
+| `-strm-mountpoint <dir>` | 可选第二只读 STRM 挂载，可单独使用；要求非空 `strm.base_url` 和启用 HTTP |
 | `-config <file>` | 可选 TOML 配置文件；未提供时使用内置默认值和环境变量 |
 | `<torrents-dir>` | 唯一 positional 参数；必须是已存在、可读写、非 symlink 的目录 |
 | `-h` / `--help` | 输出帮助并退出 |
@@ -86,7 +99,7 @@ torrentfs [-config <file>] [-mountpoint <dir>] <torrents-dir>
 | `1` | HTTP、session 或 FUSE unmount 的运行时错误 |
 | `2` | flag 用法、positional 参数、目录或配置校验错误 |
 
-按 `Ctrl-C` 或发送 `SIGTERM` 可停止服务。正常关闭顺序为 HTTP → session → FUSE unmount；session 先取消并排空等待 piece 的读取。FUSE unmount 有 30 秒 deadline；如果其他 mount namespace 仍持有传播副本，进程会输出诊断并以 `1` 退出，不会把未完成的 lazy unmount 当作成功。
+按 `Ctrl-C` 或发送 `SIGTERM` 可停止服务。正常关闭先取消 HTTP 流读取，并最多等待 5 秒 HTTP drain；超时强制关闭连接以解除阻塞网络写。随后关闭 Session，取消并排空等待 piece 的读取，最后并行卸载原始与 STRM FUSE 挂载。整个卸载阶段共用 **30 秒** deadline，不是每个挂载各等 30 秒。强制关闭 HTTP 连接不代表已等待所有 handler 返回；其他 mount namespace 若仍持有传播副本，进程会输出诊断并以 `1` 退出，不会把未完成的 lazy unmount 当作成功。
 
 ## Docker 镜像与默认值
 
@@ -133,9 +146,38 @@ nightly workflow 的 GHCR tag 包含日期、提交和 run id，不保证浮动 
 | `TORRENTFS_USERNAME` | SMB 必填；必须是镜像内解析到实际 runtime UID 的 Unix 账户，推荐固定名称 `torrentfs` |
 | `TORRENTFS_PASSWORD` | SMB 必填；非空单行密码，不能包含 CR/LF |
 
-SMB 模式独占内部 `/share` 挂载点，不要传 `-mountpoint`，也不要将非空 bind mount 挂到 `/share`。入口确认 fstype 为 `fuse.*` 后才启动 Samba，只监听 TCP 445，不启动 `nmbd`，不发布 137/138/139。
+SMB 模式管理固定的 `/share` 和可选 `/share-strm`，禁止自行传入 `-mountpoint` 或 `-strm-mountpoint`，也不要在这些内部路径覆盖 bind mount。入口确认所需挂载的 fstype 均为 `fuse.*` 后才启动 Samba，只监听 TCP 445，不启动 `nmbd`，不发布 137/138/139。
 
 share 名固定为 `torrentfs`，配置始终只读、禁止 guest。`/torrents` 和 `.metadata` 不会被共享。Samba 将请求映射到 torrentfs 的相同运行身份，因此不依赖 `allow_other`；显式启用该选项会扩大访问面。
+
+### 可选 STRM 第二共享
+
+默认只导出原始 `torrentfs`。启用后仍保留 `/share` → `torrentfs`，入口自动追加第二挂载 `/share-strm` → `torrentfs-strm`，认证、只读权限和运行身份与原共享一致，不需要宿主挂载传播。
+
+| 开关 | 职责 |
+| --- | --- |
+| `TORRENTFS_STRM_ENABLED` | Docker 入口专用，默认 `false`；只接受 `true`、`false`、`1`、`0`，启用要求 `TORRENTFS_SMB_ENABLED=true` 或 `1` |
+| `TORRENTFS_STRM_BASE_URL` / `[strm] base_url` | daemon 的直链基址和 HTTP 流开关；必须非空且 HTTP listener 启用，不能用入口开关替代 |
+
+可在 [Compose 模板](../docker-compose.yaml) 的现有服务中合并下面片段。`192.0.2.10` 仅作示例，替换为播放器可达的实际 LAN 地址；替换 loopback 端口绑定，但保留设备、capability、数据挂载、运行身份、共享凭据及需要的 peer TCP/UDP 端口映射：
+
+```yaml
+ports:
+  - "192.0.2.10:8080:8080"
+  - "192.0.2.10:445:445"
+environment:
+  TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
+  TORRENTFS_HTTP_AUTH_ENABLED: "true"
+  TORRENTFS_SMB_ENABLED: "true"
+  TORRENTFS_STRM_ENABLED: "true"
+  TORRENTFS_STRM_BASE_URL: "http://192.0.2.10:8080"
+```
+
+`docker run` 则在原 Docker + SMB 命令的镜像名前添加 `--env TORRENTFS_STRM_ENABLED=true` 和 `--env TORRENTFS_STRM_BASE_URL=http://192.0.2.10:8080`，并相应替换端口绑定。不要覆盖原有用户名/密码环境项；新共享不使用额外凭据，也不要求播放器为 HTTP 播放添加管理 Bearer token。
+
+将客户端媒体库指向 `smb://192.0.2.10/torrentfs-strm`，原共享仍为 `smb://192.0.2.10/torrentfs`。基址不能填容器内部 `localhost`；使用 HTTPS 域名或反代前缀时，确保播放器可达、代理剥离前缀并转发 `/stream/...`。只有 `base_url` 非空而入口开关关闭时，会启用 HTTP 流，但不会新增 SMB 共享；入口开关开启却缺基址、HTTP 或 SMB 时会拒绝启动。HTTP-only 可读取已有有效签名链接，但生成文件视图仍需启用挂载。
+
+入口等待**两处**挂载就绪后才启动 Samba；任一挂载丢失都联动停止服务，不会退化为共享普通目录。文件命名、ISO/BDMV、字幕匹配和客户端缓存边界见[使用指南](usage.md)。保护签名 `.strm` 与反代日志；外网使用 HTTPS。
 
 ### 客户端路径
 
@@ -164,7 +206,7 @@ umount /mnt/torrentfs-client
 
 ### 仅 SMB 与退出行为
 
-不发布 HTTP 端口只是让 HTTP 保持 container-local；并不等于关闭它。若显式把 `TORRENTFS_HTTP_LISTEN_ADDR` 置空，则没有任务添加和字幕上传入口，应先注册任务。HTTP auth 关闭时 Go 配置层忽略共享凭据，SMB 仍要求完整 pair。
+不发布 HTTP 端口只是让 HTTP 保持 container-local；并不等于关闭它。若显式把 `TORRENTFS_HTTP_LISTEN_ADDR` 置空，则没有任务添加和字幕上传入口，应先注册任务，也不能使用 STRM（须清空 `base_url` 并关闭入口 STRM 开关）。HTTP auth 关闭时 Go 配置层忽略共享凭据，SMB 仍要求完整 pair。
 
 缺少 FUSE 设备、必要 capability、凭据或有效运行身份时，入口会明确失败，不会退化为共享普通目录。torrentfs、smbd 任一核心进程异常退出或 FUSE 消失，容器会停止另一进程并以非零状态退出。
 
@@ -183,7 +225,7 @@ umount /mnt/torrentfs-client
 
 ### HTTP-only
 
-不授予 FUSE 设备和 capability，仅提供管理 API/Web UI；它没有 torrent 内容下载/播放端点：
+不授予 FUSE 设备和 capability，默认仅提供管理 API/Web UI；若另配置非空 `strm.base_url`，也可服务已有有效签名 HTTP 链接，但不生成挂载视图：
 
 ```bash
 docker run --detach --name torrentfs-http \
@@ -258,7 +300,7 @@ docker stop --time 60 torrentfs
 docker start torrentfs
 ```
 
-入口给 Samba 最多 10 秒、torrentfs 最多 45 秒的正常退出时间，60 秒 Docker stop timeout 覆盖这两个窗口。保留相同 `/srv/torrents` bind mount，重启后任务、metainfo、分类、收藏、字幕和上传限速会恢复；Bearer token 与 piece cache 不恢复。部署完成后可取消当前 shell 中的凭据变量：
+入口给 Samba 最多 10 秒、torrentfs 最多 45 秒的正常退出时间，60 秒 Docker stop timeout 覆盖这两个窗口。保留相同 `/srv/torrents` bind mount，重启后任务、metainfo、分类、收藏、字幕、上传限速和 STRM 签名密钥会恢复；Bearer token 与 piece cache 不恢复。基址或密钥变更后，播放器可能缓存旧 `.strm` 直链，需重新读取/导出并重扫或打开，不能依赖 mtime（沿用 torrent 添加时间）自动刷新。部署完成后可取消当前 shell 中的凭据变量：
 
 ```sh
 unset TORRENTFS_USERNAME TORRENTFS_PASSWORD

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -39,6 +40,32 @@ type Torrent struct {
 	cache       *cache.Cache
 	loader      pieceSource
 	coordinator *prefetchCoordinator
+
+	// filesByPath indexes payload display paths once metainfo is known. The
+	// file list is immutable for an info hash, so the index is never rebuilt.
+	filesByPath atomic.Pointer[map[string]*torrent.File]
+}
+
+// fileByPath returns the file with displayPath in O(1). A duplicated display
+// path keeps the first file, matching a linear scan of the metainfo order.
+func (t *Torrent) fileByPath(displayPath string) *torrent.File {
+	index := t.filesByPath.Load()
+	if index == nil {
+		if t.tor.Info() == nil {
+			return nil
+		}
+		files := t.tor.Files()
+		built := make(map[string]*torrent.File, len(files))
+		for _, f := range files {
+			path := f.DisplayPath()
+			if _, ok := built[path]; !ok {
+				built[path] = f
+			}
+		}
+		t.filesByPath.CompareAndSwap(nil, &built)
+		index = t.filesByPath.Load()
+	}
+	return (*index)[displayPath]
 }
 
 func sourceKind(src Source) string {
@@ -239,7 +266,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		}
 		return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.Mount.ReadTimeout)}, nil
 	}
-	f := fileByDisplayPath(t.tor, displayPath)
+	f := t.fileByPath(displayPath)
 	if f == nil {
 		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), filesystem.ErrNotFound)
 	}

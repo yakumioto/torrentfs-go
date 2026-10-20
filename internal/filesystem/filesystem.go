@@ -77,6 +77,32 @@ type Backend interface {
 	OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 }
 
+// FileStat is one payload file's current metadata, including a generated file
+// whose readable size can differ from an earlier directory snapshot.
+type FileStat struct {
+	Size      int64
+	CreatedAt time.Time
+}
+
+// FileSnapshot binds an opened payload reader to the size of the same content.
+type FileSnapshot struct {
+	Reader    io.ReaderAt
+	Size      int64
+	CreatedAt time.Time
+}
+
+// FileStatBackend optionally refreshes payload metadata at lookup and getattr.
+// Backends without it keep the directory snapshot's immutable payload metadata.
+type FileStatBackend interface {
+	FileStat(hash metainfo.Hash, path string) (FileStat, error)
+}
+
+// FileSnapshotBackend optionally supplies a reader and its metadata in one open,
+// so a generated file cannot inherit an unavailable snapshot's zero read bound.
+type FileSnapshotBackend interface {
+	OpenFileSnapshot(hash metainfo.Hash, path string) (FileSnapshot, error)
+}
+
 // CategoryBackend is an optional Backend extension that supplies every
 // persisted category, including categories with no visible torrents.
 type CategoryBackend interface {
@@ -125,6 +151,23 @@ func newFSState(backend Backend) *fsState {
 		nextIno:  1,
 		inoByKey: make(map[string]uint64),
 	}
+}
+
+// fileStat refreshes only payload metadata; managed subtitles have their own
+// independent snapshot/stat capabilities and must not pass through this path.
+func (s *fsState) fileStat(hash metainfo.Hash, path string, size int64, createdAt time.Time) (FileStat, error) {
+	stat := FileStat{Size: size, CreatedAt: createdAt}
+	if backend, ok := s.backend.(FileStatBackend); ok {
+		var err error
+		stat, err = backend.FileStat(hash, path)
+		if err != nil {
+			return FileStat{}, err
+		}
+	}
+	if stat.Size < 0 {
+		return FileStat{}, ErrInvalidName
+	}
+	return stat, nil
 }
 
 // inoFor returns the stable inode number assigned to key, allocating a new

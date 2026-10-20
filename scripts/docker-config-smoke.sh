@@ -166,6 +166,17 @@ expect_start_failure() {
 	[[ "$output" != *'starting torrentfs'* ]] || fail "$name reached service startup: $output"
 }
 
+expect_cli_config_failure() {
+	local name="$1" expected="$2" output status=0
+	shift 2
+	output="$(timeout 30 docker run --rm --entrypoint /usr/local/bin/torrentfs \
+		"$@" "$image" -config /etc/torrentfs/torrentfs.toml -strm-mountpoint /share-strm /torrents 2>&1)" || status=$?
+	[[ "$status" == 2 ]] || fail "$name exited with status $status, want configuration error"
+	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
+	[[ "$output" != *'torrentfs starting'* ]] || fail "$name reached service startup: $output"
+	[[ "$output" != *'strm-config-secret'* ]] || fail "$name exposed URL userinfo"
+}
+
 cat >"$work_dir/external.toml" <<EOF
 [http]
 listen_addr = "0.0.0.0:8080"
@@ -182,16 +193,38 @@ chmod 0777 "$work_dir/torrents"
 printf 'docker config smoke: building %s\n' "$image"
 timeout 1800 docker build --tag "$image" . >/dev/null
 
-timeout 30 docker run --rm --entrypoint /bin/sh "$image" -c \
-	'test -r /etc/torrentfs/torrentfs.toml && test -d /torrents && test -d /share && \
-	 test ! -e /etc/torrentfs/runtime-identity && test "$(stat -c %a /torrents)" = 777 && \
-	 command -v useradd >/dev/null && command -v usermod >/dev/null && command -v groupadd >/dev/null && \
-	 command -v groupmod >/dev/null && command -v setpriv >/dev/null && \
-	 command -v smbd >/dev/null && command -v smbpasswd >/dev/null && command -v testparm >/dev/null && \
-	 testparm -s /etc/samba/torrentfs-smb.conf | \
-	 sed -n "/^\\[torrentfs\\]/,\$p" | \
-	 grep -Eq "^[[:space:]]*path[[:space:]]=[[:space:]]*/share[[:space:]]*$"' \
-	|| fail 'image is missing its readable configuration, writable /torrents, /share, or required runtime tools'
+timeout 30 docker run --rm --entrypoint /bin/sh "$image" -eu -c '
+	test -r /etc/torrentfs/torrentfs.toml
+	for path in /torrents /share /share-strm; do
+		test -d "$path"
+	done
+	test ! -e /etc/torrentfs/runtime-identity
+	test "$(stat -c %a /torrents)" = 777
+	for tool in useradd usermod groupadd groupmod setpriv smbd smbpasswd testparm; do
+		command -v "$tool" >/dev/null
+	done
+	test -r /etc/samba/torrentfs-smb.conf
+	test -r /etc/samba/torrentfs-smb-strm.conf
+	testparm -s /etc/samba/torrentfs-smb.conf >/tmp/original.conf
+	if grep -Fx "[torrentfs-strm]" /tmp/original.conf; then
+		exit 1
+	fi
+	cat /etc/samba/torrentfs-smb.conf /etc/samba/torrentfs-smb-strm.conf >/tmp/combined.conf
+	testparm -s /tmp/combined.conf >/dev/null
+	parameter() {
+		testparm -s --section-name="$1" --parameter-name="$2" /tmp/combined.conf 2>/dev/null
+	}
+	for share in torrentfs torrentfs-strm; do
+		path=/share
+		[ "$share" != torrentfs-strm ] || path=/share-strm
+		test "$(parameter "$share" path)" = "$path"
+		test "$(parameter "$share" "read only" | tr "[:upper:]" "[:lower:]")" = yes
+		test "$(parameter "$share" "guest ok" | tr "[:upper:]" "[:lower:]")" = no
+		test "$(parameter "$share" "valid users")" = __TORRENTFS_SMB_USER__
+		test "$(parameter "$share" "force user")" = __TORRENTFS_SMB_USER__
+		test "$(parameter "$share" "force group")" = __TORRENTFS_SMB_GROUP__
+	done
+' || fail 'image is missing its configuration, writable /torrents, both mount directories/templates, or required runtime tools'
 [[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Entrypoint}}')" == \
 	'["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]' ]] ||
 	fail 'image entrypoint is not the tini-wrapped torrentfs entrypoint'
@@ -215,6 +248,7 @@ printf 'docker config smoke: starting HTTP-only service as 99:100\n'
 docker run --detach --name "$explicit_container" \
 	--publish 127.0.0.1::8080 \
 	--env PUID=99 --env PGID=100 \
+	--env TORRENTFS_STRM_ENABLED=0 \
 	"$image" >/dev/null
 wait_running "$explicit_container"
 assert_runtime_identity "$explicit_container" 99 100
@@ -235,6 +269,7 @@ expect_smb_preflight_failure() {
 	[[ "$status" != 0 && "$status" != 124 ]] || fail "$name unexpectedly started or timed out"
 	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
 	[[ "$output" != *"$smb_preflight_secret"* ]] || fail "$name leaked the password"
+	[[ "$output" != *'starting torrentfs'* ]] || fail "$name reached service startup: $output"
 }
 
 printf 'docker config smoke: checking that incomplete SMB credentials fail closed\n'
@@ -247,6 +282,45 @@ expect_smb_preflight_failure 'invalid SMB username' 'TORRENTFS_USERNAME is not a
 expect_smb_preflight_failure 'SMB username UID mismatch' 'TORRENTFS_USERNAME must resolve to the torrentfs runtime UID' \
 	--env TORRENTFS_USERNAME=root --env "TORRENTFS_PASSWORD=$smb_preflight_secret"
 printf 'docker config smoke: SMB credential failure was rejected before startup\n'
+
+printf 'docker config smoke: checking STRM preflight and CLI configuration failures\n'
+for value in '' yes TRUE 2 ' true'; do
+	expect_start_failure 'invalid STRM boolean' 'TORRENTFS_STRM_ENABLED must be exactly true, false, 1, or 0' \
+		--env "TORRENTFS_STRM_ENABLED=$value"
+done
+for value in true 1; do
+	expect_start_failure 'STRM without SMB' 'TORRENTFS_STRM_ENABLED requires TORRENTFS_SMB_ENABLED=true or 1' \
+		--env "TORRENTFS_STRM_ENABLED=$value" --env TORRENTFS_SMB_ENABLED=false
+done
+expect_cli_config_failure 'STRM without base URL' 'strm.base_url'
+expect_cli_config_failure 'STRM with disabled HTTP' 'strm.base_url' \
+	--env TORRENTFS_STRM_BASE_URL=http://player.example:8080 --env TORRENTFS_HTTP_LISTEN_ADDR=
+expect_cli_config_failure 'STRM with URL userinfo' 'strm.base_url' \
+	--env TORRENTFS_STRM_BASE_URL=http://user:strm-config-secret@player.example:8080
+expect_cli_config_failure 'STRM with URL query' 'strm.base_url' \
+	--env 'TORRENTFS_STRM_BASE_URL=http://player.example:8080?token=secret'
+
+for strm_enabled in false true; do
+	for mount_flag in mountpoint strm-mountpoint; do
+		for flag_form in "-$mount_flag" "--$mount_flag" "-$mount_flag=" "--$mount_flag="; do
+			args=("$flag_form" /override)
+			if [[ "$flag_form" == *= ]]; then
+				args=("${flag_form}/override")
+			fi
+			output=''
+			status=0
+			output="$(timeout 30 docker run --rm --env PUID=99 --env PGID=100 \
+				--env TORRENTFS_SMB_ENABLED=true --env "TORRENTFS_STRM_ENABLED=$strm_enabled" \
+				--env TORRENTFS_USERNAME=torrentfs --env "TORRENTFS_PASSWORD=$smb_preflight_secret" \
+				"$image" "${args[@]}" -config /etc/torrentfs/torrentfs.toml /torrents 2>&1)" || status=$?
+			[[ "$status" != 0 && "$status" != 124 ]] || fail "$flag_form unexpectedly started or timed out"
+			[[ "$output" == *"do not pass -$mount_flag"* ]] || fail "$flag_form lacked the fixed-mount diagnostic: $output"
+			[[ "$output" != *'starting torrentfs'* ]] || fail "$flag_form reached service startup: $output"
+			[[ "$output" != *"$smb_preflight_secret"* ]] || fail "$flag_form leaked the password"
+		done
+	done
+done
+printf 'docker config smoke: STRM preflight, URL validation, and every fixed-mount flag form passed\n'
 
 printf 'docker config smoke: checking invalid runtime identity values\n'
 expect_start_failure 'empty PUID' 'PUID must be an unsigned decimal integer from 1 to 4294967294 (got empty value)' \
@@ -317,6 +391,7 @@ printf 'docker config smoke: environment-only HTTP startup passed\n'
 printf 'docker config smoke: starting with an external TOML file\n'
 docker run --detach --name "$file_container" \
 	--env PUID=99 --env PGID=100 \
+	--env TORRENTFS_STRM_ENABLED=false \
 	--publish 127.0.0.1::8080 \
 	--mount "type=bind,src=$work_dir/torrents,dst=/torrents" \
 	--mount "type=bind,src=$work_dir/external.toml,dst=/config.toml,readonly" \

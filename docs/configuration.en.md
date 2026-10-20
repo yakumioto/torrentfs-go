@@ -38,6 +38,7 @@ Examples: `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483
 | --- | --- | --- |
 | `[http]` | `listen_addr`, `max_upload_size` | HTTP/UI listener; default `127.0.0.1:8080`, upload default `10MiB` |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | Single-user bcrypt authentication and in-memory Bearer tokens |
+| `[strm]` | `base_url` | Player-reachable HTTP(S) base URL; empty by default disables streaming, non-empty requires HTTP |
 | `[connections]` | `listen_host`, `listen_port`, `disable_ipv4`, `disable_ipv6`, `no_port_forwarding`, `bootstrap_nodes` | Peer listener, address families, NAT mapping, and DHT bootstrap |
 | `[proxy]` | `socks5_url` | Optional `socks5://` or `socks5h://` proxy |
 | `[cache]` | `capacity` | In-memory piece-cache limit; default `2GiB` |
@@ -77,6 +78,26 @@ The special `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` pair is an alternative w
 
 Environment credentials can appear in process environments and Docker metadata. They are plaintext deployment configuration, not a secret store. Token and header semantics are documented in the [API reference](api.en.md).
 
+## STRM signed playback
+
+`strm.base_url` defaults to `""`, disabling HTTP streaming. A non-empty value enables signed content reads and requires a non-empty `http.listen_addr`. It controls the HTTP capability even when no second view is mounted.
+
+```toml
+[strm]
+# Example domain; replace it with an address reachable by the player.
+base_url = "https://media.example/torrentfs/"
+```
+
+- Use an absolute `http://` or `https://` URL with a hostname. An explicit port must be in `1..65535`.
+- Userinfo (including usernames/passwords), queries (including a bare `?`), fragments (including a bare `#`), and opaque URLs are rejected. Configuration errors do not echo URL credentials.
+- A reverse-proxy path prefix is allowed, but ambiguous empty components, `.`, `..`, NUL, backslashes, and encoded slashes are rejected. URL construction removes one trailing `/` before appending `/stream/...`.
+- The example produces external `/torrentfs/stream/...` links. The proxy must strip `/torrentfs` and forward `/stream/...`, preserving segment escaping rather than decoding again or cleaning filenames.
+- The address must be reachable **from the player**; it is not inferred from a container address, request Host, or login token. Do not use container-local `localhost` for remote playback. Use HTTPS outside a trusted LAN.
+
+`TORRENTFS_STRM_BASE_URL` overrides this field, including an explicit empty value to disable streaming. Changing it requires restart; players may cache old URLs and need a rescan or reopen rather than a guaranteed hot update. Native `-strm-mountpoint` and entrypoint-only Docker `TORRENTFS_STRM_ENABLED` control the second mount/share; neither replaces `base_url`. The Docker switch also requires SMB. See the [deployment guide](deployment.en.md) for combinations and examples.
+
+Bearer authentication for `/api/` is unchanged. `/stream/...` uses a separate file-scoped HMAC signature, without a player login or Bearer header. Enabling streaming first creates a 32-byte, mode-`0600` `.metadata/stream_key` and reuses it on restart; it is not a login token. Protect signed links and reverse-proxy logs. Key validation and rotation boundaries are in the [usage guide](usage.en.md).
+
 ## Supported environment variables
 
 Ordinary field bindings are explicit:
@@ -100,11 +121,12 @@ Ordinary field bindings are explicit:
 | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `http.max_upload_size` | Explicit byte unit, e.g. `10MiB` |
 | `TORRENTFS_HTTP_AUTH_ENABLED` | `http.auth.enabled` | Go boolean |
 | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `http.auth.token_ttl` | Go duration |
+| `TORRENTFS_STRM_BASE_URL` | `strm.base_url` | Player-reachable HTTP(S) URL; empty by default disables streaming |
 | `TORRENTFS_LOG_LEVEL` | `log.level` | `debug`, `info`, `warn`, or `error` |
 | `TORRENTFS_LOG_FORMAT` | `log.format` | `text` or `json` |
 | `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` | Go boolean |
 
-`TORRENTFS_USERNAME` and `TORRENTFS_PASSWORD` are the special shared credential pair, not automatic bindings for arbitrary TOML keys. `TORRENTFS_SMB_ENABLED`, `PUID`, and `PGID` are handled by the Docker entrypoint, not the Go configuration loader.
+`TORRENTFS_USERNAME` and `TORRENTFS_PASSWORD` are the special shared credential pair, not automatic bindings for arbitrary TOML keys. `TORRENTFS_SMB_ENABLED`, `TORRENTFS_STRM_ENABLED`, `PUID`, and `PGID` are handled by the Docker entrypoint, not the Go configuration loader. `TORRENTFS_STRM_ENABLED` defaults to `false`, accepts only `true`, `false`, `1`, or `0`, and requires SMB plus a non-empty `strm.base_url` when enabled.
 
 An existing ordinary string variable may be empty to clear a field. Empty numeric, boolean, or duration variables produce an error. For example:
 

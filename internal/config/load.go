@@ -64,6 +64,7 @@ type fileConfig struct {
 	Cache       fileCache   `toml:"cache"`
 	Identity    Identity    `toml:"identity"`
 	HTTP        fileHTTP    `toml:"http"`
+	STRM        STRM        `toml:"strm"`
 	Log         Log         `toml:"log"`
 	Mount       Mount       `toml:"mount"`
 }
@@ -89,6 +90,7 @@ func newFileConfig(cfg Config) fileConfig {
 			Auth:           cfg.HTTP.Auth,
 			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes),
 		},
+		STRM:  cfg.STRM,
 		Log:   cfg.Log,
 		Mount: cfg.Mount,
 	}
@@ -105,6 +107,7 @@ func (c fileConfig) runtimeConfig() Config {
 			Auth:           c.HTTP.Auth,
 			MaxUploadBytes: int64(c.HTTP.MaxUploadBytes),
 		},
+		STRM:  c.STRM,
 		Log:   c.Log,
 		Mount: c.Mount,
 	}

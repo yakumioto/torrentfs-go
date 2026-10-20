@@ -20,7 +20,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         bash ca-certificates fuse3 passwd samba samba-common-bin tini util-linux; \
-    install -d -o root -g root -m 0755 /etc/torrentfs /share; \
+    install -d -o root -g root -m 0755 /etc/torrentfs /share /share-strm; \
     install -d -o root -g root -m 0777 /torrents; \
     install -d -o root -g root -m 0755 \
         /run/samba /run/samba/lock /run/samba/state /run/samba/cache \
@@ -29,6 +29,7 @@ RUN set -eux; \
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
 COPY docker/entrypoint.sh /usr/local/bin/torrentfs-entrypoint
 COPY docker/smb.conf /etc/samba/torrentfs-smb.conf
+COPY docker/smb-strm.conf /etc/samba/torrentfs-smb-strm.conf
 COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
 RUN chmod 0755 /usr/local/bin/torrentfs-entrypoint
 

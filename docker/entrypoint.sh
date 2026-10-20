@@ -7,8 +7,10 @@ IFS=$'\n\t'
 umask 022
 
 readonly MOUNTPOINT=/share
+readonly STRM_MOUNTPOINT=/share-strm
 readonly IDENTITY_FILE=/etc/torrentfs/runtime-identity
 readonly SMB_TEMPLATE=/etc/samba/torrentfs-smb.conf
+readonly SMB_STRM_TEMPLATE=/etc/samba/torrentfs-smb-strm.conf
 readonly SMB_CONFIG=/run/samba/smb.conf
 readonly TORRENTFS_PID_FILE=/run/torrentfs.pid
 readonly START_TIMEOUT_SECONDS=60
@@ -23,6 +25,8 @@ runtime_gid=''
 runtime_user=''
 runtime_group=''
 smb_username=''
+strm_requested=0
+mountpoints=("$MOUNTPOINT")
 
 log() {
 	printf 'torrentfs-entrypoint: %s\n' "$*" >&2
@@ -48,6 +52,20 @@ smb_enabled() {
 		;;
 	*)
 		fail 'TORRENTFS_SMB_ENABLED must be exactly true, false, 1, or 0'
+		;;
+	esac
+}
+
+strm_enabled() {
+	case "${TORRENTFS_STRM_ENABLED-false}" in
+	false|0)
+		return 1
+		;;
+	true|1)
+		return 0
+		;;
+	*)
+		fail 'TORRENTFS_STRM_ENABLED must be exactly true, false, 1, or 0'
 		;;
 	esac
 }
@@ -116,22 +134,26 @@ initialize_runtime_identity() {
 }
 
 prepare_runtime_dirs() {
-	chown "$runtime_uid:$runtime_gid" "$MOUNTPOINT"
-	chmod 0755 "$MOUNTPOINT"
+	local mountpoint
+	for mountpoint in "${mountpoints[@]}"; do
+		chown "$runtime_uid:$runtime_gid" "$mountpoint"
+		chmod 0755 "$mountpoint"
+	done
 }
 
 validate_mountpoint() {
+	local mountpoint="$1"
 	[[ -c /dev/fuse ]] || fail 'SMB mode requires /dev/fuse'
-	[[ -d "$MOUNTPOINT" ]] || fail "missing mountpoint directory $MOUNTPOINT"
-	if findmnt -T "$MOUNTPOINT" -n -o TARGET 2>/dev/null | awk -v target="$MOUNTPOINT" '$1 == target { found = 1 } END { exit found ? 0 : 1 }'; then
-		fail "$MOUNTPOINT is already mounted"
+	[[ -d "$mountpoint" ]] || fail "missing mountpoint directory $mountpoint"
+	if findmnt -T "$mountpoint" -n -o TARGET 2>/dev/null | awk -v target="$mountpoint" '$1 == target { found = 1 } END { exit found ? 0 : 1 }'; then
+		fail "$mountpoint is already mounted"
 	fi
-	if find "$MOUNTPOINT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-		fail "$MOUNTPOINT must be empty before FUSE startup"
+	if find "$mountpoint" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+		fail "$mountpoint must be empty before FUSE startup"
 	fi
 	if ! setpriv --reuid="$runtime_uid" --regid="$runtime_gid" --clear-groups -- \
-		/bin/sh -c 'test -r "$1" && test -x "$1"' sh "$MOUNTPOINT"; then
-		fail "runtime identity $runtime_uid:$runtime_gid cannot access $MOUNTPOINT"
+		/bin/sh -c 'test -r "$1" && test -x "$1"' sh "$mountpoint"; then
+		fail "runtime identity $runtime_uid:$runtime_gid cannot access $mountpoint"
 	fi
 }
 
@@ -149,6 +171,9 @@ validate_user_args() {
 		case "$arg" in
 		-mountpoint|--mountpoint|-mountpoint=*|--mountpoint=*)
 			fail 'SMB mode owns the fixed /share mountpoint; do not pass -mountpoint'
+			;;
+		-strm-mountpoint|--strm-mountpoint|-strm-mountpoint=*|--strm-mountpoint=*)
+			fail 'SMB mode owns the fixed /share-strm mountpoint; do not pass -strm-mountpoint'
 			;;
 		esac
 	done
@@ -191,6 +216,9 @@ prepare_samba() {
 
 	password="$TORRENTFS_PASSWORD"
 	template="$(<"$SMB_TEMPLATE")"
+	if (( strm_requested )); then
+		template+=$'\n'"$(<"$SMB_STRM_TEMPLATE")"
+	fi
 	config="${template//__TORRENTFS_SMB_USER__/$smb_username}"
 	config="${config//__TORRENTFS_SMB_GROUP__/$runtime_group}"
 	# The restrictive umask applies to this write only. A process-wide umask
@@ -221,8 +249,16 @@ prepare_samba() {
 }
 
 mount_ready() {
-	findmnt -T "$MOUNTPOINT" -n -o TARGET,FSTYPE 2>/dev/null |
-		awk -v target="$MOUNTPOINT" '$1 == target && $2 ~ /^fuse\./ { found = 1 } END { exit found ? 0 : 1 }'
+	local mountpoint="$1"
+	findmnt -T "$mountpoint" -n -o TARGET,FSTYPE 2>/dev/null |
+		awk -v target="$mountpoint" '$1 == target && $2 ~ /^fuse\./ { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+mounts_ready() {
+	local mountpoint
+	for mountpoint in "${mountpoints[@]}"; do
+		mount_ready "$mountpoint" || return 1
+	done
 }
 
 child_running() {
@@ -291,12 +327,19 @@ stop_smbd() {
 }
 
 stop_torrentfs() {
-	local rc
+	local rc mountpoint
 	[[ -n "$torrentfs_pid" ]] || return 0
 	log 'torrentfs stopping'
 	if stop_child "$torrentfs_pid" torrentfs "$TORRENTFS_STOP_TIMEOUT_SECONDS"; then
-		log 'torrentfs unmounted'
 		torrentfs_pid=''
+		for mountpoint in "${mountpoints[@]}"; do
+			if mount_ready "$mountpoint"; then
+				log "FUSE mount still present after torrentfs stopped: $mountpoint"
+				return 1
+			fi
+			log "fuse unmounted: $mountpoint"
+		done
+		log 'torrentfs unmounted'
 		return 0
 	else
 		rc=$?
@@ -346,6 +389,11 @@ unexpected_torrentfs_exit() {
 
 [[ "$EUID" == 0 ]] ||
 	fail 'container entrypoint must start as root; do not use docker run --user; configure PUID and PGID instead'
+if strm_enabled; then
+	strm_requested=1
+	smb_enabled || fail 'TORRENTFS_STRM_ENABLED requires TORRENTFS_SMB_ENABLED=true or 1'
+	mountpoints+=("$STRM_MOUNTPOINT")
+fi
 initialize_runtime_identity
 prepare_runtime_dirs
 validate_torrents_dir
@@ -358,9 +406,15 @@ fi
 
 validate_smb_credentials
 validate_user_args "$@"
-validate_mountpoint
+for mountpoint in "${mountpoints[@]}"; do
+	validate_mountpoint "$mountpoint"
+done
 validate_samba_capability
 prepare_samba
+mount_args=(-mountpoint "$MOUNTPOINT")
+if (( strm_requested )); then
+	mount_args+=(-strm-mountpoint "$STRM_MOUNTPOINT")
+fi
 
 on_shutdown_signal() {
 	stop_requested=1
@@ -373,7 +427,7 @@ setsid --wait -- setpriv --reuid="$runtime_uid" --regid="$runtime_gid" --clear-g
 		printf "%s\\n" "$$" >"$1"
 		shift
 		exec /usr/local/bin/torrentfs "$@"
-	' sh "$TORRENTFS_PID_FILE" -mountpoint "$MOUNTPOINT" "$@" &
+	' sh "$TORRENTFS_PID_FILE" "${mount_args[@]}" "$@" &
 torrentfs_pid=$!
 
 ready_deadline=$((SECONDS + START_TIMEOUT_SECONDS))
@@ -387,8 +441,10 @@ while :; do
 	if ! child_running "$torrentfs_pid"; then
 		unexpected_torrentfs_exit
 	fi
-	if mount_ready; then
-		log "fuse ready: $MOUNTPOINT"
+	if mounts_ready; then
+		for mountpoint in "${mountpoints[@]}"; do
+			log "fuse ready: $mountpoint"
+		done
 		break
 	fi
 	if (( SECONDS >= ready_deadline )); then
@@ -418,11 +474,13 @@ while :; do
 	if ! child_running "$smbd_pid"; then
 		unexpected_smbd_exit
 	fi
-	if ! mount_ready; then
-		log 'FUSE mount disappeared while services were running'
-		stop_smbd || true
-		stop_torrentfs || true
-		exit 1
-	fi
+	for mountpoint in "${mountpoints[@]}"; do
+		if ! mount_ready "$mountpoint"; then
+			log "FUSE mount disappeared while services were running: $mountpoint"
+			stop_smbd || true
+			stop_torrentfs || true
+			exit 1
+		fi
+	done
 	wait_tick 1
 done

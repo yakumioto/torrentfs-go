@@ -200,6 +200,14 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
+		name:  "TORRENTFS_STRM_BASE_URL",
+		field: "strm.base_url",
+		apply: func(cfg *Config, raw string) error {
+			cfg.STRM.BaseURL = raw
+			return nil
+		},
+	},
+	{
 		name:  "TORRENTFS_LOG_LEVEL",
 		field: "log.level",
 		apply: func(cfg *Config, raw string) error {

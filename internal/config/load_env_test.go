@@ -44,6 +44,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		httpUsernameEnvironment:                                "alice",
 		httpPasswordEnvironment:                                "password",
 		"TORRENTFS_HTTP_AUTH_TOKEN_TTL":                        "45m",
+		"TORRENTFS_STRM_BASE_URL":                              "https://media.example/torrentfs/",
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
 		"TORRENTFS_LOG_FORMAT":                                 "json",
 		"TORRENTFS_LOG_ADD_SOURCE":                             "true",
@@ -101,6 +102,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if got.HTTP.Auth.TokenTTL != Duration(45*time.Minute) {
 		t.Fatalf("auth token TTL = %s, want 45m", got.HTTP.Auth.TokenTTL)
 	}
+	if got.STRM.BaseURL != "https://media.example/torrentfs/" {
+		t.Fatalf("strm = %+v", got.STRM)
+	}
 	if got.Log != (Log{Level: "debug", Format: "json", AddSource: true}) {
 		t.Fatalf("log = %+v", got.Log)
 	}
@@ -109,8 +113,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 20 {
-		t.Fatalf("environment binding count = %d, want 20", len(environmentBindings))
+	if len(environmentBindings) != 21 {
+		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
 	}
 	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
 		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)

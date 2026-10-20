@@ -8,7 +8,7 @@ Use the [quick start](../README.en.md#quick-start) to start a service and read y
 
 Add a magnet or upload a `.torrent` through the Web UI or API. Arbitrary `.torrent` files copied into the managed directory are not imported. A magnet can remain `adding` until peers supply metainfo.
 
-Read content through the FUSE tree or SMB share. The HTTP API manages tasks but has no generic content download or playback route. Reads fetch the needed pieces on demand; a player or indexer may wait when pieces are not cached or peers are unavailable. Random seeks fetch the corresponding pieces rather than requiring a sequential full download.
+By default, read content through FUSE or SMB while the HTTP API manages tasks. Explicitly enabling STRM adds signed HTTP playback links through `.strm` files in a second read-only view; the original file view stays unchanged. Reads fetch the needed pieces on demand; a player or indexer may wait when pieces are not cached or peers are unavailable. Random seeks fetch the corresponding pieces rather than requiring a sequential full download.
 
 Each foreground content read is bounded by `mount.read_timeout` (`30s` by default). If no source provides a verified piece in time, only that read ends with a read error after the deadline (the client may report a timeout or an I/O error); the torrent is not deleted and other reads are not cancelled. This is not a limit on the whole playback session or file handle. Raise it for slow swarms or large pieces, or override it with `TORRENTFS_MOUNT_READ_TIMEOUT`, then restart; see the [configuration guide](configuration.en.md).
 
@@ -32,6 +32,37 @@ Each foreground content read is bounded by `mount.read_timeout` (`30s` by defaul
 - Category changes affect only virtual paths; they do not move payload, cache, or managed subtitle files.
 
 Managed subtitles are projected beside their video. A single-file video has a subtitle sibling at the root; a multi-file video has a subtitle in the same subdirectory. Both remain read-only.
+
+## STRM view and playback
+
+STRM is an optional second read-only view, not a replacement for the original FUSE mount or SMB share. Docker keeps `smb://SERVER/torrentfs` and adds `smb://SERVER/torrentfs-strm`. Native deployments can mount STRM alone or alongside the original view. See the [deployment guide](deployment.en.md) for enabling it and the [configuration guide](configuration.en.md) for the base URL.
+
+```text
+torrentfs (original)           torrentfs-strm (optional)
+Movie.mkv                     Movie.strm
+Movie.srt                     Movie.srt
+Disc.iso                      Disc.iso.strm
+Show/Season 1/E01.mp4          Show/Season 1/E01.strm
+```
+
+- Video extensions are `.3gp`, `.avi`, `.flv`, `.m2ts`, `.m4v`, `.mkv`, `.mov`, `.mp4`, `.mpeg`, `.mpg`, `.mts`, `.ts`, `.webm`, and `.wmv`, matched case-insensitively. `.iso` is supported separately: retain its extension and append `.strm`, for example `Disc.iso.strm`. ISO support does not add managed-subtitle upload targets.
+- Categories, directory levels, non-video files, payload subtitles, managed subtitles, and existing `.strm` files remain present. Existing `.strm` files are not hidden or overwritten.
+- Converted-name collisions first use the original extension, such as `Movie.mkv.strm` / `Movie.mp4.strm`, then a hash suffix if needed. The final extension remains `.strm`, with the `.iso.strm` form retained for ISO. Directories and unconverted entries keep their names first; conflicting files are not silently omitted.
+- BDMV video files are converted individually. Blu-ray menus and disc-directory playback are not guaranteed; use the original `torrentfs` share for those cases.
+
+Each generated file contains **one URL followed by a newline**, and its reported size is the exact text byte count:
+
+```text
+<base_url>/stream/<infohash>/<signature>/<original torrent display path, escaped per segment>
+```
+
+STRM mtime retains the torrent's added time, not the link-generation or refresh time. Changing `base_url` or manually rotating `stream_key` requires a service restart, and the player may still cache the old `.strm` URL. Read/export the files again and rescan or reopen them; hot updates are not guaranteed.
+
+Listing, stat, and reading generated `.strm` text do not fetch video payload. The player fetches content on demand only when it opens the HTTP URL. Signatures bind the info hash and original torrent-relative path, not the category, STRM filename, or current FUSE root display name. Components are escaped separately, preserving Chinese characters, spaces, `%`, `#`, `?`, and `+`; do not decode the URL again or assemble its path manually. HTTP supports HEAD, Range, and conditional requests; see the [API reference](api.en.md).
+
+The player must reach both the SMB `.strm` file and its HTTP(S) target. Container-local `localhost` is not a remote playback address. With Infuse or another player, point the library at `torrentfs-strm` and retain the original share for direct reads and disc directories. Subtitle files remain present, but automatic matching and rescanning—especially after STRM collision disambiguation—must be checked on the actual client. Automated HTTP/SMB checks are not proof of an Infuse device's scanning or playback behavior.
+
+A signed URL is a read-only, file-scoped credential. It contains no management password and does not use the Web login token; anyone holding it can read that file without a Bearer header. Protect `.strm` contents and reverse-proxy logs, and use HTTPS outside a trusted LAN. With the same key, restart and category changes preserve signatures; deleting the torrent makes its old links unreadable. Key recovery and rotation are described below.
 
 ## Web UI
 
@@ -125,6 +156,7 @@ The session's global transfer totals do not reset on browser refresh or task del
     ├── upload_rate.json
     ├── layout_version
     ├── peer_id
+    ├── stream_key                # 32-byte signing key, mode 0600; created when STRM is enabled
     └── instance.lock
 ```
 
@@ -136,6 +168,12 @@ Managed subtitles are stored separately from payload under `.metadata/subtitles`
 
 Static TOML/environment changes require restart. Upload-rate settings are the exception: API/UI changes apply immediately and are restored at startup.
 
+### STRM keys and link lifetime
+
+`.metadata/stream_key` is initialized only when `strm.base_url` is non-empty. A missing key is generated as exactly 32 random binary bytes and saved with mode `0600`; subsequent starts reuse it rather than rotating automatically. It must be an owner-readable regular, non-symlink file with no group/other permissions. An invalid length, overly broad permissions, symlink, or non-regular file causes startup failure, not silent key replacement. Protect it when backing up management state.
+
+With the same key and an existing task, restart and category changes preserve signatures. Changing HTTP/SMB passwords or logging out of the Web UI does not revoke these file-scoped links. Deleting the task makes old links unreadable. Manually rotating the key invalidates every old signed link, requiring fresh STRM reads/exports and a client rescan. Only after stopping the service, backing up, and accepting this invalidation should you move the old key aside to generate a replacement at the next enabled start. There is no key-management UI or key-export API.
+
 ## Troubleshooting
 
 | Symptom | Likely cause and action |
@@ -143,6 +181,7 @@ Static TOML/environment changes require restart. Upload-rate settings are the ex
 | `401` from the API | Missing, malformed, expired, or revoked Bearer token; log in again. |
 | Magnet remains `adding` | Peers have not supplied metainfo; check source availability and network conditions. |
 | A `ready` read waits | The required pieces are not cached; available peers still need to provide them. |
+| A generated `.strm` cannot be statted or opened | Its URL generation keeps failing. The directory snapshot retains the entry, but lookup/stat/open return explicit errors; other files remain usable and listing does not retry forever. Check STRM configuration and task state, then reread after recovery. |
 | Video or cover reads report timeout or I/O errors | One read may have exceeded `mount.read_timeout`, default `30s`; check source/network availability, or increase the setting for slow swarms or large pieces and restart. |
 | `docker cp` into `/mnt` or `/share` fails | Expected: the projected tree is read-only. Use UI/API subtitle upload. |
 | Subtitle upload returns `413` | The body exceeds `http.max_upload_size`; adjust static configuration and restart. |

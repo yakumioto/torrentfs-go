@@ -57,12 +57,20 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 			Ino:  n.state.inoFor(dirKey(n.hash, prefix)),
 		}), 0
 	}
+	createdAt := n.createdAt
+	if !e.IsSubtitle {
+		stat, err := n.state.fileStat(n.hash, e.Path, e.Size, createdAt)
+		if err != nil {
+			return nil, errnoFor(err)
+		}
+		e.Size, createdAt = stat.Size, stat.CreatedAt
+	}
 	out.Mode = 0o444
 	out.Size = uint64(e.Size)
 	if e.IsSubtitle {
 		setModifiedAt(&out.Attr, e.ModifiedAt)
 	} else {
-		setCreatedAt(&out.Attr, n.createdAt)
+		setCreatedAt(&out.Attr, createdAt)
 	}
 	child := &torrentFileNode{
 		state:      n.state,
@@ -70,7 +78,7 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 		path:       e.Path,
 		size:       e.Size,
 		subtitle:   e.IsSubtitle,
-		createdAt:  n.createdAt,
+		createdAt:  createdAt,
 		modifiedAt: e.ModifiedAt,
 	}
 	return n.NewInode(ctx, child, fs.StableAttr{

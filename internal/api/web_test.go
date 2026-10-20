@@ -43,6 +43,15 @@ func TestStaticAndAPIPathsHaveSeparateBoundaries(t *testing.T) {
 		t.Fatalf("unknown API with token = %d/%q, want non-HTML 404", rec.Code, rec.Header().Get("Content-Type"))
 	}
 
+	// Reserved stream routes must never become public SPA deep links, even
+	// when streaming is disabled or the backend only implements management.
+	for _, target := range []string{"/stream", "/stream/", "/stream/not-a-route"} {
+		rec := do(t, srv, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "<html") {
+			t.Fatalf("disabled stream route = %d/%q, want non-HTML 404", rec.Code, rec.Header().Get("Content-Type"))
+		}
+	}
+
 	staticPost := do(t, srv, httptest.NewRequest(http.MethodPost, "/", nil))
 	if staticPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST root status = %d, want 405", staticPost.Code)

@@ -32,6 +32,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}
+	if cfg.STRM.BaseURL != "" {
+		t.Fatalf("Default STRM base URL = %q, want empty", cfg.STRM.BaseURL)
+	}
 	if cfg.HTTP.ListenAddr != "127.0.0.1:8080" {
 		t.Fatalf("Default listen address = %q, want 127.0.0.1:8080", cfg.HTTP.ListenAddr)
 	}
@@ -248,6 +251,9 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	}
 	if cfg.HTTP.Auth != defaults.HTTP.Auth {
 		t.Fatalf("Auth = %+v, want defaults %+v", cfg.HTTP.Auth, defaults.HTTP.Auth)
+	}
+	if cfg.STRM != defaults.STRM {
+		t.Fatalf("STRM = %+v, want defaults %+v", cfg.STRM, defaults.STRM)
 	}
 	if cfg.Log != defaults.Log {
 		t.Fatalf("Log = %+v, want defaults %+v", cfg.Log, defaults.Log)
