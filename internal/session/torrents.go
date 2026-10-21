@@ -41,31 +41,60 @@ type Torrent struct {
 	loader      pieceSource
 	coordinator *prefetchCoordinator
 
-	// filesByPath indexes payload display paths once metainfo is known. The
-	// file list is immutable for an info hash, so the index is never rebuilt.
-	filesByPath atomic.Pointer[map[string]*torrent.File]
+	// payloadMu is independent of mu: readerFor already holds mu when it looks
+	// up a file. Initialization must not acquire it again, or Session.mu.
+	payloadMu     sync.Mutex
+	payload       atomic.Pointer[torrentPayload]
+	payloadBuilds uint64 // guarded by payloadMu; counts completed constructions
 }
 
-// fileByPath returns the file with displayPath in O(1). A duplicated display
-// path keeps the first file, matching a linear scan of the metainfo order.
-func (t *Torrent) fileByPath(displayPath string) *torrent.File {
-	index := t.filesByPath.Load()
-	if index == nil {
-		if t.tor.Info() == nil {
-			return nil
-		}
-		files := t.tor.Files()
-		built := make(map[string]*torrent.File, len(files))
-		for _, f := range files {
-			path := f.DisplayPath()
-			if _, ok := built[path]; !ok {
-				built[path] = f
-			}
-		}
-		t.filesByPath.CompareAndSwap(nil, &built)
-		index = t.filesByPath.Load()
+// torrentPayload is built once per Torrent object, only after metadata arrives.
+// Neither the files nor the path index are modified after publication.
+type torrentPayload struct {
+	files  []filesystem.FileView
+	byPath map[string]*torrent.File
+	id     *filesystem.FileListID
+}
+
+func (t *Torrent) payloadSnapshot() *torrentPayload {
+	if payload := t.payload.Load(); payload != nil {
+		return payload
 	}
-	return (*index)[displayPath]
+	t.payloadMu.Lock()
+	defer t.payloadMu.Unlock()
+	if payload := t.payload.Load(); payload != nil {
+		return payload
+	}
+	if t.tor.Info() == nil {
+		// Do not memoize an unresolved magnet's absence of metadata.
+		return nil
+	}
+	files := t.tor.Files()
+	payload := &torrentPayload{
+		files:  make([]filesystem.FileView, len(files)),
+		byPath: make(map[string]*torrent.File, len(files)),
+		id:     &filesystem.FileListID{},
+	}
+	for i, file := range files {
+		path := file.DisplayPath()
+		payload.files[i] = filesystem.FileView{Path: path, Size: file.Length()}
+		// Keep the first duplicate, matching the historical linear lookup.
+		if _, ok := payload.byPath[path]; !ok {
+			payload.byPath[path] = file
+		}
+	}
+	t.payloadBuilds++
+	t.payload.Store(payload)
+	return payload
+}
+
+// fileByPath returns the file with displayPath in O(1), sharing the exact same
+// path construction as the filesystem's immutable payload list.
+func (t *Torrent) fileByPath(displayPath string) *torrent.File {
+	if payload := t.payloadSnapshot(); payload != nil {
+		return payload.byPath[displayPath]
+	}
+	return nil
 }
 
 func sourceKind(src Source) string {

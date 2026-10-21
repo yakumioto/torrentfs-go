@@ -19,7 +19,7 @@ type categoryNode struct {
 }
 
 func (n *categoryNode) torrentViews() []TorrentView {
-	views := n.state.backend.Torrents()
+	views := n.state.torrentViews()
 	filtered := make([]TorrentView, 0, len(views))
 	for _, view := range views {
 		if view.Category == n.category {
@@ -114,13 +114,7 @@ func (n *categoryNode) Lookup(ctx context.Context, name string, out *fuse.EntryO
 		}
 		out.Mode = 0o555
 		setCreatedAt(&out.Attr, c.View.CreatedAt)
-		child := &torrentDirNode{
-			state:     n.state,
-			hash:      c.View.Hash,
-			files:     c.View.Files,
-			subtitles: c.View.Subtitles,
-			createdAt: c.View.CreatedAt,
-		}
+		child := &torrentDirNode{state: n.state, hash: c.View.Hash}
 		return n.NewInode(ctx, child, fs.StableAttr{
 			Mode: syscall.S_IFDIR,
 			Ino:  n.state.inoFor(torrentKey(c.View.Hash)),

@@ -1016,9 +1016,9 @@ func TestSTRMConcurrentListingsKeepImmutablePayloadMappings(t *testing.T) {
 	}
 }
 
-// Every FUSE lookup lists the whole library, so a projection must not rename
-// torrents or sign videos again there, and a lookup below a torrent must not
-// take a library snapshot at all: a generated file costs one signature check.
+// Root/category lookups list the current library without rebuilding payload
+// mappings or signing known lengths. Cached payload stat/open stays independent
+// of a library listing: a generated file costs one live signature check.
 func TestSTRMProjectionCachesTorrentsAndAvoidsSnapshotsOnFileLookups(t *testing.T) {
 	created := time.Date(2026, 10, 20, 1, 2, 3, 0, time.UTC)
 	backend := &strmTestBackend{fakeBackend: &fakeBackend{views: []TorrentView{

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,8 @@ import (
 )
 
 var (
-	_ filesystem.Backend = (*Session)(nil)
+	_ filesystem.Backend                = (*Session)(nil)
+	_ filesystem.TorrentContentsBackend = (*Session)(nil)
 
 	errPieceRange = errors.New("session: invalid piece range")
 )
@@ -92,28 +94,55 @@ func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
 			hashes = append(hashes, hash)
 		}
 	}
-	sort.Slice(hashes, func(i, j int) bool { return hashes[i].HexString() < hashes[j].HexString() })
+	sort.Slice(hashes, func(i, j int) bool { return bytes.Compare(hashes[i][:], hashes[j][:]) < 0 })
 	views := make([]filesystem.TorrentView, 0, len(hashes))
 	for _, hash := range hashes {
-		t := s.torrents[hash]
-		if t == nil || t.Info() == nil {
+		contents, err := s.torrentContentsLocked(hash)
+		if err != nil {
 			continue
 		}
-		entry := s.states[hash]
-		view := filesystem.TorrentView{
-			Name:       t.Name(),
+		views = append(views, filesystem.TorrentView{
+			Name:       s.torrents[hash].Name(),
 			Hash:       hash,
-			Category:   entry.Category,
-			CreatedAt:  entry.CreatedAt,
-			SingleFile: !t.Info().IsDir(),
-		}
-		for _, f := range t.tor.Files() {
-			view.Files = append(view.Files, filesystem.FileView{Path: f.DisplayPath(), Size: f.Length()})
-		}
-		view.Subtitles = s.subtitleViewsLocked(hash)
-		views = append(views, view)
+			Category:   s.states[hash].Category,
+			CreatedAt:  contents.CreatedAt,
+			Files:      contents.Files,
+			FilesID:    contents.FilesID,
+			Subtitles:  contents.Subtitles,
+			SingleFile: contents.SingleFile,
+		})
 	}
 	return views
+}
+
+// TorrentContents resolves one current ready torrent without enumerating the
+// library. Internal callers that hold mu use torrentContentsLocked instead.
+func (s *Session) TorrentContents(hash metainfo.Hash) (filesystem.TorrentContents, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.torrentContentsLocked(hash)
+}
+
+func (s *Session) torrentContentsLocked(hash metainfo.Hash) (filesystem.TorrentContents, error) {
+	if err := s.ensureActiveLocked(); err != nil {
+		return filesystem.TorrentContents{}, err
+	}
+	entry := s.states[hash]
+	t := s.torrents[hash]
+	if entry == nil || entry.State != StateReady || t == nil {
+		return filesystem.TorrentContents{}, filesystem.ErrNotFound
+	}
+	payload := t.payloadSnapshot()
+	if payload == nil {
+		return filesystem.TorrentContents{}, filesystem.ErrNotFound
+	}
+	return filesystem.TorrentContents{
+		Files:      payload.files,
+		FilesID:    payload.id,
+		Subtitles:  s.subtitleViewsLocked(hash),
+		CreatedAt:  entry.CreatedAt,
+		SingleFile: !t.Info().IsDir(),
+	}, nil
 }
 
 // OpenFile implements filesystem.Backend: it returns a reader handle for the

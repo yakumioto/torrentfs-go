@@ -660,7 +660,7 @@ func TestTorrentNodesAreReadOnlyAndOpenData(t *testing.T) {
 	backend := &fakeBackend{views: []TorrentView{{Name: "data", Hash: hashN(1)}}}
 	backend.addFile(&backend.views[0], "nested/payload", []byte("content"))
 	state := newFSState(backend)
-	dir := &torrentDirNode{state: state, hash: backend.views[0].Hash, files: backend.views[0].Files}
+	dir := &torrentDirNode{state: state, hash: backend.views[0].Hash}
 	if _, errno := dir.Mkdir(context.Background(), "new", 0, &fuse.EntryOut{}); errno != syscall.EROFS {
 		t.Fatalf("Mkdir errno = %v, want EROFS", errno)
 	}

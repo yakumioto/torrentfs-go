@@ -66,9 +66,21 @@ canonical metainfo 按 info hash 校验和命名。磁力意图先写 pending，
 
 新增 torrent 的 namespace 校验在 final metainfo 写入前进行；magnet metadata 解析完成时也校验，不能留下绕过校验、重启后又恢复的文件。任务被删除时，字幕目录不存在且父目录完成同步后，operation 才进入 `deleted`；失败任务不进入可见 index，修复后可幂等重试。
 
+### FUSE 视图与目录缓存
+
+- 每个 Session `Torrent` 在 metadata 就绪后，一次遍历同时建立 display-path 索引和不可变 `[]FileView`，使用独立于 `Torrent.mu` 的初始化锁去重。metadata 未就绪不发布空 holder；同 hash 删除后重加是新 `Torrent` 和新身份。`Torrents()` 每次新建外层切片/结构体，实时组合 ready 状态、名称、分类、添加时间与字幕，只共享不可变 Files。内部持有 `Session.mu` 的调用使用 locked helper，不重入公开加锁方法；管理锁顺序仍为 namespace → per-hash → Session.mu。
+- `FileListID` 是非零尺寸的不透明身份。非 nil `FilesID` 承诺 Files 切片永久只读；路径或大小变化必须发布新切片和新身份。nil 身份的 legacy Backend 通过精确内容比较与自有副本兼容，不能按切片地址判断是否变化。可选 `TorrentContentsBackend` 按 hash 返回一次当前内容快照；旧 Backend 每次目录操作最多扫描一次 `Torrents()`，不存在或关闭绝不回退旧 inode 的快照。
+- 根目录、分类目录仍每次列出当前库并实时计算名称与冲突消歧，没有整库根名缓存。种子目录节点只保存 state/hash/prefix；Lookup、Readdir、Getattr 都按 hash 取当前内容，因此 go-fuse 复用旧 StableAttr/inode 后仍能看到上传的字幕。删除任务或移除最后一个成员的嵌套 prefix 后，旧目录查询返回 `ENOENT`。`EntryTimeout` 和 `AttrTimeout` 保持 0。
+- 每个挂载私有缓存 `hash → 当前内容版本 → 已访问 prefix` 的排序子项与名称索引，直接复用 `childrenOfViews` 的优先级和纯字符串前缀规则。相同 FilesID 跳过 payload 比较，字幕逐字段精确比较；内容变化替换整个 hash 版本。Backend/StreamURL 在缓存锁外调用，首次构建按 hash/版本去重，迟到请求只能完成自己的快照，不能覆盖新版本或复活已删除缓存。
+- 仅保留当前版本和实际存在的 prefix；列表同步或按 hash miss 清理已删除条目，不缓存缺失 hash/prefix。不回收稳定 inode 分配表 `inoByKey`，因此不能宣称整个挂载元数据内存严格有界。已打开的 DirStream 保持自己的成员列表和 offset；新 Lookup、新目录流观察最新内容。字幕没有单独删除 API，集合减少只由删除种子或单测 Backend 模拟。
+
 ### STRM 投影与签名读取
 
-STRM Backend 包装现有 Backend，不另建一套 FUSE 节点。它投影复制的快照，保留目录和非视频条目，消歧但不丢文件，并将可见名称映射回不可变的原始 payload 路径；分类和字幕能力继续转发。节点通过可选的实时文件 stat 与打开快照接口读取投影元数据，将一次 open 的 reader 和长度绑定，避免旧目录快照或复用 inode 保留过期的零长度。每次 FUSE lookup 都会列出整库，因此投影按 info hash 缓存命名映射和已生成的链接长度：列目录只为长度未知的视频签名并清理已移除种子；文件 lookup/stat 不再获取整库快照，生成文件只做一次 O(1) 签名校验。Session 也按 display path 建立一次性文件索引。生成和读取 URL 文本不打开视频 payload。某文件 URL 持续失败时，快照保留 size 为 0 的条目，但 lookup/stat/open 明确报错，不能阻塞健康邻居、返回成功空文本或无限重试；恢复后无需卸载即可读取。STRM mtime 沿用 torrent 添加时间；基址或密钥变化后需要客户端重新读取/扫描，不能假定热刷新。
+STRM Backend 包装现有 Backend，不另建一套 FUSE 节点，保留目录、非视频和原有 Category/Subtitle/SubtitleStat 可选能力的缺席语义。按 hash 的单种子投影不计算根名称，整库 `Torrents()` 才在自有外层切片上计算根命名。映射键包括源 FilesID 和 SingleFile：单文件根保留原 payload path，目录型才转换相对路径。受信任来源的完整投影通过只读切片和新的派生 FilesID 共享，热路径不逐项比较/复制整份文件列表；legacy 来源继续内容比较，并向外返回 Files/Subtitles 副本。
+
+列目录只对长度未知的视频尝试一次签名。URL 失败保留 size=0 的条目，不发布不可变身份，后续操作继续重试；lookup/stat/open 明确返回实时错误，健康邻居不受影响，不永久缓存失败或在一次操作内循环重试。恢复或 live stat/open 发现 URL 文本长度变化时，发布新切片与派生身份，不原地改动旧快照；迟到回填核对当前 entry 与对应文件的尺寸版本，不能写进删除重建后的同 hash 条目，也不能因另一个文件的并发回填而丢弃有效结果。
+
+payload live stat 与 `FileSnapshotBackend` 保持每次 URL 存活/ready 校验，同一次 open 的文本、reader 和长度绑定，不能改成先 stat 再 open。生成和读取 URL 文本不打开视频 payload。缓存的 passthrough 属性仍可在下一次列表/按 hash miss 清理前返回，真正打开始终交由 live Backend 决定。STRM mtime 沿用 torrent 添加时间；基址或密钥变化后需要客户端重新读取/扫描，不能假定热刷新。
 
 `internal/media` 统一原有 14 种视频、独立 ISO 判断及显式 MIME。`internal/stream` 复制调用方密钥，用完整 HMAC-SHA256 绑定版本域、info hash 和原始 torrent 相对路径，逐组件转义且只解码一次；拒绝编码斜线和歧义组件，`%252F` 一次解码后仍是字面 `%2F`。
 
@@ -122,6 +134,23 @@ golangci-lint run ./...
 
 这些覆盖通过 Go 质量检查及下列 FUSE-required、容器检查运行，不等于 Infuse 设备已验收。实际客户端仍需检查扫描、播放、seek、字幕自动匹配及基址/密钥变更后的缓存刷新。
 
+## 视图缓存回归与基准
+
+- raw NodeFS/rawBridge 回归保留多级目录的旧 NodeId，先 Lookup/Readdir 再发布字幕；再次解析父路径须仍是同一 NodeId，直接通过旧 NodeId 的新 Lookup/Readdir 必须可见。原始和 STRM 两种 Backend 都覆盖，并检查已打开目录流的列表/offset 不改变。
+- 真实 FUSE 回归在已访问目录及持有 dirfd 后上传字幕，覆盖深层目录、等长/变长替换、新查询与旧文件 descriptor 快照、删除后 `ENOENT`；普通测试缺少 FUSE 时会跳过，必须另跑下方 required 门禁。字幕集合减少在 Backend 单测模拟，不新增 API。
+- Session/STRM/目录单测检查首次并发构建只发生一次、源/派生身份稳定、legacy 原地修改可见、可变 URL 长度与失败恢复、迟到结果不覆盖新版本，以及删除重加 churn 不保留旧索引；应使用 race 重复验证。
+
+```sh
+go test -race -count=3 -run 'TestPayloadHolder|TestFilesystemViews' ./internal/session
+go test -race -count=3 ./internal/filesystem
+go test -run '^$' -bench 'FilesystemView|TorrentLookup|STRMProjection' -benchmem -count=5 ./internal/session ./internal/filesystem
+bash -n scripts/docker-smb-smoke.sh
+```
+
+基准合成 111 个种子、19792 个文件，最大种子 18920 个文件、216 个虚拟目录；Session 用真实 anacrolix metadata 走 `filesystemViewsLocked`，禁用网络发现/Tracker/WebSeed，不使用生产目录或凭据。分别报告冷/热 Session 视图、原始/STRM 根 Lookup、深层 Lookup/Readdir，以及冷/热 STRM 投影的 ns/op、B/op、allocs/op，并用 payload/index 构建、整库枚举和签名计数验证热路径。初始基线只依赖旧接口；接口落地后合成只读源显式提供 FilesID 和按 hash 内容，匹配 Session 的新契约。
+
+性能比较必须使用相同库规模与调用方式，五次取中位数；合成基准不能代替隔离 FUSE/SMB 中相同 UID、目录、命令的完整路径/相对路径 stat、`ls -l`、`find`、`ls -lR` 对照，更不代表 Infuse 已验收。容器和 HTTP smoke 仅在获准的隔离环境运行；只做 `bash -n` 不算运行验证。
+
 ## 集成与容器验证
 
 ### HTTP 与配置
@@ -161,7 +190,7 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 
 需要 Linux Docker daemon、`/dev/fuse`、`SYS_ADMIN`、`CAP_NET_BIND_SERVICE`、允许 FUSE 的安全策略，以及 `python3`、`sha256sum`、`dd`、`timeout`。脚本构建应用和独立 client 镜像，在隔离 Docker network 中检查认证、错误密码和 guest 拒绝、目录列举、读取哈希、只读拒写、`.metadata` 不可见、HTTP/SMB 共享凭据、日志不泄密、SIGTERM 顺序，以及核心进程异常退出的联动和退出码。client 操作用同一个有界 `CLIENT_TIMEOUT`，smbclient 本身也使用 `-t`；失败打印应用与 web seed 日志。
 
-STRM 场景还验证默认只导出原共享、启用后双只读共享/双挂载、读取 `.strm` 不拉取视频、HTTP HEAD 不读 payload、Range `206` 字节哈希、篡改签名 `403`、双卸载和任一挂载丢失的联动。就绪检查使用完整日志行区分 `/share` 与 `/share-strm`；这是自动化协议验证，不代替 Infuse 实机验收。
+STRM 场景还验证默认只导出原共享、启用后双只读共享/双挂载、先列多文件种子的顶层与深层目录再经认证 API 上传字幕，并在两个共享重新列举、查询元数据和下载比对内容，覆盖等长及变长替换；还检查读取 `.strm` 不拉取视频、HTTP HEAD 不读 payload、Range `206` 字节哈希、篡改签名 `403`、双卸载和任一挂载丢失的联动。就绪检查使用完整日志行区分 `/share` 与 `/share-strm`；这是自动化协议验证，不代替 Infuse 实机验收。
 
 脚本还尝试 client 容器内 `mount.cifs`，以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于 cache 的区间并与源切片比较，验证随机 seek。宿主不具备 CIFS 能力时，明确打印 `host cannot mount CIFS` 并继续，由 required FUSE 测试（包括 `>4GiB` 虚拟文件大偏移）提供随机读取验证；挂载成功但数据错误则直接失败。显式跳过用 `TORRENTFS_SMB_SKIP_CIFS=1`，CI/nightly 不设置该变量，在有能力的 runner 上执行完整比较。
 
