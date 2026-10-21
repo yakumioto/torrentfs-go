@@ -3,7 +3,6 @@ package filesystem
 import (
 	"context"
 	"syscall"
-	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -16,48 +15,42 @@ import (
 // layout is served.
 type torrentDirNode struct {
 	fs.Inode
-	state     *fsState
-	hash      metainfo.Hash
-	files     []FileView     // display paths of every file in the torrent
-	subtitles []SubtitleView // managed sidecars in the torrent
-	prefix    string         // torrent-relative prefix this directory represents
-	createdAt time.Time
-}
-
-func (n *torrentDirNode) entries() []fsEntry {
-	return childrenOfViews(n.files, n.subtitles, n.prefix)
+	state  *fsState
+	hash   metainfo.Hash
+	prefix string // torrent-relative directory prefix, resolved on every operation
 }
 
 func (n *torrentDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	contents, _, err := n.state.directory(n.hash, n.prefix)
+	if err != nil {
+		return errnoFor(err)
+	}
 	out.Mode = 0o555
 	out.Nlink = 2
-	setCreatedAt(&out.Attr, n.createdAt)
+	setCreatedAt(&out.Attr, contents.CreatedAt)
 	return 0
 }
 
 func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	e, ok := lookupChildWithSubtitles(n.files, n.subtitles, n.prefix, name)
+	contents, index, err := n.state.directory(n.hash, n.prefix)
+	if err != nil {
+		return nil, errnoFor(err)
+	}
+	e, ok := index.byName[name]
 	if !ok {
 		return nil, errnoFor(ErrNotFound)
 	}
 	if e.IsDir {
 		out.Mode = 0o555
-		setCreatedAt(&out.Attr, n.createdAt)
+		setCreatedAt(&out.Attr, contents.CreatedAt)
 		prefix := joinRel(n.prefix, e.Name)
-		child := &torrentDirNode{
-			state:     n.state,
-			hash:      n.hash,
-			files:     n.files,
-			subtitles: n.subtitles,
-			prefix:    prefix,
-			createdAt: n.createdAt,
-		}
+		child := &torrentDirNode{state: n.state, hash: n.hash, prefix: prefix}
 		return n.NewInode(ctx, child, fs.StableAttr{
 			Mode: syscall.S_IFDIR,
 			Ino:  n.state.inoFor(dirKey(n.hash, prefix)),
 		}), 0
 	}
-	createdAt := n.createdAt
+	createdAt := contents.CreatedAt
 	if !e.IsSubtitle {
 		stat, err := n.state.fileStat(n.hash, e.Path, e.Size, createdAt)
 		if err != nil {
@@ -88,9 +81,12 @@ func (n *torrentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 }
 
 func (n *torrentDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	cs := n.entries()
-	entries := make([]fuse.DirEntry, 0, len(cs))
-	for _, c := range cs {
+	_, index, err := n.state.directory(n.hash, n.prefix)
+	if err != nil {
+		return nil, errnoFor(err)
+	}
+	entries := make([]fuse.DirEntry, 0, len(index.entries))
+	for _, c := range index.entries {
 		mode := uint32(syscall.S_IFREG)
 		if c.IsDir {
 			mode = syscall.S_IFDIR

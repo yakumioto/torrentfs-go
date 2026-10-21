@@ -405,6 +405,10 @@ func TestFuseStrmDualMountSignedRangeAndDeletion(t *testing.T) {
 	t.Log("verified real dual FUSE mounts, metadata-only STRM reads, signed HTTP ranges and deletion")
 }
 
+func TestFuseStrmVisitedDirectoriesRefreshSubtitles(t *testing.T) {
+	testFuseVisitedDirectoriesRefreshSubtitles(t, true)
+}
+
 type fuseSTRMDeleteResult struct {
 	operation *session.Operation
 	err       error

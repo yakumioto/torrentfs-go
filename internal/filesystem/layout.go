@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -144,7 +145,7 @@ func rootEntriesForCategory(views []TorrentView, category string, reserved map[s
 		}
 	}
 	slices.SortFunc(ordered, func(a, b TorrentView) int {
-		return strings.Compare(a.Hash.HexString(), b.Hash.HexString())
+		return bytes.Compare(a.Hash[:], b.Hash[:])
 	})
 	used := make(map[string]bool, len(reserved)+len(ordered))
 	for name := range reserved {

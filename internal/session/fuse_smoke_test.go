@@ -420,6 +420,10 @@ func TestFuseReadOnlyDataTree(t *testing.T) {
 	}
 }
 
+func TestFuseSmokeVisitedDirectoriesRefreshSubtitles(t *testing.T) {
+	testFuseVisitedDirectoriesRefreshSubtitles(t, false)
+}
+
 // TestFuseSmokeManagedSubtitles mounts a real torrent and drives the subtitle
 // overlay end to end: an authenticated upload becomes visible and readable
 // through the kernel, a same-name replacement is seen by a later open, the

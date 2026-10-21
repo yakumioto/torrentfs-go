@@ -301,8 +301,8 @@ func TestSTRMRawBridgeRecoversUnavailableSnapshotsAndReusesOldInodes(t *testing.
 				parent = fileSnapshotRawLookup(t, raw, parent, "Collection", fuse.OK).NodeId
 				parent = fileSnapshotRawLookup(t, raw, parent, "nested", fuse.OK).NodeId
 			}
-			// Keep these bridge parent nodes alive: the multi-file directory still
-			// contains the zero-sized listing even after the backend recovers.
+			// Keep the actual bridge parent nodes alive across recovery, rather
+			// than substituting freshly constructed nodes for the old inodes.
 			fileSnapshotRawLookup(t, raw, parent, leaf, fuse.Status(syscall.EACCES))
 			healthy := fileSnapshotRawLookup(t, raw, 1, "Healthy.strm", fuse.OK)
 			fileSnapshotRawRead(t, raw, healthy.NodeId, strmTestURL(hashN(2), "Healthy.mkv")+"\n")

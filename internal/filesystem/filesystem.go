@@ -33,6 +33,30 @@ type SubtitleStat struct {
 	ModifiedAt time.Time
 }
 
+// FileListID is an opaque identity for a permanently immutable payload list.
+// A backend must publish a new slice and identity whenever any path or size
+// changes. Its non-zero size gives separately allocated identities distinct
+// addresses. A nil identity opts out of sharing and keeps legacy copy semantics.
+type FileListID struct{ _ byte }
+
+// TorrentContents is one torrent's current directory snapshot, independent of
+// root naming and category layout. Only Files with a non-nil FilesID may be
+// shared indefinitely; all other fields describe this particular observation.
+type TorrentContents struct {
+	Files      []FileView
+	FilesID    *FileListID
+	Subtitles  []SubtitleView
+	CreatedAt  time.Time
+	SingleFile bool
+}
+
+// TorrentContentsBackend optionally resolves one ready torrent without listing
+// the library. Missing torrents and closed backends must return an error, never
+// a previous snapshot.
+type TorrentContentsBackend interface {
+	TorrentContents(hash metainfo.Hash) (TorrentContents, error)
+}
+
 // TorrentView is the read-only snapshot of a torrent exposed to the
 // filesystem layer. Files is non-empty once the torrent's metainfo is known.
 // SingleFile marks a torrent whose metainfo has no directory structure
@@ -46,8 +70,10 @@ type TorrentView struct {
 	// Category is the optional top-level directory containing this torrent.
 	Category string
 	// CreatedAt is the durable time when the torrent was added to the session.
-	CreatedAt  time.Time
-	Files      []FileView
+	CreatedAt time.Time
+	Files     []FileView
+	// FilesID authorizes read-only sharing of Files; nil retains legacy copying.
+	FilesID    *FileListID
 	Subtitles  []SubtitleView
 	SingleFile bool
 }
@@ -139,6 +165,10 @@ type SubtitleStatBackend interface {
 // the stable inode allocator.
 type fsState struct {
 	backend Backend
+
+	// Membership indexes are mount-private and independent of inode allocation.
+	views           snapshotCache[torrentDirectoryVersion]
+	directoryBuilds uint64 // guarded by views.mu
 
 	mu       sync.Mutex
 	nextIno  uint64

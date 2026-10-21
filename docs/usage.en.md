@@ -31,7 +31,7 @@ Each foreground content read is bounded by `mount.read_timeout` (`30s` by defaul
 - Display-name collisions are disambiguated with an info-hash prefix within the affected parent directory. Identical names in different categories do not conflict.
 - Category changes affect only virtual paths; they do not move payload, cache, or managed subtitle files.
 
-Managed subtitles are projected beside their video. A single-file video has a subtitle sibling at the root; a multi-file video has a subtitle in the same subdirectory. Both remain read-only.
+Managed subtitles are projected beside their video. A single-file video has a subtitle sibling at the root; a multi-file video has a subtitle in the same subdirectory. Both remain read-only. Uploads are visible to new directory queries, stat, and open in both original and STRM shares even after visiting the torrent's top or deep directory; no remount is needed. New file handles read replacements, while old file handles keep their descriptor snapshots. A directory stream already being iterated retains its list and offset; use a new directory query to see added members. A player's own cache may still require a rescan or reopen; see the [development guide](development.en.md).
 
 ## STRM view and playback
 

@@ -394,6 +394,51 @@ with open(os.path.join(root, ".metadata", "state", infohash + ".json"), "w") as 
     json.dump({"id": infohash, "info_hash": infohash, "name": name, "state": "ready", "created_at": now, "updated_at": now}, output)
 PY
 }
+# This metadata-only torrent exercises already visited multi-level directories.
+# No payload read is needed to publish, stat, or download its managed subtitles.
+create_subtitle_fixture() {
+	local root="$1" hash_path="$2"
+	python3 -I - "$root" "$hash_path" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import sys
+
+root, hash_path = sys.argv[1:]
+
+
+def bencode(value):
+    if isinstance(value, int):
+        return b"i" + str(value).encode() + b"e"
+    if isinstance(value, bytes):
+        return str(len(value)).encode() + b":" + value
+    if isinstance(value, list):
+        return b"l" + b"".join(bencode(item) for item in value) + b"e"
+    if isinstance(value, dict):
+        return b"d" + b"".join(bencode(key) + bencode(value[key]) for key in sorted(value)) + b"e"
+    raise TypeError(type(value))
+
+
+paths = [b"top.mkv", b"Season 1/deep/Movie.mkv", b"notes.txt"]
+content = b"subtitle fixture payload\n"
+info = {
+    b"name": b"Collection",
+    b"files": [{b"length": len(content), b"path": path.split(b"/")} for path in paths],
+    b"piece length": 1 << 20,
+    b"pieces": hashlib.sha1(content * len(paths)).digest(),
+}
+infohash = hashlib.sha1(bencode(info)).hexdigest()
+with open(os.path.join(root, infohash + ".torrent"), "wb") as output:
+    output.write(bencode({b"info": info}))
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+with open(os.path.join(root, ".metadata", "state", infohash + ".json"), "w") as output:
+    json.dump({"id": infohash, "info_hash": infohash, "name": "Collection", "state": "ready", "created_at": now, "updated_at": now}, output)
+with open(hash_path, "w") as output:
+    output.write(infohash)
+PY
+}
+
 create_fixture "$torrents_dir" "$webseed_dir/payload.bin" payload.bin \
 	"http://host.docker.internal:$webseed_port/payload.bin" "$work_dir/infohash"
 torrent_hash="$(<"$work_dir/infohash")"
@@ -509,6 +554,76 @@ http_client_authenticate() {
 			--output /dev/null --write-out "%{http_code}" "http://$APP:8080/api/v1/auth/login")"
 		[ "$status" = 200 ]
 	'
+}
+
+# Login and upload through the same authenticated API used by the Web UI. The
+# token stays inside the disposable client, never in the URL or smoke output.
+subtitle_upload() {
+	local app="$1" torrent_id="$2" video_path="$3" filename="$4" source="$5"
+	bounded "$CLIENT_TIMEOUT" "upload subtitle against $app" docker run --rm --network "$NETWORK" \
+		--env "APP=$app" --env "PASSWORD=$smb_password" \
+		--env "TORRENT_ID=$torrent_id" --env "VIDEO_PATH=$video_path" --env "FILENAME=$filename" \
+		--mount "type=bind,src=$source,dst=/input/subtitle,readonly" \
+		"$CLIENT_IMAGE" sh -eu -c '
+			curl --silent --show-error --fail --connect-timeout 2 --max-time 10 \
+				--header "Content-Type: application/json" --data "{\"password\":\"$PASSWORD\"}" \
+				--output /tmp/login.json "http://$APP:8080/api/v1/auth/login"
+			token="$(sed -n '\''s/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'\'' /tmp/login.json)"
+			test -n "$token"
+			status="$(curl --silent --show-error --connect-timeout 2 --max-time 20 \
+				--request PUT --header "Authorization: Bearer $token" \
+				--form "video_path=$VIDEO_PATH" --form "file=@/input/subtitle;filename=$FILENAME" \
+				--output /tmp/upload.json --write-out "%{http_code}" \
+				"http://$APP:8080/api/v1/torrents/$TORRENT_ID/subtitles")"
+			case "$status" in
+			200 | 201) ;;
+			*) echo "subtitle upload returned HTTP $status" >&2; exit 1 ;;
+			esac
+		' || fail "subtitle upload failed
+app logs:
+$(logs "$app")
+web seed log:
+$(tail -20 "$work_dir/webseed.log")"
+}
+
+subtitle_smb_check() {
+	local app="$1" share="$2" directory="$3" filename="$4" source="$5"
+	bounded "$CLIENT_TIMEOUT" "list/stat/get subtitle against $app/$share" docker run --rm --network "$NETWORK" \
+		--env "APP=$app" --env "SHARE=$share" --env "DIRECTORY=$directory" --env "FILENAME=$filename" \
+		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
+		--mount "type=bind,src=$source,dst=/input/expected,readonly" \
+		"$CLIENT_IMAGE" sh -eu -c '
+			client() {
+				smbclient "//$APP/$SHARE" -A /run/secrets/smb-credentials -m SMB3 \
+					-t '"$CLIENT_SMB_TIMEOUT"' -c "$1"
+			}
+			expected_size="$(wc -c </input/expected)"
+			client "cd \"$DIRECTORY\"; ls" >/tmp/subtitle-list.log 2>&1 || {
+				cat /tmp/subtitle-list.log >&2; exit 1;
+			}
+			# These fixture leaf names have no spaces. Check only ls output, so
+			# successful allinfo/get cannot hide a stale directory listing.
+			awk -v name="$FILENAME" -v size="$expected_size" '\''
+				$1 == name && $3 == size { found = 1 }
+				END { exit !found }
+			'\'' /tmp/subtitle-list.log || { cat /tmp/subtitle-list.log >&2; exit 1; }
+			client "cd \"$DIRECTORY\"; allinfo \"$FILENAME\"" >/tmp/subtitle-stat.log 2>&1 || {
+				cat /tmp/subtitle-stat.log >&2; exit 1;
+			}
+			awk -v size="$expected_size" '\''
+				$1 == "stream:" && $2 == "[::$DATA]," && $3 == size && $4 == "bytes" { found = 1 }
+				END { exit !found }
+			'\'' /tmp/subtitle-stat.log || { cat /tmp/subtitle-stat.log >&2; exit 1; }
+			client "cd \"$DIRECTORY\"; get \"$FILENAME\" /tmp/subtitle" >/tmp/subtitle-get.log 2>&1 || {
+				cat /tmp/subtitle-get.log >&2; exit 1;
+			}
+			test "$(wc -c </tmp/subtitle)" -eq "$expected_size"
+			test "$(sha256sum /tmp/subtitle | cut -d" " -f1)" = "$(sha256sum /input/expected | cut -d" " -f1)"
+		' || fail "subtitle list/stat/get failed on $share
+app logs:
+$(logs "$app")
+web seed log:
+$(tail -20 "$work_dir/webseed.log")"
 }
 
 # smb_client runs one smbclient operation with the shared client bound. The
@@ -819,6 +934,8 @@ printf 'docker SMB smoke: starting isolated original-file and STRM shares\n'
 strm_torrents="$work_dir/strm-torrents"
 create_fixture "$strm_torrents" "$webseed_dir/Movie.mkv" Movie.mkv \
 	"http://host.docker.internal:$webseed_port/Movie.mkv" "$work_dir/strm-infohash"
+create_subtitle_fixture "$strm_torrents" "$work_dir/subtitle-infohash"
+subtitle_hash="$(<"$work_dir/subtitle-infohash")"
 app_strm="${APP_PREFIX}-strm"
 start_app "$app_strm" "$strm_torrents" true 30s true
 assert_process_identities "$app_strm" torrentfs
@@ -877,6 +994,36 @@ bounded "$CLIENT_TIMEOUT" 'read STRM over SMB and request HTTP HEAD without payl
 if grep -Fx Movie.mkv "$webseed_reads" >/dev/null; then
 	fail 'STRM listing/open/read or HTTP HEAD fetched video payload'
 fi
+# Readdir must happen before publication: same StableAttr reuses the old inode
+# even after this client disconnects. Exercise top and deep directories in both
+# shares, then require fresh listings, live metadata, and exact subtitle bytes.
+for share in torrentfs torrentfs-strm; do
+	visited_listing="$(smb_share_client "$app_strm" "$share" \
+		-c 'cd Collection; ls; cd "Season 1"; ls; cd deep; ls' 2>&1)" ||
+		fail "could not visit subtitle directories on $share: $visited_listing
+app logs:
+$(logs "$app_strm")"
+	[[ "$visited_listing" == *'notes.txt'* && "$visited_listing" == *'Movie.'* ]] ||
+		fail "multi-file subtitle fixture was not listed on $share: $visited_listing"
+done
+printf 'top subtitle\n' >"$work_dir/top.srt"
+subtitle_upload "$app_strm" "$subtitle_hash" top.mkv top.srt "$work_dir/top.srt"
+for share in torrentfs torrentfs-strm; do
+	subtitle_smb_check "$app_strm" "$share" Collection top.srt "$work_dir/top.srt"
+done
+for version in initial same-length longer; do
+	case "$version" in
+	initial) printf 'old subtitle\n' >"$work_dir/Movie.srt" ;;
+	same-length) printf 'new subtitle\n' >"$work_dir/Movie.srt" ;;
+	longer) printf 'a much longer replacement subtitle\nsecond subtitle line\n' >"$work_dir/Movie.srt" ;;
+	esac
+	subtitle_upload "$app_strm" "$subtitle_hash" 'Season 1/deep/Movie.mkv' Movie.srt "$work_dir/Movie.srt"
+	for share in torrentfs torrentfs-strm; do
+		subtitle_smb_check "$app_strm" "$share" 'Collection/Season 1/deep' Movie.srt "$work_dir/Movie.srt"
+	done
+done
+printf 'docker SMB smoke: visited multi-file directories refresh uploaded and replaced subtitles on both shares\n'
+
 strm_expected_range="$(dd if="$webseed_dir/Movie.mkv" bs=1 skip="$RANDOM_OFFSET" count="$RANDOM_LENGTH" status=none | sha256sum | awk '{ print $1 }')"
 bounded "$CLIENT_TIMEOUT" 'signed HTTP Range and tampered-signature denial' docker run --rm --network "$NETWORK" \
 	--env "APP=$app_strm" --env "EXPECTED_RANGE=$strm_expected_range" \
