@@ -207,3 +207,5 @@ TORRENTFS_SMOKE_UID=1500 TORRENTFS_SMOKE_GID=1500 ./scripts/docker-smb-smoke.sh
 欢迎提交问题和贡献。提交行为改动时，应更新对应详细指南和测试；README 只保留项目介绍、主要能力和完整首次使用入口。
 
 CI nightly 的多平台 OCI 构建与本地 `scripts/nightly-build.sh` 归档脚本是不同入口。本文命令用于本地构建和验证，不将手工归档脚本写成 nightly 发布保证，也不假定存在浮动镜像 tag。
+
+`Nightly` 是开发镜像渠道名称，不保证每日发布。自动构建由 `main` 分支的 push 触发；没有 `main` 更新时不会每日自动重建。`workflow_dispatch` 保留为显式重建/重试入口，允许同一 SHA 手动重建。仅原仓库 `yakumioto/torrentfs-go` 的 `main` 可发布，现有质量门禁与唯一标签不变。

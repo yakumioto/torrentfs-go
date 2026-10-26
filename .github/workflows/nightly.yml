@@ -1,9 +1,8 @@
 name: Nightly
 
 on:
-  # GitHub Actions cron uses UTC: 16:17 UTC is 00:17 the next day in Beijing.
-  schedule:
-    - cron: "17 16 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions: {}

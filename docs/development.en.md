@@ -183,6 +183,8 @@ These variables override smoke-test runtime settings, not image build arguments.
 
 The CI nightly multi-platform OCI build and [nightly-build.sh](../scripts/nightly-build.sh) local archive entry point are different workflows. Local validation commands do not imply a floating release tag or publication guarantee.
 
+`Nightly` names the development image channel, not a daily publication guarantee. Automatic builds run on pushes to `main`; without `main` updates there is no daily automatic rebuild. `workflow_dispatch` remains an explicit rebuild/retry entry point and allows rebuilding the same SHA manually. Only `main` in the original `yakumioto/torrentfs-go` repository can publish; existing quality gates and unique tags are unchanged.
+
 ## Contributing
 
 Run checks appropriate to the changed layer and report any skipped FUSE, CIFS, or container prerequisites rather than presenting a skip as successful runtime verification. Keep source examples and API/configuration contracts consistent with the [configuration guide](configuration.en.md) and [API reference](api.en.md).

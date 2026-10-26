@@ -100,6 +100,8 @@ Normal shutdown first cancels HTTP stream reads and allows at most five seconds 
 
 The [Dockerfile](../Dockerfile) builds the Web UI with Node 22.23.2, compiles a `CGO_ENABLED=0` Go 1.27 binary with the UI embedded, and runs it in Debian bookworm-slim with FUSE3, Samba, `tini`, certificates, and `passwd`. The host does not need Node.js or Go.
 
+`Nightly` names the development image channel, not a guarantee of a new tag every day. Automatic builds run on pushes to `main`; without `main` updates there is no daily automatic rebuild. Use `workflow_dispatch` for explicit rebuilds/retries, including manual rebuilds of the same SHA. Only `main` in the original `yakumioto/torrentfs-go` repository can publish; existing quality gates and unique tags are unchanged.
+
 The nightly workflow publishes tags containing a UTC date, commit SHA, and run id. It does not promise floating `latest` or `nightly` tags. Use a locally built image unless a specific published tag has been verified:
 
 ```bash
