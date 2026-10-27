@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
 func TestSMBColdWebseedSmallCache(t *testing.T) {
@@ -24,7 +26,18 @@ func TestSMBColdWebseedSmallCache(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i*31 + i/251)
 	}
+	type requestEvent struct {
+		at   time.Time
+		span string
+	}
+	var requestMu sync.Mutex
+	var requests []requestEvent
 	webseed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			requestMu.Lock()
+			requests = append(requests, requestEvent{time.Now(), r.Header.Get("Range")})
+			requestMu.Unlock()
+		}
 		http.ServeContent(w, r, "cold.bin", time.Time{}, bytes.NewReader(data))
 	}))
 	defer webseed.Close()
@@ -48,7 +61,12 @@ func TestSMBColdWebseedSmallCache(t *testing.T) {
 			cfg.Cache.CapacityBytes = 8 << 20
 			cfg.Mount.ReadTimeout = config.Duration(10 * time.Second)
 			sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
+			requestMu.Lock()
+			requestStart := len(requests)
+			requestMu.Unlock()
 			addTorrentBytes(t, sess, meta)
+			probes := make(chan session.ReadProbeEvent, 256)
+			defer session.SetReadProbe(probes)()
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 			defer cancel()
 			var read func([]byte, int64) (int, error)
@@ -76,6 +94,17 @@ func TestSMBColdWebseedSmallCache(t *testing.T) {
 				read = f.ReadAt
 			}
 			started := time.Now()
+			defer func() {
+				requestMu.Lock()
+				var timeline []string
+				for _, event := range requests[requestStart:] {
+					timeline = append(timeline, fmt.Sprintf("%s@%s", event.span, event.at.Sub(started).Round(time.Millisecond)))
+				}
+				requestMu.Unlock()
+				st, _ := sess.Torrent(mi.HashInfoBytes())
+				snapshot := session.PrefetchSnapshotForTest(st)
+				t.Logf("cold trace webseed=%v active=%v max_active=%d pins=%d high=%d budget_blocks=%d reader_events=%d", timeline, snapshot.ActivePieceIndexes, snapshot.MaxActivePieces, snapshot.PinnedPieces, snapshot.EffectiveHigh, snapshot.BudgetBlocks, len(probes))
+			}()
 			got := make([]byte, len(data))
 			for off := 0; off < len(got); off += pieceLength {
 				if protocol == "direct-paced" {

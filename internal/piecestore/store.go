@@ -26,9 +26,10 @@ import (
 
 // Store implements storage.ClientImplCloser on top of an in-memory LRU cache.
 type Store struct {
-	capacity int64
-	cache    *cache.Cache
-	logger   *slog.Logger
+	capacity        int64
+	torrentCapacity storage.TorrentCapacity
+	cache           *cache.Cache
+	logger          *slog.Logger
 
 	mu             sync.Mutex
 	staging        map[cache.Key]*stagingBuffer
@@ -121,15 +122,17 @@ func New(c *cache.Cache, logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = logging.Discard()
 	}
+	capacity := func() (int64, bool) { return c.Capacity(), true }
 	return &Store{
-		capacity:      c.Capacity(),
-		cache:         c,
-		logger:        logger,
-		staging:       make(map[cache.Key]*stagingBuffer),
-		lastRead:      make(map[cache.Key]uint64),
-		epochs:        make(map[cache.Key]uint64),
-		verifiedEpoch: make(map[cache.Key]uint64),
-		torrents:      make(map[string]*torrentLifecycle),
+		capacity:        c.Capacity(),
+		torrentCapacity: &capacity,
+		cache:           c,
+		logger:          logger,
+		staging:         make(map[cache.Key]*stagingBuffer),
+		lastRead:        make(map[cache.Key]uint64),
+		epochs:          make(map[cache.Key]uint64),
+		verifiedEpoch:   make(map[cache.Key]uint64),
+		torrents:        make(map[string]*torrentLifecycle),
 	}
 }
 
@@ -178,7 +181,8 @@ func (s *Store) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash met
 				generation: s.epoch(pieceKey),
 			}
 		},
-		Close: func() error { s.closeTorrent(key, lifecycle); return nil },
+		Close:    func() error { s.closeTorrent(key, lifecycle); return nil },
+		Capacity: s.torrentCapacity,
 	}, nil
 }
 

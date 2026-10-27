@@ -114,6 +114,7 @@ require (
 // unreadPeerRequests invariant during shutdown (MIO-62).
 //
 // Drop this replace once upstream publishes a release containing all changes.
-replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.3
+// The local copy retains the fork fixes and adds the documented webseed wakeup patch.
+replace github.com/anacrolix/torrent => ./third_party/anacrolix-torrent
 
 replace github.com/sonroyaalmerol/go-smb-server => ./third_party/go-smb-server

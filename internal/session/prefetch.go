@@ -835,6 +835,7 @@ func (c *prefetchCoordinator) reconcile() {
 		return
 	}
 	c.updateBufferedLocked()
+	c.completeActiveLocked()
 	desired := c.desiredPiecesLocked()
 	wanted := make(map[int]struct{}, len(desired))
 	for _, index := range desired {
@@ -846,11 +847,7 @@ func (c *prefetchCoordinator) reconcile() {
 			c.releaseLocked(index)
 		}
 	}
-	// A forward move within the window can push earlier pieces out of it without
-	// changing the generation, so the active set is pruned on every pass rather
-	// than only when the window is full.
-	c.cancelUnneededActiveLocked(wanted)
-
+	admitted := make([]int, 0, len(desired))
 	reservedPrefix := int64(0)
 	reservationBlocked := false
 	for _, index := range desired {
@@ -861,8 +858,17 @@ func (c *prefetchCoordinator) reconcile() {
 			}
 			c.windowPins[index] = struct{}{}
 		}
+		admitted = append(admitted, index)
 		reservedPrefix += c.pieceOverlapLocked(index)
 	}
+	wanted = makePieceSet(admitted)
+	for index := range c.windowPins {
+		if _, ok := wanted[index]; !ok {
+			delete(c.windowPins, index)
+			c.releaseLocked(index)
+		}
+	}
+	c.cancelUnneededActiveLocked(wanted)
 	if reservationBlocked {
 		c.budgetBlocks++
 	}
@@ -875,7 +881,7 @@ func (c *prefetchCoordinator) reconcile() {
 	// mark. Without this the state would report filling forever after the first
 	// read of a fully buffered window.
 	work := false
-	for _, index := range desired {
+	for _, index := range admitted {
 		if !c.cache.Has(c.key(index)) {
 			work = true
 			break
@@ -883,20 +889,20 @@ func (c *prefetchCoordinator) reconcile() {
 	}
 	if c.effectiveHigh == 0 || c.bufferedBytes >= c.effectiveHigh || !work {
 		c.state = prefetchPaused
+		if c.effectiveHigh == 0 && reservationBlocked {
+			c.state = prefetchBudgetBlocked
+		}
 		c.completeActiveLocked()
 		return
 	}
 	if c.bufferedBytes < c.effectiveLow || c.state == prefetchIdle || c.state == prefetchPaused || c.state == prefetchBudgetBlocked {
 		c.state = prefetchFilling
 	}
-	if c.state != prefetchFilling || reservationBlocked {
-		if reservationBlocked {
-			c.state = prefetchBudgetBlocked
-		}
+	if c.state != prefetchFilling {
 		return
 	}
 
-	for _, index := range desired {
+	for _, index := range admitted {
 		if c.bufferedBytes >= c.effectiveHigh || len(c.active) >= c.currentLimit() {
 			break
 		}

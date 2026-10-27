@@ -12,6 +12,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 # The pinned SMB module uses a reviewed local replacement.
 COPY third_party/go-smb-server ./third_party/go-smb-server
+COPY third_party/anacrolix-torrent ./third_party/anacrolix-torrent
 RUN go mod download
 COPY . .
 COPY --from=web-build /src/web/dist ./web/dist
