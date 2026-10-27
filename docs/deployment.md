@@ -111,6 +111,8 @@ docker build -t torrentfs .
 
 nightly workflow 的 GHCR tag 包含日期、提交和 run id，不保证浮动 `latest` 或 `nightly` tag 存在。未核实具体发布 tag 前，使用本地构建。
 
+`Nightly` 是开发镜像渠道名称，不保证每天都有新标签：自动构建由 `main` push 触发，没有 `main` 更新时不会每日自动重建。需要重建/重试时可使用 `workflow_dispatch`，包括同一 SHA 的显式手动重建。仅原仓库 `yakumioto/torrentfs-go` 的 `main` 可发布，现有质量门禁与唯一标签不变。
+
 镜像默认命令等价于：
 
 ```text
