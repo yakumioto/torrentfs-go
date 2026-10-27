@@ -69,12 +69,12 @@ func connectSMBSession(t *testing.T, addr, name string) (*client.Share, func()) 
 	d := &client.Dialer{Initiator: &client.NTLMInitiator{User: "reader", Password: "integration-secret", Domain: "WORKGROUP"}}
 	s, err := d.Dial(conn)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal(err)
 	}
 	share, err := s.Mount(name)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal(err)
 	}
 	var once sync.Once
@@ -137,7 +137,7 @@ func TestSMBSessionNamespaceRandomReadsAndRefresh(t *testing.T) {
 	if n, err := file.ReadAt(make([]byte, 16), 1); n != 16 || err != nil {
 		t.Fatalf("existing handle after category move: %d %v", n, err)
 	}
-	file.Close()
+	_ = file.Close()
 
 	files := map[string][]byte{"first.bin": bytes.Repeat([]byte("a"), 128<<10), "嵌套😀/second.bin": bytes.Repeat([]byte("b"), 400<<10)}
 	for i := range 1600 {
@@ -162,7 +162,7 @@ func TestSMBSessionNamespaceRandomReadsAndRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = io.ReadAll(second)
-	second.Close()
+	_ = second.Close()
 	if err != nil || sha256.Sum256(got) != sha256.Sum256(files["嵌套😀/second.bin"]) {
 		t.Fatalf("cross-file piece read: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestSMBSubtitleSTRMAndSessionRestart(t *testing.T) {
 			t.Fatalf("subtitle stat: %v %v", stat, err)
 		}
 		got, err := io.ReadAll(tc.f)
-		tc.f.Close()
+		_ = tc.f.Close()
 		if err != nil || string(got) != tc.want {
 			t.Fatalf("subtitle snapshot: %q %v", got, err)
 		}
@@ -286,7 +286,7 @@ func TestSMBPeerlessTimeoutAndShutdownCancellation(t *testing.T) {
 					t.Fatalf("retry after timeout: %v", err)
 				}
 			}
-			file.Close()
+			_ = file.Close()
 			closeClient()
 			stop()
 			drained := make(chan error, 1)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -75,7 +76,7 @@ func TestSMBColdWebseedSmallCache(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer r.(io.Closer).Close()
+				defer func() { _ = r.(io.Closer).Close() }()
 				read = func(p []byte, off int64) (int, error) {
 					return r.(interface {
 						ReadAtContext(context.Context, []byte, int64) (int, error)
@@ -90,7 +91,7 @@ func TestSMBColdWebseedSmallCache(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer f.Close()
+				defer func() { _ = f.Close() }()
 				read = f.ReadAt
 			}
 			started := time.Now()

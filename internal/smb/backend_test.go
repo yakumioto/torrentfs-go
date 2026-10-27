@@ -70,7 +70,7 @@ func TestBackendReadOnlyPathsAndEnumeration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dir.Close(ctx)
+	defer func() { _ = dir.Close(ctx) }()
 	for _, pattern := range []string{"*", "*.*", "*.TXT"} {
 		count := 0
 		for fi, err := range dir.Enumerate(ctx, pattern) {

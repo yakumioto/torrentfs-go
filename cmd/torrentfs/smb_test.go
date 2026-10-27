@@ -54,7 +54,7 @@ func TestSMBBindFailureAndImmediateShutdown(t *testing.T) {
 	if _, err := startSMB(context.Background(), cfg, nil, nil); err == nil {
 		t.Fatal("occupied address accepted")
 	}
-	ln.Close()
+	_ = ln.Close()
 	cfg.SMB.ListenAddr = "127.0.0.1:0"
 	for range 10 {
 		srv, err := startSMB(context.Background(), cfg, nil, nil)

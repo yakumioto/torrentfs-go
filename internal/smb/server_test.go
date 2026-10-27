@@ -58,14 +58,14 @@ func TestServerRealClientAuthenticationPaginationAndReadOnly(t *testing.T) {
 		session, err := dialer.Dial(c)
 		if !tc.allow {
 			if err == nil {
-				session.Logoff()
+				_ = session.Logoff()
 				t.Error("unauthorized login succeeded")
 			}
-			c.Close()
+			_ = c.Close()
 			continue
 		}
 		if err != nil {
-			c.Close()
+			_ = c.Close()
 			t.Fatalf("authenticate: %v", err)
 		}
 		share, err := session.Mount("torrentfs")
@@ -87,7 +87,7 @@ func TestServerRealClientAuthenticationPaginationAndReadOnly(t *testing.T) {
 		if err := file.Truncate(0); err == nil {
 			t.Fatal("truncate succeeded")
 		}
-		file.Close()
+		_ = file.Close()
 		if _, err := share.Create("new.txt"); err == nil {
 			t.Fatal("create succeeded")
 		}
@@ -100,8 +100,8 @@ func TestServerRealClientAuthenticationPaginationAndReadOnly(t *testing.T) {
 		if err := share.Chtimes("电影😀.txt", time.Now(), time.Now()); err == nil {
 			t.Fatal("set time succeeded")
 		}
-		share.Umount()
-		session.Logoff()
-		c.Close()
+		_ = share.Umount()
+		_ = session.Logoff()
+		_ = c.Close()
 	}
 }
