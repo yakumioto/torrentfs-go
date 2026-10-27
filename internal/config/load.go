@@ -67,6 +67,8 @@ type fileConfig struct {
 	STRM        STRM        `toml:"strm"`
 	Log         Log         `toml:"log"`
 	Mount       Mount       `toml:"mount"`
+	Filesystem  Filesystem  `toml:"filesystem"`
+	SMB         SMB         `toml:"smb"`
 }
 
 type fileCache struct {
@@ -90,9 +92,11 @@ func newFileConfig(cfg Config) fileConfig {
 			Auth:           cfg.HTTP.Auth,
 			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes),
 		},
-		STRM:  cfg.STRM,
-		Log:   cfg.Log,
-		Mount: cfg.Mount,
+		STRM:       cfg.STRM,
+		Log:        cfg.Log,
+		Mount:      cfg.Mount,
+		Filesystem: cfg.Filesystem,
+		SMB:        cfg.SMB,
 	}
 }
 
@@ -107,8 +111,10 @@ func (c fileConfig) runtimeConfig() Config {
 			Auth:           c.HTTP.Auth,
 			MaxUploadBytes: int64(c.HTTP.MaxUploadBytes),
 		},
-		STRM:  c.STRM,
-		Log:   c.Log,
-		Mount: c.Mount,
+		STRM:       c.STRM,
+		Log:        c.Log,
+		Mount:      c.Mount,
+		Filesystem: c.Filesystem,
+		SMB:        c.SMB,
 	}
 }

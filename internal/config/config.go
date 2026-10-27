@@ -97,6 +97,20 @@ type Config struct {
 	STRM        STRM        `toml:"strm"`
 	Log         Log         `toml:"log"`
 	Mount       Mount       `toml:"mount"`
+	Filesystem  Filesystem  `toml:"filesystem"`
+	SMB         SMB         `toml:"smb"`
+}
+
+type Filesystem struct {
+	Mode string `toml:"mode"`
+}
+
+type SMB struct {
+	ListenAddr  string `toml:"listen_addr"`
+	ShareName   string `toml:"share_name"`
+	STRMEnabled bool   `toml:"strm_enabled"`
+	Username    string `toml:"-" json:"-"`
+	Password    string `toml:"-" json:"-"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -236,6 +250,8 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
+		Filesystem: Filesystem{Mode: "fuse"},
+		SMB:        SMB{ListenAddr: "127.0.0.1:1445", ShareName: "torrentfs"},
 		Mount: Mount{
 			AllowOther:  false,
 			ReadTimeout: Duration(30 * time.Second),
@@ -245,6 +261,9 @@ func Default() Config {
 
 // Validate checks values that must be valid before starting a session.
 func (c Config) Validate() error {
+	if err := c.validateFilesystem(); err != nil {
+		return err
+	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
 	}

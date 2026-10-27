@@ -3,6 +3,16 @@
 # environment mapping for every TOML leaf. TORRENTFS_USERNAME and
 # TORRENTFS_PASSWORD are special shared HTTP/SMB credentials.
 
+[filesystem]
+# No mountpoint flags keeps the image HTTP-only. Compose selects smb explicitly.
+mode = "fuse"
+
+[smb]
+# Containers need a non-loopback listener; publish host 445 to container 1445.
+listen_addr = "0.0.0.0:1445"
+share_name = "torrentfs"
+strm_enabled = false
+
 [http]
 listen_addr = "127.0.0.1:8080"
 max_upload_size = "10MiB"

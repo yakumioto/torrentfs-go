@@ -23,6 +23,14 @@ const (
 )
 
 var environmentBindings = []envBinding{
+	{name: "TORRENTFS_FILESYSTEM_MODE", field: "filesystem.mode", apply: func(cfg *Config, raw string) error { cfg.Filesystem.Mode = raw; return nil }},
+	{name: "TORRENTFS_SMB_LISTEN_ADDR", field: "smb.listen_addr", apply: func(cfg *Config, raw string) error { cfg.SMB.ListenAddr = raw; return nil }},
+	{name: "TORRENTFS_SMB_SHARE_NAME", field: "smb.share_name", apply: func(cfg *Config, raw string) error { cfg.SMB.ShareName = raw; return nil }},
+	{name: "TORRENTFS_SMB_STRM_ENABLED", field: "smb.strm_enabled", apply: func(cfg *Config, raw string) error {
+		value, err := parseEnvBool(raw)
+		cfg.SMB.STRMEnabled = value
+		return err
+	}},
 	{
 		name:  "TORRENTFS_CONNECTIONS_LISTEN_HOST",
 		field: "connections.listen_host",
@@ -238,6 +246,9 @@ var environmentBindings = []envBinding{
 }
 
 func applyEnvironment(cfg *Config, lookup envLookup) error {
+	if err := applyLegacyFilesystemEnvironment(cfg, lookup); err != nil {
+		return err
+	}
 	for _, binding := range environmentBindings {
 		raw, ok := lookup(binding.name)
 		if !ok {
@@ -246,6 +257,10 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 		if err := binding.apply(cfg, raw); err != nil {
 			return invalid(binding.field, errors.New("environment variable "+binding.name+": "+err.Error()))
 		}
+	}
+	if cfg.Filesystem.Mode == "smb" {
+		cfg.SMB.Username, _ = lookup(httpUsernameEnvironment)
+		cfg.SMB.Password, _ = lookup(httpPasswordEnvironment)
 	}
 	return applyHTTPAuthenticationEnvironment(cfg, lookup)
 }

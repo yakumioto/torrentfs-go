@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-`torrentfs` is a read-only BitTorrent filesystem written in Go. It fetches content on demand, exposes a FUSE file tree, and provides a Web UI/API for task management.
+`torrentfs` is a read-only BitTorrent filesystem written in Go. It fetches content on demand, exposes a file tree over FUSE or in-process SMB, and provides a Web UI/API for task management.
 
 Use it to let players, media libraries, indexers, or command-line tools read torrents like local files, or to provide a read-only SMB share through Docker.
 
@@ -12,7 +12,7 @@ Use it to let players, media libraries, indexers, or command-line tools read tor
 - **Read-only filesystem:** single files appear directly; multi-file torrents retain their directory structure.
 - **Web UI/API management:** add magnets or upload `.torrent` files and inspect tasks and cache state.
 - **Task and media management:** categories, favorites, age-based cleanup, subtitle upload/replacement, and scheduled upload limits.
-- **Docker + SMB:** FUSE and a read-only share in one container, without host mount propagation.
+- **Docker + SMB:** in-process read-only shares, without FUSE, Samba, or extra container capabilities.
 - **Optional STRM view:** retain the original file share and add `.strm` files pointing to signed HTTP links; see the [deployment guide](docs/deployment.en.md).
 
 ## Quick start
@@ -21,8 +21,8 @@ Recommended path: **Docker → add a task in the Web UI → read over SMB**. Bui
 
 Requirements:
 
-- Linux with rootful Docker, an available `/dev/fuse`, and a host security policy that permits FUSE.
-- Permission to grant `SYS_ADMIN` and `NET_BIND_SERVICE`; host ports `8080` and `445` must be available.
+- Docker; SMB mode needs no `/dev/fuse`, Samba, or extra capabilities.
+- Available host ports `8080` and `445`. Only explicit FUSE mounts need a device, mount privileges, and a host policy permitting FUSE.
 - Bash; run the commands in order in the same terminal. Go and Node.js are not required on the host.
 
 The default cache limit is `2GiB`; adjust it for smaller hosts using the [configuration reference](docs/configuration.en.md). Other run modes are in the [deployment guide](docs/deployment.en.md).
@@ -58,7 +58,7 @@ sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
 This is for a new directory; inspect ownership and permissions before using existing data. The entrypoint does not chown bind mounts, and the selected identity must be able to read, write, and traverse the directory.
 
-HTTP and SMB share a password. Web login needs only that password; SMB also uses the container's runtime account name `torrentfs`:
+HTTP authentication is enabled independently. This example shares runtime credentials between HTTP and SMB; HTTP generates bcrypt at startup. Web login only needs the password; SMB uses a username/password pair with NTLMv2 (`WORKGROUP` or the client's default domain). The username need not be a Unix account or match `PUID:PGID`:
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -74,24 +74,21 @@ The password is passed through the environment and may be visible to users with 
 ```bash
 docker run --detach --name torrentfs \
   --publish 127.0.0.1:8080:8080 \
-  --publish 127.0.0.1:445:445 \
+  --publish 127.0.0.1:445:1445 \
   --env PUID --env PGID \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --cap-add NET_BIND_SERVICE \
-  --security-opt apparmor=unconfined \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_FILESYSTEM_MODE=smb \
+  --env TORRENTFS_SMB_LISTEN_ADDR=0.0.0.0:1445 \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
 ```
 
-This example publishes HTTP/SMB only on loopback and relaxes AppArmor to permit FUSE; use it only on a trusted host. If the host policy already permits FUSE, adjust the security options as described in the [deployment guide](docs/deployment.en.md).
+This example publishes HTTP/SMB only on loopback. SMB runs in the single Go process without FUSE or Samba. When upgrading an old container, replace `445:445` with `445:1445` and remove FUSE devices, added capabilities, and `apparmor=unconfined`.
 
-SMB mode owns the container-local `/share` mount: do not add `-mountpoint`, and do not bind `/share` to the host. For LAN access or inbound peers, follow the deployment guide's address, firewall, and TCP/UDP settings.
+SMB and FUSE modes are mutually exclusive: do not add `-mountpoint` / `-strm-mountpoint` or a `/share` bind mount. For LAN access, bind an explicit trusted LAN address and configure firewall rules; never expose SMB to the public Internet. See the [deployment guide](docs/deployment.en.md) for inbound peer TCP/UDP settings.
 
 ### 4. Add a task and read
 

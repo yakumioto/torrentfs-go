@@ -2,8 +2,6 @@ package filesystem
 
 import (
 	"context"
-	"slices"
-	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -34,34 +32,7 @@ func (n *categoryNode) children() []rootEntry {
 }
 
 func (n *categoryNode) visibleChildren() []rootEntry {
-	entries := n.children()
-	used := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		used[entry.Name] = true
-	}
-	for _, entry := range entries {
-		if _, single := mediaRoot(entry.View); !single {
-			continue
-		}
-		for _, subtitle := range entry.View.Subtitles {
-			if strings.Contains(subtitle.Path, "/") || used[subtitle.Path] {
-				continue
-			}
-			used[subtitle.Path] = true
-			entries = append(entries, rootEntry{
-				Name:       subtitle.Path,
-				View:       entry.View,
-				Path:       subtitle.Path,
-				Size:       subtitle.Size,
-				ModifiedAt: subtitle.ModifiedAt,
-				IsSubtitle: true,
-			})
-		}
-	}
-	slices.SortFunc(entries, func(a, b rootEntry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return entries
+	return visibleEntries(n.children(), nil)
 }
 
 func (n *categoryNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {

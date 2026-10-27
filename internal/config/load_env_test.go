@@ -25,6 +25,10 @@ func TestLoadWithoutPathUsesDefaults(t *testing.T) {
 
 func TestLoadEnvironmentBindings(t *testing.T) {
 	values := map[string]string{
+		"TORRENTFS_FILESYSTEM_MODE":                            "smb",
+		"TORRENTFS_SMB_LISTEN_ADDR":                            "127.0.0.1:1446",
+		"TORRENTFS_SMB_SHARE_NAME":                             "media",
+		"TORRENTFS_SMB_STRM_ENABLED":                           "true",
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST":                    "127.0.0.1",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT":                    "12345",
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV4":                   "true",
@@ -113,8 +117,11 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 21 {
-		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
+	if len(environmentBindings) != 25 {
+		t.Fatalf("environment binding count = %d, want 25", len(environmentBindings))
+	}
+	if got.Filesystem.Mode != "smb" || got.SMB.ListenAddr != "127.0.0.1:1446" || got.SMB.ShareName != "media" || !got.SMB.STRMEnabled || got.SMB.Username != "alice" || got.SMB.Password != "password" {
+		t.Fatal("SMB environment bindings were not applied")
 	}
 	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
 		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)

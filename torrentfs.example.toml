@@ -1,7 +1,8 @@
 # torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
 # One existing torrents directory remains a required command-line input.
-# mountpoint is required unless the HTTP API is enabled (http.listen_addr).
+# In mode=fuse, mountpoint is required unless HTTP is enabled (http.listen_addr).
+# mode=smb instead serves files in-process, without FUSE or mountpoint flags.
 # Configuration is loaded on every startup. Only the exact documented
 # environment variable names are read; there is no automatic environment mapping
 # for every TOML leaf. Most supported values use TORRENTFS_<SECTION>_<KEY>, with
@@ -10,13 +11,31 @@
 # special shared HTTP/SMB credentials. The precedence is environment variables,
 # this file, then built-in defaults.
 #
-# The FUSE mount exposes torrent data only, read-only. Torrent management
+# FUSE and SMB expose torrent data only, read-only. Torrent management
 # (add, delete, status) happens over the HTTP API below; there is no
-# metadata/ or stats/ control directory in the mount.
+# metadata/ or stats/ control directory in either view.
 #
 # Piece data is cached in memory only and is never written to disk. Restarting
 # torrentfs starts from an empty cache: no piece completion is persisted and no
 # piece is recovered from disk.
+
+[filesystem]
+# fuse preserves HTTP-only startup when no mountpoint flags are supplied.
+# smb is mutually exclusive with FUSE flags and needs the runtime credentials
+# TORRENTFS_USERNAME / TORRENTFS_PASSWORD; it does not require a Unix login name.
+mode = "fuse"
+
+[smb]
+# In-process read-only SMB; no Samba, /dev/fuse or extra capabilities required.
+# Native default is loopback. Containers should bind 0.0.0.0:1445 and map 445:1445.
+listen_addr = "127.0.0.1:1445"
+share_name = "torrentfs"
+# Adds <share_name>-strm; requires strm.base_url and an enabled HTTP listener.
+strm_enabled = false
+# Canonical environment variables: TORRENTFS_FILESYSTEM_MODE,
+# TORRENTFS_SMB_LISTEN_ADDR, TORRENTFS_SMB_SHARE_NAME, TORRENTFS_SMB_STRM_ENABLED.
+# Deprecated aliases: TORRENTFS_SMB_ENABLED -> filesystem.mode (true=smb,
+# false=fuse); TORRENTFS_STRM_ENABLED -> smb.strm_enabled. Canonical env wins.
 
 [http]
 # The listener serves both the embedded Web UI and the management API. Empty

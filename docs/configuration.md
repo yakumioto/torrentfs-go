@@ -40,6 +40,8 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 
 | Section | 常用 key | 说明 |
 | --- | --- | --- |
+| `[filesystem]` | `mode` | `fuse`（默认，未挂载时 HTTP-only）或 `smb`（进程内只读共享）；二者互斥 |
+| `[smb]` | `listen_addr`, `share_name`, `strm_enabled` | 原生默认 `127.0.0.1:1445`、`torrentfs`、`false`；容器监听 `0.0.0.0:1445` |
 | `[http]` | `listen_addr`, `max_upload_size` | HTTP/Web listener；默认 `127.0.0.1:8080`，上传上限默认 `10MiB`；listener 为空则禁用 HTTP |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | 单用户 bcrypt 登录和内存 Bearer token |
 | `[strm]` | `base_url` | 播放器可达的 HTTP(S) 直链基址；默认空值关闭流端点，非空要求启用 HTTP |
@@ -52,13 +54,31 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 
 本地内置默认值和镜像配置不同：本地 peer 端口为 `0`，地址族都启用；镜像 peer 端口为固定 `6881`，默认禁用 IPv6。两者都默认禁用 UPnP/NAT-PMP 自动端口映射；需要接受入站 peer 时应设置固定端口并同时发布 TCP 和 UDP。
 
-`cache.capacity` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，为协议缓冲、临时副本、Samba 等保留余量，避免 OOM kill。piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。
+`cache.capacity` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，为 SMB/HTTP 协议缓冲、临时副本等保留余量，避免 OOM kill。piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。
+
+## 文件系统模式与 SMB
+
+`[filesystem] mode = "fuse"` 是内置默认值；不传挂载参数时保持 HTTP-only。设为 `"smb"` 后由单一 Go 进程提供只读 SMB，不使用 FUSE 或 Samba，并拒绝 `-mountpoint` / `-strm-mountpoint`。SMB 可以关闭 HTTP；此时只呈现已注册任务。
+
+```toml
+[filesystem]
+mode = "smb"
+
+[smb]
+listen_addr = "127.0.0.1:1445"
+share_name = "torrentfs"
+strm_enabled = false
+```
+
+SMB 原生默认监听 loopback；镜像 TOML 为 `0.0.0.0:1445`，标准客户端使用宿主 `445:1445` 映射。原共享为 `share_name`，启用 `smb.strm_enabled` 后附加 `<share_name>-strm`，要求非空 `strm.base_url` 和 HTTP。两者共享认证并只读，不共享 `/torrents` 或 `.metadata`。
+
+SMB 必须从运行时环境成对提供非空 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`，TOML 不保存 SMB 密码；用户名不必是 Unix 账户，也不绑定 `PUID:PGID`。使用 NTLMv2，domain 可用 `WORKGROUP` 或客户端默认值；匿名和错误凭据被拒绝。SMB 应只对可信 LAN 开放，并用防火墙限制访问，不能直接暴露到公网。
 
 ## HTTP 认证与网络边界
 
 HTTP 默认只监听 loopback，认证关闭。绑定 `0.0.0.0`、空 host 或其他非 loopback 地址时，必须启用完整认证配置。服务没有 TLS，对外部署应放在可信的 TLS reverse proxy 后面并限制可访问网络。
 
-Web/HTTP 登录仅校验密码；用户名仍用于配置账户标识和 SMB 登录。使用 TOML 认证时，仍需设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
+Web/HTTP 登录仅校验密码；HTTP 用户名作为配置账户标识，SMB 独立使用运行时环境用户名。使用 TOML 认证时，仍需设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
 
 ```toml
 [http]
@@ -73,9 +93,9 @@ token_ttl = "30m"
 ```
 
 - hash file 必须是非空的普通、非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。
-- `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 是可选的共享凭据覆盖方式。HTTP auth 启用且这两个变量完整提供时，启动时会生成 cost-10 bcrypt hash，成对覆盖 TOML 的用户名、hash 和 hash file，最终配置不保存明文密码。
-- 两个共享变量必须同时提供、都非空；HTTP 密码最多 72 个 UTF-8 bytes，不能截断。SMB 还要求用户名解析为镜像内的 torrentfs runtime Unix 账户，并拒绝密码中的 CR/LF，见[部署指南](deployment.md)。
-- HTTP auth 关闭时，Go 配置层忽略共享凭据 pair，以便 SMB-only 启动；但 TOML 中的 username、hash 和 hash file 必须全为空，关闭 auth 不会自动清空这些字段。
+- `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 是可选的共享凭据覆盖方式。HTTP auth 启用且这两个变量完整提供时，启动时会生成 cost-10 bcrypt hash，成对覆盖 TOML 的用户名、hash 和 hash file；HTTP 认证结果不保存明文，SMB 则仅在运行时使用该凭据 pair。
+- 两个共享变量必须同时提供、都非空；HTTP 密码最多 72 个 UTF-8 bytes，不能截断。SMB 使用同一运行时 pair，但不要求 Unix 用户名，见[部署指南](deployment.md)。
+- HTTP auth 关闭时，HTTP 认证层不使用共享凭据 pair；SMB 模式仍要求它们。TOML 中的 HTTP username、hash 和 hash file 必须全为空，关闭 auth 不会自动清空这些字段。
 - 环境变量可能出现在进程环境和 Docker metadata 中，不应当作 secret store。
 
 `token_ttl` 是无活动过期窗口，有效的认证请求会滑动该窗口；token 只存在 daemon 内存中，重启后全部失效。登录和请求协议见 [API 参考](api.md)。
@@ -96,7 +116,7 @@ base_url = "https://media.example/torrentfs/"
 - 上例生成外部 `/torrentfs/stream/...` 链接；反代必须剥离 `/torrentfs`，将 `/stream/...` 转发给服务，并保留逐段路径转义，不要再次解码或清理文件名。
 - 基址必须从**播放器**可达，不能从容器地址、请求 Host 或登录 token 自动推断。远程播放不要填容器内部 `localhost`；外网必须使用 HTTPS。
 
-`TORRENTFS_STRM_BASE_URL` 覆盖该字段，显式空值可关闭流端点。基址变更需要重启；播放器可能缓存旧直链，需重新扫描或打开，不承诺热更新。原生 `-strm-mountpoint` 和 Docker 入口专用 `TORRENTFS_STRM_ENABLED` 控制第二视图是否挂载/共享，不替代 `base_url`：Docker 开关还要求 SMB 开启。完整组合与示例见[部署指南](deployment.md)。
+`TORRENTFS_STRM_BASE_URL` 覆盖该字段，显式空值可关闭流端点。基址变更需要重启；播放器可能缓存旧直链，需重新扫描或打开，不承诺热更新。FUSE 模式的 `-strm-mountpoint` 和 SMB 模式的 `TORRENTFS_SMB_STRM_ENABLED` / `smb.strm_enabled` 分别控制第二视图是否挂载/共享，均不替代 `base_url`。完整组合与示例见[部署指南](deployment.md)。
 
 `/api/` 的 Bearer 认证规则保持不变；`/stream/...` 单独使用文件级 HMAC 签名，不要求播放器登录或添加 Bearer header。启用时首次创建 32 字节、`0600` 的 `.metadata/stream_key`，重启复用；它不是登录 token。保护签名链接和反代日志，密钥校验与轮换边界见[使用指南](usage.md)。
 
@@ -104,6 +124,10 @@ base_url = "https://media.example/torrentfs/"
 
 | 环境变量 | TOML key / 用途 | 格式 |
 | --- | --- | --- |
+| `TORRENTFS_FILESYSTEM_MODE` | `filesystem.mode` | `fuse` 或 `smb` |
+| `TORRENTFS_SMB_LISTEN_ADDR` | `smb.listen_addr` | `host:port`，原生默认 `127.0.0.1:1445` |
+| `TORRENTFS_SMB_SHARE_NAME` | `smb.share_name` | 共享名称，默认 `torrentfs` |
+| `TORRENTFS_SMB_STRM_ENABLED` | `smb.strm_enabled` | Go boolean，默认 `false` |
 | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | `connections.listen_host` | 字符串 |
 | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | `connections.listen_port` | 十进制整数 |
 | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | `connections.disable_ipv4` | Go boolean |
@@ -137,7 +161,7 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 ./torrentfs "$PWD/torrents"
 ```
 
-`PUID`、`PGID`、`TORRENTFS_SMB_ENABLED` 和 `TORRENTFS_STRM_ENABLED` 由 Docker 入口处理，不是 daemon 的 TOML 配置。`TORRENTFS_STRM_ENABLED` 默认 `false`，只接受 `true`、`false`、`1`、`0`，启用时要求 SMB 开启并配置非空 `strm.base_url`。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
+`PUID` 和 `PGID` 仅由 Docker 入口处理。`TORRENTFS_SMB_ENABLED` 是已弃用的 `filesystem.mode` alias（`true` / `1` → `smb`，`false` / `0` → `fuse`）；`TORRENTFS_STRM_ENABLED` 是已弃用的 `smb.strm_enabled` alias。二者由 Go 配置层读取，原生与 Docker 一致；canonical 环境变量优先于对应 alias，所有环境覆盖优先于 TOML。布尔值采用 Go boolean 规则；新配置应迁移到 canonical 名称。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
 
 ## 校验与旧配置迁移
 

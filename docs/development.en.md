@@ -29,7 +29,8 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 cmd/torrentfs          CLI, configuration, process lifecycle, shutdown
         │
         ├── internal/session      torrent lifecycle, metainfo, network, cache, signed reads
-        ├── internal/filesystem   original read-only FUSE tree and STRM Backend projection
+        ├── internal/filesystem   shared virtual namespace, read-only FUSE tree and STRM projection
+        ├── internal/smb          read-only VFS adapter and explicit NTLMv2 server configuration
         ├── internal/media        shared video/ISO detection and explicit MIME types
         ├── internal/stream       HMAC signatures, URL/path rules, cancellable Reader contract
         ├── internal/api          management authentication, status, separate signed HTTP streams
@@ -66,7 +67,7 @@ The Session creates/reuses `.metadata/stream_key` only when streaming is enabled
 
 The separate `/stream/...` handler does not weaken `/api/` Bearer authentication. It adapts `ReadAtContext` to `io.NewSectionReader` and `http.ServeContent`, uses explicit MIME without sniffing, and adds no whole-file or whole-block HTTP cache. HEAD/bodyless conditions avoid payload reads. Readers are cancelled/closed on completion, cancellation, and failure; recorded read failures after headers abort the transport rather than append JSON or fabricate a complete response.
 
-Shutdown cancels stream contexts before a maximum five-second HTTP drain, forcing HTTP Close when necessary to unblock network writes. Session close follows, then both FUSE mounts are unmounted concurrently under one shared 30-second deadline. Force-closing connections is not proof that every handler or goroutine has returned. The Docker supervisor stops Samba first and couples process or either-mount failure; see the [deployment guide](deployment.en.md).
+Shutdown cancels stream contexts before a maximum five-second HTTP drain, forcing HTTP Close when necessary to unblock network writes. SMB connections and reads are then cancelled and drained before Session close, followed by any FUSE mounts under one shared 30-second deadline. Force-closing HTTP connections is not proof that every HTTP handler or goroutine has returned. Docker uses tini with a direct torrentfs child, without Samba or a shell supervisor; see the [deployment guide](deployment.en.md).
 
 ## Frontend development
 
@@ -141,7 +142,7 @@ Use the same scale and call patterns and take the median of five runs. Synthetic
 
 [http-smoke.sh](../scripts/http-smoke.sh) requires Docker, `curl`, and Python 3, but not a FUSE device. It builds a local image and checks static root/deep links, missing assets, authentication, `WWW-Authenticate`, login, protected list, and logout. It does not publish to a remote registry.
 
-[docker-config-smoke.sh](../scripts/docker-config-smoke.sh) additionally verifies bundled TOML, the default command, environment overrides, external config mounts, and invalid SMB credentials/runtime accounts. It covers STRM boolean validation, invalid combinations without SMB/base URL/HTTP, and early rejection of either custom mount flag in SMB mode. It also requires `awk` and `timeout`.
+[docker-config-smoke.sh](../scripts/docker-config-smoke.sh) additionally verifies bundled TOML/default CMD, env and external-file overrides, HTTP bcrypt credential overrides, PUID/PGID, and data permissions. SMB checks cover invalid/missing credentials, canonical env over deprecated aliases, env over TOML, non-Unix usernames, STRM booleans/base URL/HTTP validation, and rejection of either mount flag. It asserts no FUSE/Samba, a single Go process, and SIGTERM exit `0`. It also requires `awk` and `timeout`.
 
 ### Required FUSE tests
 
@@ -167,11 +168,11 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 ./scripts/docker-smb-smoke.sh
 ```
 
-[docker-smb-smoke.sh](../scripts/docker-smb-smoke.sh) requires Linux Docker, `/dev/fuse`, `SYS_ADMIN`, `NET_BIND_SERVICE`, permission for FUSE, Python 3, `sha256sum`, `dd`, and `timeout`. It verifies authentication and guest rejection, directory listings, read hashes, read-only behavior, hidden metadata, shared credentials, runtime identities, normal shutdown, and failure coupling between smbd and torrentfs.
+[docker-smb-smoke.sh](../scripts/docker-smb-smoke.sh) requires Linux Docker, Python 3, `sha256sum`, `dd`, and `timeout`, but no host FUSE device or smbclient. The app has no devices, added capabilities, or relaxed security options; `NET_BIND_SERVICE` is explicitly dropped. A separate client image installs smbclient and pinned go-smb2. Mandatory checks retain a self-hosted ranged webseed, full hashes of `64MiB+123` data against an `8MiB` cache, large-offset ReadAt/Seek/EOF, same-connection reads with 16 missing videos pending, NTLMv2 explicit/default domains, wrong-password/guest denial, listings, hidden metadata, HTTP auth, and read-only create/write-open/append/truncate/write/mkdir/rename/delete/set-time denials. These protocol/data checks cannot be skipped. It also asserts runtime IDs, no smbd/FUSE mount, a direct single Go child of tini, SIGTERM exit `0`, and SIGKILL exit `137`.
 
-STRM scenarios also cover the original-only default and dual read-only shares/mounts when enabled. They list a multi-file torrent's top and deep directories before authenticated API uploads, then relist, query metadata, and download exact subtitle bytes through both shares, including equal/changed-length replacements. They retain no-video-fetch `.strm` reads, no-payload HTTP HEAD, Range `206` byte hashes, tampered-signature `403`, dual unmount, and coupling when either mount disappears. Readiness matches whole log lines to distinguish `/share` from `/share-strm`. These are automated protocol checks, not Infuse device acceptance.
+STRM checks retain the original-only default and dual read-only shares. They visit top and deep multi-file directories before authenticated subtitle uploads, then relist, stat, and compare exact bytes on both shares for equal/changed-length replacements. They also retain no-payload `.strm`/HEAD reads, Range `206` hashes, tampered-signature `403`, credential redaction, and clean dual-share shutdown. They are not Infuse device acceptance.
 
-The script attempts a kernel CIFS mount and a large-offset read as well. If the host lacks CIFS/nested-mount capability, it reports that limitation and continues; a successful mount with wrong data is a failure. `TORRENTFS_SMB_SKIP_CIFS=1` explicitly skips that check. Neither kind of skip proves kernel CIFS mounting, and the required FUSE tests retain the separate random-read evidence. CI and nightly do not set the explicit skip variable.
+Kernel CIFS is a supplemental client: only its client container needs mount privileges, never the app. The script checks large-offset and concurrent reads when CIFS/nested mounts are available. Missing host support is explicitly untested; a successful mount with wrong data fails. `TORRENTFS_SMB_SKIP_CIFS=1` skips only this supplement, never mandatory smbclient/go-smb2 data checks; CI/nightly do not set it. `KEEP_SMOKE_ARTIFACTS=1` retains logs/fixtures while all owned containers, networks, and images are still cleaned up.
 
 To test a runtime identity different from the host's:
 

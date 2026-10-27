@@ -36,6 +36,8 @@ Examples: `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483
 
 | Section | Common keys | Notes |
 | --- | --- | --- |
+| `[filesystem]` | `mode` | `fuse` (default, HTTP-only without mounts) or `smb` (in-process read-only shares); mutually exclusive |
+| `[smb]` | `listen_addr`, `share_name`, `strm_enabled` | Native defaults: `127.0.0.1:1445`, `torrentfs`, `false`; image listener: `0.0.0.0:1445` |
 | `[http]` | `listen_addr`, `max_upload_size` | HTTP/UI listener; default `127.0.0.1:8080`, upload default `10MiB` |
 | `[http.auth]` | `enabled`, `username`, `password_hash`, `password_hash_file`, `token_ttl` | Single-user bcrypt authentication and in-memory Bearer tokens |
 | `[strm]` | `base_url` | Player-reachable HTTP(S) base URL; empty by default disables streaming, non-empty requires HTTP |
@@ -48,11 +50,29 @@ Examples: `32MB = 32000000` bytes, `8GB = 8000000000` bytes, and `2GiB = 2147483
 
 Native defaults use peer port `0`, both address families enabled, and automatic port forwarding disabled (`no_port_forwarding = true`). The Docker TOML instead fixes the peer port at `6881` and disables IPv6. Do not infer one set of defaults from the other.
 
+## Filesystem mode and SMB
+
+`[filesystem] mode = "fuse"` is the built-in default: without mountpoint flags it stays HTTP-only. Select `"smb"` for read-only SMB in the single Go process, without FUSE or Samba. SMB rejects `-mountpoint` / `-strm-mountpoint`. HTTP may be disabled, leaving access to already registered tasks.
+
+```toml
+[filesystem]
+mode = "smb"
+
+[smb]
+listen_addr = "127.0.0.1:1445"
+share_name = "torrentfs"
+strm_enabled = false
+```
+
+Native SMB defaults to loopback; the image TOML uses `0.0.0.0:1445`. Publish host `445:1445` for standard clients. The original share is `share_name`; `smb.strm_enabled` adds `<share_name>-strm` and requires non-empty `strm.base_url` plus HTTP. Both shares use the same authentication and are read-only; `/torrents` and `.metadata` are not exported.
+
+SMB requires the non-empty runtime environment pair `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`; SMB passwords are not stored in TOML. The username need not exist as a Unix account or match `PUID:PGID`. Authentication uses NTLMv2 with `WORKGROUP` or the client's default domain; anonymous and incorrect credentials are rejected. Restrict SMB to a trusted LAN with firewall rules; never expose it directly to the public Internet.
+
 ## HTTP authentication and network boundary
 
 An empty `http.listen_addr` disables HTTP and the Web UI. A non-empty listener must be a valid `host:port`; a non-loopback address requires complete authentication. HTTP has no TLS and should be placed behind a trusted TLS reverse proxy when exposed beyond the local machine.
 
-Web/HTTP login verifies only the password; the configured username remains the account identifier and is also used for SMB login. A TOML configuration still sets that username and uses exactly one bcrypt password source, never a plaintext password:
+Web/HTTP login verifies only the password; its configured username is an account identifier, while SMB independently uses the runtime environment username. A TOML configuration still sets that username and uses exactly one bcrypt password source, never a plaintext password:
 
 ```toml
 [http]
@@ -72,9 +92,9 @@ The special `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` pair is an alternative w
 
 - Both variables must be present together and non-empty.
 - The password must be at most 72 UTF-8 bytes; it is not truncated.
-- Startup generates a cost-10 bcrypt hash and atomically overrides the TOML username and hash source; the resulting configuration does not retain the plaintext password.
-- When HTTP authentication is disabled, the Go configuration layer ignores the pair so SMB-only deployments can use it.
-- SMB adds a runtime Unix-account requirement; see the [deployment guide](deployment.en.md).
+- Startup generates a cost-10 bcrypt hash and atomically overrides the TOML username and hash source. HTTP auth retains no plaintext password; SMB only uses the environment pair at runtime.
+- When HTTP authentication is disabled, the HTTP auth layer ignores the pair; SMB mode still requires it.
+- SMB credentials are independent of Unix account names; see the [deployment guide](deployment.en.md).
 
 Environment credentials can appear in process environments and Docker metadata. They are plaintext deployment configuration, not a secret store. Token and header semantics are documented in the [API reference](api.en.md).
 
@@ -94,7 +114,7 @@ base_url = "https://media.example/torrentfs/"
 - The example produces external `/torrentfs/stream/...` links. The proxy must strip `/torrentfs` and forward `/stream/...`, preserving segment escaping rather than decoding again or cleaning filenames.
 - The address must be reachable **from the player**; it is not inferred from a container address, request Host, or login token. Do not use container-local `localhost` for remote playback. Use HTTPS outside a trusted LAN.
 
-`TORRENTFS_STRM_BASE_URL` overrides this field, including an explicit empty value to disable streaming. Changing it requires restart; players may cache old URLs and need a rescan or reopen rather than a guaranteed hot update. Native `-strm-mountpoint` and entrypoint-only Docker `TORRENTFS_STRM_ENABLED` control the second mount/share; neither replaces `base_url`. The Docker switch also requires SMB. See the [deployment guide](deployment.en.md) for combinations and examples.
+`TORRENTFS_STRM_BASE_URL` overrides this field, including an explicit empty value to disable streaming. Changing it requires restart; players may cache old URLs and need a rescan or reopen rather than a guaranteed hot update. FUSE `-strm-mountpoint` and SMB `TORRENTFS_SMB_STRM_ENABLED` / `smb.strm_enabled` control the respective second mount/share; neither replaces `base_url`. See the [deployment guide](deployment.en.md) for combinations and examples.
 
 Bearer authentication for `/api/` is unchanged. `/stream/...` uses a separate file-scoped HMAC signature, without a player login or Bearer header. Enabling streaming first creates a 32-byte, mode-`0600` `.metadata/stream_key` and reuses it on restart; it is not a login token. Protect signed links and reverse-proxy logs. Key validation and rotation boundaries are in the [usage guide](usage.en.md).
 
@@ -104,6 +124,10 @@ Ordinary field bindings are explicit:
 
 | Environment variable | TOML key | Format |
 | --- | --- | --- |
+| `TORRENTFS_FILESYSTEM_MODE` | `filesystem.mode` | `fuse` or `smb` |
+| `TORRENTFS_SMB_LISTEN_ADDR` | `smb.listen_addr` | `host:port`, native default `127.0.0.1:1445` |
+| `TORRENTFS_SMB_SHARE_NAME` | `smb.share_name` | Share name, default `torrentfs` |
+| `TORRENTFS_SMB_STRM_ENABLED` | `smb.strm_enabled` | Go boolean, default `false` |
 | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | `connections.listen_host` | String |
 | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | `connections.listen_port` | Decimal integer |
 | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | `connections.disable_ipv4` | Go boolean |
@@ -126,7 +150,7 @@ Ordinary field bindings are explicit:
 | `TORRENTFS_LOG_FORMAT` | `log.format` | `text` or `json` |
 | `TORRENTFS_LOG_ADD_SOURCE` | `log.add_source` | Go boolean |
 
-`TORRENTFS_USERNAME` and `TORRENTFS_PASSWORD` are the special shared credential pair, not automatic bindings for arbitrary TOML keys. `TORRENTFS_SMB_ENABLED`, `TORRENTFS_STRM_ENABLED`, `PUID`, and `PGID` are handled by the Docker entrypoint, not the Go configuration loader. `TORRENTFS_STRM_ENABLED` defaults to `false`, accepts only `true`, `false`, `1`, or `0`, and requires SMB plus a non-empty `strm.base_url` when enabled.
+`TORRENTFS_USERNAME` and `TORRENTFS_PASSWORD` are the special shared runtime credential pair, not automatic TOML bindings. Only `PUID` and `PGID` are entrypoint-only. `TORRENTFS_SMB_ENABLED` is a deprecated `filesystem.mode` alias (`true` / `1` → `smb`, `false` / `0` → `fuse`); `TORRENTFS_STRM_ENABLED` is a deprecated `smb.strm_enabled` alias. The Go loader reads them for native and Docker runs alike. Canonical environment variables win over the corresponding alias; all environment overrides win over TOML. Booleans use Go boolean rules. Migrate new deployments to the canonical names.
 
 An existing ordinary string variable may be empty to clear a field. Empty numeric, boolean, or duration variables produce an error. For example:
 
@@ -142,7 +166,7 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 - Peer ports must be in `0..65535`; `0` selects an available port. Incoming peers require a fixed port published for both TCP and UDP.
 - IPv4 and IPv6 cannot both be disabled. Bootstrap entries need a host and a port in `1..65535`.
 - Cache capacity must be positive and within the watermark arithmetic safety limit. It is a cap, not a reservation. A torrent with a piece larger than the cache capacity is rejected.
-- Leave memory for protocol buffers, staging, the rest of the daemon, and Samba when sizing a container; cache capacity is not the process RSS limit.
+- Leave memory for SMB/HTTP protocol buffers, staging, and the rest of the daemon when sizing a container; cache capacity is not the process RSS limit.
 - A proxy may be empty or use `socks5://` / `socks5h://` with a valid host; any explicit port must be in `1..65535`. Validation errors redact proxy credentials.
 - `identity.peer_id_prefix` is at most 20 bytes, and the tracker User-Agent cannot contain CR/LF.
 - `http.max_upload_size` must be positive and caps both `.torrent` and subtitle uploads.

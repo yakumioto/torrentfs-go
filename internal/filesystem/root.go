@@ -53,8 +53,11 @@ func (n *rootNode) categoryEntries() []rootEntry {
 // category directories, plus managed subtitles of unclassified single-file
 // torrents. A multi-file torrent's subtitles live inside its directory.
 func (n *rootNode) visibleChildren() []rootEntry {
-	torrents := n.children()
-	entries := append(torrents, n.categoryEntries()...)
+	return visibleEntries(n.children(), n.categoryEntries())
+}
+
+func visibleEntries(torrents, categories []rootEntry) []rootEntry {
+	entries := append(torrents, categories...)
 	used := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		used[entry.Name] = true

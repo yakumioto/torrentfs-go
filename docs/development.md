@@ -32,7 +32,8 @@ Vite 默认监听 `127.0.0.1:5173`，将 `/api` 代理到 `http://127.0.0.1:8080
 cmd/torrentfs                  CLI、配置、进程生命周期、优雅退出
         │
         ├── internal/session      torrent 生命周期、metainfo、网络、cache、签名读取
-        ├── internal/filesystem   原始只读 FUSE 树与 STRM Backend 投影
+        ├── internal/filesystem   共享虚拟命名空间、只读 FUSE 树与 STRM 投影
+        ├── internal/smb          只读 VFS 适配与显式 NTLMv2 服务配置
         ├── internal/media        共享视频/ISO 判定与显式 MIME
         ├── internal/stream       HMAC 签名、URL/路径规则、可取消 Reader 契约
         ├── internal/api          管理认证、status 与独立签名 HTTP 流
@@ -46,7 +47,7 @@ cmd/torrentfs                  CLI、配置、进程生命周期、优雅退出
 - HTTP 默认 loopback，非 loopback 强制认证；服务不终止 TLS。
 - API status 包含 piece、文件范围和 network/DHT 诊断；当前 UI 展示文件/piece 缓存视图，不提供 peer/DHT 面板。
 
-完整磁盘布局与恢复规则见[使用指南](usage.md)。启动先校验参数和配置，再创建 logger、恢复 session、按需启动 HTTP/FUSE。根目录手工放入的任意 `.torrent` 不会创建任务或进入 FUSE，也不会阻止 API 删除。
+完整磁盘布局与恢复规则见[使用指南](usage.md)。启动先校验参数和配置，再创建 logger、恢复 session、按需启动 HTTP 与所选 FUSE/SMB。根目录手工放入的任意 `.torrent` 不会创建任务或进入 FUSE，也不会阻止 API 删除。
 
 ## 一致性与存储保证
 
@@ -100,7 +101,7 @@ Session 仅在启用流时、获得实例锁后且创建 client 等资源前初�
 
 ### 关闭与静态服务
 
-正常关闭先取消 HTTP 流的 context，再给 HTTP Shutdown 最多 5 秒；超时以 HTTP Close 解除阻塞网络写。随后关闭 Session，取消并排空未完成读取，最后并行卸载两个 FUSE 挂载，整个 unmount 阶段共用 30 秒 deadline。强制 Close 不代表已等待所有 handler 返回，不能据此宣称所有 goroutine 都已结束。容器 SMB supervisor 先停 Samba 再停 torrentfs，核心进程异常退出或任一 mount 消失会联动停止，详见[部署指南](deployment.md)。
+正常关闭先取消 HTTP 流的 context，再给 HTTP Shutdown 最多 5 秒；超时以 HTTP Close 解除阻塞网络写。随后取消并排空 SMB 的连接和读取，再关闭 Session，最后卸载存在的 FUSE 挂载，整个 unmount 阶段共用 30 秒 deadline。强制 HTTP Close 不代表已等待所有 HTTP handler 返回，不能据此宣称所有 goroutine 都已结束。容器由 tini 直接管理单个 torrentfs，不再启动 Samba 或 shell supervisor，详见[部署指南](deployment.md)。
 
 静态服务仅接受 `GET`/`HEAD`；根路径和无扩展名前端 deep link 回退到 `index.html`，带扩展名的未知 asset 返回 `404`。`index.html` 使用 `no-cache`，构建 assets 使用长期 immutable 缓存。
 
@@ -162,7 +163,7 @@ bash -n scripts/docker-smb-smoke.sh
 
 HTTP smoke 需要 Docker、`curl` 和 `python3`，不需要 FUSE；检查静态 root/deep link、缺失 asset、认证 `401`、`WWW-Authenticate`、登录、列表、登出，不向远端 registry 发布内容。
 
-Docker config smoke 还需要 `awk`、`timeout`；验证内置 TOML、默认 CMD、环境覆盖、外部只读 TOML，以及 SMB 缺凭据、非法用户名或 UID 不匹配时在 listener 启动前失败。还检查 STRM 布尔值、缺少 SMB/基址/HTTP 的非法组合，以及 SMB 模式下自定义任一挂载参数被提前拒绝。数据目录仍必须可写。
+Docker config smoke 还需要 `awk`、`timeout`；验证内置 TOML、默认 CMD、环境覆盖、外部只读 TOML、HTTP bcrypt 凭据覆盖、PUID/PGID 与目录权限。SMB 检查缺失/非法凭据、canonical 环境变量优先于 deprecated alias、环境优先于 TOML、非 Unix 登录名、STRM 布尔值与基址/HTTP 校验，以及 SMB 下拒绝任一挂载参数；断言无 FUSE/Samba、单 Go 进程和 SIGTERM 退出 `0`。
 
 ### FUSE-required
 
@@ -188,11 +189,11 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 ./scripts/docker-smb-smoke.sh
 ```
 
-需要 Linux Docker daemon、`/dev/fuse`、`SYS_ADMIN`、`CAP_NET_BIND_SERVICE`、允许 FUSE 的安全策略，以及 `python3`、`sha256sum`、`dd`、`timeout`。脚本构建应用和独立 client 镜像，在隔离 Docker network 中检查认证、错误密码和 guest 拒绝、目录列举、读取哈希、只读拒写、`.metadata` 不可见、HTTP/SMB 共享凭据、日志不泄密、SIGTERM 顺序，以及核心进程异常退出的联动和退出码。client 操作用同一个有界 `CLIENT_TIMEOUT`，smbclient 本身也使用 `-t`；失败打印应用与 web seed 日志。
+需要 Linux Docker daemon、`python3`、`sha256sum`、`dd` 和 `timeout`，不需要宿主 `/dev/fuse` 或 smbclient。应用容器没有 FUSE 设备、额外 capability 或放宽安全选项，并显式移除 `NET_BIND_SERVICE`；独立 client 镜像安装 smbclient 和 pinned go-smb2。必需验证包含自建 ranged webseed、`64MiB+123` 数据大于 `8MiB` cache 的全量哈希、大偏移 ReadAt/Seek/EOF、同连接 16 个缺来源读取并发、NTLMv2 domain/默认 domain、错误密码/guest 拒绝、目录列举、`.metadata` 隐藏、HTTP 认证和完整只读拒写（创建、writable open、append、truncate、write、mkdir、rename、delete、set-time）。这些协议/数据检查不可跳过。还断言无 smbd/无 FUSE mount、runtime UID/GID、tini 直接托管单 Go 进程、SIGTERM 退出 `0` 与 SIGKILL 退出 `137`。
 
-STRM 场景还验证默认只导出原共享、启用后双只读共享/双挂载、先列多文件种子的顶层与深层目录再经认证 API 上传字幕，并在两个共享重新列举、查询元数据和下载比对内容，覆盖等长及变长替换；还检查读取 `.strm` 不拉取视频、HTTP HEAD 不读 payload、Range `206` 字节哈希、篡改签名 `403`、双卸载和任一挂载丢失的联动。就绪检查使用完整日志行区分 `/share` 与 `/share-strm`；这是自动化协议验证，不代替 Infuse 实机验收。
+STRM 场景保留原共享和第二只读共享、先访问多文件种子的顶层与深层目录再经认证 API 上传字幕，在两个共享重新列举、查询元数据、下载比对等长与变长替换；还检查 `.strm` 和 HTTP HEAD 不拉取视频、Range `206` 字节哈希、篡改签名 `403`、凭据不泄密与双共享关闭。它不代替 Infuse 实机验收。
 
-脚本还尝试 client 容器内 `mount.cifs`，以非零大偏移 `dd iflag=skip_bytes,count_bytes` 读取大于 cache 的区间并与源切片比较，验证随机 seek。宿主不具备 CIFS 能力时，明确打印 `host cannot mount CIFS` 并继续，由 required FUSE 测试（包括 `>4GiB` 虚拟文件大偏移）提供随机读取验证；挂载成功但数据错误则直接失败。显式跳过用 `TORRENTFS_SMB_SKIP_CIFS=1`，CI/nightly 不设置该变量，在有能力的 runner 上执行完整比较。
+内核 CIFS 仅是补充客户端：脚本尝试独立 client 容器 `mount.cifs` 后的大偏移与并发读取，应用权限不变。宿主无 CIFS/嵌套挂载能力时标记补充项未测；挂载成功但数据错误直接失败。`TORRENTFS_SMB_SKIP_CIFS=1` 仅跳过此补充项，不能跳过 smbclient/go-smb2 必需检查；CI/nightly 不设置它。`KEEP_SMOKE_ARTIFACTS=1` 保留失败日志与 fixture，所有运行容器、网络和镜像仍会清理。
 
 默认宿主/容器 UID 相同时容易掩盖 metadata 权限和清理问题；可指定不同运行身份：
 

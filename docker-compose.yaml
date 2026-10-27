@@ -1,4 +1,4 @@
-# Requires Linux rootful Docker, /dev/fuse, and a host policy that permits FUSE.
+# Requires Docker; SMB runs in-process without FUSE or extra capabilities.
 # Save as docker-compose.yaml; edit it and run these commands in its directory.
 # Choose an existing image tag from the project's GitHub Packages, set the required
 # password, and adjust PUID/PGID, the data directory and ports before starting.
@@ -11,22 +11,19 @@
 # Bare port mappings listen on all host interfaces. Use HTTP/SMB only on trusted
 # networks with firewall protection. On hosts with public interfaces, explicitly
 # bind HTTP/SMB to a trusted LAN IP, e.g. "192.168.1.10:8080:8080/tcp" and
-# "192.168.1.10:445:445/tcp" instead of the bare mappings below.
+# "192.168.1.10:445:1445/tcp" instead of the bare mappings below.
+# Migration: replace old 445:445 mappings with 445:1445 and remove FUSE devices,
+# added capabilities and apparmor=unconfined from SMB deployments.
+# Explicit filesystem.mode=fuse with mountpoint flags is a separate mode: only
+# actual FUSE mounts need /dev/fuse, SYS_ADMIN and a host policy permitting FUSE.
 
 services:
   torrentfs:
     image: ghcr.io/yakumioto/torrentfs-go:REPLACE_WITH_PUBLISHED_TAG
     restart: unless-stopped
     stop_grace_period: 60s
-    devices:
-      - /dev/fuse:/dev/fuse
-    cap_add:
-      - SYS_ADMIN
-      - NET_BIND_SERVICE
-    security_opt:
-      - apparmor=unconfined
     ports:
-      - "445:445/tcp"
+      - "445:1445/tcp"
       - "8080:8080/tcp"
       # Keep BT TCP/UDP mappings and TORRENTFS_CONNECTIONS_LISTEN_PORT in sync.
       - "6881:6881/tcp"
@@ -40,15 +37,18 @@ services:
     environment:
       PUID: "1000"
       PGID: "1000"
-      TORRENTFS_SMB_ENABLED: "true"
+      TORRENTFS_FILESYSTEM_MODE: "smb"
+      TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
+      TORRENTFS_SMB_SHARE_NAME: "torrentfs"
       # Optional second read-only SMB share (torrentfs-strm); disabled by default.
       # Use a player-reachable LAN address/domain, not container-local localhost.
-      # TORRENTFS_STRM_ENABLED: "true"
+      # TORRENTFS_SMB_STRM_ENABLED: "true"
       # TORRENTFS_STRM_BASE_URL: "http://192.168.1.10:8080"
       TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
       TORRENTFS_HTTP_AUTH_ENABLED: "true"
-      TORRENTFS_USERNAME: "torrentfs"
-      # REQUIRED: a strong, single-line shared HTTP/SMB password; write literal $ as $$.
+      # SMB login is independent of the container's Unix account and PUID/PGID.
+      TORRENTFS_USERNAME: "media"
+      # REQUIRED: a strong shared HTTP/SMB password; write literal $ as $$.
       # Do not commit or share this file after filling in real credentials.
       TORRENTFS_PASSWORD: ""
       TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"

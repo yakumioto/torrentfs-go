@@ -1,4 +1,4 @@
-// Command torrentfs mounts BitTorrent downloads as a FUSE filesystem.
+// Command torrentfs exposes read-only BitTorrent files over FUSE or SMB.
 package main
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,10 +23,11 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
+	"github.com/yakumioto/torrentfs-go/internal/smb"
 )
 
-const usageText = `torrentfs mounts BitTorrent downloads as a read-only FUSE filesystem and
-serves a torrent management HTTP API.
+const usageText = `torrentfs exposes BitTorrent downloads as a read-only FUSE filesystem or SMB
+server and serves an optional torrent management HTTP API.
 
 Usage:
   torrentfs [-mountpoint <dir>] [-strm-mountpoint <dir>] [flags] <torrents-dir>
@@ -60,8 +62,13 @@ the original-file view. Its mountpoint and -mountpoint must not be the same or
 nested, including symbolic-link aliases.
 
 When http.listen_addr is set the management API is served; an enabled
-http.auth configuration is required for non-loopback listeners. Omitting both
-mountpoint flags then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
+http.auth configuration is required for non-loopback listeners. In the default
+FUSE mode, omitting both mountpoint flags then runs headless (HTTP only).
+Set filesystem.mode="smb" (or TORRENTFS_FILESYSTEM_MODE=smb) for an in-process
+SMB server without FUSE. SMB mode rejects mountpoint flags and requires the
+TORRENTFS_USERNAME and TORRENTFS_PASSWORD environment variables. The default
+SMB address is 127.0.0.1:1445 and the share is torrentfs; HTTP may be disabled.
+Send SIGINT or SIGTERM to shut down.
 `
 
 func main() {
@@ -103,13 +110,18 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
+	smbEnabled := cfg.Filesystem.Mode == "smb"
+	if smbEnabled && (*mountpoint != "" || *strmMountpoint != "") {
+		_, _ = fmt.Fprintln(stderr, "torrentfs: SMB mode does not accept -mountpoint or -strm-mountpoint")
+		return 2
+	}
 	*mountpoint, *strmMountpoint, err = validateMountpoints(*mountpoint, *strmMountpoint, cfg.STRM.BaseURL)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if *mountpoint == "" && *strmMountpoint == "" && !httpEnabled {
+	if !smbEnabled && *mountpoint == "" && *strmMountpoint == "" && !httpEnabled {
 		flags.Usage()
 		return 2
 	}
@@ -127,6 +139,11 @@ func run(args []string, stderr io.Writer) int {
 	if logFormat == "" {
 		logFormat = "text"
 	}
+	for _, alias := range []struct{ old, canonical string }{{"TORRENTFS_SMB_ENABLED", "TORRENTFS_FILESYSTEM_MODE"}, {"TORRENTFS_STRM_ENABLED", "TORRENTFS_SMB_STRM_ENABLED"}} {
+		if _, set := os.LookupEnv(alias.old); set {
+			logger.Warn("deprecated environment variable", "name", alias.old, "replacement", alias.canonical)
+		}
+	}
 	logger.Info("torrentfs starting",
 		"version", "dev",
 		"torrents_dir", torrentsDir,
@@ -134,6 +151,7 @@ func run(args []string, stderr io.Writer) int {
 		"mountpoint", *mountpoint,
 		"strm_mountpoint", *strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
+		"filesystem_mode", cfg.Filesystem.Mode,
 		"listen_port", cfg.Connections.ListenPort,
 		"mount_uid", os.Getuid(),
 		"mount_gid", os.Getgid(),
@@ -172,7 +190,21 @@ func run(args []string, stderr io.Writer) int {
 		sequence.api = apiServer
 	}
 
-	requests := []mountRequest{{mountpoint: *mountpoint, backend: sess}}
+	var smbServeErr <-chan error
+	if smbEnabled {
+		running, err := startSMB(rootCtx, cfg, sess, logger)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize SMB: %v\n", err)
+			sequence.run()
+			return 1
+		}
+		sequence.smb = running
+		smbServeErr = running.errors
+	}
+	requests := []mountRequest{}
+	if !smbEnabled {
+		requests = append(requests, mountRequest{mountpoint: *mountpoint, backend: sess})
+	}
 	if *strmMountpoint != "" {
 		requests = append(requests, mountRequest{
 			mountpoint: *strmMountpoint,
@@ -201,7 +233,16 @@ func run(args []string, stderr io.Writer) int {
 	var serveFailure error
 	select {
 	case <-signals:
-	case serveFailure = <-serveErr:
+	case err := <-serveErr:
+		if err == nil {
+			err = errors.New("HTTP service stopped unexpectedly")
+		}
+		serveFailure = fmt.Errorf("http server: %w", err)
+	case err := <-smbServeErr:
+		if err == nil {
+			err = errors.New("SMB service stopped unexpectedly")
+		}
+		serveFailure = fmt.Errorf("smb server: %w", err)
 	}
 
 	shutdown := sequence.run()
@@ -214,15 +255,57 @@ func run(args []string, stderr io.Writer) int {
 		serveFailure = shutdown.api
 	}
 	if serveFailure != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: http server: %v\n", serveFailure)
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", serveFailure)
 	}
 	if shutdown.close != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", shutdown.close)
 	}
-	if shutdown.unmount != nil || serveFailure != nil || shutdown.close != nil {
+	if shutdown.smb != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: smb shutdown: %v\n", shutdown.smb)
+	}
+	if shutdown.unmount != nil || serveFailure != nil || shutdown.close != nil || shutdown.smb != nil {
 		return 1
 	}
 	return 0
+}
+
+type runningSMB struct {
+	server   interface{ Shutdown() error }
+	cancel   context.CancelFunc
+	done     chan struct{}
+	errors   <-chan error
+	serveErr error
+}
+
+func startSMB(ctx context.Context, cfg config.Config, source filesystem.StreamURLBackend, logger *slog.Logger) (*runningSMB, error) {
+	server, err := smb.New(cfg, source, logger)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp", cfg.SMB.ListenAddr)
+	if err != nil {
+		return nil, err
+	}
+	serveCtx, cancel := context.WithCancel(ctx)
+	failures := make(chan error, 1)
+	running := &runningSMB{server: server, cancel: cancel, done: make(chan struct{}), errors: failures}
+	go func() {
+		defer close(running.done)
+		err := server.Serve(serveCtx, listener)
+		if serveCtx.Err() != nil && errors.Is(err, net.ErrClosed) {
+			err = nil
+		}
+		running.serveErr = err
+		failures <- err
+	}()
+	return running, nil
+}
+
+func (s *runningSMB) Shutdown() error {
+	s.cancel()
+	err := s.server.Shutdown()
+	<-s.done
+	return errors.Join(err, s.serveErr)
 }
 
 // httpShutdowner is the narrow API surface the shutdown sequence stops.
@@ -286,12 +369,13 @@ const defaultUnmountTimeout = 30 * time.Second
 var errUnmountTimeout = errors.New("unmount did not complete")
 
 // shutdownSequence stops a running torrentfs instance. The order is fixed and
-// observable: stop the HTTP API, close the session, and only then unmount the
+// observable: stop HTTP, drain SMB, close the session, and only then unmount the
 // FUSE servers. Closing the session first cancels and drains outstanding reads,
 // so Unmount does not block on FUSE requests still waiting for data.
 type shutdownSequence struct {
 	logger *slog.Logger
 	api    httpShutdowner
+	smb    interface{ Shutdown() error }
 	sess   sessionCloser
 	mounts []mountedFilesystem
 
@@ -303,6 +387,7 @@ type shutdownSequence struct {
 // shutdownResult carries one error per stage so each can be reported
 // separately; a failed stage never skips the stages after it.
 type shutdownResult struct {
+	smb     error
 	api     error
 	close   error
 	unmount error
@@ -318,6 +403,9 @@ func (s shutdownSequence) run() shutdownResult {
 	if s.api != nil {
 		result.api = s.api.Shutdown(context.Background())
 	}
+	if s.smb != nil {
+		result.smb = s.smb.Shutdown()
+	}
 	if s.sess != nil {
 		result.close = s.sess.Close(context.Background())
 	}
@@ -328,6 +416,10 @@ func (s shutdownSequence) run() shutdownResult {
 	if result.api != nil {
 		failedStages = append(failedStages, "http-api")
 		failures = append(failures, fmt.Errorf("http api: %w", result.api))
+	}
+	if result.smb != nil {
+		failedStages = append(failedStages, "smb")
+		failures = append(failures, fmt.Errorf("smb: %w", result.smb))
 	}
 	if result.close != nil {
 		failedStages = append(failedStages, "session")

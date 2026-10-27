@@ -8,7 +8,7 @@
 
 - 原生构建需要 Go 1.27 或更高版本、`web/.nvmrc` 指定的 Node.js（当前为 22.23.2）和 npm。
 - 使用 FUSE 需要 Linux FUSE3、`/dev/fuse` 和挂载权限；仅运行 HTTP API/Web UI 不需要 FUSE 设备。
-- 容器内 FUSE/SMB 需要 Linux rootful Docker、`/dev/fuse`、`SYS_ADMIN`、`NET_BIND_SERVICE`，以及允许 FUSE 的宿主安全策略。
+- SMB 使用普通 Docker 网络与非特权容器端口，不需要 FUSE 设备、额外 capability 或 Samba；仅实际 FUSE 挂载需要相应设备、权限及安全策略。
 - 本文部分示例使用 Bash；API 命令见 [API 参考](api.md)，自动验证脚本及依赖见[开发指南](development.md)。
 
 ## 原生运行
@@ -67,9 +67,23 @@ TORRENTFS_HTTP_LISTEN_ADDR= \
 
 `go run ./cmd/torrentfs ...` 可以替代 `./torrentfs ...`，但同样必须先生成 `web/dist`。通过 UI/API 添加任务后，单文件 torrent 直接出现在挂载点下，多文件 torrent 保留目录树，见[使用指南](usage.md)。
 
+### 原生 SMB
+
+使用运行时凭据并选择 SMB，不能同时传 FUSE 挂载参数：
+
+```bash
+export TORRENTFS_USERNAME=media
+read -r -s -p 'SMB password: ' TORRENTFS_PASSWORD
+printf '\n'
+export TORRENTFS_PASSWORD
+TORRENTFS_FILESYSTEM_MODE=smb ./torrentfs "$PWD/torrents"
+```
+
+原生默认监听 `127.0.0.1:1445`；可用 `smbclient //127.0.0.1/torrentfs -p 1445 -U media -m SMB3` 访问。无须创建 Unix 用户、FUSE 设备或额外 capability。HTTP 保持默认 loopback listener；设置 `TORRENTFS_HTTP_LISTEN_ADDR=` 可仅提供已注册任务的 SMB 访问。SMB 只向可信 LAN 开放，并配置防火墙。
+
 ### 可选 STRM 挂载
 
-原生运行使用 `-strm-mountpoint`，可单独提供，也可与 `-mountpoint` 一起使用。先配置非空 `strm.base_url`，并保持 HTTP listener 启用；两个目录都必须事先存在，规范化路径和符号链接别名后不能相同或互相嵌套。
+FUSE 模式使用 `-strm-mountpoint`，可单独提供，也可与 `-mountpoint` 一起使用。先配置非空 `strm.base_url`，并保持 HTTP listener 启用；两个目录都必须事先存在，规范化路径和符号链接别名后不能相同或互相嵌套。
 
 ```sh
 mkdir -p "$PWD/mnt-strm"
@@ -96,14 +110,14 @@ torrentfs [-config <file>] [-mountpoint <dir>] [-strm-mountpoint <dir>] <torrent
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 收到 `SIGINT`/`SIGTERM` 后正常关闭 |
-| `1` | HTTP、session 或 FUSE unmount 的运行时错误 |
+| `1` | HTTP、SMB、session 或 FUSE unmount 的运行时错误 |
 | `2` | flag 用法、positional 参数、目录或配置校验错误 |
 
-按 `Ctrl-C` 或发送 `SIGTERM` 可停止服务。正常关闭先取消 HTTP 流读取，并最多等待 5 秒 HTTP drain；超时强制关闭连接以解除阻塞网络写。随后关闭 Session，取消并排空等待 piece 的读取，最后并行卸载原始与 STRM FUSE 挂载。整个卸载阶段共用 **30 秒** deadline，不是每个挂载各等 30 秒。强制关闭 HTTP 连接不代表已等待所有 handler 返回；其他 mount namespace 若仍持有传播副本，进程会输出诊断并以 `1` 退出，不会把未完成的 lazy unmount 当作成功。
+按 `Ctrl-C` 或发送 `SIGTERM` 可停止服务。正常关闭先取消 HTTP 流读取，并最多等待 5 秒 HTTP drain；超时强制关闭连接以解除阻塞网络写。随后取消并 drain SMB（若启用），再关闭 Session、排空等待 piece 的读取，最后并行卸载原始与 STRM FUSE 挂载（若存在）。整个卸载阶段共用 **30 秒** deadline，不是每个挂载各等 30 秒。强制关闭 HTTP 连接不代表已等待所有 handler 返回；其他 mount namespace 若仍持有传播副本，进程会输出诊断并以 `1` 退出，不会把未完成的 lazy unmount 当作成功。
 
 ## Docker 镜像与默认值
 
-Dockerfile 用 Node 22.23.2 构建 UI、Go 1.27 编译包含 UI 的 `CGO_ENABLED=0` 二进制，运行阶段是带 FUSE3、Samba、`tini`、CA certificates、`passwd` 和 `util-linux` 的 Debian bookworm-slim。
+Dockerfile 用 Node 22.23.2 构建 UI、Go 1.27 编译包含 UI 的 `CGO_ENABLED=0` 二进制，运行阶段是带 FUSE3（仅供显式 FUSE 模式）、`tini`、CA certificates、`passwd` 和 `util-linux` 的 Debian bookworm-slim，不安装 Samba。
 
 ```sh
 docker build -t torrentfs .
@@ -119,11 +133,11 @@ nightly workflow 的 GHCR tag 包含日期、提交和 run id，不保证浮动 
 /usr/local/bin/torrentfs -config /etc/torrentfs/torrentfs.toml /torrents
 ```
 
-镜像默认 HTTP 仍绑定容器内 `127.0.0.1:8080`，只加 `-p 8080:8080` 不会改变监听地址。镜像 peer 端口固定为 `6881`、IPv6 默认禁用、自动端口映射禁用、cache 为 `2GiB`、`allow_other` 关闭。环境变量可以覆盖镜像 TOML，见[配置参考](configuration.md)。
+镜像默认 `filesystem.mode=fuse`，无挂载参数时保持 HTTP-only；SMB 配置监听 `0.0.0.0:1445`，须显式选择 SMB 模式。HTTP 仍绑定容器内 `127.0.0.1:8080`，只加 `-p 8080:8080` 不会改变监听地址。镜像 peer 端口固定为 `6881`、IPv6 默认禁用、自动端口映射禁用、cache 为 `2GiB`、`allow_other` 关闭。环境变量可以覆盖镜像 TOML，见[配置参考](configuration.md)。
 
 ## 运行身份与持久化目录
 
-入口必须以 root 启动，用于账户和 runtime 初始化，之后以 `PUID:PGID` 运行 torrentfs 和 smbd。不要传 `docker run --user`，也不需要为每台主机重建镜像。
+入口必须以 root 启动，用于账户和 runtime 初始化，之后以 `PUID:PGID` exec 单一 torrentfs Go 进程。不要传 `docker run --user`，也不需要为每台主机重建镜像。
 
 | 变量 | 默认值 | 约束 |
 | --- | --- | --- |
@@ -138,52 +152,54 @@ nightly workflow 的 GHCR tag 包含日期、提交和 run id，不保证浮动 
 
 可以通过 `/proc/<torrentfs-pid>/status` 检查实际服务身份；`docker exec torrentfs id` 默认看到 root shell，不代表 daemon 身份。
 
-## 容器内 SMB 只读共享
+## 进程内 SMB 只读共享
 
-推荐用同一个容器运行 HTTP 管理、FUSE 和 SMB，完整启动命令见 [README](../README.md#快速开始)。FUSE 与 Samba 留在同一个 mount namespace 内，不需要宿主 `/mnt`、`rshared` 或跨容器 mount propagation。
+推荐用一个 Go 进程提供 HTTP 管理和 SMB，完整启动命令见 [README](../README.md#快速开始)。SMB 不使用 FUSE 或 Samba，不需要 `/dev/fuse`、`SYS_ADMIN`、`NET_BIND_SERVICE`、放宽 AppArmor、宿主 `/mnt` 或挂载传播。入口完成身份与目录校验后直接 exec torrentfs，由 daemon 负责监听和关闭。
 
-| 变量 | 说明 |
+| 变量 / TOML | 说明 |
 | --- | --- |
-| `TORRENTFS_SMB_ENABLED` | 默认 `false`；支持 `true`、`false`、`1`、`0`，其他值会被拒绝 |
-| `TORRENTFS_USERNAME` | SMB 必填；必须是镜像内解析到实际 runtime UID 的 Unix 账户，推荐固定名称 `torrentfs` |
-| `TORRENTFS_PASSWORD` | SMB 必填；非空单行密码，不能包含 CR/LF |
+| `TORRENTFS_FILESYSTEM_MODE` / `filesystem.mode` | `fuse`（默认，未传挂载参数时 HTTP-only）或 `smb`；二者互斥 |
+| `TORRENTFS_SMB_LISTEN_ADDR` / `smb.listen_addr` | 原生默认 `127.0.0.1:1445`；镜像默认 `0.0.0.0:1445` |
+| `TORRENTFS_SMB_SHARE_NAME` / `smb.share_name` | 默认 `torrentfs`；用于客户端共享路径 |
+| `TORRENTFS_SMB_STRM_ENABLED` / `smb.strm_enabled` | 默认 `false`；附加 `<share_name>-strm` 只读共享 |
+| `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` | SMB 必填、成对非空的运行时凭据，不保存到 TOML；用户名无需对应 Unix 账户或 runtime UID |
 
-SMB 模式管理固定的 `/share` 和可选 `/share-strm`，禁止自行传入 `-mountpoint` 或 `-strm-mountpoint`，也不要在这些内部路径覆盖 bind mount。入口确认所需挂载的 fstype 均为 `fuse.*` 后才启动 Samba，只监听 TCP 445，不启动 `nmbd`，不发布 137/138/139。
+SMB 模式拒绝 `-mountpoint` 和 `-strm-mountpoint`，没有内部 `/share` 挂载需要维护。共享始终只读、禁止 guest，创建、写入、删除、重命名和修改元数据均被拒绝；`/torrents` 与 `.metadata` 不会导出。认证使用 NTLMv2，domain 可用 `WORKGROUP` 或客户端默认值。
 
-share 名固定为 `torrentfs`，配置始终只读、禁止 guest。`/torrents` 和 `.metadata` 不会被共享。Samba 将请求映射到 torrentfs 的相同运行身份，因此不依赖 `allow_other`；显式启用该选项会扩大访问面。
+### 从旧容器迁移
+
+将端口 `445:445` 改为 **`445:1445`**，并移除 FUSE device、`SYS_ADMIN` / `NET_BIND_SERVICE` 的 `cap_add` 和 `apparmor=unconfined`。设置 `TORRENTFS_FILESYSTEM_MODE=smb`，保留原数据目录、运行身份和凭据；不再需要 Samba 配置、passdb 或 Unix SMB 登录账户。
+
+`TORRENTFS_SMB_ENABLED=true/false` 是已弃用的 `filesystem.mode=smb/fuse` 别名；`TORRENTFS_STRM_ENABLED` 是已弃用的 `smb.strm_enabled` 别名。二进制与容器都识别它们，canonical 环境变量优先于 alias，环境变量优先于 TOML；启动会提示弃用。新部署应使用上表的 canonical 名称。
 
 ### 可选 STRM 第二共享
 
-默认只导出原始 `torrentfs`。启用后仍保留 `/share` → `torrentfs`，入口自动追加第二挂载 `/share-strm` → `torrentfs-strm`，认证、只读权限和运行身份与原共享一致，不需要宿主挂载传播。
+默认只导出原始 `torrentfs`。启用 `smb.strm_enabled` 后附加 `torrentfs-strm`；若自定义 `share_name`，附加名称为 `<share_name>-strm`。两者共享认证且只读，不增加 FUSE 挂载。
 
-| 开关 | 职责 |
-| --- | --- |
-| `TORRENTFS_STRM_ENABLED` | Docker 入口专用，默认 `false`；只接受 `true`、`false`、`1`、`0`，启用要求 `TORRENTFS_SMB_ENABLED=true` 或 `1` |
-| `TORRENTFS_STRM_BASE_URL` / `[strm] base_url` | daemon 的直链基址和 HTTP 流开关；必须非空且 HTTP listener 启用，不能用入口开关替代 |
-
-可在 [Compose 模板](../docker-compose.yaml) 的现有服务中合并下面片段。`192.0.2.10` 仅作示例，替换为播放器可达的实际 LAN 地址；替换 loopback 端口绑定，但保留设备、capability、数据挂载、运行身份、共享凭据及需要的 peer TCP/UDP 端口映射：
+`TORRENTFS_SMB_STRM_ENABLED=true` 还要求非空 `TORRENTFS_STRM_BASE_URL` / `[strm] base_url` 和 HTTP listener。可在 [Compose 模板](../docker-compose.yaml) 中合并以下片段，保留数据挂载、运行身份、共享凭据和需要的 BT TCP/UDP 映射。`192.0.2.10` 应替换为播放器实际可达的可信 LAN 地址，并设置防火墙：
 
 ```yaml
 ports:
   - "192.0.2.10:8080:8080"
-  - "192.0.2.10:445:445"
+  - "192.0.2.10:445:1445"
 environment:
   TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
   TORRENTFS_HTTP_AUTH_ENABLED: "true"
-  TORRENTFS_SMB_ENABLED: "true"
-  TORRENTFS_STRM_ENABLED: "true"
+  TORRENTFS_FILESYSTEM_MODE: "smb"
+  TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
+  TORRENTFS_SMB_STRM_ENABLED: "true"
   TORRENTFS_STRM_BASE_URL: "http://192.0.2.10:8080"
 ```
 
-`docker run` 则在原 Docker + SMB 命令的镜像名前添加 `--env TORRENTFS_STRM_ENABLED=true` 和 `--env TORRENTFS_STRM_BASE_URL=http://192.0.2.10:8080`，并相应替换端口绑定。不要覆盖原有用户名/密码环境项；新共享不使用额外凭据，也不要求播放器为 HTTP 播放添加管理 Bearer token。
+`docker run` 则在原命令镜像名前追加 `--env TORRENTFS_SMB_STRM_ENABLED=true --env TORRENTFS_STRM_BASE_URL=http://192.0.2.10:8080`，并替换端口绑定。新共享不需要额外凭据，HTTP 播放不需要管理 Bearer token。
 
-将客户端媒体库指向 `smb://192.0.2.10/torrentfs-strm`，原共享仍为 `smb://192.0.2.10/torrentfs`。基址不能填容器内部 `localhost`；使用 HTTPS 域名或反代前缀时，确保播放器可达、代理剥离前缀并转发 `/stream/...`。只有 `base_url` 非空而入口开关关闭时，会启用 HTTP 流，但不会新增 SMB 共享；入口开关开启却缺基址、HTTP 或 SMB 时会拒绝启动。HTTP-only 可读取已有有效签名链接，但生成文件视图仍需启用挂载。
+将媒体库指向 `smb://192.0.2.10/torrentfs-strm`；原共享仍为 `smb://192.0.2.10/torrentfs`。基址不能填容器内部 `localhost`。只有 `base_url` 非空而 `smb.strm_enabled=false` 时仅启用 HTTP 流，不增加 SMB 共享；SMB STRM 开启却缺基址或 HTTP 会拒绝启动。HTTP-only 仍可读取有效签名链接，生成文件视图可选择显式 FUSE STRM 挂载或 SMB STRM 共享。
 
-入口等待**两处**挂载就绪后才启动 Samba；任一挂载丢失都联动停止服务，不会退化为共享普通目录。文件命名、ISO/BDMV、字幕匹配和客户端缓存边界见[使用指南](usage.md)。保护签名 `.strm` 与反代日志；外网使用 HTTPS。
+文件命名、ISO/BDMV、字幕匹配和客户端缓存边界见[使用指南](usage.md)。保护签名 `.strm` 与反代日志；HTTP 外网访问使用 HTTPS，SMB 仅限可信 LAN。
 
 ### 客户端路径
 
-- 服务端后端：容器内部 `/share`。
+- 服务端后端：Go 进程内的只读虚拟树，没有 `/share` FUSE 挂载。
 - SMB endpoint：`smb://SERVER/torrentfs`；Linux 命令行使用 `//SERVER/torrentfs`，Windows 使用 `\\server\torrentfs`。
 - share 内文件：例如 `payload.bin`，不会额外增加一层 `share` 或 `torrentfs`。
 - 客户端 mountpoint：自行选择，例如 `/mnt/torrentfs-client`，挂载后文件是 `/mnt/torrentfs-client/payload.bin`。
@@ -204,24 +220,24 @@ ls -l /mnt/torrentfs-client/payload.bin
 umount /mnt/torrentfs-client
 ```
 
-不要把客户端 mountpoint 设为 `/`，也不要将宿主或容器的 `/` 当作 Samba share path。客户端读取需要的 piece 会进入内存 cache；随机 seek 走同一条 Samba `pread` → FUSE `Read(off)` → piece planner/cache 链路。
+不要把客户端 mountpoint 设为 `/`，也不要把 `/torrents` 或宿主目录作为共享后端。客户端所需 piece 进入内存 cache；随机 seek 走 SMB READ offset → 虚拟文件 ReadAt → piece planner/cache，不经过 FUSE。
 
 ### 仅 SMB 与退出行为
 
-不发布 HTTP 端口只是让 HTTP 保持 container-local；并不等于关闭它。若显式把 `TORRENTFS_HTTP_LISTEN_ADDR` 置空，则没有任务添加和字幕上传入口，应先注册任务，也不能使用 STRM（须清空 `base_url` 并关闭入口 STRM 开关）。HTTP auth 关闭时 Go 配置层忽略共享凭据，SMB 仍要求完整 pair。
+不发布 HTTP 端口并不等于关闭 HTTP。显式设置 `TORRENTFS_HTTP_LISTEN_ADDR=` 即可仅运行 SMB；此时没有任务添加和字幕上传入口，应先注册任务，且须清空 `strm.base_url`、关闭 `smb.strm_enabled`。HTTP auth 关闭时其认证层不使用共享凭据，SMB 仍要求完整 pair。
 
-缺少 FUSE 设备、必要 capability、凭据或有效运行身份时，入口会明确失败，不会退化为共享普通目录。torrentfs、smbd 任一核心进程异常退出或 FUSE 消失，容器会停止另一进程并以非零状态退出。
+缺少凭据、无效运行身份或 SMB listener 绑定失败时会明确退出，不会退化为共享普通目录；不应通过增加 capability 修复 SMB 配置错误。
 
-收到 `SIGTERM`/`SIGINT` 时，先有界停止 Samba，再通知 torrentfs 执行 HTTP → session → FUSE unmount；正常关闭返回 `0`，超时强制终止会记录日志并返回非零。
+收到 `SIGTERM`/`SIGINT` 后，单一 Go 进程按 HTTP → 取消并 drain SMB → Session.Close → FUSE unmount 的顺序关闭（SMB 模式没有 FUSE 挂载）。正常退出为 `0`；Go 进程异常终止直接由 tini 传递其退出码，没有 shell supervisor。
 
 ## 网络与安全
 
 - README 示例仅向 `127.0.0.1` 发布 HTTP/SMB；可信 LAN 访问应绑定明确的 LAN 地址并配置防火墙。
 - HTTP 服务不提供 TLS，应放在 TLS reverse proxy 后面，不要直接公开到不受信任的网络。
 - 接收入站 peer 时，在 `docker run` 中同时添加 `--publish 6881:6881/tcp --publish 6881:6881/udp`。只发布 HTTP 或只发布一个 peer 协议都不够；peer 端口设为 `0` 时不能预先按 `6881` 映射。
-- `SYS_ADMIN` 和 `apparmor=unconfined` 扩大容器权限边界。示例针对允许 FUSE 的可信 rootful 部署；部分主机不需要放宽 AppArmor，应按主机策略配置，而不是让不受信任的调用者控制该容器。
-- 共享密码通过 stdin 初始化 Samba passdb，不写入命令行、Samba 配置或日志；但 Docker environment 和 metadata 对 inspect 权限者可见，不是 secret store。
-- SMB 与 torrentfs 共用 cgroup，cache 规划需要给 Samba 和其他进程留出余量。端口冲突应选择客户端支持的绑定或处理现有服务，不能假设换 SMB 端口后客户端仍能透明使用标准共享。
+- 仅显式 FUSE 挂载需要 `/dev/fuse`、挂载权限和允许 FUSE 的宿主策略。`SYS_ADMIN` / `apparmor=unconfined` 会扩大权限边界；它们不属于 SMB 部署参数，FUSE 也应尽量使用最小主机策略。
+- SMB 只面向可信 LAN；防火墙限制来源，不公开到公网。共享密码仅作运行时凭据，不写入 TOML、passdb、命令行或日志；Docker environment 和 metadata 对 inspect 权限者可见，不是 secret store。
+- SMB 与 session 在同一 Go 进程，cache 规划仍需给协议缓冲和其他内存开销留出余量。标准 SMB 客户端通常要求宿主 TCP 445；容器高端口 `1445` 不需要 bind 特权。
 
 ## 其他 Docker 模式
 
@@ -302,7 +318,7 @@ docker stop --time 60 torrentfs
 docker start torrentfs
 ```
 
-入口给 Samba 最多 10 秒、torrentfs 最多 45 秒的正常退出时间，60 秒 Docker stop timeout 覆盖这两个窗口。保留相同 `/srv/torrents` bind mount，重启后任务、metainfo、分类、收藏、字幕、上传限速和 STRM 签名密钥会恢复；Bearer token 与 piece cache 不恢复。基址或密钥变更后，播放器可能缓存旧 `.strm` 直链，需重新读取/导出并重扫或打开，不能依赖 mtime（沿用 torrent 添加时间）自动刷新。部署完成后可取消当前 shell 中的凭据变量：
+建议保留 60 秒 Docker stop grace period，让 daemon 排空 HTTP/SMB 并清理 session；不再有独立的 Samba 关闭窗口。保留相同 `/srv/torrents` bind mount，重启后任务、metainfo、分类、收藏、字幕、上传限速和 STRM 签名密钥会恢复；Bearer token 与 piece cache 不恢复。基址或密钥变更后，播放器可能缓存旧 `.strm` 直链，需重新读取/导出并重扫或打开，不能依赖 mtime（沿用 torrent 添加时间）自动刷新。部署完成后可取消当前 shell 中的凭据变量：
 
 ```sh
 unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
@@ -314,10 +330,10 @@ unset TORRENTFS_USERNAME TORRENTFS_PASSWORD
 | --- | --- |
 | runtime identity 错误 | 检查 `PUID`/`PGID` 是否为空、零、非法或越界，以及目标数字身份能否读写遍历 bind mount |
 | 发布 `8080` 后 HTTP 仍不可达 | daemon 仍监听容器 loopback；设置非 loopback listener 并启用完整认证 |
-| SMB 无法启动 | 检查 `/dev/fuse`、`SYS_ADMIN`、`NET_BIND_SERVICE`、单行非空凭据，以及用户名是否解析到 runtime UID |
+| SMB 无法启动 | 检查 `filesystem.mode=smb`、成对非空运行时凭据、合法 listener 和端口占用；不要求 Unix 用户名、FUSE 或额外 capability |
 | 外置 TOML 报 CLI 错误 | 默认路径之外挂载时，需要同时传 `-config` 和 `/torrents` |
 | 宿主看不到 FUSE | 检查挂载传播、安全策略和运行身份；需要其他 UID 读取时再评估 `allow_other` |
 | `445`、`8080` 或 `6881` 被占用 | 检查现有服务并选择可用绑定；peer TCP/UDP 必须一起映射 |
-| `docker cp` 写 `/mnt` 或 `/share` 失败 | 预期行为，FUSE/SMB 只读；字幕应通过 API/UI 上传 |
+| 写入 SMB 共享或 FUSE `/mnt` 失败 | 预期行为，两种视图均只读；字幕应通过 API/UI 上传，容器 `/share` 不是 SMB 后端 |
 
 读取、字幕和状态问题见[使用指南](usage.md)；HTTP、Docker 配置、FUSE、SMB 的 smoke 验证见[开发指南](development.md)。

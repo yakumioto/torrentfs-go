@@ -58,9 +58,23 @@ To use the checked-in example configuration:
 
 `go run ./cmd/torrentfs ...` can replace the binary command, but `web/dist` must already have been built.
 
+### Native SMB
+
+Set runtime credentials and select SMB instead of supplying mountpoint flags:
+
+```bash
+export TORRENTFS_USERNAME=media
+read -r -s -p 'SMB password: ' TORRENTFS_PASSWORD
+printf '\n'
+export TORRENTFS_PASSWORD
+TORRENTFS_FILESYSTEM_MODE=smb ./torrentfs "$PWD/torrents"
+```
+
+Native SMB defaults to `127.0.0.1:1445`; use `smbclient //127.0.0.1/torrentfs -p 1445 -U media -m SMB3`. No Unix account, FUSE device, or extra capability is needed. HTTP stays on its default loopback listener; set `TORRENTFS_HTTP_LISTEN_ADDR=` for SMB-only access to existing tasks. Keep SMB on a trusted LAN with firewall protection.
+
 ### Optional STRM mount
 
-Native deployments use `-strm-mountpoint`, alone or together with `-mountpoint`. Set a non-empty `strm.base_url` and keep the HTTP listener enabled. Both mount directories must already exist; after path normalization and symlink resolution, they must not be identical or nested.
+FUSE mode uses `-strm-mountpoint`, alone or together with `-mountpoint`. Set a non-empty `strm.base_url` and keep the HTTP listener enabled. Both mount directories must already exist; after path normalization and symlink resolution, they must not be identical or nested.
 
 ```sh
 mkdir -p "$PWD/mnt-strm"
@@ -91,14 +105,14 @@ A single `.torrent` file cannot be used as the positional argument. The daemon d
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Normal shutdown after `SIGINT` or `SIGTERM` |
-| `1` | HTTP, session, or FUSE-unmount runtime error |
+| `1` | HTTP, SMB, session, or FUSE-unmount runtime error |
 | `2` | Invalid flags, positional argument, directory, or configuration |
 
-Normal shutdown first cancels HTTP stream reads and allows at most five seconds for HTTP drain, then forcibly closes connections if needed to unblock network writes. It closes the Session next, cancelling and draining reads waiting for pieces, and finally unmounts the original and STRM FUSE mounts concurrently. The entire unmount stage shares one **30-second** deadline, not 30 seconds per mount. Force-closing HTTP connections does not mean every handler has returned. A propagated mount copy held in another namespace produces a diagnostic and a non-zero exit rather than being treated as a successful lazy unmount.
+Normal shutdown first cancels HTTP stream reads and allows at most five seconds for HTTP drain, then forcibly closes connections if needed to unblock network writes. It next cancels and drains SMB (if enabled), closes the Session and drains reads waiting for pieces, then unmounts any original and STRM FUSE mounts concurrently. The entire unmount stage shares one **30-second** deadline, not 30 seconds per mount. Force-closing HTTP connections does not mean every handler has returned. A propagated mount copy held in another namespace produces a diagnostic and a non-zero exit rather than being treated as a successful lazy unmount.
 
 ## Docker deployment
 
-The [Dockerfile](../Dockerfile) builds the Web UI with Node 22.23.2, compiles a `CGO_ENABLED=0` Go 1.27 binary with the UI embedded, and runs it in Debian bookworm-slim with FUSE3, Samba, `tini`, certificates, and `passwd`. The host does not need Node.js or Go.
+The [Dockerfile](../Dockerfile) builds the Web UI with Node 22.23.2, compiles a `CGO_ENABLED=0` Go 1.27 binary with the UI embedded, and runs it in Debian bookworm-slim with FUSE3 (for explicit mounts only), `tini`, certificates, `passwd`, and `util-linux`, without Samba. The host does not need Node.js or Go.
 
 `Nightly` names the development image channel, not a guarantee of a new tag every day. Automatic builds run on pushes to `main`; without `main` updates there is no daily automatic rebuild. Use `workflow_dispatch` for explicit rebuilds/retries, including manual rebuilds of the same SHA. Only `main` in the original `yakumioto/torrentfs-go` repository can publish; existing quality gates and unique tags are unchanged.
 
@@ -112,7 +126,7 @@ docker build -t torrentfs .
 
 ### Runtime identity and persistent directory
 
-The entrypoint must start as root and then drops torrentfs and smbd to `PUID:PGID`. Do not use `docker run --user`.
+The entrypoint must start as root and then execs the single torrentfs Go process as `PUID:PGID`. Do not use `docker run --user`.
 
 | Variable | Default | Constraint |
 | --- | --- | --- |
@@ -142,11 +156,11 @@ For an existing directory, inspect its data and permissions before changing owne
 
 Without a bind mount, the image creates `/torrents` with mode `0777` only to make the default container start. `docker exec torrentfs id` normally reports the exec shell's identity, not the daemon's; inspect `/proc/<torrentfs-pid>/status` when checking the actual service identity.
 
-### Recommended: container-local FUSE and SMB
+### Recommended: in-process SMB
 
-Use Linux rootful Docker with `/dev/fuse`, `SYS_ADMIN`, and `NET_BIND_SERVICE`. Host security policy must permit FUSE. The example disables the AppArmor profile; adjust this to the host's security policy where possible.
+SMB runs in the single Go process, without FUSE or Samba. No `/dev/fuse`, `SYS_ADMIN`, `NET_BIND_SERVICE`, relaxed AppArmor profile, or host mount propagation is needed. The entrypoint initializes the runtime identity, checks data permissions, and directly execs torrentfs.
 
-HTTP and SMB share a password. Web login needs only the password; SMB also requires a username that resolves to the container's runtime Unix account. `torrentfs` is the stable account name even when its numeric UID changes. The following prompt uses Bash syntax:
+HTTP and SMB can use the same runtime environment credential pair. SMB requires both non-empty values; its username does not need to exist as a Unix account or match `PUID:PGID`. HTTP auth is independent: when enabled, the pair generates a bcrypt hash at startup. Web login only needs the password. The following prompt uses Bash syntax:
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -156,22 +170,23 @@ export TORRENTFS_PASSWORD
 
 docker run --detach --name torrentfs \
   --publish 127.0.0.1:8080:8080 \
-  --publish 127.0.0.1:445:445 \
+  --publish 127.0.0.1:445:1445 \
   --env PUID --env PGID \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --cap-add NET_BIND_SERVICE \
-  --security-opt apparmor=unconfined \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_FILESYSTEM_MODE=smb \
+  --env TORRENTFS_SMB_LISTEN_ADDR=0.0.0.0:1445 \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
 ```
 
-Do not pass `-mountpoint` or `-strm-mountpoint` in SMB mode: the entrypoint owns `/share` and optional `/share-strm`, starting Samba only after all required FUSE mounts are ready. Do not cover these internal paths with bind mounts. No host `/mnt`, `rshared`, or cross-container mount propagation is needed. `/torrents` and `.metadata` are never shared.
+Select `[filesystem] mode="smb"` / `TORRENTFS_FILESYSTEM_MODE=smb`; the default is `fuse`, preserving HTTP-only behavior without mount flags. The two modes are mutually exclusive: SMB rejects `-mountpoint` and `-strm-mountpoint` and creates no `/share` mounts. `/torrents` and `.metadata` are never shared.
+
+The native `[smb]` defaults are `listen_addr="127.0.0.1:1445"`, `share_name="torrentfs"`, and `strm_enabled=false`; the Docker TOML uses `0.0.0.0:1445`. Override them with `TORRENTFS_SMB_LISTEN_ADDR`, `TORRENTFS_SMB_SHARE_NAME`, and `TORRENTFS_SMB_STRM_ENABLED`.
+
+**Old-container migration:** change `445:445` to `445:1445` and remove FUSE devices, added `SYS_ADMIN` / `NET_BIND_SERVICE`, and `apparmor=unconfined`. Keep the data directory and runtime identity. Samba templates, passdb, and Unix SMB users are no longer used. `TORRENTFS_SMB_ENABLED` is a deprecated alias for mode (`true` → `smb`, `false` → `fuse`), and `TORRENTFS_STRM_ENABLED` is a deprecated alias for `smb.strm_enabled`. Canonical environment variables win over aliases, and environment wins over TOML, for native and Docker runs alike.
 
 Open `http://127.0.0.1:8080/`, log in with the configured password, and add a magnet or `.torrent`. For a scripted login/add/status workflow, use the [API reference](api.en.md).
 
@@ -200,32 +215,33 @@ Single-file torrents appear directly at the share root, multi-file torrents reta
 
 ### Optional second STRM share
 
-Only the original `torrentfs` share is exported by default. Enabling STRM preserves `/share` → `torrentfs` and automatically adds `/share-strm` → `torrentfs-strm`, using the same authentication, read-only permissions, and runtime identity. No host mount propagation is needed.
+Only the original `torrentfs` share is exported by default. `smb.strm_enabled=true` adds `<share_name>-strm` (normally `torrentfs-strm`) with the same authentication and read-only permissions; no FUSE mounts are involved.
 
 | Switch | Responsibility |
 | --- | --- |
-| `TORRENTFS_STRM_ENABLED` | Docker entrypoint only; defaults to `false`, accepts only `true`, `false`, `1`, or `0`, and requires `TORRENTFS_SMB_ENABLED=true` or `1` when enabled |
-| `TORRENTFS_STRM_BASE_URL` / `[strm] base_url` | Daemon link base and HTTP-stream switch; must be non-empty with HTTP enabled, independently of the entrypoint switch |
+| `TORRENTFS_SMB_STRM_ENABLED` / `smb.strm_enabled` | Defaults to `false`; adds the second share in SMB mode |
+| `TORRENTFS_STRM_BASE_URL` / `[strm] base_url` | Link base and HTTP-stream switch; must be non-empty with HTTP enabled when adding the STRM share |
 
-Merge this fragment into the existing service in the [Compose template](../docker-compose.yaml). `192.0.2.10` is an example only; replace it with the player's reachable LAN address. Replace loopback port bindings while retaining devices, capabilities, data mounts, runtime identity, shared credentials, and required peer TCP/UDP port mappings:
+Merge this fragment into the existing service in the [Compose template](../docker-compose.yaml). Replace `192.0.2.10` with the player's reachable trusted LAN address and apply firewall rules. Retain data mounts, runtime identity, credentials, and required BT TCP/UDP mappings, but no FUSE devices or extra capabilities:
 
 ```yaml
 ports:
   - "192.0.2.10:8080:8080"
-  - "192.0.2.10:445:445"
+  - "192.0.2.10:445:1445"
 environment:
   TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
   TORRENTFS_HTTP_AUTH_ENABLED: "true"
-  TORRENTFS_SMB_ENABLED: "true"
-  TORRENTFS_STRM_ENABLED: "true"
+  TORRENTFS_FILESYSTEM_MODE: "smb"
+  TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
+  TORRENTFS_SMB_STRM_ENABLED: "true"
   TORRENTFS_STRM_BASE_URL: "http://192.0.2.10:8080"
 ```
 
-With `docker run`, add `--env TORRENTFS_STRM_ENABLED=true` and `--env TORRENTFS_STRM_BASE_URL=http://192.0.2.10:8080` before the image name in the original Docker + SMB command and adjust port bindings accordingly. Keep the existing username/password variables. The second share needs no extra credentials, and HTTP playback needs no management Bearer token.
+With `docker run`, add `--env TORRENTFS_SMB_STRM_ENABLED=true` and `--env TORRENTFS_STRM_BASE_URL=http://192.0.2.10:8080` before the image name in the original Docker + SMB command and adjust port bindings accordingly. Keep the existing username/password variables. The second share needs no extra credentials, and HTTP playback needs no management Bearer token.
 
-Point the client library at `smb://192.0.2.10/torrentfs-strm`; the original remains `smb://192.0.2.10/torrentfs`. Do not use container-local `localhost` as the base URL. For an HTTPS domain or reverse-proxy prefix, ensure player reachability and strip the prefix before forwarding `/stream/...`. A non-empty `base_url` with the entrypoint switch off enables HTTP streams but adds no SMB share. Enabling the entrypoint switch without the base URL, HTTP, or SMB fails startup. HTTP-only mode can serve existing valid signed links, but generating the file view still requires a mount.
+Point the client library at `smb://192.0.2.10/torrentfs-strm`; the original remains `smb://192.0.2.10/torrentfs`. Do not use container-local `localhost` as the base URL. For an HTTPS domain or reverse-proxy prefix, ensure player reachability and strip the prefix before forwarding `/stream/...`. A non-empty `base_url` with `smb.strm_enabled=false` enables HTTP streams but adds no SMB share. Enabling SMB STRM without the base URL or HTTP fails startup. HTTP-only mode can serve existing valid links; generating the file view requires either an explicit FUSE STRM mount or the SMB STRM share.
 
-The entrypoint waits for **both** mounts before starting Samba and stops services if either mount disappears; it never falls back to sharing an ordinary directory. Naming, ISO/BDMV, subtitle matching, and client-cache boundaries are in the [usage guide](usage.en.md). Protect signed `.strm` contents and proxy logs; use HTTPS outside a trusted LAN.
+Both shares are projections of the virtual tree in the same Go service, not ordinary host directories. Naming, ISO/BDMV, subtitle matching, and client-cache boundaries are in the [usage guide](usage.en.md). Protect signed `.strm` contents and proxy logs; use HTTPS for HTTP outside a trusted LAN and keep SMB LAN-only.
 
 ### Network and credential boundaries
 
@@ -235,7 +251,7 @@ The image fixes the peer port at `6881`. To accept inbound peers, add both `--pu
 
 Docker environment variables are visible to users with inspect permissions. Treat them as plaintext deployment configuration, not as a secret store, and do not commit real passwords to shell history or image layers.
 
-SMB listens only on TCP 445; ports 137/138/139 and `nmbd` are not used. The share has guest access disabled and maps clients to the same non-root identity as FUSE, so `allow_other` is not required. Enabling it intentionally widens local read access.
+The container listens on SMB TCP 1445, normally published as host TCP 445; ports 137/138/139 and `nmbd` are not used. NTLMv2 accepts `WORKGROUP` or the client's default domain; anonymous and wrong-password logins fail. SMB requires no Unix login mapping or `allow_other`. Keep SMB on a trusted LAN behind a firewall, never directly on the public Internet.
 
 ### Stop and restart
 
@@ -245,9 +261,9 @@ docker stop --time 60 torrentfs
 docker start torrentfs
 ```
 
-The entrypoint gives Samba up to 10 seconds and torrentfs up to 45 seconds for normal shutdown. Keep the same `/srv/torrents` bind mount to restore tasks, categories, favorites, metainfo, managed subtitles, upload-rate settings, and the STRM signing key. Tokens, transfer counters, and the piece cache are runtime state and reset after restart. After a base-URL or key change, players may retain cached `.strm` links: read/export again and rescan or reopen rather than relying on mtime, which retains the torrent's added time. After testing, stop the container before removing it with `docker rm torrentfs`, and unset credential variables in the shell.
+Use a 60-second Docker stop grace period for the daemon's HTTP/SMB drain and session cleanup; there is no separate Samba shutdown window. Keep the same `/srv/torrents` bind mount to restore tasks, categories, favorites, metainfo, managed subtitles, upload-rate settings, and the STRM signing key. Tokens, transfer counters, and the piece cache are runtime state and reset after restart. After a base-URL or key change, players may retain cached `.strm` links: read/export again and rescan or reopen rather than relying on mtime, which retains the torrent's added time. After testing, stop the container before removing it with `docker rm torrentfs`, and unset credential variables in the shell.
 
-If torrentfs or smbd exits unexpectedly, or the FUSE mount disappears, the entrypoint stops the other service and exits non-zero. Normal signals stop Samba first, then follow the daemon's HTTP → session → FUSE shutdown sequence. Forced termination is logged and reported as failure.
+A single Go service owns HTTP and SMB. Normal signals follow HTTP → cancel/drain SMB → Session.Close → FUSE unmount (if any), returning `0` on complete shutdown. Unexpected Go termination is propagated by tini; no shell supervisor or separate smbd process remains. SMB configuration and bind errors must be fixed directly, not by granting extra capabilities.
 
 ### External TOML configuration
 
@@ -277,9 +293,9 @@ docker run --detach --name torrentfs-config \
   torrentfs -config /config.toml /torrents
 ```
 
-These examples demonstrate config mounting only. Add the device, capabilities, credentials, and port bindings for the chosen mode. The external TOML must still satisfy non-loopback authentication validation.
+These examples demonstrate config mounting only. Add credentials and port bindings for the chosen mode; only actual FUSE mounts need a device and mount capabilities. The external TOML must still satisfy non-loopback authentication validation.
 
-The image's [bundled configuration](../docker/torrentfs.toml) uses container-local HTTP `127.0.0.1:8080`, peer port `6881`, IPv6 disabled, automatic port forwarding disabled, a `2GiB` cache, and `allow_other = false`. Publishing `8080` alone does not change a loopback listener. Native defaults use peer port `0` and enable both address families.
+The image's [bundled configuration](../docker/torrentfs.toml) defaults to `filesystem.mode=fuse` (HTTP-only without mount flags), SMB listener `0.0.0.0:1445` when selected, container-local HTTP `127.0.0.1:8080`, peer port `6881`, IPv6 disabled, automatic port forwarding disabled, a `2GiB` cache, and `allow_other = false`. Publishing `8080` alone does not change a loopback listener. Native defaults use peer port `0` and enable both address families.
 
 ### HTTP-only container
 
@@ -327,9 +343,9 @@ For a fresh directory, retain an authenticated HTTP endpoint to add tasks; the F
 
 ### SMB-only access
 
-Omitting the HTTP port binding leaves the image's HTTP listener accessible only inside the container; it does not disable HTTP. SMB still requires the shared username/password pair. To disable HTTP entirely, set `TORRENTFS_HTTP_LISTEN_ADDR=`; no HTTP management entry point remains, and STRM cannot be used (clear `base_url` and turn off the entrypoint STRM switch). The Go configuration layer ignores the shared pair when HTTP authentication is disabled.
+Omitting the HTTP port binding does not disable HTTP. Set `TORRENTFS_HTTP_LISTEN_ADDR=` for SMB-only access to already registered tasks. Clear `strm.base_url` and set `smb.strm_enabled=false`; STRM requires HTTP. The HTTP auth layer ignores the environment pair when disabled, but SMB still requires both non-empty runtime credentials.
 
-The server's internal `/share`, the SMB endpoint `//SERVER/torrentfs`, and a client's local mountpoint are different namespaces. A client may choose `/mnt/torrentfs-client`:
+SMB exports a virtual tree, not an internal `/share` mount. The endpoint `//SERVER/torrentfs` differs from a client's local mountpoint, such as `/mnt/torrentfs-client`:
 
 ```sh
 mkdir -p /mnt/torrentfs-client
@@ -339,7 +355,7 @@ ls -l /mnt/torrentfs-client/payload.bin
 umount /mnt/torrentfs-client
 ```
 
-Do not use `/` as the CIFS mountpoint or Samba share path. The server owns `/share`; do not also use it as a client mountpoint or a non-empty bind target.
+Do not use `/` as the client CIFS mountpoint. Server paths are virtual SMB paths, not host `/share` directories; do not add a server-side bind mount for them. SMB READ offsets map directly to virtual-file ReadAt and the piece cache, without FUSE.
 
 ## Deployment troubleshooting
 
@@ -347,7 +363,7 @@ Do not use `/` as the CIFS mountpoint or Samba share path. The server owns `/sha
 | --- | --- |
 | Runtime identity error | Check non-zero `PUID`/`PGID` and read/write/traverse access to the bind-mounted `/torrents`. |
 | HTTP unreachable after `-p 8080:8080` | Set a non-loopback container listener and enable authentication; port publishing does not change the daemon's bind address. |
-| SMB refuses to start | Check `/dev/fuse`, `SYS_ADMIN`, `NET_BIND_SERVICE`, non-empty single-line credentials, and that the username resolves to the runtime UID. |
+| SMB refuses to start | Check `filesystem.mode=smb`, the non-empty runtime credential pair, a valid listener, and port conflicts. Unix usernames, FUSE, and added capabilities are not required. |
 | External TOML causes a CLI error | A non-default mount path requires both `-config /config.toml` and `/torrents`; non-loopback authentication is still required. |
 | Port 445, 8080, or 6881 already in use | Select an available host binding where the client supports it. Publish peer TCP and UDP together; SMB clients may require the standard port. |
 | FUSE mount does not reach the host | Check the host propagation prerequisites; container-local SMB avoids this requirement. |

@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-`torrentfs` 是用 Go 编写的只读 BitTorrent 文件系统：按需获取内容，通过 FUSE 呈现为文件树，并用 Web UI/API 管理任务。
+`torrentfs` 是用 Go 编写的只读 BitTorrent 文件系统：按需获取内容，通过 FUSE 或进程内 SMB 呈现文件树，并用 Web UI/API 管理任务。
 
 适合让播放器、媒体库、索引器或命令行工具像读取本地文件一样读取种子内容，也可通过 Docker 提供 SMB 只读共享。
 
@@ -12,7 +12,7 @@
 - **只读文件系统**：单文件直接呈现，多文件保留目录结构。
 - **Web UI/API 管理**：添加磁力链接或上传 `.torrent`，查看任务与缓存状态。
 - **任务与媒体管理**：分类、收藏、批量清理、字幕上传/替换和按时段上传限速。
-- **Docker + SMB**：在同一容器内挂载 FUSE 并提供只读共享，无需宿主挂载传播。
+- **Docker + SMB**：Go 进程内只读共享，不依赖 FUSE、Samba 或额外容器 capability。
 - **可选 STRM 视图**：保留原文件共享，另提供指向签名 HTTP 直链的 `.strm` 文件，见[部署指南](docs/deployment.md)。
 
 ## 快速开始
@@ -21,8 +21,8 @@
 
 前提条件：
 
-- Linux rootful Docker、可用的 `/dev/fuse`，以及允许 FUSE 的宿主安全策略。
-- 可以授予容器 `SYS_ADMIN`、`NET_BIND_SERVICE`；本机 `8080` 和 `445` 端口可用。
+- 可用的 Docker；SMB 模式不需要 `/dev/fuse`、Samba 或额外 capability。
+- 本机 `8080` 和 `445` 端口可用；仅显式 FUSE 挂载需要另加设备、挂载权限和相应宿主安全策略。
 - 使用 Bash，在同一个终端依次执行以下命令；宿主机不需要安装 Go 或 Node.js。
 
 缓存默认上限为 `2GiB`，小内存部署请先按[配置参考](docs/configuration.md)调整。其他运行方式见[部署指南](docs/deployment.md)。
@@ -58,7 +58,7 @@ sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
 以上用于新目录；已有数据请先检查属主和权限。入口不会自动 `chown`，目标身份必须能读、写和遍历该目录。
 
-HTTP 和 SMB 共用密码；Web 登录仅需密码，SMB 用户名使用镜像内的运行账户 `torrentfs`：
+HTTP auth 独立启用；此示例让 HTTP 和 SMB 共用运行时凭据，HTTP 启动时生成 bcrypt。Web 登录仅需密码，SMB 用用户名和密码（NTLMv2，`WORKGROUP` 或客户端默认 domain）。用户名不必是 Unix 账户，也不绑定 `PUID:PGID`：
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -74,24 +74,21 @@ export TORRENTFS_PASSWORD
 ```bash
 docker run --detach --name torrentfs \
   --publish 127.0.0.1:8080:8080 \
-  --publish 127.0.0.1:445:445 \
+  --publish 127.0.0.1:445:1445 \
   --env PUID --env PGID \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --cap-add NET_BIND_SERVICE \
-  --security-opt apparmor=unconfined \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_FILESYSTEM_MODE=smb \
+  --env TORRENTFS_SMB_LISTEN_ADDR=0.0.0.0:1445 \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
 ```
 
-此示例仅向本机发布 HTTP/SMB，并放宽 AppArmor 以允许 FUSE；请只在可信主机使用。主机策略已允许 FUSE 时，可按[部署指南](docs/deployment.md)调整安全选项。
+此示例仅向本机发布 HTTP/SMB，SMB 在单一 Go 进程内运行，不使用 FUSE 或 Samba。旧容器升级时，将 `445:445` 改为 `445:1445`，移除 FUSE 设备、额外 capability 和 `apparmor=unconfined`。
 
-SMB 模式自动管理容器内 `/share`，不要追加 `-mountpoint`，无需把 `/share` 挂到宿主。需要 LAN 访问或入站 peer 时，按部署指南配置地址、防火墙和 TCP/UDP 端口。
+SMB 与 FUSE 模式互斥，不要追加 `-mountpoint` / `-strm-mountpoint`，也不需要 `/share` bind mount。需要 LAN 访问时，绑定明确的可信 LAN 地址并配置防火墙，勿将 SMB 暴露到公网；入站 peer 的 TCP/UDP 配置见[部署指南](docs/deployment.md)。
 
 ### 4. 添加任务并读取
 
