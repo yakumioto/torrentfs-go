@@ -289,6 +289,19 @@ func TestSMBPeerlessTimeoutAndShutdownCancellation(t *testing.T) {
 			file.Close()
 			closeClient()
 			stop()
+			drained := make(chan error, 1)
+			go func() { drained <- sess.Close(context.Background()) }()
+			select {
+			case err := <-drained:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Until(started.Add(2 * time.Second))):
+				t.Fatal("session flights did not drain after SMB shutdown")
+			}
+			if time.Since(started) > 2*time.Second {
+				t.Fatal("service/session cleanup exceeded cancellation bound")
+			}
 		})
 	}
 }

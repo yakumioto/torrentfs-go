@@ -14,7 +14,11 @@ The source is copied from the pinned Go module archive without changing the exis
 - `webseed-peer.go`: reader/completion demand calls the existing client-level `scheduleImmediateWebseedRequestUpdate`; closed clients reject new notifications.
 - `webseed-requesting.go`: the timer callback takes the Client lock before checking closed state or changing its coalesced reason, preventing a raced shutdown from rearming the timer and synchronizing reason access.
 - `webseed-wakeup_test.go`: demand wakeup, coalescing, safety-poll rearming, and closed-client regression tests.
+- `reader.go`: terminal context/close/disabled errors stop recovery; a constant-stack reset/resync loop retries capped EOF only after completion confirms missing data. Resync invalidates stale storage handles before waiting for repopulation, while unchanged readable completion with persistent EOF fails as unexpected EOF. Permanent storage/close errors retain their causes and terminate without unbounded retry.
+- `reader_capped_test.go`: canceled/readable and waiting requests, deadlines, close/disabled paths, persistent errors, unchanged EOF, stale-handle reset and eviction recovery, same-piece waiter isolation, seek/zero-length/EOF behavior.
 
 The five-second safety polling interval, network timeouts, host concurrency and retry/backoff constants are unchanged. The patch is justified by the 16MiB+123 / 8MiB-cache cold-read regression: after admitted-prefix and storage-capacity fixes, eligible requests still started at roughly 5s and 10s while the unchanged 12s read gate failed.
 
-Remove this local replacement only when an upstream release contains all retained fixes and the added demand-wakeup behavior, and passes the Session cold-read, reader/request-strategy, and complete Docker SMB regression gates.
+The Reader patch is additionally required by capped storage: the original recursion retried cancellation indefinitely and prevented Session flight cleanup. It preserves real eviction recovery rather than disabling capped retries; the small-cache transfer tests cover piece-sized, large and default readahead.
+
+Remove this local replacement only when an upstream release contains all retained fixes, demand wakeup and terminal/bounded Reader recovery, and passes the Session cancellation/drain, cold-read, small-cache transfer and complete Docker SMB regression gates.

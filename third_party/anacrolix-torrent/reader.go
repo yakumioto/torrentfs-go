@@ -204,15 +204,19 @@ func (r *reader) readContext(ctx context.Context, b []byte) (n int, err error) {
 	r.pos += int64(n)
 	r.posChanged()
 	r.mu.Unlock()
-	if r.pos >= r.length {
+	if r.pos >= r.length && err == nil {
 		err = io.EOF
-	} else if err == io.EOF {
+	} else if err == io.EOF && r.pos < r.length {
 		err = io.ErrUnexpectedEOF
 	}
 	return
 }
 
-var closedChan = make(chan struct{})
+var (
+	closedChan                  = make(chan struct{})
+	errReaderDownloadDisabled   = errors.New("torrent data downloading disabled")
+	errReaderNetworkingDisabled = errors.New("torrent networking disabled")
+)
 
 func init() {
 	close(closedChan)
@@ -247,9 +251,9 @@ func (r *reader) waitAvailable(
 		case <-ctx.Done():
 			err = ctx.Err()
 		case <-r.t.dataDownloadDisallowed.On():
-			err = errors.New("torrent data downloading disabled")
+			err = errReaderDownloadDisabled
 		case <-r.t.networkingEnabled.Off():
-			err = errors.New("torrent networking disabled")
+			err = errReaderNetworkingDisabled
 		case <-dontWait:
 		}
 		return
@@ -284,7 +288,7 @@ func (r *reader) readOnceAt(ctx context.Context, b []byte, pos int64) (n int, er
 	}
 	panicif.Nil(err)
 	if r.t.closed.IsSet() {
-		err = fmt.Errorf("reading from closed torrent: %w", err)
+		err = fmt.Errorf("reading from closed torrent: %w: %w", errTorrentClosed, err)
 		return
 	}
 	attrs := [...]any{
@@ -301,59 +305,109 @@ func (r *reader) readOnceAt(ctx context.Context, b []byte, pos int64) (n int, er
 	return
 }
 
-// Performs at most one successful read to torrent storage. Try reading, first with the storage
-// reader we already have, then after resetting it (in case data moved for
-// completed/incomplete/promoted etc.). Then try resetting the piece completions. Then after all
-// that if the storage is supposed to be flaky, try all over again. TODO: Filter errors and set log
-// levels appropriately.
-func (r *reader) readAt(ctx context.Context, b []byte, pos int64) (n int, err error) {
-	if pos >= r.length {
-		err = io.EOF
-		return
+func (r *reader) terminalReadError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
-	n, err = r.readOnceAt(ctx, b, pos)
-	if err == nil {
-		return
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, errTorrentClosed) || errors.Is(err, errReaderDownloadDisabled) ||
+		errors.Is(err, errReaderNetworkingDisabled) {
+		return err
 	}
-	r.slogger().Error("initial read failed", "err", err)
+	if r.t.closed.IsSet() {
+		return errTorrentClosed
+	}
+	return nil
+}
 
-	err = r.clearStorageReader()
+func (r *reader) resetStorageReader(ctx context.Context) error {
+	if err := r.terminalReadError(ctx, nil); err != nil {
+		return err
+	}
+	err := r.clearStorageReader()
+	if terminal := r.terminalReadError(ctx, err); terminal != nil {
+		return terminal
+	}
 	if err != nil {
-		err = fmt.Errorf("closing storage reader after first read failed: %w", err)
+		return fmt.Errorf("closing storage reader during recovery: %w", err)
+	}
+	return nil
+}
+
+func (r *reader) readAt(ctx context.Context, b []byte, pos int64) (n int, err error) {
+	if err = r.terminalReadError(ctx, nil); err != nil {
 		return
 	}
-	r.storageReader = nil
-
-	n, err = r.readOnceAt(ctx, b, pos)
-	if err == nil {
-		return
+	if pos >= r.length {
+		return 0, io.EOF
 	}
-	r.slogger().Error("read failed after reader reset", "err", err)
+	for {
+		if err = r.terminalReadError(ctx, nil); err != nil {
+			return
+		}
+		n, err = r.readOnceAt(ctx, b, pos)
+		if terminal := r.terminalReadError(ctx, err); terminal != nil {
+			return n, terminal
+		}
+		if err == nil {
+			return
+		}
+		r.slogger().Debug("initial read failed", "err", err)
 
-	r.updatePieceCompletion(pos)
+		if err = r.resetStorageReader(ctx); err != nil {
+			return
+		}
+		n, err = r.readOnceAt(ctx, b, pos)
+		if terminal := r.terminalReadError(ctx, err); terminal != nil {
+			return n, terminal
+		}
+		if err == nil {
+			return
+		}
+		r.slogger().Debug("read failed after reader reset", "err", err)
 
-	n, err = r.readOnceAt(ctx, b, pos)
-	if err == nil {
-		return
+		missing := r.updatePieceCompletion(pos)
+		if terminal := r.terminalReadError(ctx, err); terminal != nil {
+			return n, terminal
+		}
+		if missing {
+			if !errors.Is(err, io.EOF) {
+				return
+			}
+			if closeErr := r.resetStorageReader(ctx); closeErr != nil {
+				return n, closeErr
+			}
+		}
+		n, err = r.readOnceAt(ctx, b, pos)
+		if terminal := r.terminalReadError(ctx, err); terminal != nil {
+			return n, terminal
+		}
+		if err == nil {
+			return
+		}
+		r.slogger().Debug("read failed after completion resync", "err", err)
+		if !errors.Is(err, io.EOF) {
+			return
+		}
+		if !r.t.hasStorageCap() {
+			return n, io.ErrUnexpectedEOF
+		}
+		missing = r.updatePieceCompletion(pos)
+		if terminal := r.terminalReadError(ctx, err); terminal != nil {
+			return n, terminal
+		}
+		if !missing {
+			return n, io.ErrUnexpectedEOF
+		}
+		if closeErr := r.resetStorageReader(ctx); closeErr != nil {
+			return n, closeErr
+		}
+		// Only an observed loss of readable data may re-enter waitAvailable.
 	}
-	r.slogger().Error("read failed after completion resync", "err", err)
-
-	if r.t.hasStorageCap() {
-		// Ensure params weren't modified (Go sux). Recurse to detect infinite loops. TODO: I expect
-		// only some errors should pass through here, this might cause us to get stuck if we retry
-		// for any error.
-		return r.readAt(ctx, b, pos)
-	}
-
-	// There should have been something available, avail != 0 here.
-	if err == io.EOF {
-		err = io.ErrUnexpectedEOF
-	}
-	return
 }
 
 // We pass pos in case we go ahead and implement multiple reads per ReadAt.
-func (r *reader) updatePieceCompletion(pos int64) {
+func (r *reader) updatePieceCompletion(pos int64) (missing bool) {
 	firstPieceIndex := pieceIndex(r.torrentOffset(pos) / r.t.info.PieceLength)
 	r.t.cl.lock()
 	// I think there's a panic here caused by the Client being closed before obtaining this
@@ -378,6 +432,7 @@ func (r *reader) updatePieceCompletion(pos int64) {
 	for index := r.pieces.begin + 1; index < r.pieces.end; index++ {
 		r.t.updatePieceCompletion(index)
 	}
+	return r.available(pos, 1) == 0
 }
 
 // Hodor
