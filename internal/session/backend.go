@@ -15,12 +15,12 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 var (
-	_ filesystem.Backend                = (*Session)(nil)
-	_ filesystem.TorrentContentsBackend = (*Session)(nil)
+	_ vfs.Backend                = (*Session)(nil)
+	_ vfs.TorrentContentsBackend = (*Session)(nil)
 
 	errPieceRange = errors.New("session: invalid piece range")
 )
@@ -75,10 +75,10 @@ type NetworkStatus struct {
 	DhtFamilies []DhtFamilyStatus
 }
 
-// Torrents implements filesystem.Backend. Torrents whose metainfo is not yet
+// Torrents implements vfs.Backend. Torrents whose metainfo is not yet
 // available (magnet sources still resolving) are excluded: without info there
 // is nothing to show or read.
-func (s *Session) Torrents() []filesystem.TorrentView {
+func (s *Session) Torrents() []vfs.TorrentView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.state != stateActive {
@@ -87,7 +87,7 @@ func (s *Session) Torrents() []filesystem.TorrentView {
 	return s.filesystemViewsLocked()
 }
 
-func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
+func (s *Session) filesystemViewsLocked() []vfs.TorrentView {
 	hashes := make([]metainfo.Hash, 0, len(s.states))
 	for hash, entry := range s.states {
 		if entry.State == StateReady {
@@ -95,13 +95,13 @@ func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
 		}
 	}
 	sort.Slice(hashes, func(i, j int) bool { return bytes.Compare(hashes[i][:], hashes[j][:]) < 0 })
-	views := make([]filesystem.TorrentView, 0, len(hashes))
+	views := make([]vfs.TorrentView, 0, len(hashes))
 	for _, hash := range hashes {
 		contents, err := s.torrentContentsLocked(hash)
 		if err != nil {
 			continue
 		}
-		views = append(views, filesystem.TorrentView{
+		views = append(views, vfs.TorrentView{
 			Name:       s.torrents[hash].Name(),
 			Hash:       hash,
 			Category:   s.states[hash].Category,
@@ -117,26 +117,26 @@ func (s *Session) filesystemViewsLocked() []filesystem.TorrentView {
 
 // TorrentContents resolves one current ready torrent without enumerating the
 // library. Internal callers that hold mu use torrentContentsLocked instead.
-func (s *Session) TorrentContents(hash metainfo.Hash) (filesystem.TorrentContents, error) {
+func (s *Session) TorrentContents(hash metainfo.Hash) (vfs.TorrentContents, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.torrentContentsLocked(hash)
 }
 
-func (s *Session) torrentContentsLocked(hash metainfo.Hash) (filesystem.TorrentContents, error) {
+func (s *Session) torrentContentsLocked(hash metainfo.Hash) (vfs.TorrentContents, error) {
 	if err := s.ensureActiveLocked(); err != nil {
-		return filesystem.TorrentContents{}, err
+		return vfs.TorrentContents{}, err
 	}
 	entry := s.states[hash]
 	t := s.torrents[hash]
 	if entry == nil || entry.State != StateReady || t == nil {
-		return filesystem.TorrentContents{}, filesystem.ErrNotFound
+		return vfs.TorrentContents{}, vfs.ErrNotFound
 	}
 	payload := t.payloadSnapshot()
 	if payload == nil {
-		return filesystem.TorrentContents{}, filesystem.ErrNotFound
+		return vfs.TorrentContents{}, vfs.ErrNotFound
 	}
-	return filesystem.TorrentContents{
+	return vfs.TorrentContents{
 		Files:      payload.files,
 		FilesID:    payload.id,
 		Subtitles:  s.subtitleViewsLocked(hash),
@@ -145,7 +145,7 @@ func (s *Session) torrentContentsLocked(hash metainfo.Hash) (filesystem.TorrentC
 	}, nil
 }
 
-// OpenFile implements filesystem.Backend: it returns a reader handle for the
+// OpenFile implements vfs.Backend: it returns a reader handle for the
 // file at the given display path inside the torrent identified by hash.
 func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error) {
 	s.mu.RLock()
@@ -155,11 +155,11 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 	}
 	entry, ok := s.states[hash]
 	if !ok || entry.State != StateReady {
-		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
+		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, vfs.ErrNotFound)
 	}
 	t, ok := s.torrents[hash]
 	if !ok {
-		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, filesystem.ErrNotFound)
+		return nil, fmt.Errorf("session: unknown torrent %s: %w", hash, vfs.ErrNotFound)
 	}
 	return t.readerFor(path)
 }
@@ -167,21 +167,21 @@ func (s *Session) OpenFile(hash metainfo.Hash, path string) (io.ReaderAt, error)
 // OpenSubtitle opens a managed subtitle for the FUSE read path. The metadata
 // and the file come from the same opened descriptor, so a replacement that lands
 // between them cannot pair one version's length with another version's bytes.
-func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (filesystem.SubtitleSnapshot, error) {
+func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (vfs.SubtitleSnapshot, error) {
 	rel, err := s.managedSubtitlePath(hash, path)
 	if err != nil {
-		return filesystem.SubtitleSnapshot{}, err
+		return vfs.SubtitleSnapshot{}, err
 	}
 	store := s.subtitleStore
 	if store == nil {
-		return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
+		return vfs.SubtitleSnapshot{}, vfs.ErrNotFound
 	}
 	file, err := store.openRead(rel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
+			return vfs.SubtitleSnapshot{}, vfs.ErrNotFound
 		}
-		return filesystem.SubtitleSnapshot{}, err
+		return vfs.SubtitleSnapshot{}, err
 	}
 	if subtitleOpenHook != nil {
 		subtitleOpenHook(hash, path)
@@ -189,13 +189,13 @@ func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (filesystem.Subt
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return filesystem.SubtitleSnapshot{}, err
+		return vfs.SubtitleSnapshot{}, err
 	}
 	if !info.Mode().IsRegular() {
 		_ = file.Close()
-		return filesystem.SubtitleSnapshot{}, filesystem.ErrNotFound
+		return vfs.SubtitleSnapshot{}, vfs.ErrNotFound
 	}
-	return filesystem.SubtitleSnapshot{
+	return vfs.SubtitleSnapshot{
 		Reader:     file,
 		Size:       info.Size(),
 		ModifiedAt: info.ModTime().UTC(),
@@ -206,20 +206,20 @@ func (s *Session) OpenSubtitle(hash metainfo.Hash, path string) (filesystem.Subt
 // separate from OpenSubtitle because a stat is a point-in-time observation: the
 // coherence that matters is between the length and the bytes of one open, which
 // OpenSubtitle guarantees on its own.
-func (s *Session) SubtitleStat(hash metainfo.Hash, path string) (filesystem.SubtitleStat, error) {
+func (s *Session) SubtitleStat(hash metainfo.Hash, path string) (vfs.SubtitleStat, error) {
 	rel, err := s.managedSubtitlePath(hash, path)
 	if err != nil {
-		return filesystem.SubtitleStat{}, err
+		return vfs.SubtitleStat{}, err
 	}
 	store := s.subtitleStore
 	if store == nil {
-		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
+		return vfs.SubtitleStat{}, vfs.ErrNotFound
 	}
 	stat, err := store.lstat(rel)
 	if err != nil || stat.Mode&subtitleStoreFileType != subtitleStoreRegular {
-		return filesystem.SubtitleStat{}, filesystem.ErrNotFound
+		return vfs.SubtitleStat{}, vfs.ErrNotFound
 	}
-	return filesystem.SubtitleStat{
+	return vfs.SubtitleStat{
 		Size:       stat.Size,
 		ModifiedAt: time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec).UTC(),
 	}, nil
@@ -229,7 +229,7 @@ func (s *Session) SubtitleStat(hash metainfo.Hash, path string) (filesystem.Subt
 // managed store, refusing anything the index does not know about.
 func (s *Session) managedSubtitlePath(hash metainfo.Hash, path string) (string, error) {
 	if err := validateSubtitleRelativePath(path); err != nil {
-		return "", filesystem.ErrNotFound
+		return "", vfs.ErrNotFound
 	}
 	s.mu.RLock()
 	activeErr := s.ensureActiveLocked()
@@ -240,7 +240,7 @@ func (s *Session) managedSubtitlePath(hash metainfo.Hash, path string) (string, 
 		return "", activeErr
 	}
 	if entry == nil || entry.State != StateReady || !known {
-		return "", filesystem.ErrNotFound
+		return "", vfs.ErrNotFound
 	}
 	return filepath.Join(subtitleDirName(hash), filepath.FromSlash(path)), nil
 }
@@ -293,7 +293,7 @@ func (s *Session) TorrentStatusFor(id string) (TorrentStatusView, error) {
 		view.SubtitleTargets = targets
 	}
 	allViews := s.filesystemViewsLocked()
-	var currentView filesystem.TorrentView
+	var currentView vfs.TorrentView
 	for _, candidate := range allViews {
 		if candidate.Hash == hash {
 			currentView = candidate

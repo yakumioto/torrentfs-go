@@ -8,11 +8,13 @@ Use the [quick start](../README.en.md#quick-start) to start a service and read y
 
 Add a magnet or upload a `.torrent` through the Web UI or API. Arbitrary `.torrent` files copied into the managed directory are not imported. A magnet can remain `adding` until peers supply metainfo.
 
-By default, read content through FUSE or SMB while the HTTP API manages tasks. Explicitly enabling STRM adds signed HTTP playback links through `.strm` files in a second read-only view; the original file view stays unchanged. Reads fetch the needed pieces on demand; a player or indexer may wait when pieces are not cached or peers are unavailable. Random seeks fetch the corresponding pieces rather than requiring a sequential full download.
+After selecting `filesystem.backend=fuse` or `smb`, read content through that output while the HTTP API manages tasks. Explicitly enabling STRM adds signed HTTP playback links through `.strm` files in a second read-only view; the original file view stays unchanged. Reads fetch the needed pieces on demand; a player or indexer may wait when pieces are not cached or peers are unavailable. Random seeks fetch the corresponding pieces rather than requiring a sequential full download.
 
-Each foreground content read is bounded by `mount.read_timeout` (`30s` by default). If no source provides a verified piece in time, only that read ends with a read error after the deadline (the client may report a timeout or an I/O error); the torrent is not deleted and other reads are not cancelled. This is not a limit on the whole playback session or file handle. Raise it for slow swarms or large pieces, or override it with `TORRENTFS_MOUNT_READ_TIMEOUT`, then restart; see the [configuration guide](configuration.en.md).
+Each foreground content read is bounded by `filesystem.read_timeout` (`30s` by default). If no source provides a verified piece in time, only that read ends with a read error after the deadline (the client may report a timeout or an I/O error); the torrent is not deleted and other reads are not cancelled. This is not a limit on the whole playback session or file handle. Raise it for slow swarms or large pieces, or override it with `TORRENTFS_FILESYSTEM_READ_TIMEOUT` (legacy `TORRENTFS_MOUNT_READ_TIMEOUT` remains accepted), then restart; see the [configuration guide](configuration.en.md).
 
 ## FUSE and SMB layout
+
+Both backends share this tree. `<mount>` means the FUSE mountpoint or the SMB share root; SMB needs no physical server mount.
 
 ```text
 <mount>/
@@ -32,6 +34,12 @@ Each foreground content read is bounded by `mount.read_timeout` (`30s` by defaul
 - Category changes affect only virtual paths; they do not move payload, cache, or managed subtitle files.
 
 Managed subtitles are projected beside their video. A single-file video has a subtitle sibling at the root; a multi-file video has a subtitle in the same subdirectory. Both remain read-only. Uploads are visible to new directory queries, stat, and open in both original and STRM shares even after visiting the torrent's top or deep directory; no remount is needed. New file handles read replacements, while old file handles keep their descriptor snapshots. A directory stream already being iterated retains its list and offset; use a new directory query to see added members. A player's own cache may still require a rescan or reopen; see the [development guide](development.en.md).
+
+### SMB names and directory snapshots
+
+SMB lookup is case-insensitive. Windows-invalid characters, reserved names, long names, and case-only collisions receive stable aliases while retaining media extensions; files are not silently omitted. Use names actually returned by SMB. API `video_path` still uses the original torrent display path; historical `mount_path` describes virtual layout, not a host path or necessarily an SMB-encoded alias.
+
+Continuation pages retain one enumeration snapshot. Reopen or restart enumeration to see current members. Refreshing the server does not invalidate a player's media-library cache, so a rescan may still be needed.
 
 ## STRM view and playback
 
@@ -80,7 +88,7 @@ Frontend development is covered in the [development guide](development.en.md).
 
 ## Categories, favorites, and cleanup
 
-A category name is both a stable identifier and one directory level in the FUSE tree. You can create a category, assign a task, or clear its category. Empty categories remain visible. This version does not support renaming, deleting, nesting, or assigning multiple categories to one task.
+A category name is both a stable identifier and one directory level in the shared virtual tree. You can create a category, assign a task, or clear its category. Empty categories remain visible. This version does not support renaming, deleting, nesting, or assigning multiple categories to one task.
 
 Favorite flags are persisted with the task. They exempt tasks from age-based prune operations, not from a direct delete request. Deletion and prune are asynchronous; the UI polls the returned operations. Managed subtitles are removed with the task.
 
@@ -182,7 +190,7 @@ With the same key and an existing task, restart and category changes preserve si
 | Magnet remains `adding` | Peers have not supplied metainfo; check source availability and network conditions. |
 | A `ready` read waits | The required pieces are not cached; available peers still need to provide them. |
 | A generated `.strm` cannot be statted or opened | Its URL generation keeps failing. The directory snapshot retains the entry, but lookup/stat/open return explicit errors; other files remain usable and listing does not retry forever. Check STRM configuration and task state, then reread after recovery. |
-| Video or cover reads report timeout or I/O errors | One read may have exceeded `mount.read_timeout`, default `30s`; check source/network availability, or increase the setting for slow swarms or large pieces and restart. |
+| Video or cover reads report timeout or I/O errors | One read may have exceeded `filesystem.read_timeout`, default `30s`; check source/network availability, or increase the setting for slow swarms or large pieces and restart. |
 | `docker cp` into `/mnt` or `/share` fails | Expected: the projected tree is read-only. Use UI/API subtitle upload. |
 | Subtitle upload returns `413` | The body exceeds `http.max_upload_size`; adjust static configuration and restart. |
 | Subtitle upload returns `415` | Check the exact basename and lowercase `.srt`/`.ass`/`.vtt` extension. |

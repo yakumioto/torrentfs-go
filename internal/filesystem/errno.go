@@ -6,19 +6,21 @@ import (
 	iofs "io/fs"
 	"os"
 	"syscall"
+
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 var (
-	ErrExists      = errors.New("filesystem: entry exists")
-	ErrNotFound    = errors.New("filesystem: entry not found")
-	ErrIsDir       = errors.New("filesystem: entry is a directory")
-	ErrNotDir      = errors.New("filesystem: entry is not a directory")
-	ErrNotEmpty    = errors.New("filesystem: directory not empty")
-	ErrReadOnly    = errors.New("filesystem: read-only")
-	ErrPermission  = errors.New("filesystem: permission denied")
-	ErrInvalidName = errors.New("filesystem: invalid name")
-	ErrCrossDir    = errors.New("filesystem: cross-directory operation")
-	ErrClosed      = errors.New("filesystem: closed")
+	ErrExists      = vfs.ErrExists
+	ErrNotFound    = vfs.ErrNotFound
+	ErrIsDir       = vfs.ErrIsDir
+	ErrNotDir      = vfs.ErrNotDir
+	ErrNotEmpty    = vfs.ErrNotEmpty
+	ErrReadOnly    = vfs.ErrReadOnly
+	ErrPermission  = vfs.ErrPermission
+	ErrInvalidName = vfs.ErrInvalidName
+	ErrCrossDir    = vfs.ErrCrossDir
+	ErrClosed      = vfs.ErrClosed
 )
 
 func errnoFor(err error) syscall.Errno {

@@ -16,7 +16,7 @@ readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
 readonly FIXTURE_INFO_HASH="dd45d0108ac27c3c0fb1d7b28fd2b313c753bc9b"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt"
 readonly LEGACY_STATS_MARKER="/torrents/.stats/leftover.txt"
-readonly IMAGE="torrentfs-mio17-smoke:${BASHPID}"
+readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-mio17-smoke:${BASHPID}}"
 readonly CONTAINER="torrentfs-mio17-${BASHPID}"
 readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
 readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
@@ -72,7 +72,7 @@ readonly UNMOUNT_BUSY_PATTERN='failed to unmount .*Device or resource busy'
 # fragment of the diagnostic the daemon must print before exiting non-zero.
 readonly UNMOUNT_TIMEOUT_SECONDS=30
 readonly UNMOUNT_STOP_MARGIN=20
-readonly UNMOUNT_TIMEOUT_DIAGNOSTIC='unmount did not return within'
+readonly UNMOUNT_TIMEOUT_DIAGNOSTIC='another mount namespace may still hold a propagated copy'
 
 TMP_DIR=""
 WEBSEED_PID=""
@@ -417,11 +417,15 @@ printf 'docker smoke: web seed serving the fixture on 127.0.0.1:%s\n' "$WEBSEED_
 mkdir -p "$TORRENT_HOST_DIR/.stats"
 printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
-printf 'docker smoke: building %s\n' "$IMAGE"
-IMAGE_TAGGED=1
-if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build \
-	--tag "$IMAGE" "$ROOT_DIR"; then
-	fail "docker build failed"
+if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+	probe "inspect prebuilt FUSE test image" docker image inspect "$IMAGE" >/dev/null
+else
+	printf 'docker smoke: building %s\n' "$IMAGE"
+	IMAGE_TAGGED=1
+	if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build \
+		--tag "$IMAGE" "$ROOT_DIR"; then
+		fail "docker build failed"
+	fi
 fi
 
 printf 'docker smoke: starting runtime-user host mount observer before FUSE\n'
@@ -436,8 +440,10 @@ HOST_OBSERVER_STARTED=1
 
 printf 'docker smoke: starting runtime-configured real FUSE mount (uid=%s gid=%s)\n' "$RUNTIME_UID" "$RUNTIME_GID"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the runtime-configured FUSE container" docker run --detach --name "$CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
 	--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -599,8 +605,10 @@ printf 'docker smoke: starting blocked-read shutdown scenario\n'
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
 mkdir -p "$BLOCKED_MOUNT_DIR"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run --detach --name "$BLOCKED_READ_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
 	--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -731,6 +739,7 @@ mkdir -p "$PEER_MOUNT_DIR"
 # non-root FUSE mount while creating the holder container. A private bind made
 # after propagation keeps the FUSE connection alive when the daemon unmounts.
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer mount namespace holder" docker run --detach --name "$PEER_HOLDER_CONTAINER" \
+	--user 0:0 \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
 	--entrypoint /bin/sh \
@@ -743,8 +752,10 @@ fi
 # piece; the outstanding-request cause belongs to the blocked-read scenario,
 # not this one.
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker run --detach --name "$PEER_DAEMON_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
 	--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -849,8 +860,10 @@ FILE_INPUT_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
 if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --name "$FILE_INPUT_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
 	--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -874,8 +887,10 @@ MISSING_DIR_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
 if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --name "$MISSING_DIR_CONTAINER" \
-		--env "PUID=$RUNTIME_UID" \
+		--user "$RUNTIME_UID:$RUNTIME_GID" \
+	--env "PUID=$RUNTIME_UID" \
 		--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 		--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \
@@ -958,8 +973,10 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the propagation observer for the subtit
 fi
 
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the managed subtitle container" docker run --detach --name "$SUBTITLE_CONTAINER" \
+	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
 	--env "PGID=$RUNTIME_GID" \
+	--env TORRENTFS_CONNECTIONS_LISTEN_PORT=0 \
 	--device /dev/fuse \
 	--cap-add SYS_ADMIN \
 	--security-opt apparmor=unconfined \

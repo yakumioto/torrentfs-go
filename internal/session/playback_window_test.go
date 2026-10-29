@@ -282,7 +282,7 @@ func TestPlaybackWindowKeepsAdjacentForegroundFlights(t *testing.T) {
 	}
 }
 
-func TestPlaybackWindowSeekCancelsOnlyStaleForegroundFlights(t *testing.T) {
+func TestPlaybackWindowSeekPreservesIndependentForegroundFlights(t *testing.T) {
 	const (
 		pieceLength = int64(1 << 20)
 		fileSize    = int64(256 << 20)
@@ -328,18 +328,22 @@ func TestPlaybackWindowSeekCancelsOnlyStaleForegroundFlights(t *testing.T) {
 	secondCandidate.finish(secondRequest.FileOffset, 64, nil)
 	select {
 	case <-old.ctx.Done():
+		t.Fatal("another stream's confirmed seek canceled an active foreground read")
 	default:
-		t.Fatal("confirmed seek did not cancel the stale foreground ticket")
 	}
 	snapshot = coordinator.snapshot()
 	if snapshot.Generation != 2 {
 		t.Fatalf("generation = %d after confirmed seek, want 2", snapshot.Generation)
 	}
-	if snapshot.ForegroundTickets != 0 {
-		t.Fatalf("foreground tickets after confirmed seek = %d, want 0", snapshot.ForegroundTickets)
+	if snapshot.ForegroundTickets != 1 {
+		t.Fatalf("foreground tickets after confirmed seek = %d, want 1", snapshot.ForegroundTickets)
 	}
-	if snapshot.ForegroundCancels != 1 {
-		t.Fatalf("foreground cancellations = %d, want 1", snapshot.ForegroundCancels)
+	if snapshot.ForegroundCancels != 0 {
+		t.Fatalf("foreground cancellations = %d, want 0", snapshot.ForegroundCancels)
+	}
+	old.finish(oldRequest.FileOffset, 64, nil)
+	if got := coordinator.snapshot().ForegroundTickets; got != 0 {
+		t.Fatalf("tickets after old-generation read finishes = %d, want 0", got)
 	}
 	secondCandidate.finishPiece(secondPlan.Spans[0].Index)
 }
@@ -465,7 +469,7 @@ func (s *blockingPlaybackSource) ReadAtContext(ctx context.Context, dst []byte, 
 
 func (s *blockingPlaybackSource) Close() error { return nil }
 
-func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
+func TestPlaybackWindowCrossPieceReadStopsOnlyOnExplicitCancel(t *testing.T) {
 	const (
 		pieceLength = int64(1 << 20)
 		fileSize    = int64(256 << 20)
@@ -476,9 +480,11 @@ func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
 	file := playbackTestFile(fileSize, pieceLength, store, coordinator)
 	file.loader = source
 
+	oldContext, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
 	oldDone := make(chan error, 1)
 	go func() {
-		_, err := file.ReadAtContext(context.Background(), make([]byte, 2*pieceLength), 0)
+		_, err := file.ReadAtContext(oldContext, make([]byte, 2*pieceLength), 0)
 		oldDone <- err
 	}()
 	select {
@@ -498,11 +504,17 @@ func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
 	}
 	select {
 	case err := <-oldDone:
+		t.Fatalf("another stream's seek interrupted a multi-piece read: %v", err)
+	default:
+	}
+	oldCancel()
+	select {
+	case err := <-oldDone:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("stale multi-piece read error = %v, want context.Canceled", err)
+			t.Fatalf("explicitly canceled multi-piece read error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("confirmed seek did not stop the stale multi-piece read")
+		t.Fatal("explicit cancellation did not stop the multi-piece read")
 	}
 
 	closeCalls := false
@@ -519,8 +531,8 @@ func TestPlaybackWindowStaleCrossPieceReadStopsBeforeNextSpan(t *testing.T) {
 			break
 		}
 	}
-	if got := coordinator.snapshot().StaleSpanRejects; got == 0 {
-		t.Fatal("stale span rejection was not recorded")
+	if got := coordinator.snapshot().ForegroundTickets; got != 0 {
+		t.Fatalf("canceled read retained %d foreground tickets", got)
 	}
 }
 
@@ -836,10 +848,21 @@ func TestPlaybackWindowBackwardSeekWhileHigherReadOutstanding(t *testing.T) {
 	secondCandidate.finish(secondRequest.FileOffset, 64, nil)
 	select {
 	case <-old.ctx.Done():
+		t.Fatal("backward seek canceled an independent higher read")
 	default:
-		t.Fatal("confirmed backward seek did not cancel the higher outstanding ticket")
 	}
 	if got := coordinator.snapshot().Generation; got != 2 {
 		t.Fatalf("generation after confirmed backward seek = %d, want 2", got)
+	}
+	oldCancel()
+	select {
+	case <-old.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("explicit cancellation did not reach higher read")
+	}
+	old.finishPiece(oldPlan.Spans[0].Index)
+	old.finish(oldRequest.FileOffset, 0, context.Canceled)
+	if got := coordinator.snapshot().ForegroundTickets; got != 0 {
+		t.Fatalf("old-generation ticket leaked after cancel: %d", got)
 	}
 }

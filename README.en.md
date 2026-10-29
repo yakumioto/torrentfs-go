@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-`torrentfs` is a read-only BitTorrent filesystem written in Go. It fetches content on demand, exposes a FUSE file tree, and provides a Web UI/API for task management.
+`torrentfs` is a read-only BitTorrent filesystem written in Go. It fetches content on demand, exposes one virtual tree through configurable FUSE or native SMB backends, and provides a Web UI/API for task management.
 
 Use it to let players, media libraries, indexers, or command-line tools read torrents like local files, or to provide a read-only SMB share through Docker.
 
@@ -12,7 +12,7 @@ Use it to let players, media libraries, indexers, or command-line tools read tor
 - **Read-only filesystem:** single files appear directly; multi-file torrents retain their directory structure.
 - **Web UI/API management:** add magnets or upload `.torrent` files and inspect tasks and cache state.
 - **Task and media management:** categories, favorites, age-based cleanup, subtitle upload/replacement, and scheduled upload limits.
-- **Docker + SMB:** FUSE and a read-only share in one container, without host mount propagation.
+- **Peer FUSE / SMB backends:** select `filesystem.backend`; native SMB needs no FUSE, Samba, or host mount propagation.
 - **Optional STRM view:** retain the original file share and add `.strm` files pointing to signed HTTP links; see the [deployment guide](docs/deployment.en.md).
 
 ## Quick start
@@ -21,8 +21,8 @@ Recommended path: **Docker → add a task in the Web UI → read over SMB**. Bui
 
 Requirements:
 
-- Linux with rootful Docker, an available `/dev/fuse`, and a host security policy that permits FUSE.
-- Permission to grant `SYS_ADMIN` and `NET_BIND_SERVICE`; host ports `8080` and `445` must be available.
+- Linux Docker; host ports `8080` and `445` must be available and permitted by the host/Docker publishing policy.
+- The recommended SMB mode needs no `/dev/fuse`, added capabilities, or relaxed AppArmor profile.
 - Bash; run the commands in order in the same terminal. Go and Node.js are not required on the host.
 
 The default cache limit is `2GiB`; adjust it for smaller hosts using the [configuration reference](docs/configuration.en.md). Other run modes are in the [deployment guide](docs/deployment.en.md).
@@ -39,7 +39,7 @@ docker build -t torrentfs .
 
 ### 2. Prepare the directory and credentials
 
-The entrypoint must start as root, but the services run as a non-root `PUID:PGID`. Do not pass `--user`. A non-root host user can reuse their identity; a root user needs a dedicated non-zero identity:
+The image defaults to `1000:1000`. Prefer an explicit non-root `--user "$PUID:$PGID"`; if set, `PUID/PGID` must agree with it. A non-root host user can reuse their identity; a root user needs a dedicated non-zero identity:
 
 ```bash
 HOST_UID="$(id -u)"
@@ -58,7 +58,7 @@ sudo install -d -o "$PUID" -g "$PGID" -m 0755 /srv/torrents
 
 This is for a new directory; inspect ownership and permissions before using existing data. The entrypoint does not chown bind mounts, and the selected identity must be able to read, write, and traverse the directory.
 
-HTTP and SMB share a password. Web login needs only that password; SMB also uses the container's runtime account name `torrentfs`:
+The environment example supplies one password to HTTP and SMB. Web login needs only the password; the example SMB username `torrentfs` is independent of the Unix runtime account:
 
 ```bash
 export TORRENTFS_USERNAME=torrentfs
@@ -74,24 +74,23 @@ The password is passed through the environment and may be visible to users with 
 ```bash
 docker run --detach --name torrentfs \
   --publish 127.0.0.1:8080:8080 \
-  --publish 127.0.0.1:445:445 \
+  --publish 127.0.0.1:445:1445 \
+  --user "$PUID:$PGID" \
   --env PUID --env PGID \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --cap-add NET_BIND_SERVICE \
-  --security-opt apparmor=unconfined \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_SMB_ENABLED=true \
+  --env TORRENTFS_FILESYSTEM_BACKEND=smb \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
 ```
 
-This example publishes HTTP/SMB only on loopback and relaxes AppArmor to permit FUSE; use it only on a trusted host. If the host policy already permits FUSE, adjust the security options as described in the [deployment guide](docs/deployment.en.md).
+This example publishes HTTP/SMB only on loopback and runs the application non-root, with no capabilities and the default AppArmor profile. For LAN players, bind an explicit trusted LAN address and configure a firewall as described in the [deployment guide](docs/deployment.en.md).
 
-SMB mode owns the container-local `/share` mount: do not add `-mountpoint`, and do not bind `/share` to the host. For LAN access or inbound peers, follow the deployment guide's address, firewall, and TCP/UDP settings.
+SMB exports the virtual tree directly and creates no `/share` mount; do not add FUSE `-mountpoint` flags. TOML can select `fuse`, `smb`, or `none`; see the [configuration reference](docs/configuration.en.md) and [deployment guide](docs/deployment.en.md) for examples and FUSE-specific privileges.
 
 ### 4. Add a task and read
 

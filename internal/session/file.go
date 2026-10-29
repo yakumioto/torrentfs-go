@@ -11,7 +11,7 @@ import (
 	"github.com/anacrolix/torrent"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 // readProbeEvent reports one step of a loader read to a test-installed probe.
@@ -102,7 +102,7 @@ func newPieceFetcher(t *torrent.Torrent, c *cache.Cache) *pieceFetcher {
 
 func (f *pieceFetcher) ReadAtContext(requestCtx context.Context, p []byte, off, _ int64) (int, error) {
 	if off < 0 || f.pieceLength <= 0 {
-		return 0, filesystem.ErrInvalidName
+		return 0, vfs.ErrInvalidName
 	}
 	if requestCtx == nil {
 		requestCtx = context.Background()
@@ -149,7 +149,7 @@ func (f *pieceFetcher) joinFlight(index int, start, length int64) (*pieceFlight,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
-		return nil, filesystem.ErrClosed
+		return nil, vfs.ErrClosed
 	}
 	if flight, ok := f.inflight[index]; ok {
 		flight.waiters++
@@ -193,7 +193,7 @@ func (f *pieceFetcher) runFlight(flight *pieceFlight, start, length int64) {
 			err = io.ErrUnexpectedEOF
 		}
 	}
-	if closeErr := reader.Close(); err == nil && closeErr != nil && !errors.Is(closeErr, filesystem.ErrClosed) {
+	if closeErr := reader.Close(); err == nil && closeErr != nil && !errors.Is(closeErr, vfs.ErrClosed) {
 		err = closeErr
 	}
 	if err == nil && f.cache != nil {
@@ -352,7 +352,7 @@ func (l *pieceLoader) endOperation(operation uint64, cancel context.CancelFunc) 
 // queue by cancelling the read in flight rather than by interrupting waiters.
 func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, readahead int64) (int, error) {
 	if off < 0 {
-		return 0, filesystem.ErrInvalidName
+		return 0, vfs.ErrInvalidName
 	}
 	if requestCtx == nil {
 		requestCtx = context.Background()
@@ -385,7 +385,7 @@ func (l *pieceLoader) ReadAtContext(requestCtx context.Context, p []byte, off, r
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
-		return 0, filesystem.ErrClosed
+		return 0, vfs.ErrClosed
 	}
 	l.r.SetReadahead(readahead)
 	l.r.SetContext(ctx)
@@ -417,7 +417,7 @@ func (l *pieceLoader) Close() error {
 	}
 	l.closed = true
 	l.err = l.r.Close()
-	if l.err != nil && errors.Is(l.err, filesystem.ErrClosed) {
+	if l.err != nil && errors.Is(l.err, vfs.ErrClosed) {
 		return nil
 	}
 	return l.err
@@ -511,7 +511,7 @@ func (f *raFile) ReadAt(p []byte, off int64) (int, error) {
 // an older generation.
 func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
 	if off < 0 {
-		return 0, filesystem.ErrInvalidName
+		return 0, vfs.ErrInvalidName
 	}
 	if len(p) == 0 {
 		return 0, nil
@@ -523,7 +523,7 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 	f.mu.RLock()
 	if f.closed {
 		f.mu.RUnlock()
-		return 0, filesystem.ErrClosed
+		return 0, vfs.ErrClosed
 	}
 	loader := f.loader
 	coordinator := f.coordinator
@@ -649,7 +649,7 @@ func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]by
 	f.mu.RLock()
 	if f.closed {
 		f.mu.RUnlock()
-		return nil, filesystem.ErrClosed
+		return nil, vfs.ErrClosed
 	}
 	f.cache.Put(key, data)
 	f.mu.RUnlock()

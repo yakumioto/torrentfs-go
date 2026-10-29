@@ -1,4 +1,4 @@
-// Command torrentfs mounts BitTorrent downloads as a FUSE filesystem.
+// Command torrentfs exports a read-only torrent tree through FUSE or SMB.
 package main
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,46 +23,43 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
+	"github.com/yakumioto/torrentfs-go/internal/smb"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
-const usageText = `torrentfs mounts BitTorrent downloads as a read-only FUSE filesystem and
-serves a torrent management HTTP API.
+const usageText = `torrentfs exposes BitTorrent files as a read-only FUSE or native SMB virtual tree
+and serves a torrent management HTTP API.
 
 Usage:
-  torrentfs [-mountpoint <dir>] [-strm-mountpoint <dir>] [flags] <torrents-dir>
+  torrentfs [-config <file>] [-mountpoint <dir>] [-strm-mountpoint <dir>] <torrents-dir>
+
+Configuration:
+  [filesystem] backend = "fuse", "smb", or "none" (HTTP-only default)
+  [fuse] mountpoint / strm_mountpoint / allow_other
+  [smb] listen_addr / username / password_file
 
 Flags:
-  -mountpoint <dir>       original-file mount (required unless the HTTP API is enabled)
-  -strm-mountpoint <dir>  optional STRM mount; requires strm.base_url and the HTTP API
   -config <file>          TOML configuration file
+  -mountpoint <dir>       legacy FUSE mountpoint alias; conflicts with explicit smb/none
+  -strm-mountpoint <dir>  optional FUSE STRM view; requires strm.base_url and HTTP
   -h, --help              show this help and exit
 
-Configuration precedence is TORRENTFS_* environment variables, then the TOML
-file, then built-in defaults. See the README for the complete environment
-variable list.
+SMB serves torrentfs and optionally torrentfs-strm directly without FUSE or Samba.
+Its default container port is 1445; publish host TCP 445 to container TCP 1445.
+Both file outputs are read-only: there is no metadata/ or stats/ control directory.
+A single-file torrent appears directly; multi-file torrents retain their directory
+layout. Management (add/delete/status) happens over the HTTP API. Unregistered
+root .torrent files are ignored. Canonical metainfo is stored only at
+<torrents-dir>/<infohash>.torrent; the .metadata directory stores internal state
+and is never exported.
 
-<torrents-dir> must be an existing directory. Torrent tasks are created only
-through the HTTP API; root .torrent files that are not registry-managed are
-ignored. A single-file torrent is exposed under the mount point as a regular
-file directly, e.g. <mount>/movie.mp4; a multi-file torrent is exposed as a
-directory tree. The mount is data only and every path in it is read-only:
-there is no metadata/ or stats/ control directory.
+<torrents-dir> must be an existing directory. HTTP can run without a file output,
+and SMB can run without HTTP unless STRM links are enabled. Non-loopback HTTP
+listeners require http.auth. The FUSE STRM view can be mounted alone or beside the
+original view. Mountpoints must not be identical or nested, including symbolic-link aliases.
 
-Managing torrents happens over the HTTP API: add by upload or magnet, list,
-delete, and query per-torrent piece status. Canonical metainfo is stored only
-at <torrents-dir>/<infohash>.torrent. The .metadata directory stores pending
-magnet intents, registry state, peer identity, the layout marker, and the
-instance lock; all of these paths are implementation details and are never
-mounted.
-
-The optional STRM mount replaces videos and ISO files with signed HTTP links;
-other files retain their original contents. It can be mounted alone or beside
-the original-file view. Its mountpoint and -mountpoint must not be the same or
-nested, including symbolic-link aliases.
-
-When http.listen_addr is set the management API is served; an enabled
-http.auth configuration is required for non-loopback listeners. Omitting both
-mountpoint flags then runs headless (HTTP only). Send SIGINT or SIGTERM to shut down.
+Configuration precedence is documented TORRENTFS_* environment variables, then
+TOML, then defaults. Send SIGINT or SIGTERM for bounded shutdown.
 `
 
 func main() {
@@ -103,13 +101,20 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	*mountpoint, *strmMountpoint, err = validateMountpoints(*mountpoint, *strmMountpoint, cfg.STRM.BaseURL)
-	if err != nil {
+	if err = cfg.ResolveFilesystem(*mountpoint, *strmMountpoint); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
+	*mountpoint, *strmMountpoint = "", ""
+	if cfg.Filesystem.Backend == config.BackendFUSE {
+		*mountpoint, *strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+			return 2
+		}
+	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if *mountpoint == "" && *strmMountpoint == "" && !httpEnabled {
+	if cfg.Filesystem.Backend == config.BackendNone && !httpEnabled {
 		flags.Usage()
 		return 2
 	}
@@ -131,13 +136,14 @@ func run(args []string, stderr io.Writer) int {
 		"version", "dev",
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
+		"filesystem_backend", cfg.Filesystem.Backend,
 		"mountpoint", *mountpoint,
 		"strm_mountpoint", *strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,
 		"mount_uid", os.Getuid(),
 		"mount_gid", os.Getgid(),
-		"mount_allow_other", cfg.Mount.AllowOther,
+		"mount_allow_other", cfg.FUSE.AllowOther,
 		"log_level", logLevel,
 		"log_format", logFormat,
 	)
@@ -176,10 +182,10 @@ func run(args []string, stderr io.Writer) int {
 	if *strmMountpoint != "" {
 		requests = append(requests, mountRequest{
 			mountpoint: *strmMountpoint,
-			backend:    filesystem.NewSTRMBackend(sess),
+			backend:    vfs.NewSTRMBackend(sess),
 		})
 	}
-	sequence.mounts, err = mountFilesystems(requests, cfg.Mount.AllowOther,
+	sequence.mounts, err = mountFilesystems(requests, cfg.FUSE.AllowOther,
 		func(path string, backend filesystem.Backend, options *fs.Options) (mountUnmounter, error) {
 			server, mountErr := filesystem.Mount(path, backend, options)
 			if mountErr != nil {
@@ -193,9 +199,32 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
+	if cfg.Filesystem.Backend == config.BackendSMB {
+		shares := map[string]*vfs.Tree{smb.ShareName: vfs.New(sess)}
+		if cfg.SMBSTRMEnabled() {
+			shares[smb.STRMShareName] = vfs.New(vfs.NewSTRMBackend(sess))
+		}
+		native, startErr := smb.New(shares, smb.Options{Username: cfg.SMB.Username,
+			Password: cfg.SMB.Password, ReadTimeout: time.Duration(cfg.FileReadTimeout()), Logger: logger})
+		if startErr != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", startErr)
+			sequence.run()
+			return 1
+		}
+		listener, listenErr := net.Listen("tcp", cfg.SMB.ListenAddr)
+		if listenErr != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: smb listen: %v\n", listenErr)
+			sequence.run()
+			return 1
+		}
+		sequence.smb = native
+		go func() {
+			serveErr <- unexpectedServeResult("smb", native.Serve(listener))
+		}()
+	}
 	if apiServer != nil {
-		go func() { serveErr <- apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr) }()
+		go func() { serveErr <- unexpectedServeResult("http", apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr)) }()
 	}
 
 	var serveFailure error
@@ -210,11 +239,9 @@ func run(args []string, stderr io.Writer) int {
 	if shutdown.unmount != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", shutdown.unmount)
 	}
-	if shutdown.api != nil && serveFailure == nil {
-		serveFailure = shutdown.api
-	}
+	serveFailure = errors.Join(serveFailure, shutdown.api, shutdown.smb)
 	if serveFailure != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: http server: %v\n", serveFailure)
+		_, _ = fmt.Fprintf(stderr, "torrentfs: server: %v\n", serveFailure)
 	}
 	if shutdown.close != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: close: %v\n", shutdown.close)
@@ -292,6 +319,7 @@ var errUnmountTimeout = errors.New("unmount did not complete")
 type shutdownSequence struct {
 	logger *slog.Logger
 	api    httpShutdowner
+	smb    httpShutdowner
 	sess   sessionCloser
 	mounts []mountedFilesystem
 
@@ -303,6 +331,7 @@ type shutdownSequence struct {
 // shutdownResult carries one error per stage so each can be reported
 // separately; a failed stage never skips the stages after it.
 type shutdownResult struct {
+	smb     error
 	api     error
 	close   error
 	unmount error
@@ -315,6 +344,11 @@ func (s shutdownSequence) run() shutdownResult {
 	}
 	logger.Info("shutting down")
 	var result shutdownResult
+	if s.smb != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		result.smb = s.smb.Shutdown(ctx)
+		cancel()
+	}
 	if s.api != nil {
 		result.api = s.api.Shutdown(context.Background())
 	}
@@ -325,6 +359,10 @@ func (s shutdownSequence) run() shutdownResult {
 
 	var failures []error
 	var failedStages []string
+	if result.smb != nil {
+		failedStages = append(failedStages, "smb")
+		failures = append(failures, fmt.Errorf("smb: %w", result.smb))
+	}
 	if result.api != nil {
 		failedStages = append(failedStages, "http-api")
 		failures = append(failures, fmt.Errorf("http api: %w", result.api))
@@ -462,6 +500,13 @@ func validateTorrentDir(path string) error {
 		return fmt.Errorf("torrents path %q must be an existing directory", path)
 	}
 	return nil
+}
+
+func unexpectedServeResult(name string, err error) error {
+	if err == nil {
+		return fmt.Errorf("%s server stopped unexpectedly", name)
+	}
+	return fmt.Errorf("%s server: %w", name, err)
 }
 
 func loadConfig(path string) (config.Config, error) {

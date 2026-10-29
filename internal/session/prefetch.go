@@ -659,16 +659,9 @@ func (c *prefetchCoordinator) confirmCandidateLocked(ticket *foregroundTicket) [
 	c.state = prefetchIdle
 	c.bufferedBytes = 0
 
-	var cancels []context.CancelFunc
-	for id, old := range c.foreground {
-		if id == ticket.id {
-			continue
-		}
-		if cancel := c.removeForegroundLocked(old); cancel != nil {
-			cancels = append(cancels, cancel)
-			c.foregroundCancels++
-		}
-	}
+	// A confirmed seek changes background prefetch, not ownership of other
+	// active reads. Independent SMB/HTTP/FUSE requests keep their tickets and
+	// pins until they finish or their own contexts are canceled.
 	for index := range c.windowPins {
 		delete(c.windowPins, index)
 		c.releaseLocked(index)
@@ -680,7 +673,7 @@ func (c *prefetchCoordinator) confirmCandidateLocked(ticket *foregroundTicket) [
 	ticket.kind = foregroundCurrentWindow
 	ticket.candidateID = 0
 	c.anchorTicket = ticket.id
-	return cancels
+	return nil
 }
 
 func (c *prefetchCoordinator) foregroundPieceForRequestLocked(f *raFile, requestStart int64) bool {

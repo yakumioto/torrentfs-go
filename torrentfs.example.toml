@@ -1,7 +1,8 @@
 # torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
 # One existing torrents directory remains a required command-line input.
-# mountpoint is required unless the HTTP API is enabled (http.listen_addr).
+# Select filesystem.backend = "fuse", "smb", or "none" (HTTP-only).
+# FUSE mountpoints and the native SMB listener are configured independently.
 # Configuration is loaded on every startup. Only the exact documented
 # environment variable names are read; there is no automatic environment mapping
 # for every TOML leaf. Most supported values use TORRENTFS_<SECTION>_<KEY>, with
@@ -10,9 +11,8 @@
 # special shared HTTP/SMB credentials. The precedence is environment variables,
 # this file, then built-in defaults.
 #
-# The FUSE mount exposes torrent data only, read-only. Torrent management
-# (add, delete, status) happens over the HTTP API below; there is no
-# metadata/ or stats/ control directory in the mount.
+# Both FUSE and SMB expose only the same read-only virtual data tree. Management
+# (add, delete, status) happens over HTTP; internal metadata is never shared.
 #
 # Piece data is cached in memory only and is never written to disk. Restarting
 # torrentfs starts from an empty cache: no piece completion is persisted and no
@@ -93,10 +93,29 @@ format = "text"
 # Include the source file and line for each record.
 add_source = false
 
-[mount]
-# Keep access limited to the mounting UID/GID. Set true only when every local
-# UID should be able to read the mounted data; non-root mounts also require
-# user_allow_other in /etc/fuse.conf.
-allow_other = false
-# Limits one read so missing peers cannot hold SMB requests indefinitely.
+[filesystem]
+# Exactly one file output: fuse, smb, or none. HTTP management is independent.
+# Changing backend does not require deleting the unselected backend's settings.
+backend = "none"
 read_timeout = "30s"
+
+[fuse]
+# Required when backend=fuse; existing -mountpoint remains a legacy alias only
+# when no conflicting backend is explicitly selected.
+mountpoint = ""
+# Optional STRM mount; requires strm.base_url and the HTTP listener.
+strm_mountpoint = ""
+# Wider access also requires user_allow_other in /etc/fuse.conf.
+allow_other = false
+
+[smb]
+# Native SMB needs no FUSE mount, Samba, or host filesystem export.
+# In Docker publish host 445 to container 1445 rather than granting low-port caps.
+listen_addr = "0.0.0.0:1445"
+username = "torrentfs"
+# Optional: false keeps signed HTTP links enabled without exporting a STRM share.
+# strm_enabled = false
+# Readable by the process UID; a single trailing newline is removed. Do not put
+# a plaintext password in this TOML. Shared TORRENTFS_USERNAME/PASSWORD may
+# override this source and also configure HTTP authentication when enabled.
+password_file = "/run/secrets/torrentfs_password"
