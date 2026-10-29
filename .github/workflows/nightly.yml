@@ -174,94 +174,9 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
           docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
 
-          container="torrentfs-nightly-default-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '
-            test -r /etc/torrentfs/torrentfs.toml ||
-              { printf "static image is missing readable torrentfs.toml\\n" >&2; exit 1; }
-            test -d /torrents ||
-              { printf "static image is missing /torrents\\n" >&2; exit 1; }
-            test ! -e /etc/torrentfs/runtime-identity ||
-              { printf "static image unexpectedly contains runtime identity\\n" >&2; exit 1; }
-            command -v smbd >/dev/null ||
-              { printf "static image is missing smbd\\n" >&2; exit 1; }
-            command -v smbpasswd >/dev/null ||
-              { printf "static image is missing smbpasswd\\n" >&2; exit 1; }
-            command -v testparm >/dev/null ||
-              { printf "static image is missing testparm\\n" >&2; exit 1; }
-            testparm -s /etc/samba/torrentfs-smb.conf >/dev/null ||
-              { printf "static image has invalid Samba configuration\\n" >&2; exit 1; }
-          '
-          test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]'
-          docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' | grep -q '445/tcp'
-          docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
-          readiness_deadline=$(( $(date +%s) + 60 ))
-          state=""
-          ready=false
-          while :; do
-            now="$(date +%s)"
-            if (( now >= readiness_deadline )); then
-              break
-            fi
-            inspect_timeout=$(( readiness_deadline - now ))
-            if (( inspect_timeout > 2 )); then
-              inspect_timeout=2
-            fi
-            state="$(timeout "${inspect_timeout}s" docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
-            if [[ "$state" == exited || "$state" == dead ]]; then
-              exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-              printf 'Validation container exited before readiness: platform=%s state=%s exit_code=%s\n' \
-                "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-              timeout 5s docker logs --tail 200 "$container" 2>&1 || true
-              exit 1
-            fi
-            if [[ "$state" == running ]]; then
-              now="$(date +%s)"
-              if (( now >= readiness_deadline )); then
-                break
-              fi
-              log_timeout=$(( readiness_deadline - now ))
-              if (( log_timeout > 2 )); then
-                log_timeout=2
-              fi
-              logs="$(timeout "${log_timeout}s" docker logs --tail 200 "$container" 2>&1 || true)"
-              if [[ "$logs" == *"http api listening"* ]]; then
-                ready=true
-                break
-              fi
-            fi
-            now="$(date +%s)"
-            if (( now >= readiness_deadline )); then
-              break
-            fi
-            sleep 0.2
-          done
-          if [[ "$ready" != true ]]; then
-            exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-            printf 'Validation container did not become ready: platform=%s state=%s exit_code=%s\n' \
-              "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-            timeout 5s docker logs --tail 200 "$container" 2>&1 || true
-            exit 1
-          fi
-          docker exec "$container" /bin/sh -c '
-            test -r /etc/torrentfs/runtime-identity ||
-              { printf "runtime identity was not created after entrypoint startup\\n" >&2; exit 1; }
-            expected="$(printf "uid=1000\\ngid=1000\\nuser=torrentfs\\ngroup=torrentfs")"
-            actual="$(cat /etc/torrentfs/runtime-identity)"
-            test "$actual" = "$expected" ||
-              { printf "runtime identity contents mismatch: %s\\n" "$actual" >&2; exit 1; }
-            actual_stat="$(stat -c "%u:%g %a" /etc/torrentfs/runtime-identity)"
-            test "$actual_stat" = "0:0 444" ||
-              { printf "runtime identity ownership/mode mismatch: %s\\n" "$actual_stat" >&2; exit 1; }
-            actual_account="$(id -u torrentfs):$(id -g torrentfs)"
-            test "$actual_account" = "1000:1000" ||
-              { printf "torrentfs default identity mismatch: %s\\n" "$actual_account" >&2; exit 1; }
-          '
-          # The default image still must not start Samba or open 445 implicitly.
-          docker exec "$container" /bin/sh -c 'test ! -e /run/samba/smbd.pid'
-          docker kill --signal TERM "$container" >/dev/null
-          test "$(timeout 30 docker wait "$container")" = 0
+          # Reuse the same non-root, zero-capability configuration gate for
+          # both architectures; it does not rebuild or remove the supplied image.
+          TORRENTFS_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
 
       - name: Build Linux arm64 validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -296,102 +211,17 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
           docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
 
-          container="torrentfs-nightly-default-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '
-            test -r /etc/torrentfs/torrentfs.toml ||
-              { printf "static image is missing readable torrentfs.toml\\n" >&2; exit 1; }
-            test -d /torrents ||
-              { printf "static image is missing /torrents\\n" >&2; exit 1; }
-            test ! -e /etc/torrentfs/runtime-identity ||
-              { printf "static image unexpectedly contains runtime identity\\n" >&2; exit 1; }
-            command -v smbd >/dev/null ||
-              { printf "static image is missing smbd\\n" >&2; exit 1; }
-            command -v smbpasswd >/dev/null ||
-              { printf "static image is missing smbpasswd\\n" >&2; exit 1; }
-            command -v testparm >/dev/null ||
-              { printf "static image is missing testparm\\n" >&2; exit 1; }
-            testparm -s /etc/samba/torrentfs-smb.conf >/dev/null ||
-              { printf "static image has invalid Samba configuration\\n" >&2; exit 1; }
-          '
-          test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]'
-          docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' | grep -q '445/tcp'
-          docker run --detach --platform "$PLATFORM" --name "$container" "$IMAGE" >/dev/null
-          readiness_deadline=$(( $(date +%s) + 60 ))
-          state=""
-          ready=false
-          while :; do
-            now="$(date +%s)"
-            if (( now >= readiness_deadline )); then
-              break
-            fi
-            inspect_timeout=$(( readiness_deadline - now ))
-            if (( inspect_timeout > 2 )); then
-              inspect_timeout=2
-            fi
-            state="$(timeout "${inspect_timeout}s" docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
-            if [[ "$state" == exited || "$state" == dead ]]; then
-              exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-              printf 'Validation container exited before readiness: platform=%s state=%s exit_code=%s\n' \
-                "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-              timeout 5s docker logs --tail 200 "$container" 2>&1 || true
-              exit 1
-            fi
-            if [[ "$state" == running ]]; then
-              now="$(date +%s)"
-              if (( now >= readiness_deadline )); then
-                break
-              fi
-              log_timeout=$(( readiness_deadline - now ))
-              if (( log_timeout > 2 )); then
-                log_timeout=2
-              fi
-              logs="$(timeout "${log_timeout}s" docker logs --tail 200 "$container" 2>&1 || true)"
-              if [[ "$logs" == *"http api listening"* ]]; then
-                ready=true
-                break
-              fi
-            fi
-            now="$(date +%s)"
-            if (( now >= readiness_deadline )); then
-              break
-            fi
-            sleep 0.2
-          done
-          if [[ "$ready" != true ]]; then
-            exit_code="$(timeout 2s docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-            printf 'Validation container did not become ready: platform=%s state=%s exit_code=%s\n' \
-              "$PLATFORM" "$state" "${exit_code:-unknown}" >&2
-            timeout 5s docker logs --tail 200 "$container" 2>&1 || true
-            exit 1
-          fi
-          docker exec "$container" /bin/sh -c '
-            test -r /etc/torrentfs/runtime-identity ||
-              { printf "runtime identity was not created after entrypoint startup\\n" >&2; exit 1; }
-            expected="$(printf "uid=1000\\ngid=1000\\nuser=torrentfs\\ngroup=torrentfs")"
-            actual="$(cat /etc/torrentfs/runtime-identity)"
-            test "$actual" = "$expected" ||
-              { printf "runtime identity contents mismatch: %s\\n" "$actual" >&2; exit 1; }
-            actual_stat="$(stat -c "%u:%g %a" /etc/torrentfs/runtime-identity)"
-            test "$actual_stat" = "0:0 444" ||
-              { printf "runtime identity ownership/mode mismatch: %s\\n" "$actual_stat" >&2; exit 1; }
-            actual_account="$(id -u torrentfs):$(id -g torrentfs)"
-            test "$actual_account" = "1000:1000" ||
-              { printf "torrentfs default identity mismatch: %s\\n" "$actual_account" >&2; exit 1; }
-          '
-          # The default image still must not start Samba or open 445 implicitly.
-          docker exec "$container" /bin/sh -c 'test ! -e /run/samba/smbd.pid'
-          docker kill --signal TERM "$container" >/dev/null
-          test "$(timeout 30 docker wait "$container")" = 0
+          # Reuse the same non-root, zero-capability configuration gate for
+          # both architectures; it does not rebuild or remove the supplied image.
+          TORRENTFS_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
 
-      # Native amd64 runs the full FUSE + SMB deployment path, not just the image
-      # contract: FUSE mount, authenticated read-only share, full read, guest and
-      # write denial, bounded shutdown order, and failure propagation. It runs
+      # Native amd64 runs the full native SMB deployment path, not just the image
+      # contract: zero-capability application, authenticated read-only share,
+      # full read, guest/write denial, bounded shutdown, and failure propagation. It runs
       # before the publishing step, so a regression here blocks the nightly image.
       # The script states it explicitly when the host kernel cannot mount CIFS;
       # on a host that can, the ranged comparison must also pass.
-      - name: Run the single-container FUSE + SMB end-to-end smoke
+      - name: Run the reduced-privilege native SMB end-to-end smoke
         run: ./scripts/docker-smb-smoke.sh
 
       - name: Log in to GHCR after validation

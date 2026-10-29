@@ -2,7 +2,7 @@
 
 [简体中文](api.md) · [README](../README.en.md)
 
-The HTTP listener serves the embedded Web UI and management/diagnostic API at `/api/v1`, defaulting to `http://127.0.0.1:8080`. Content is read through FUSE or SMB by default. Explicit STRM configuration additionally enables a separate signed `/stream/...` content endpoint.
+The HTTP listener serves the embedded Web UI and management/diagnostic API at `/api/v1`, defaulting to `http://127.0.0.1:8080`. Content is read through FUSE or SMB after selecting that file backend. Explicit STRM configuration additionally enables a separate signed `/stream/...` content endpoint.
 
 Commands run from the repository root. Listener and credential configuration is documented in the [configuration guide](configuration.en.md).
 
@@ -92,7 +92,7 @@ These requests have no `Authorization` header. Do not expose real links in share
 
 - `http.ServeContent` handles full GET, HEAD, single/multipart Range, conditional requests, and `If-Range`. Satisfied ranges return `206`; unsatisfiable ranges return `416`. An `If-Range` mismatch falls back to the full response under standard semantics.
 - Responses use an explicit `Content-Type` (`application/octet-stream` for unknown extensions), ETag, Last-Modified, and Content-Length where applicable, plus `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`. Lengths and offsets are int64, including files larger than 4 GiB. MIME detection does not sniff content; HEAD, metadata, and bodyless conditional responses do not fetch payload.
-- Reads reuse the Session cache, readahead, and `mount.read_timeout`. Client cancellation cancels that request's reads and releases its reader. A read timeout or other read failure after the response starts aborts the transfer; it does not append JSON or guarantee a `504`. Clients must treat a truncated response as failure.
+- Reads reuse the Session cache, readahead, and `filesystem.read_timeout`. Client cancellation cancels that request's reads and releases its reader. A read timeout or other read failure after the response starts aborts the transfer; it does not append JSON or guarantee a `504`. Clients must treat a truncated response as failure.
 
 | Status | Stream meaning |
 | --- | --- |

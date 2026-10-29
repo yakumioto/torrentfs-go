@@ -29,7 +29,9 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 cmd/torrentfs          CLI, configuration, process lifecycle, shutdown
         │
         ├── internal/session      torrent lifecycle, metainfo, network, cache, signed reads
-        ├── internal/filesystem   original read-only FUSE tree and STRM Backend projection
+        ├── internal/vfs          protocol-independent model, directory indexes, open snapshots, STRM
+        ├── internal/filesystem   FUSE Adapter: inodes, POSIX attributes, mounts
+        ├── internal/smb          SMB Adapter: read-only shares, handles, cancellation
         ├── internal/media        shared video/ISO detection and explicit MIME types
         ├── internal/stream       HMAC signatures, URL/path rules, cancellable Reader contract
         ├── internal/api          management authentication, status, separate signed HTTP streams
@@ -54,7 +56,7 @@ The HTTP listener defaults to loopback. A non-loopback listener requires authent
 
 ## STRM projection and HTTP lifecycle
 
-The STRM Backend wraps the same FUSE nodes, retaining directories, non-video files, and the original presence/absence of Category/Subtitle/SubtitleStat capabilities. Per-hash projection does not compute root names; only whole-library `Torrents()` performs root naming on its own outer slice. Mapping keys include source FilesID and SingleFile shape: a single-file root keeps its original payload path, while directory torrents transform relative paths. Complete projections from trusted sources share read-only slices under a new derived FilesID, avoiding full-list comparison/copying on hot paths. Legacy sources keep content comparisons and return independent Files/Subtitles copies.
+The protocol-independent STRM Backend in `internal/vfs` wraps the shared Backend, retaining directories, non-video files, and the original presence/absence of Category/Subtitle/SubtitleStat capabilities. Per-hash projection does not compute root names; only whole-library `Torrents()` performs root naming on its own outer slice. Mapping keys include source FilesID and SingleFile shape: a single-file root keeps its original payload path, while directory torrents transform relative paths. Complete projections from trusted sources share read-only slices under a new derived FilesID, avoiding full-list comparison/copying on hot paths. Legacy sources keep content comparisons and return independent Files/Subtitles copies.
 
 Listings attempt each unknown video length once. URL failures retain size-zero entries without publishing an immutable identity; later operations retry. Live lookup/stat/open return the actual error without blocking healthy neighbors, freezing failures, or retrying in a loop within one operation. Recovery and live stat/open observations of changed URL lengths publish new slices and derived identities, never mutate an older snapshot. Late size backfills verify both the entry still owning the hash and the corresponding file's size revision, preventing writes into a removed/recreated entry without discarding valid concurrent backfills for other files.
 
@@ -66,7 +68,17 @@ The Session creates/reuses `.metadata/stream_key` only when streaming is enabled
 
 The separate `/stream/...` handler does not weaken `/api/` Bearer authentication. It adapts `ReadAtContext` to `io.NewSectionReader` and `http.ServeContent`, uses explicit MIME without sniffing, and adds no whole-file or whole-block HTTP cache. HEAD/bodyless conditions avoid payload reads. Readers are cancelled/closed on completion, cancellation, and failure; recorded read failures after headers abort the transport rather than append JSON or fabricate a complete response.
 
-Shutdown cancels stream contexts before a maximum five-second HTTP drain, forcing HTTP Close when necessary to unblock network writes. Session close follows, then both FUSE mounts are unmounted concurrently under one shared 30-second deadline. Force-closing connections is not proof that every handler or goroutine has returned. The Docker supervisor stops Samba first and couples process or either-mount failure; see the [deployment guide](deployment.en.md).
+Shutdown cancels stream contexts before a maximum five-second HTTP drain, forcing HTTP Close when necessary to unblock network writes. Session close follows, then both FUSE mounts are unmounted concurrently under one shared 30-second deadline. Force-closing connections is not proof that every handler or goroutine has returned. Native SMB stops accepting and cancels/drains its reads before session close. There is no Samba or two-process shell supervisor; static configuration selects SMB or FUSE. See the [deployment guide](deployment.en.md).
+
+## Native SMB interfaces and dependency boundary
+
+`internal/vfs.Tree` supplies Lookup/Stat, immutable directory observations, and open handles. `Handle.Metadata` describes the bytes of that same open; `ReadAtContext` must keep request cancellation rather than wrap only `io.ReaderAt`. Both adapters share layout, categories, subtitles, STRM, and the Session reader. Session production code does not depend on go-fuse types. SMB resolves virtual identities only, never a fallback host path.
+
+An enumeration retains its snapshot across pages and refreshes on restart/reopen. Case-insensitive lookup, Windows-invalid names, and collisions use stable mappings rather than losing or opening the wrong file. Content/metadata versions invalidate indexes; hot paths must not rescan the whole library per file. Exact default-stream size/allocation queries do not enable ADS writes.
+
+A slow READ on one connection must not block healthy READ/ECHO. CANCEL belongs to its request; handle/tree/session teardown, disconnect, and shutdown reclaim owned tasks. Shared piece flights survive until their last waiter leaves. Moving a prefetch anchor only withdraws stale background leases, not independent active foreground reads. Connections, frames, and pending work remain bounded.
+
+`third_party/go-smb` pins an upstream baseline plus reviewable local patches, retaining MIT notices and patch documentation. It is not a complete Samba replacement, and relay/credential-capture hooks are not enabled. Runtime images distribute both the root and third-party licenses, not the whole source tree. Authentication, signing, encryption, compound, and lifecycle changes need real protocol and race regressions, not only a client from the same library.
 
 ## Frontend development
 
@@ -121,8 +133,8 @@ These are exercised by the Go quality checks and the required-FUSE/container che
 
 ```sh
 go test -race -count=3 -run 'TestPayloadHolder|TestFilesystemViews' ./internal/session
-go test -race -count=3 ./internal/filesystem
-go test -run '^$' -bench 'FilesystemView|TorrentLookup|STRMProjection' -benchmem -count=5 ./internal/session ./internal/filesystem
+go test -race -count=3 ./internal/filesystem ./internal/vfs ./internal/smb
+go test -run '^$' -bench 'FilesystemView|TorrentLookup|STRMProjection' -benchmem -count=5 ./internal/session ./internal/filesystem ./internal/vfs
 bash -n scripts/docker-smb-smoke.sh
 ```
 
@@ -141,7 +153,7 @@ Use the same scale and call patterns and take the median of five runs. Synthetic
 
 [http-smoke.sh](../scripts/http-smoke.sh) requires Docker, `curl`, and Python 3, but not a FUSE device. It builds a local image and checks static root/deep links, missing assets, authentication, `WWW-Authenticate`, login, protected list, and logout. It does not publish to a remote registry.
 
-[docker-config-smoke.sh](../scripts/docker-config-smoke.sh) additionally verifies bundled TOML, the default command, environment overrides, external config mounts, and invalid SMB credentials/runtime accounts. It covers STRM boolean validation, invalid combinations without SMB/base URL/HTTP, and early rejection of either custom mount flag in SMB mode. It also requires `awk` and `timeout`.
+[docker-config-smoke.sh](../scripts/docker-config-smoke.sh) additionally needs `timeout` and Python 3. It checks the non-root default, numeric `--user`, zero capabilities/no-new-privileges, explicit root bootstrap, TOML backend choice, secret files, shared HTTP credentials, and conflicting legacy inputs. SMB-only really disables HTTP and needs no `/dev/fuse` or Samba. Identity/configuration failures precede session initialization; inaccessible storage must also fail.
 
 ### Required FUSE tests
 
@@ -167,11 +179,15 @@ TORRENTFS_FUSE_REQUIRED=1 go test -race -run 'TestFuse|TestSessionIncomplete' ./
 ./scripts/docker-smb-smoke.sh
 ```
 
-[docker-smb-smoke.sh](../scripts/docker-smb-smoke.sh) requires Linux Docker, `/dev/fuse`, `SYS_ADMIN`, `NET_BIND_SERVICE`, permission for FUSE, Python 3, `sha256sum`, `dd`, and `timeout`. It verifies authentication and guest rejection, directory listings, read hashes, read-only behavior, hidden metadata, shared credentials, runtime identities, normal shutdown, and failure coupling between smbd and torrentfs.
+The application runs with an explicit non-root UID/GID, `--cap-drop ALL`, no-new-privileges, and default AppArmor, without FUSE. Prerequisites are Linux Docker, Python 3, `sha256sum`, `dd`, and `timeout`; a separate client image provides smbclient/cifs-utils/curl. Checks cover authentication, wrong-password/guest denial, share enumeration, full-read hashes, denied writes, hidden metadata, shared HTTP credentials, real SMB-only, redacted logs, SIGTERM exit status, and abrupt single-process death.
 
-STRM scenarios also cover the original-only default and dual read-only shares/mounts when enabled. They list a multi-file torrent's top and deep directories before authenticated API uploads, then relist, query metadata, and download exact subtitle bytes through both shares, including equal/changed-length replacements. They retain no-video-fetch `.strm` reads, no-payload HTTP HEAD, Range `206` byte hashes, tampered-signature `403`, dual unmount, and coupling when either mount disappears. Readiness matches whole log lines to distinguish `/share` from `/share-strm`. These are automated protocol checks, not Infuse device acceptance.
+STRM checks cover original/optional STRM read-only shares, visiting directories before subtitle publication/replacement, current enumeration/metadata/exact bytes through both shares, no-payload `.strm`/HTTP HEAD, Range `206`, and tampered-signature `403`. Physical `/share` mounts or Samba PID/passdb files are no longer acceptance criteria.
 
-The script attempts a kernel CIFS mount and a large-offset read as well. If the host lacks CIFS/nested-mount capability, it reports that limitation and continues; a successful mount with wrong data is a failure. `TORRENTFS_SMB_SKIP_CIFS=1` explicitly skips that check. Neither kind of skip proves kernel CIFS mounting, and the required FUSE tests retain the separate random-read evidence. CI and nightly do not set the explicit skip variable.
+Only the disposable kernel-CIFS **client** may need privileged mounting; the application keeps zero capabilities. When CIFS mounts, a cold range larger than cache must match the source. With 16 unavailable reads pending on that same connection, a healthy cold range must finish correctly within 30 seconds. Server/client slow-read bounds are 45/60 seconds so early cancellation cannot fake success.
+
+Unavailable CIFS/modules/nested mounting is reported as not run; `TORRENTFS_SMB_SKIP_CIFS=1` explicitly skips it. Passing FUSE reads does not prove SMB/CIFS compatibility. `internal/smb` still exercises authenticated TCP, an independent Go client, same-connection 16-read/CANCEL behavior, multi-page listings, and shutdown. Infuse remains a device acceptance check.
+
+Use `TORRENTFS_SMOKE_IMAGE=<local-tag>` to reuse a built image without deleting it. Rebuild after source changes: old-image success is not new-source success. Default scripts own and clean their temporary images, networks, and data and publish nothing remotely.
 
 To test a runtime identity different from the host's:
 

@@ -2,409 +2,217 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
-cd -- "$repo_root"
+readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
+readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-config-smoke:${BASHPID}}"
+readonly PREFIX="torrentfs-config-${BASHPID}"
+readonly SECRET="config-smoke-${BASHPID}-test-only-password"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-config.XXXXXX")"
+image_built=0
+containers=()
 
-for command_name in docker curl awk timeout; do
-	command -v "$command_name" >/dev/null || {
-		printf 'docker config smoke: %s is required\n' "$command_name" >&2
-		exit 1
-	}
-done
-
-work_dir="$(mktemp -d)"
-image="torrentfs-config-smoke:$$"
-defaults_container="torrentfs-config-defaults-$$"
-explicit_container="torrentfs-config-explicit-$$"
-env_container="torrentfs-config-env-$$"
-file_container="torrentfs-config-file-$$"
-positive_container="torrentfs-config-positive-$$"
-password_hash='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq'
-
+fail() { printf 'docker config smoke: %s\n' "$*" >&2; exit 1; }
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM
-	for container in \
-		"$defaults_container" "$explicit_container" "$env_container" "$file_container" "$positive_container"; do
-		docker rm -f "$container" >/dev/null 2>&1 || true
-	done
-	if [[ -d "$work_dir/torrents" ]]; then
-		docker run --rm --mount "type=bind,src=$work_dir/torrents,dst=/scratch" \
-			--entrypoint /bin/sh "$image" -c 'rm -rf /scratch/* /scratch/..?* /scratch/.[!.]*' >/dev/null 2>&1 || true
-	fi
-	docker image rm "$image" >/dev/null 2>&1 || true
+	for container in "${containers[@]}"; do timeout 30 docker rm -f "$container" >/dev/null 2>&1 || true; done
+	# Only the private mktemp tree is mounted into this root cleanup helper.
+	timeout 30 docker run --rm --user 0:0 --entrypoint /bin/sh \
+		--mount "type=bind,src=$work_dir,dst=/scratch" "$IMAGE" \
+		-c 'rm -rf /scratch/* /scratch/..?* /scratch/.[!.]*' >/dev/null 2>&1 || true
 	rm -rf -- "$work_dir"
+	if (( image_built )); then timeout 60 docker image rm "$IMAGE" >/dev/null 2>&1 || true; fi
 	exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+for tool in docker curl timeout python3; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 
-fail() {
-	printf 'docker config smoke: %s\n' "$*" >&2
-	exit 1
-}
+if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+	timeout 30 docker image inspect "$IMAGE" >/dev/null
+else
+	printf 'docker config smoke: building native image\n'
+	timeout 1800 docker build --tag "$IMAGE" "$ROOT_DIR"
+	image_built=1
+fi
 
-wait_running() {
-	local container="$1"
-	local state=''
-	for _ in {1..60}; do
-		state="$(timeout 10 docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
-		case "$state" in
-		running)
-			if timeout 10 docker exec "$container" test -r /etc/torrentfs/runtime-identity >/dev/null 2>&1; then
-				return 0
-			fi
-			;;
-		exited|dead)
-			docker logs "$container" >&2 || true
-			fail "$container exited before becoming ready (state=$state)"
-			;;
-		esac
-		sleep 0.2
-	done
-	docker logs "$container" >&2 || true
-	fail "$container did not become ready within 12 seconds"
-}
-
-published_port() {
-	local container="$1"
-	local port=''
-	for _ in {1..60}; do
-		port="$(timeout 10 docker port "$container" 8080/tcp 2>/dev/null | awk -F: 'NF {print $NF; exit}' || true)"
-		if [[ -n "$port" ]]; then
-			printf '%s\n' "$port"
-			return 0
-		fi
-		sleep 0.2
-	done
-	fail "could not determine published port for $container"
-}
-
-wait_http() {
-	local url="$1"
-	for _ in {1..60}; do
-		if curl --silent --show-error --fail --connect-timeout 2 --max-time 5 "$url" >/dev/null; then
-			return 0
-		fi
-		sleep 0.2
-	done
-	fail "HTTP endpoint did not become ready: $url"
-}
-
-stop_clean() {
-	local container="$1"
-	local status
-	timeout 30 docker kill --signal TERM "$container" >/dev/null || fail "could not signal $container"
-	status="$(timeout 30 docker wait "$container")" || fail "$container did not stop within 30 seconds"
-	[[ "$status" == "0" ]] || fail "$container stopped with exit code $status"
-	docker rm "$container" >/dev/null || fail "could not remove $container"
-}
-
-runtime_identity() {
-	local container="$1"
-	timeout 10 docker exec "$container" /bin/sh -c 'cat /etc/torrentfs/runtime-identity'
-}
-
-assert_runtime_identity() {
-	local container="$1" expected_uid="$2" expected_gid="$3" actual expected
-	actual="$(runtime_identity "$container")"
-	expected="$(printf 'uid=%s\ngid=%s\nuser=torrentfs\ngroup=torrentfs' "$expected_uid" "$expected_gid")"
-	[[ "$actual" == "$expected" ]] ||
-		fail "$container runtime identity was unexpected: $actual"
-	[[ "$(timeout 10 docker exec "$container" id -u torrentfs)" == "$expected_uid" ]] ||
-		fail "$container torrentfs user UID is not $expected_uid"
-	[[ "$(timeout 10 docker exec "$container" id -g torrentfs)" == "$expected_gid" ]] ||
-		fail "$container torrentfs group GID is not $expected_gid"
-	[[ "$(timeout 10 docker exec "$container" stat -c '%u:%g %a' /etc/torrentfs/runtime-identity)" == '0:0 444' ]] ||
-		fail "$container runtime identity file is not root-owned and mode 0444"
-}
+timeout 30 docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
+	--entrypoint /bin/sh "$IMAGE" -eu -c '
+		test "$(id -u)" = 1000 && test "$(id -g)" = 1000
+		test -r /etc/torrentfs/torrentfs.toml
+		test -x /usr/local/bin/torrentfs-entrypoint
+		test -d /torrents && test -w /torrents
+		test ! -e /dev/fuse && test ! -d /run/samba
+		! command -v smbd >/dev/null 2>&1
+		! command -v smbpasswd >/dev/null 2>&1
+		! command -v testparm >/dev/null 2>&1
+	' || fail 'native image contract failed'
+[[ "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" == '1000:1000' ]] || fail 'image does not default to non-root'
+ports="$(docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}')"
+[[ "$ports" == *'"1445/tcp"'* && "$ports" != *'"445/tcp"'* ]] || fail 'image must advertise internal SMB 1445, not privileged 445'
+printf 'docker config smoke: non-root image and absence of Samba passed\n'
 
 process_identity() {
-	local container="$1" process_name="$2"
-	timeout 10 docker exec "$container" /bin/sh -c '
-		wanted="$1"
+	timeout 10 docker exec "$1" /bin/sh -eu -c '
 		for status in /proc/[0-9]*/status; do
 			[ -r "$status" ] || continue
-			name="$(grep "^Name:" "$status" | cut -d: -f2 | tr -d "[:space:]")"
-			[ "$name" = "$wanted" ] || continue
-			uid_line="$(grep "^Uid:" "$status")"
-			gid_line="$(grep "^Gid:" "$status")"
-			uid_line="${uid_line#Uid:}"
-			gid_line="${gid_line#Gid:}"
-			set -- $uid_line
-			uid="$1:$2:$3:$4"
-			set -- $gid_line
-			gid="$1:$2:$3:$4"
-			pid="${status#/proc/}"
-			pid="${pid%/status}"
-			printf "%s %s %s\\n" "$pid" "$uid" "$gid"
+			grep -q "^Name:[[:space:]]*torrentfs$" "$status" || continue
+			grep -E "^(Uid|Gid|CapEff|CapBnd|NoNewPrivs):" "$status"
 			exit 0
 		done
-		exit 1
-	' sh "$process_name"
+		exit 1'
 }
-
-assert_process_identity() {
-	local container="$1" process_name="$2" expected_uid="$3" expected_gid="$4"
-	local actual pid uid gid
-	actual="$(process_identity "$container" "$process_name")" ||
-		fail "$container has no $process_name process"
-	IFS=' ' read -r pid uid gid <<<"$actual"
-	[[ "$uid" == "$expected_uid:$expected_uid:$expected_uid:$expected_uid" ]] ||
-		fail "$container $process_name UID credentials were $uid, expected $expected_uid in every field"
-	[[ "$gid" == "$expected_gid:$expected_gid:$expected_gid:$expected_gid" ]] ||
-		fail "$container $process_name GID credentials were $gid, expected $expected_gid in every field"
-	printf 'docker config smoke: %s %s runs as %s:%s\n' "$process_name" "$pid" "$expected_uid" "$expected_gid"
+wait_running() {
+	local container="$1" state
+	for _ in {1..100}; do
+		state="$(timeout 10 docker inspect "$container" --format '{{.State.Status}}')"
+		if [[ "$state" == running ]] && process_identity "$container" >/dev/null 2>&1 &&
+			timeout 10 docker exec "$container" /bin/sh -c 'grep -Eq ":(1F90|05A5)[[:space:]].*[[:space:]]0A[[:space:]]" /proc/net/tcp /proc/net/tcp6'; then return 0; fi
+		if [[ "$state" == exited || "$state" == dead ]]; then
+			docker logs "$container" >&2 || true
+			fail "$container exited before readiness"
+		fi
+		sleep 0.1
+	done
+	fail "$container did not become ready"
 }
-
-expect_start_failure() {
+assert_identity() {
+	local output uid="$2" gid="$3"
+	output="$(process_identity "$1")"
+	python3 -I -c 'import sys
+text, uid, gid=sys.argv[1:]
+fields=dict(line.split(":",1) for line in text.splitlines())
+assert fields["Uid"].split()==[uid]*4
+assert fields["Gid"].split()==[gid]*4
+assert fields["CapEff"].strip()=="0000000000000000"
+assert fields["NoNewPrivs"].strip()=="1"
+' "$output" "$uid" "$gid" || fail 'process did not retain its non-root/no-privileges identity'
+}
+start() {
+	local container="$1"
+	shift
+	containers+=("$container")
+	timeout 30 docker run --detach --name "$container" --cap-drop ALL \
+		--security-opt no-new-privileges:true "$@" "$IMAGE" >/dev/null
+	wait_running "$container"
+}
+stop_clean() {
+	timeout 30 docker kill --signal TERM "$1" >/dev/null
+	local status
+	status="$(timeout 30 docker wait "$1")" || fail 'shutdown exceeded 30 seconds'
+	local output
+	output="$(timeout 10 docker logs "$1" 2>&1)"
+	[[ "$status" == 0 ]] || fail "shutdown returned $status: ${output//"$SECRET"/[REDACTED]}"
+	[[ "$output" != *"$SECRET"* ]] || fail 'startup/shutdown logs disclosed a password'
+}
+expect_failure() {
 	local name="$1" expected="$2" output status=0
 	shift 2
-	output="$(timeout 30 docker run --rm "$@" "$image" 2>&1)" || status=$?
-	[[ "$status" != 0 && "$status" != 124 ]] || fail "$name unexpectedly started or timed out"
-	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
-	[[ "$output" != *'starting torrentfs'* ]] || fail "$name reached service startup: $output"
-}
-
-expect_cli_config_failure() {
-	local name="$1" expected="$2" output status=0
-	shift 2
-	output="$(timeout 30 docker run --rm --entrypoint /usr/local/bin/torrentfs \
-		"$@" "$image" -config /etc/torrentfs/torrentfs.toml -strm-mountpoint /share-strm /torrents 2>&1)" || status=$?
-	[[ "$status" == 2 ]] || fail "$name exited with status $status, want configuration error"
-	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
-	[[ "$output" != *'torrentfs starting'* ]] || fail "$name reached service startup: $output"
-	[[ "$output" != *'strm-config-secret'* ]] || fail "$name exposed URL userinfo"
-}
-
-cat >"$work_dir/external.toml" <<EOF
-[http]
-listen_addr = "0.0.0.0:8080"
-
-[http.auth]
-enabled = true
-username = "alice"
-password_hash = "$password_hash"
-token_ttl = "30m"
-EOF
-mkdir -p "$work_dir/torrents" "$work_dir/blocked-torrents"
-chmod 0777 "$work_dir/torrents"
-
-printf 'docker config smoke: building %s\n' "$image"
-timeout 1800 docker build --tag "$image" . >/dev/null
-
-timeout 30 docker run --rm --entrypoint /bin/sh "$image" -eu -c '
-	test -r /etc/torrentfs/torrentfs.toml
-	for path in /torrents /share /share-strm; do
-		test -d "$path"
+	local docker_args=() go_args=() delimiter=0
+	for arg in "$@"; do
+		if [[ "$delimiter" == 0 && "$arg" == -- ]]; then delimiter=1; continue; fi
+		if (( delimiter )); then go_args+=("$arg"); else docker_args+=("$arg"); fi
 	done
-	test ! -e /etc/torrentfs/runtime-identity
-	test "$(stat -c %a /torrents)" = 777
-	for tool in useradd usermod groupadd groupmod setpriv smbd smbpasswd testparm; do
-		command -v "$tool" >/dev/null
-	done
-	test -r /etc/samba/torrentfs-smb.conf
-	test -r /etc/samba/torrentfs-smb-strm.conf
-	testparm -s /etc/samba/torrentfs-smb.conf >/tmp/original.conf
-	if grep -Fx "[torrentfs-strm]" /tmp/original.conf; then
-		exit 1
+	output="$(timeout 30 docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
+		"${docker_args[@]}" "$IMAGE" "${go_args[@]}" 2>&1)" || status=$?
+	[[ "$status" != 0 && "$status" != 124 ]] || fail "$name started or timed out"
+	[[ "$output" == *"$expected"* ]] || fail "$name lacked $expected: $output"
+	[[ "$output" != *"$SECRET"* ]] || fail "$name disclosed its password"
+	# Filesystem permission failures occur inside Session.New; configuration
+	# and identity failures must be rejected before the session is initialized.
+	if [[ "$name" != 'inaccessible data' ]]; then
+		[[ "$output" != *'msg="torrentfs starting"'* && "$output" != *'msg=torrentfs starting'* ]] || fail "$name reached session startup"
 	fi
-	cat /etc/samba/torrentfs-smb.conf /etc/samba/torrentfs-smb-strm.conf >/tmp/combined.conf
-	testparm -s /tmp/combined.conf >/dev/null
-	parameter() {
-		testparm -s --section-name="$1" --parameter-name="$2" /tmp/combined.conf 2>/dev/null
-	}
-	for share in torrentfs torrentfs-strm; do
-		path=/share
-		[ "$share" != torrentfs-strm ] || path=/share-strm
-		test "$(parameter "$share" path)" = "$path"
-		test "$(parameter "$share" "read only" | tr "[:upper:]" "[:lower:]")" = yes
-		test "$(parameter "$share" "guest ok" | tr "[:upper:]" "[:lower:]")" = no
-		test "$(parameter "$share" "valid users")" = __TORRENTFS_SMB_USER__
-		test "$(parameter "$share" "force user")" = __TORRENTFS_SMB_USER__
-		test "$(parameter "$share" "force group")" = __TORRENTFS_SMB_GROUP__
-	done
-' || fail 'image is missing its configuration, writable /torrents, both mount directories/templates, or required runtime tools'
-[[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Entrypoint}}')" == \
-	'["/usr/bin/tini","--","/usr/local/bin/torrentfs-entrypoint"]' ]] ||
-	fail 'image entrypoint is not the tini-wrapped torrentfs entrypoint'
-[[ "$(timeout 30 docker image inspect "$image" --format '{{json .Config.Cmd}}')" == \
-	'["-config","/etc/torrentfs/torrentfs.toml","/torrents"]' ]] ||
-	fail 'image CMD changed from the documented default'
-timeout 30 docker image inspect "$image" --format '{{json .Config.ExposedPorts}}' |
-	grep -F '"445/tcp"' >/dev/null || fail 'image does not expose 445/tcp'
-printf 'docker config smoke: generic root-entrypoint image contract is readable\n'
-
-printf 'docker config smoke: verifying unset PUID/PGID defaults to 1000:1000\n'
-docker run --detach --name "$defaults_container" "$image" >/dev/null
-wait_running "$defaults_container"
-assert_runtime_identity "$defaults_container" 1000 1000
-assert_process_identity "$defaults_container" torrentfs 1000 1000
-stop_clean "$defaults_container"
-defaults_container=''
-printf 'docker config smoke: default runtime identity passed\n'
-
-printf 'docker config smoke: starting HTTP-only service as 99:100\n'
-docker run --detach --name "$explicit_container" \
-	--publish 127.0.0.1::8080 \
-	--env PUID=99 --env PGID=100 \
-	--env TORRENTFS_STRM_ENABLED=0 \
-	"$image" >/dev/null
-wait_running "$explicit_container"
-assert_runtime_identity "$explicit_container" 99 100
-assert_process_identity "$explicit_container" torrentfs 99 100
-timeout 10 docker exec "$explicit_container" /bin/sh -c \
-	'test ! -e /run/samba/smbd.pid && test ! -e /run/samba/private/passdb.tdb' ||
-	fail 'HTTP-only startup unexpectedly initialized Samba'
-stop_clean "$explicit_container"
-explicit_container=''
-printf 'docker config smoke: HTTP-only runtime identity and Samba isolation passed\n'
-
-smb_preflight_secret='config-smoke-secret'
-expect_smb_preflight_failure() {
-	local name="$1" expected="$2" output status=0
-	shift 2
-	output="$(timeout 30 docker run --rm --env PUID=99 --env PGID=100 \
-		--env TORRENTFS_SMB_ENABLED=true "$@" "$image" 2>&1)" || status=$?
-	[[ "$status" != 0 && "$status" != 124 ]] || fail "$name unexpectedly started or timed out"
-	[[ "$output" == *"$expected"* ]] || fail "$name lacked diagnostic $expected: $output"
-	[[ "$output" != *"$smb_preflight_secret"* ]] || fail "$name leaked the password"
-	[[ "$output" != *'starting torrentfs'* ]] || fail "$name reached service startup: $output"
 }
 
-printf 'docker config smoke: checking that incomplete SMB credentials fail closed\n'
-expect_smb_preflight_failure 'missing SMB username' 'TORRENTFS_USERNAME is required when SMB is enabled' \
-	--env "TORRENTFS_PASSWORD=$smb_preflight_secret"
-expect_smb_preflight_failure 'missing SMB password' 'TORRENTFS_PASSWORD is required when SMB is enabled' \
-	--env TORRENTFS_USERNAME=torrentfs
-expect_smb_preflight_failure 'invalid SMB username' 'TORRENTFS_USERNAME is not a valid Unix account name' \
-	--env TORRENTFS_USERNAME='invalid/username' --env "TORRENTFS_PASSWORD=$smb_preflight_secret"
-expect_smb_preflight_failure 'SMB username UID mismatch' 'TORRENTFS_USERNAME must resolve to the torrentfs runtime UID' \
-	--env TORRENTFS_USERNAME=root --env "TORRENTFS_PASSWORD=$smb_preflight_secret"
-printf 'docker config smoke: SMB credential failure was rejected before startup\n'
+start "${PREFIX}-default"
+assert_identity "${PREFIX}-default" 1000 1000
+stop_clean "${PREFIX}-default"
+start "${PREFIX}-uid" --user 99:100 --env PUID=99 --env PGID=100
+assert_identity "${PREFIX}-uid" 99 100
+stop_clean "${PREFIX}-uid"
+# Legacy root bootstrap is not the zero-capability path: SETUID/SETGID change
+# the child identity, and root tini needs KILL to forward signals to that UID.
+start "${PREFIX}-bootstrap" --user 0:0 --cap-add SETUID --cap-add SETGID --cap-add KILL --env PUID=99 --env PGID=100
+assert_identity "${PREFIX}-bootstrap" 99 100
+stop_clean "${PREFIX}-bootstrap"
+printf 'docker config smoke: default, numeric --user and explicit root-bootstrap identity passed\n'
 
-printf 'docker config smoke: checking STRM preflight and CLI configuration failures\n'
-for value in '' yes TRUE 2 ' true'; do
-	expect_start_failure 'invalid STRM boolean' 'TORRENTFS_STRM_ENABLED must be exactly true, false, 1, or 0' \
-		--env "TORRENTFS_STRM_ENABLED=$value"
+expect_failure 'empty PUID' 'PUID must be' --env PUID=
+expect_failure 'invalid PGID' 'PGID must be' --env PGID=-1
+expect_failure 'zero PUID' 'PUID must be between' --env PUID=0
+expect_failure 'overflow PGID' 'PGID must be between' --env PGID=4294967295
+expect_failure 'mismatched PUID' 'PUID/PGID must match docker --user' --env PUID=99
+expect_failure 'unknown backend' 'filesystem.backend' --env TORRENTFS_FILESYSTEM_BACKEND=invalid
+expect_failure 'no output' 'Usage:' --env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
+expect_failure 'missing SMB credential pair' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
+expect_failure 'missing SMB password' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader
+expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
+expect_failure 'SMB/FUSE CLI conflict' 'conflict' --env TORRENTFS_FILESYSTEM_BACKEND=smb \
+	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" -- \
+	-mountpoint /share -config /etc/torrentfs/torrentfs.toml /torrents
+expect_failure 'conflicting old selector' 'conflicts' --env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_SMB_ENABLED=true
+expect_failure 'conflicting read deadlines' 'conflicts' --env TORRENTFS_MOUNT_READ_TIMEOUT=3s --env TORRENTFS_FILESYSTEM_READ_TIMEOUT=4s
+expect_failure 'STRM requires HTTP' 'strm.base_url' --env TORRENTFS_FILESYSTEM_BACKEND=smb \
+	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" \
+	--env TORRENTFS_HTTP_LISTEN_ADDR= --env TORRENTFS_STRM_BASE_URL=http://player.example:8080
+printf 'docker config smoke: identity, selector, credential, alias, and STRM failures passed\n'
+
+mkdir -p "$work_dir/blocked"
+chmod 000 "$work_dir/blocked"
+expect_failure 'inaccessible data' 'permission denied' --user 99:100 --env PUID=99 --env PGID=100 \
+	--mount "type=bind,src=$work_dir/blocked,dst=/torrents"
+chmod 0700 "$work_dir/blocked"
+
+# A private secret file enables SMB with no HTTP listener and no Unix-name lookup.
+printf '%s\n' "$SECRET" >"$work_dir/password"
+# The mktemp directory is private; the fake fixture must be readable by the
+# image's numeric UID even when the smoke runner uses a different host UID.
+chmod 0444 "$work_dir/password"
+cat >"$work_dir/native.toml" <<'EOF'
+[filesystem]
+backend = "smb"
+read_timeout = "30s"
+[http]
+listen_addr = ""
+[smb]
+username = "not-a-unix-account"
+password_file = "/run/secrets/smb-password"
+listen_addr = "0.0.0.0:1445"
+[fuse]
+mountpoint = "/not-needed-for-smb"
+EOF
+chmod 0444 "$work_dir/native.toml"
+container="${PREFIX}-secret"
+containers+=("$container")
+timeout 30 docker run --detach --name "$container" --cap-drop ALL --security-opt no-new-privileges:true \
+	--mount "type=bind,src=$work_dir/password,dst=/run/secrets/smb-password,readonly" \
+	--mount "type=bind,src=$work_dir/native.toml,dst=/config.toml,readonly" \
+	"$IMAGE" -config /config.toml /torrents >/dev/null
+wait_running "$container"
+assert_identity "$container" 1000 1000
+timeout 10 docker exec "$container" /bin/sh -eu -c '
+	! grep -Eq ":[0]*1F90[[:space:]].*[[:space:]]0A[[:space:]]" /proc/net/tcp /proc/net/tcp6
+	test ! -e /dev/fuse && test ! -d /run/samba
+'
+stop_clean "$container"
+printf 'docker config smoke: TOML-selected SMB-only with a secret file and no FUSE passed\n'
+
+# Existing shared environment credentials still enable HTTP password login.
+container="${PREFIX}-http"
+start "$container" --publish 127.0.0.1::8080 \
+	--env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+	--env TORRENTFS_HTTP_AUTH_ENABLED=true --env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET"
+port="$(docker port "$container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
+url="http://127.0.0.1:$port"
+for _ in {1..100}; do
+	if curl --silent --fail --max-time 2 "$url/" >/dev/null; then break; fi
+	sleep 0.1
 done
-for value in true 1; do
-	expect_start_failure 'STRM without SMB' 'TORRENTFS_STRM_ENABLED requires TORRENTFS_SMB_ENABLED=true or 1' \
-		--env "TORRENTFS_STRM_ENABLED=$value" --env TORRENTFS_SMB_ENABLED=false
-done
-expect_cli_config_failure 'STRM without base URL' 'strm.base_url'
-expect_cli_config_failure 'STRM with disabled HTTP' 'strm.base_url' \
-	--env TORRENTFS_STRM_BASE_URL=http://player.example:8080 --env TORRENTFS_HTTP_LISTEN_ADDR=
-expect_cli_config_failure 'STRM with URL userinfo' 'strm.base_url' \
-	--env TORRENTFS_STRM_BASE_URL=http://user:strm-config-secret@player.example:8080
-expect_cli_config_failure 'STRM with URL query' 'strm.base_url' \
-	--env 'TORRENTFS_STRM_BASE_URL=http://player.example:8080?token=secret'
-
-for strm_enabled in false true; do
-	for mount_flag in mountpoint strm-mountpoint; do
-		for flag_form in "-$mount_flag" "--$mount_flag" "-$mount_flag=" "--$mount_flag="; do
-			args=("$flag_form" /override)
-			if [[ "$flag_form" == *= ]]; then
-				args=("${flag_form}/override")
-			fi
-			output=''
-			status=0
-			output="$(timeout 30 docker run --rm --env PUID=99 --env PGID=100 \
-				--env TORRENTFS_SMB_ENABLED=true --env "TORRENTFS_STRM_ENABLED=$strm_enabled" \
-				--env TORRENTFS_USERNAME=torrentfs --env "TORRENTFS_PASSWORD=$smb_preflight_secret" \
-				"$image" "${args[@]}" -config /etc/torrentfs/torrentfs.toml /torrents 2>&1)" || status=$?
-			[[ "$status" != 0 && "$status" != 124 ]] || fail "$flag_form unexpectedly started or timed out"
-			[[ "$output" == *"do not pass -$mount_flag"* ]] || fail "$flag_form lacked the fixed-mount diagnostic: $output"
-			[[ "$output" != *'starting torrentfs'* ]] || fail "$flag_form reached service startup: $output"
-			[[ "$output" != *"$smb_preflight_secret"* ]] || fail "$flag_form leaked the password"
-		done
-	done
-done
-printf 'docker config smoke: STRM preflight, URL validation, and every fixed-mount flag form passed\n'
-
-printf 'docker config smoke: checking invalid runtime identity values\n'
-expect_start_failure 'empty PUID' 'PUID must be an unsigned decimal integer from 1 to 4294967294 (got empty value)' \
-	--env PUID= --env PGID=100
-expect_start_failure 'empty PGID' 'PGID must be an unsigned decimal integer from 1 to 4294967294 (got empty value)' \
-	--env PUID=99 --env PGID=
-expect_start_failure 'non-numeric PUID' 'PUID must be an unsigned decimal integer from 1 to 4294967294 (got invalid value)' \
-	--env PUID=abc --env PGID=100
-expect_start_failure 'negative PGID' 'PGID must be an unsigned decimal integer from 1 to 4294967294 (got invalid value)' \
-	--env PUID=99 --env PGID=-1
-expect_start_failure 'zero PUID' 'PUID must be between 1 and 4294967294 (got zero)' \
-	--env PUID=0 --env PGID=100
-expect_start_failure 'out-of-range PGID' 'PGID must be between 1 and 4294967294 (got out-of-range value)' \
-	--env PUID=99 --env PGID=4294967295
-expect_start_failure 'non-root entrypoint' 'container entrypoint must start as root; do not use docker run --user' \
-	--user 99:100 --env PUID=99 --env PGID=100
-printf 'docker config smoke: invalid identity and non-root entrypoint diagnostics passed\n'
-
-printf 'docker config smoke: checking /torrents access validation\n'
-docker run --detach --name "$positive_container" \
-	--env PUID=99 --env PGID=100 \
-	--mount "type=bind,src=$work_dir/torrents,dst=/torrents" \
-	"$image" >/dev/null
-wait_running "$positive_container"
-stop_clean "$positive_container"
-positive_container=''
-printf 'docker config smoke: writable /torrents startup passed\n'
-
-chmod 000 "$work_dir/blocked-torrents"
-blocked_output=''
-blocked_status=0
-blocked_output="$(timeout 30 docker run --rm --env PUID=99 --env PGID=100 \
-	--mount "type=bind,src=$work_dir/blocked-torrents,dst=/torrents" "$image" 2>&1)" || blocked_status=$?
-chmod 0777 "$work_dir/blocked-torrents"
-[[ "$blocked_status" != 0 && "$blocked_status" != 124 ]] || fail 'unwritable /torrents unexpectedly started or timed out'
-[[ "$blocked_output" == *'runtime identity 99:100 cannot read and write /torrents'* ]] ||
-	fail "unwritable /torrents lacked the runtime identity diagnostic: $blocked_output"
-[[ "$blocked_output" != *'starting torrentfs'* ]] ||
-	fail "unwritable /torrents reached service startup: $blocked_output"
-printf 'docker config smoke: inaccessible /torrents fails before service startup\n'
-
-printf 'docker config smoke: starting with environment overrides only\n'
-docker run --detach --name "$env_container" \
-	--publish 127.0.0.1::8080 \
-	--env PUID=99 --env PGID=100 \
-	--env 'TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080' \
-	--env 'TORRENTFS_HTTP_AUTH_ENABLED=true' \
-	--env TORRENTFS_USERNAME=alice \
-	--env TORRENTFS_PASSWORD=password \
-	"$image" >/dev/null
-wait_running "$env_container"
-env_port="$(published_port "$env_container")"
-env_url="http://127.0.0.1:$env_port"
-wait_http "$env_url/"
-env_api_status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
-	--output "$work_dir/env-api.json" --write-out '%{http_code}' "$env_url/api/v1/torrents")"
-[[ "$env_api_status" == "401" ]] || fail "environment-only API status was $env_api_status, want 401"
-env_login_status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
-	--header 'Content-Type: application/json' \
-	--data '{"password":"password"}' \
-	--output "$work_dir/env-login.json" --write-out '%{http_code}' \
-	"$env_url/api/v1/auth/login")"
-[[ "$env_login_status" == "200" ]] || fail "environment-only login status was $env_login_status, want 200"
-stop_clean "$env_container"
-env_container=''
-printf 'docker config smoke: environment-only HTTP startup passed\n'
-
-printf 'docker config smoke: starting with an external TOML file\n'
-docker run --detach --name "$file_container" \
-	--env PUID=99 --env PGID=100 \
-	--env TORRENTFS_STRM_ENABLED=false \
-	--publish 127.0.0.1::8080 \
-	--mount "type=bind,src=$work_dir/torrents,dst=/torrents" \
-	--mount "type=bind,src=$work_dir/external.toml,dst=/config.toml,readonly" \
-	"$image" -config /config.toml /torrents >/dev/null
-wait_running "$file_container"
-file_port="$(published_port "$file_container")"
-file_url="http://127.0.0.1:$file_port"
-wait_http "$file_url/"
-file_api_status="$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
-	--output "$work_dir/file-api.json" --write-out '%{http_code}' "$file_url/api/v1/torrents")"
-[[ "$file_api_status" == "401" ]] || fail "external-file API status was $file_api_status, want 401"
-stop_clean "$file_container"
-file_container=''
-printf 'docker config smoke: external TOML startup passed\n'
-
+status="$(curl --silent --show-error --max-time 5 -o /dev/null -w '%{http_code}' "$url/api/v1/torrents")"
+[[ "$status" == 401 ]] || fail 'HTTP authentication was not enabled'
+status="$(curl --silent --show-error --max-time 5 --header 'Content-Type: application/json' \
+	--data "{\"password\":\"$SECRET\"}" -o /dev/null -w '%{http_code}' "$url/api/v1/auth/login")"
+[[ "$status" == 200 ]] || fail 'HTTP shared credential login failed'
+stop_clean "$container"
 printf 'docker config smoke: all checks passed\n'

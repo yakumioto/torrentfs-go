@@ -9,12 +9,8 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// Load reads, strictly decodes, overlays environment variables, and validates
-// a TOML configuration file. An empty path loads only the defaults and
-// environment variables.
-func Load(path string) (Config, error) {
-	return load(path, os.LookupEnv)
-}
+// Load strictly decodes TOML, overlays the documented environment, and validates.
+func Load(path string) (Config, error) { return load(path, os.LookupEnv) }
 
 func load(path string, lookup envLookup) (Config, error) {
 	cfg := Default()
@@ -24,11 +20,13 @@ func load(path string, lookup envLookup) (Config, error) {
 			return Config{}, fmt.Errorf("config: open %q: %w", path, err)
 		}
 		defer func() { _ = file.Close() }()
-
 		fileCfg := newFileConfig(cfg)
 		if err := toml.NewDecoder(file).DisallowUnknownFields().Decode(&fileCfg); err != nil {
 			var strictErr *toml.StrictMissingError
 			if errors.As(err, &strictErr) {
+				if strings.Contains(strings.ToLower(strictErr.String()), "password") {
+					return Config{}, errors.New("config: unknown password field; use documented hash or secret-file settings")
+				}
 				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, strictErr.String(), err)
 			}
 			var decodeErr *toml.DecodeError
@@ -59,20 +57,22 @@ func load(path string, lookup envLookup) (Config, error) {
 }
 
 type fileConfig struct {
-	Connections Connections `toml:"connections"`
-	Proxy       Proxy       `toml:"proxy"`
-	Cache       fileCache   `toml:"cache"`
-	Identity    Identity    `toml:"identity"`
-	HTTP        fileHTTP    `toml:"http"`
-	STRM        STRM        `toml:"strm"`
-	Log         Log         `toml:"log"`
-	Mount       Mount       `toml:"mount"`
+	Connections Connections    `toml:"connections"`
+	Proxy       Proxy          `toml:"proxy"`
+	Cache       fileCache      `toml:"cache"`
+	Identity    Identity       `toml:"identity"`
+	HTTP        fileHTTP       `toml:"http"`
+	STRM        STRM           `toml:"strm"`
+	Log         Log            `toml:"log"`
+	Mount       fileMount      `toml:"mount"`
+	Filesystem  fileFilesystem `toml:"filesystem"`
+	FUSE        fileFUSE       `toml:"fuse"`
+	SMB         SMB            `toml:"smb"`
 }
 
 type fileCache struct {
 	CapacityBytes tomlByteQuantity `toml:"capacity"`
 }
-
 type fileHTTP struct {
 	ListenAddr     string           `toml:"listen_addr"`
 	Auth           Auth             `toml:"auth"`
@@ -81,34 +81,22 @@ type fileHTTP struct {
 
 func newFileConfig(cfg Config) fileConfig {
 	return fileConfig{
-		Connections: cfg.Connections,
-		Proxy:       cfg.Proxy,
-		Cache:       fileCache{CapacityBytes: tomlByteQuantity(cfg.Cache.CapacityBytes)},
-		Identity:    cfg.Identity,
-		HTTP: fileHTTP{
-			ListenAddr:     cfg.HTTP.ListenAddr,
-			Auth:           cfg.HTTP.Auth,
-			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes),
-		},
-		STRM:  cfg.STRM,
-		Log:   cfg.Log,
-		Mount: cfg.Mount,
+		Connections: cfg.Connections, Proxy: cfg.Proxy,
+		Cache:    fileCache{CapacityBytes: tomlByteQuantity(cfg.Cache.CapacityBytes)},
+		Identity: cfg.Identity,
+		HTTP: fileHTTP{ListenAddr: cfg.HTTP.ListenAddr, Auth: cfg.HTTP.Auth,
+			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes)},
+		STRM: cfg.STRM, Log: cfg.Log, SMB: cfg.SMB,
 	}
 }
 
 func (c fileConfig) runtimeConfig() Config {
-	return Config{
-		Connections: c.Connections,
-		Proxy:       c.Proxy,
-		Cache:       Cache{CapacityBytes: int64(c.Cache.CapacityBytes)},
-		Identity:    c.Identity,
-		HTTP: HTTP{
-			ListenAddr:     c.HTTP.ListenAddr,
-			Auth:           c.HTTP.Auth,
-			MaxUploadBytes: int64(c.HTTP.MaxUploadBytes),
-		},
-		STRM:  c.STRM,
-		Log:   c.Log,
-		Mount: c.Mount,
+	cfg := Config{
+		Connections: c.Connections, Proxy: c.Proxy,
+		Cache: Cache{CapacityBytes: int64(c.Cache.CapacityBytes)}, Identity: c.Identity,
+		HTTP: HTTP{ListenAddr: c.HTTP.ListenAddr, Auth: c.HTTP.Auth, MaxUploadBytes: int64(c.HTTP.MaxUploadBytes)},
+		STRM: c.STRM, Log: c.Log,
 	}
+	c.outputConfig(&cfg)
+	return cfg
 }

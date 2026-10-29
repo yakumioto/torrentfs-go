@@ -34,7 +34,7 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 
 单位区分大小写，不接受裸数字、小数、bits 单位或科学计数法；旧裸数字配置需要改写后才能启动。
 
-`http.auth.token_ttl` 和 `mount.read_timeout` 使用 Go duration，例如 `30m`、`1h30m`、`250ms`；都必须为正数，`token_ttl` 还不超过 24 小时。Web UI 上传限速输入使用 `1MiB/s`、`32MB/s` 等带单位形式，但 HTTP API 和内部状态文件仍使用整数 bytes/s，不能把单位字符串直接写入 API。
+`http.auth.token_ttl` 和 `filesystem.read_timeout` 使用 Go duration，例如 `30m`、`1h30m`、`250ms`；都必须为正数，`token_ttl` 还不超过 24 小时。Web UI 上传限速输入使用 `1MiB/s`、`32MB/s` 等带单位形式，但 HTTP API 和内部状态文件仍使用整数 bytes/s，不能把单位字符串直接写入 API。
 
 ## 主要配置项
 
@@ -48,17 +48,44 @@ TOML decoder 会拒绝未知字段。只有下表列出的环境变量会被读�
 | `[cache]` | `capacity` | 内存 piece cache 硬上限，默认 `2GiB`；必须为正数且不超过水位计算安全上限 |
 | `[identity]` | `tracker_user_agent`, `peer_id_prefix`, `extended_handshake_client_version` | tracker/peer 握手身份 |
 | `[log]` | `level`, `format`, `add_source` | `debug`/`info`/`warn`/`error`，`text`/`json` 和源码位置 |
-| `[mount]` | `allow_other`, `read_timeout` | 是否允许除挂载用户外的本机 UID 读取 FUSE 挂载；单次前台内容读取的等待上限，默认 `30s` |
+| `[filesystem]` | `backend`, `read_timeout` | `fuse` / `smb` / `none`（默认）；共用单次读取期限，默认 `30s` |
+| `[fuse]` | `mountpoint`, `strm_mountpoint`, `allow_other` | FUSE 专属挂载路径和本地读权限 |
+| `[smb]` | `listen_addr`, `username`, `password_file`, `strm_enabled` | 内置只读 SMB；默认地址 `0.0.0.0:1445`，登录名独立于 Unix 身份 |
 
 本地内置默认值和镜像配置不同：本地 peer 端口为 `0`，地址族都启用；镜像 peer 端口为固定 `6881`，默认禁用 IPv6。两者都默认禁用 UPnP/NAT-PMP 自动端口映射；需要接受入站 peer 时应设置固定端口并同时发布 TCP 和 UDP。
 
-`cache.capacity` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，为协议缓冲、临时副本、Samba 等保留余量，避免 OOM kill。piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。
+`cache.capacity` 是上限而非预留量，cache 按需增长。容器中应根据内存限制调低它，为协议缓冲、临时副本和其他进程内开销保留余量，避免 OOM kill。piece length 大于 cache capacity 的 torrent 会在添加时被拒绝。
+
+## 选择 FUSE 或 SMB
+
+```toml
+[filesystem]
+backend = "smb" # fuse / smb / none
+read_timeout = "30s"
+[fuse]
+mountpoint = "/srv/mnt"
+strm_mountpoint = ""
+allow_other = false
+[smb]
+listen_addr = "0.0.0.0:1445"
+username = "media-reader"
+password_file = "/run/secrets/torrentfs-password"
+# strm_enabled = false # 省略时按 strm.base_url 自动提供第二共享
+```
+
+一次选择一个文件输出；HTTP 独立控制。`none` 是默认值，保留 HTTP-only；`smb` 不访问 FUSE 设备或检查未选中的挂载路径；`fuse` 不启动 SMB，也不读取未使用的 SMB secret。可以保留两组设置，仅切换 backend。
+
+FUSE 至少需要一个挂载点；STRM 挂载要求非空基址和启用 HTTP。旧 CLI `-mountpoint` / `-strm-mountpoint` 在没有显式后端时推导 FUSE，显式 `smb` / `none` 与这些 CLI 参数冲突。配置中的未选中 FUSE 路径不会触发挂载。全部输出均关闭会拒绝启动。
+
+SMB 固定提供原始 `torrentfs` share；非空 `strm.base_url` 默认再提供 `torrentfs-strm`。`smb.strm_enabled=false` 可单独关闭第二共享，`true` 要求 SMB 和有效基址。密码文件应只给运行身份读取并只读挂载，最多读取 64 KiB；只移除末尾的一次换行，保留口令空格。SMB 需要非空、单行 UTF-8 密码，不接受 TOML 明文 `password`，也不能使用 HTTP bcrypt 反推 NTLM 凭据。共享环境凭据优先于 SMB 文件来源，见下文。
+
+SMB 默认禁 guest/匿名、最低 SMB2.1、要求签名，并支持 SMB3 加密协商；支持加密不等于强制加密。listener 必须是合法 `host:port`，端口为 `1..65535`。Docker 标准映射为宿主 `445` → 容器 `1445`，不需要应用低端口 capability。
 
 ## HTTP 认证与网络边界
 
 HTTP 默认只监听 loopback，认证关闭。绑定 `0.0.0.0`、空 host 或其他非 loopback 地址时，必须启用完整认证配置。服务没有 TLS，对外部署应放在可信的 TLS reverse proxy 后面并限制可访问网络。
 
-Web/HTTP 登录仅校验密码；用户名仍用于配置账户标识和 SMB 登录。使用 TOML 认证时，仍需设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
+Web/HTTP 登录仅校验密码；HTTP 配置用户名是账户标识，可与独立 `smb.username` 不同。使用 TOML 认证时，仍需设置用户名以及**恰好一个** bcrypt 密码来源：`password_hash` 或 `password_hash_file`。不能使用明文密码：
 
 ```toml
 [http]
@@ -73,9 +100,9 @@ token_ttl = "30m"
 ```
 
 - hash file 必须是非空的普通、非符号链接文件，只允许 owner 读取，大小不超过 1024 bytes；服务会验证 bcrypt cost。
-- `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 是可选的共享凭据覆盖方式。HTTP auth 启用且这两个变量完整提供时，启动时会生成 cost-10 bcrypt hash，成对覆盖 TOML 的用户名、hash 和 hash file，最终配置不保存明文密码。
-- 两个共享变量必须同时提供、都非空；HTTP 密码最多 72 个 UTF-8 bytes，不能截断。SMB 还要求用户名解析为镜像内的 torrentfs runtime Unix 账户，并拒绝密码中的 CR/LF，见[部署指南](deployment.md)。
-- HTTP auth 关闭时，Go 配置层忽略共享凭据 pair，以便 SMB-only 启动；但 TOML 中的 username、hash 和 hash file 必须全为空，关闭 auth 不会自动清空这些字段。
+- `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 是可选的共享凭据覆盖方式。HTTP auth 启用且这两个变量完整提供时，启动时会生成 cost-10 bcrypt hash，成对覆盖 TOML 的用户名、hash 和 hash file，HTTP auth 只保存 bcrypt；启用 SMB 时，其认证仍需在进程内使用口令/NT hash。
+- 在启用 HTTP auth 或 SMB 时，两个共享变量必须同时提供、都非空；HTTP 密码最多 72 个 UTF-8 bytes，不能截断。SMB 登录名无需映射 Unix 用户，并拒绝密码中的 CR/LF/NUL。
+- HTTP listener 完全关闭时，忽略未使用的 HTTP auth 配置和 bcrypt 生成，允许 SMB-only；SMB 仍独立验证凭据。HTTP listener 启用但 auth 关闭时，HTTP 的 TOML username/hash/hash file 仍须为空。
 - 环境变量可能出现在进程环境和 Docker metadata 中，不应当作 secret store。
 
 `token_ttl` 是无活动过期窗口，有效的认证请求会滑动该窗口；token 只存在 daemon 内存中，重启后全部失效。登录和请求协议见 [API 参考](api.md)。
@@ -96,7 +123,7 @@ base_url = "https://media.example/torrentfs/"
 - 上例生成外部 `/torrentfs/stream/...` 链接；反代必须剥离 `/torrentfs`，将 `/stream/...` 转发给服务，并保留逐段路径转义，不要再次解码或清理文件名。
 - 基址必须从**播放器**可达，不能从容器地址、请求 Host 或登录 token 自动推断。远程播放不要填容器内部 `localhost`；外网必须使用 HTTPS。
 
-`TORRENTFS_STRM_BASE_URL` 覆盖该字段，显式空值可关闭流端点。基址变更需要重启；播放器可能缓存旧直链，需重新扫描或打开，不承诺热更新。原生 `-strm-mountpoint` 和 Docker 入口专用 `TORRENTFS_STRM_ENABLED` 控制第二视图是否挂载/共享，不替代 `base_url`：Docker 开关还要求 SMB 开启。完整组合与示例见[部署指南](deployment.md)。
+`TORRENTFS_STRM_BASE_URL` 覆盖该字段，显式空值可关闭流端点。基址变更需要重启；播放器可能缓存旧直链，需重新扫描或打开，不承诺热更新。FUSE 用 `fuse.strm_mountpoint`（或旧 CLI 别名）控制 STRM 挂载；SMB 的 `smb.strm_enabled` 可省略（按基址自动）或显式开关第二共享，不替代 HTTP 的 `base_url`。旧 `TORRENTFS_STRM_ENABLED` 由 daemon 兼容，显式 true 仍要求 SMB 和有效基址。完整组合与示例见[部署指南](deployment.md)。
 
 `/api/` 的 Bearer 认证规则保持不变；`/stream/...` 单独使用文件级 HMAC 签名，不要求播放器登录或添加 Bearer header。启用时首次创建 32 字节、`0600` 的 `.metadata/stream_key`，重启复用；它不是登录 token。保护签名链接和反代日志，密钥校验与轮换边界见[使用指南](usage.md)。
 
@@ -110,8 +137,17 @@ base_url = "https://media.example/torrentfs/"
 | `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | `connections.disable_ipv6` | Go boolean |
 | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `connections.no_port_forwarding` | Go boolean |
 | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `connections.bootstrap_nodes` | 逗号分隔的 `host:port` 列表 |
-| `TORRENTFS_MOUNT_ALLOW_OTHER` | `mount.allow_other` | Go boolean |
-| `TORRENTFS_MOUNT_READ_TIMEOUT` | `mount.read_timeout` | Go duration，如 `30s` |
+| `TORRENTFS_FILESYSTEM_BACKEND` | `filesystem.backend` | `fuse` / `smb` / `none` |
+| `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `filesystem.read_timeout` | 正 Go duration，如 `30s` |
+| `TORRENTFS_FUSE_MOUNTPOINT` | `fuse.mountpoint` | 原文件挂载路径 |
+| `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `fuse.strm_mountpoint` | STRM 挂载路径 |
+| `TORRENTFS_FUSE_ALLOW_OTHER` | `fuse.allow_other` | Go boolean |
+| `TORRENTFS_SMB_LISTEN_ADDR` | `smb.listen_addr` | `host:port`，默认 `0.0.0.0:1445` |
+| `TORRENTFS_SMB_USERNAME` | `smb.username` | 登录用户名，与 Unix UID 无关 |
+| `TORRENTFS_SMB_PASSWORD_FILE` | `smb.password_file` | 运行身份可读的口令文件 |
+| `TORRENTFS_SMB_STRM_ENABLED` | `smb.strm_enabled` | Go boolean；省略时自动 |
+| `TORRENTFS_MOUNT_ALLOW_OTHER` | 旧 `fuse.allow_other` 别名 | Go boolean |
+| `TORRENTFS_MOUNT_READ_TIMEOUT` | 旧 `filesystem.read_timeout` 别名 | Go duration |
 | `TORRENTFS_PROXY_SOCKS5_URL` | `proxy.socks5_url` | 字符串 |
 | `TORRENTFS_CACHE_CAPACITY` | `cache.capacity` | 带单位字节，如 `1GiB` 或 `32MB` |
 | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `identity.tracker_user_agent` | 字符串 |
@@ -137,16 +173,19 @@ TORRENTFS_CACHE_CAPACITY=1GiB \
 ./torrentfs "$PWD/torrents"
 ```
 
-`PUID`、`PGID`、`TORRENTFS_SMB_ENABLED` 和 `TORRENTFS_STRM_ENABLED` 由 Docker 入口处理，不是 daemon 的 TOML 配置。`TORRENTFS_STRM_ENABLED` 默认 `false`，只接受 `true`、`false`、`1`、`0`，启用时要求 SMB 开启并配置非空 `strm.base_url`。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
+`PUID` / `PGID` 仅由 Docker 入口处理。旧 `TORRENTFS_SMB_ENABLED` 在 daemon 中兼容为后端选择，旧 `TORRENTFS_STRM_ENABLED` 兼容为 SMB 第二共享开关；显式矛盾的新旧设置会报错，不会同时启动两种输出。`TORRENTFS_FUSE_REQUIRED` 是测试门禁，见[开发指南](development.md)。
 
 ## 校验与旧配置迁移
+
+- 将 `[mount] allow_other` 改为 `[fuse] allow_other`，将 `[mount] read_timeout` 改为 `[filesystem] read_timeout`；旧字段和 `TORRENTFS_MOUNT_*` 暂时兼容，新旧显式值不同会报冲突。
+- 选择 `filesystem.backend` 后删除矛盾的旧 SMB 开关、FUSE CLI 参数和 Compose 环境覆盖。SMB 不再需要 `/share` 挂载、Samba 配置或 passdb；原始 share 名与数据目录保持不变。
 
 - 普通环境变量存在但为空时，字符串字段可以被清空；数字、布尔值和 duration 的空值会报错。
 - `connections.listen_port` 必须在 `0..65535`；`disable_ipv4` 和 `disable_ipv6` 不能同时为 `true`；每个 bootstrap 项必须是合法且端口在 `1..65535` 的 `host:port`。
 - `proxy.socks5_url` 只能为空、`socks5://` 或 `socks5h://`，且必须包含合法 host；显式端口必须在 `1..65535`，校验错误不会回显 proxy 凭据。
 - `identity.peer_id_prefix` 最多 20 bytes；tracker User-Agent 不能包含 CR/LF。
 - `http.max_upload_size` 必须大于零；非空 HTTP listener 必须是合法的 `host:port`。
-- `mount.read_timeout` 必须为正数 Go duration。它限制**单次**前台内容读取的等待时间，不是整段播放或文件句柄的总时长：拿不到已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除 torrent 或取消其他读取。慢来源或大 piece 可以调长该值。
+- `filesystem.read_timeout` 必须为正数 Go duration。它限制**单次**前台内容读取的等待时间，不是整段播放或文件句柄的总时长：拿不到已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除 torrent 或取消其他读取。慢来源或大 piece 可以调长该值。
 - `[paths]`（包括 `paths.data_dir`）已移除；`TORRENTFS_PATHS_DATA_DIR` 会被忽略，不会恢复旧的磁盘 payload 路径。
 
 迁移旧字段时，将 `cache.capacity_bytes` / `http.max_upload_bytes` 改为 `cache.capacity` / `http.max_upload_size`，将 `TORRENTFS_CACHE_CAPACITY_BYTES` / `TORRENTFS_HTTP_MAX_UPLOAD_BYTES` 改为 `TORRENTFS_CACHE_CAPACITY` / `TORRENTFS_HTTP_MAX_UPLOAD_SIZE`。旧 TOML key 不再接受，旧环境变量不再读取；值的 SI/IEC 单位规则不变。

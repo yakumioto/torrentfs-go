@@ -666,6 +666,18 @@ func unsetConfigEnvironment(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT",
 		"TORRENTFS_MOUNT_ALLOW_OTHER",
+		"TORRENTFS_MOUNT_READ_TIMEOUT",
+		"TORRENTFS_FILESYSTEM_BACKEND",
+		"TORRENTFS_FILESYSTEM_READ_TIMEOUT",
+		"TORRENTFS_FUSE_MOUNTPOINT",
+		"TORRENTFS_FUSE_STRM_MOUNTPOINT",
+		"TORRENTFS_FUSE_ALLOW_OTHER",
+		"TORRENTFS_SMB_ENABLED",
+		"TORRENTFS_SMB_LISTEN_ADDR",
+		"TORRENTFS_SMB_USERNAME",
+		"TORRENTFS_SMB_PASSWORD_FILE",
+		"TORRENTFS_SMB_STRM_ENABLED",
+		"TORRENTFS_STRM_ENABLED",
 		"TORRENTFS_PROXY_SOCKS5_URL",
 		"TORRENTFS_CACHE_CAPACITY",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
@@ -874,7 +886,7 @@ func TestUsageDescribesAPIOnlyTorrentManagement(t *testing.T) {
 	if strings.Contains(usageText, "scanned "+"at startup") || strings.Contains(usageText, "while "+"running") {
 		t.Fatalf("usage still describes directory scanning: %q", usageText)
 	}
-	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "-strm-mountpoint", "strm.base_url", "mounted alone", "mountpoint flags then runs headless", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
+	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "-strm-mountpoint", "strm.base_url", "mounted alone", "native SMB", "HTTP-only default", "SMB can run without HTTP", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage = %q, want %q", usageText, want)
 		}

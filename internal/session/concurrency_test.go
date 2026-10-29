@@ -612,49 +612,71 @@ func TestFuseUnavailableTorrentDoesNotBlockHealthyTorrent(t *testing.T) {
 		unmountServer(t, server, mnt)
 		server.Wait()
 	})
-	missingReaders := make([]*os.File, blockedReads)
-	for index := range blockedReads {
-		file, err := os.Open(filepath.Join(mnt, "missing", fmt.Sprintf("%03d.bin", index)))
-		if err != nil {
-			t.Fatalf("open unavailable video %d: %v", index, err)
-		}
-		missingReaders[index] = file
-		t.Cleanup(func() { _ = file.Close() })
-	}
 	events := make(chan session.ReadProbeEvent, 256)
 	restoreProbe := session.SetReadProbe(events)
+	defer restoreProbe()
+	client := startUnavailableFuseClient(t, mnt)
 	defer func() {
 		_ = sess.Close(context.Background())
-		restoreProbe()
+		client.stop(t)
 	}()
-	missingDone := readAtAsync(missingReaders[0], 0, concurrencyReadChunk)
-	started := waitProbeEvent(t, events, "reader-started", 0)
-	requireNoReadOutcome(t, missingDone, "unavailable torrent read")
-	for index := 1; index < blockedReads; index++ {
-		readAtAsync(missingReaders[index], 0, concurrencyReadChunk)
-		waitProbeEvent(t, events, "reader-started", int64(index*testPieceLength))
-	}
-
-	healthyDone := make(chan readOutcome, 1)
-	go func() {
-		file, err := os.Open(filepath.Join(mnt, "healthy.bin"))
-		if err != nil {
-			healthyDone <- readOutcome{err: err}
+	startedReaders := make(map[int64]session.ReadProbeEvent, blockedReads)
+	waitStarted := func(index int) {
+		offset := int64(index * testPieceLength)
+		if _, ok := startedReaders[offset]; ok {
 			return
 		}
-		defer func() { _ = file.Close() }()
-		healthyDone <- <-readAtAsync(file, 0, concurrencyReadChunk)
-	}()
+		deadline := time.NewTimer(externalProbeWait)
+		defer deadline.Stop()
+		for {
+			select {
+			case event := <-events:
+				if event.Kind == "reader-started" {
+					startedReaders[event.Offset] = event
+					if event.Offset == offset {
+						return
+					}
+				}
+			case outcome := <-client.results:
+				t.Fatalf("unavailable reader %d returned before the healthy read: %d bytes, %s", outcome.Index, len(outcome.Data), outcome.Error)
+			case <-deadline.C:
+				t.Fatalf("no reader-started for offset %d (%d/%d readers started)", offset, len(startedReaders), blockedReads)
+			}
+		}
+	}
+	for index := range blockedReads {
+		client.command(t, fmt.Sprintf("missing %d", index))
+		waitStarted(index)
+	}
+	if len(startedReaders) != blockedReads {
+		t.Fatalf("started readers = %d, want %d", len(startedReaders), blockedReads)
+	}
+
+	client.command(t, "healthy")
 	// The webseed scheduler runs on a five-second interval.
-	outcome := waitReadOutcomeWithin(t, healthyDone, "healthy torrent read while another torrent has no peers", 8*time.Second)
-	if outcome.err != nil {
-		t.Fatalf("healthy torrent read: %v", outcome.err)
+	select {
+	case outcome := <-client.results:
+		if outcome.Index != -1 {
+			t.Fatalf("unavailable reader %d returned while peers were missing: %d bytes, %s", outcome.Index, len(outcome.Data), outcome.Error)
+		}
+		if outcome.Error != "" {
+			t.Fatalf("healthy torrent read: %s", outcome.Error)
+		}
+		if !bytes.Equal(outcome.Data, healthy[:concurrencyReadChunk]) {
+			t.Fatal("healthy torrent content mismatch")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("healthy torrent read while another torrent has no peers did not return")
 	}
-	if !bytes.Equal(outcome.data, healthy[:concurrencyReadChunk]) {
-		t.Fatal("healthy torrent content mismatch")
+	for offset, event := range startedReaders {
+		if probeDoneClosed(event.Done) {
+			t.Fatalf("healthy torrent read canceled unavailable reader at offset %d", offset)
+		}
 	}
-	if probeDoneClosed(started.Done) {
-		t.Fatal("healthy torrent read cancelled the unavailable torrent read")
+	select {
+	case outcome := <-client.results:
+		t.Fatalf("unavailable reader %d completed prematurely: %d bytes, %s", outcome.Index, len(outcome.Data), outcome.Error)
+	default:
 	}
 }
 

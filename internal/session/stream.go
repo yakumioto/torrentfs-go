@@ -12,8 +12,8 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/stream"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 const streamKeyFileName = "stream_key"
@@ -122,11 +122,11 @@ func (s *Session) streamFileLocked(hash metainfo.Hash, path string) (*Torrent, *
 	entry := s.states[hash]
 	t := s.torrents[hash]
 	if entry == nil || entry.State != StateReady || t == nil || t.Info() == nil {
-		return nil, nil, filesystem.ErrNotFound
+		return nil, nil, vfs.ErrNotFound
 	}
 	file := t.fileByPath(path)
 	if file == nil {
-		return nil, nil, filesystem.ErrNotFound
+		return nil, nil, vfs.ErrNotFound
 	}
 	return t, file, nil
 }

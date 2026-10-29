@@ -2,12 +2,12 @@ package filesystem
 
 import (
 	"context"
-	"slices"
-	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 // categoryNode is a dynamic, read-only directory containing one category's
@@ -34,34 +34,7 @@ func (n *categoryNode) children() []rootEntry {
 }
 
 func (n *categoryNode) visibleChildren() []rootEntry {
-	entries := n.children()
-	used := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		used[entry.Name] = true
-	}
-	for _, entry := range entries {
-		if _, single := mediaRoot(entry.View); !single {
-			continue
-		}
-		for _, subtitle := range entry.View.Subtitles {
-			if strings.Contains(subtitle.Path, "/") || used[subtitle.Path] {
-				continue
-			}
-			used[subtitle.Path] = true
-			entries = append(entries, rootEntry{
-				Name:       subtitle.Path,
-				View:       entry.View,
-				Path:       subtitle.Path,
-				Size:       subtitle.Size,
-				ModifiedAt: subtitle.ModifiedAt,
-				IsSubtitle: true,
-			})
-		}
-	}
-	slices.SortFunc(entries, func(a, b rootEntry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return entries
+	return vfs.VisibleRootEntries(n.torrentViews(), nil, n.category)
 }
 
 func (n *categoryNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -128,7 +101,7 @@ func (n *categoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno
 	out := make([]fuse.DirEntry, 0, len(entries))
 	for _, entry := range entries {
 		mode := uint32(syscall.S_IFDIR)
-		if entry.IsSubtitle || !entry.isDir() {
+		if entry.IsSubtitle || !entry.IsDir() {
 			mode = syscall.S_IFREG
 		}
 		out = append(out, fuse.DirEntry{Name: entry.Name, Mode: mode})

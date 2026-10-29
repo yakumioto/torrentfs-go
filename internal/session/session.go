@@ -1,6 +1,6 @@
 // Package session owns the BitTorrent client and the torrents registered on
 // it. It hides anacrolix behind the small API the rest of torrentfs needs and
-// implements filesystem.Backend, so main can inject a session straight into
+// implements vfs.Backend, so main can inject a session straight into
 // the filesystem layer.
 package session
 
@@ -22,10 +22,10 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/piecestore"
 	"github.com/yakumioto/torrentfs-go/internal/stream"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 type lifecycle uint8
@@ -493,7 +493,7 @@ func (s *Session) Close(ctx context.Context) error {
 
 func (s *Session) ensureActiveLocked() error {
 	if s.state != stateActive {
-		return fmt.Errorf("session: not active: %w", filesystem.ErrClosed)
+		return fmt.Errorf("session: not active: %w", vfs.ErrClosed)
 	}
 	return nil
 }

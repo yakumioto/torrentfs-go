@@ -89,14 +89,19 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 
 // Config holds torrentfs runtime settings.
 type Config struct {
-	Connections Connections `toml:"connections"`
-	Proxy       Proxy       `toml:"proxy"`
-	Cache       Cache       `toml:"cache"`
-	Identity    Identity    `toml:"identity"`
-	HTTP        HTTP        `toml:"http"`
-	STRM        STRM        `toml:"strm"`
-	Log         Log         `toml:"log"`
-	Mount       Mount       `toml:"mount"`
+	Connections     Connections `toml:"connections"`
+	Proxy           Proxy       `toml:"proxy"`
+	Cache           Cache       `toml:"cache"`
+	Identity        Identity    `toml:"identity"`
+	HTTP            HTTP        `toml:"http"`
+	STRM            STRM        `toml:"strm"`
+	Log             Log         `toml:"log"`
+	Mount           Mount       `toml:"-"` // deprecated in-process compatibility
+	Filesystem      Filesystem  `toml:"filesystem"`
+	FUSE            FUSE        `toml:"fuse"`
+	SMB             SMB         `toml:"smb"`
+	backendExplicit bool
+	outputError     error
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -236,15 +241,17 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Mount: Mount{
-			AllowOther:  false,
-			ReadTimeout: Duration(30 * time.Second),
-		},
+		Mount:      Mount{ReadTimeout: defaultReadTimeout},
+		Filesystem: Filesystem{Backend: BackendNone, ReadTimeout: defaultReadTimeout},
+		SMB:        SMB{ListenAddr: "0.0.0.0:1445"},
 	}
 }
 
 // Validate checks values that must be valid before starting a session.
 func (c Config) Validate() error {
+	if err := c.validateFilesystem(); err != nil {
+		return err
+	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
 	}
@@ -271,8 +278,10 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
 		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
 	}
-	if err := validateAuth(c.HTTP.Auth); err != nil {
-		return err
+	if c.HTTP.ListenAddr != "" {
+		if err := validateAuth(c.HTTP.Auth); err != nil {
+			return err
+		}
 	}
 	if c.HTTP.ListenAddr != "" {
 		host, _, err := net.SplitHostPort(c.HTTP.ListenAddr)

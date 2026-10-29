@@ -107,6 +107,9 @@ var environmentBindings = []envBinding{
 			if err != nil {
 				return err
 			}
+			if value <= 0 {
+				return errPositive
+			}
 			cfg.Mount.ReadTimeout = value
 			return nil
 		},
@@ -247,11 +250,14 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 			return invalid(binding.field, errors.New("environment variable "+binding.name+": "+err.Error()))
 		}
 	}
+	if err := applyFilesystemEnvironment(cfg, lookup); err != nil {
+		return err
+	}
 	return applyHTTPAuthenticationEnvironment(cfg, lookup)
 }
 
 func applyHTTPAuthenticationEnvironment(cfg *Config, lookup envLookup) error {
-	if !cfg.HTTP.Auth.Enabled {
+	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.ListenAddr == "" {
 		return nil
 	}
 

@@ -2,7 +2,7 @@
 
 [English](api.en.md) · [返回 README](../README.md)
 
-HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`。`/api/v1` 提供任务管理和诊断；内容默认通过 FUSE/SMB 读取，显式配置 STRM 后另启用独立的签名 `/stream/...` 内容端点。
+HTTP 服务和 Web UI 共用 listener，默认地址为 `http://127.0.0.1:8080`。`/api/v1` 提供任务管理和诊断；选择对应文件后端后通过 FUSE/SMB 读取内容，显式配置 STRM 后另启用独立的签名 `/stream/...` 内容端点。
 
 ## 路由
 
@@ -86,7 +86,7 @@ curl --fail --range 0-1023 "$STREAM_URL" --output ./range.bin
 
 - 全量 GET、HEAD、单/多 Range、条件请求和 `If-Range` 由 `http.ServeContent` 处理；匹配的 Range 返回 `206`，不可满足的 Range 返回 `416`。`If-Range` 不匹配时按标准语义回退为完整响应。
 - 响应使用显式 `Content-Type`（未知扩展名为 `application/octet-stream`），以及 ETag、Last-Modified 和适用的 Content-Length，并设置 `Cache-Control: private, no-store`、`Referrer-Policy: no-referrer`；偏移和长度使用 int64，支持大于 4GiB 的文件。不会为 MIME 嗅探额外读取首部；HEAD、元数据和无需 body 的条件响应不拉取 payload。
-- 内容复用 Session 的缓存、预读和 `mount.read_timeout`。客户端取消会取消该请求的读取并释放 reader；单次读取超时或其他读取错误若发生在响应已发出后，会中止传输，不追加 JSON，也不保证返回 `504`。客户端必须把截断响应视为失败。
+- 内容复用 Session 的缓存、预读和 `filesystem.read_timeout`。客户端取消会取消该请求的读取并释放 reader；单次读取超时或其他读取错误若发生在响应已发出后，会中止传输，不追加 JSON，也不保证返回 `504`。客户端必须把截断响应视为失败。
 
 | 状态 | 流端点含义 |
 | --- | --- |

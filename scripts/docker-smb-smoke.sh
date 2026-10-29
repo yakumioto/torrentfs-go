@@ -4,8 +4,8 @@ IFS=$'\n\t'
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly IMAGE="torrentfs-smb-smoke:${BASHPID}"
-readonly CLIENT_IMAGE="torrentfs-smb-client:${BASHPID}"
+readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-smb-smoke:${BASHPID}}"
+readonly CLIENT_IMAGE="${TORRENTFS_SMOKE_CLIENT_IMAGE:-torrentfs-smb-client:${BASHPID}}"
 readonly NETWORK="torrentfs-smb-network-${BASHPID}"
 readonly APP_PREFIX="torrentfs-smb-app-${BASHPID}"
 readonly CLIENT_CREDENTIALS_NAME="smb-credentials"
@@ -29,7 +29,7 @@ readonly RANDOM_OFFSET=$((40 * 1024 * 1024 + 12345))
 readonly RANDOM_LENGTH=8192
 # Kernel-level "this host cannot do CIFS at all" failures, as opposed to a real
 # regression in the mount or the data it returns.
-readonly CIFS_UNAVAILABLE_PATTERN='(unknown filesystem type|cannot mount|No such device|not supported|modprobe|Operation not permitted)'
+readonly CIFS_UNAVAILABLE_PATTERN='(unknown filesystem type|cifs filesystem not supported by the system|No such device|modprobe.*(not found|not permitted)|mount error\(1\): Operation not permitted)'
 
 work_dir=''
 webseed_pid=''
@@ -92,77 +92,36 @@ all_process_identities() {
 	' sh "$process_name"
 }
 
-pid_identity() {
-	local container="$1" pid="$2"
-	probe "read PID $pid credentials" docker exec "$container" /bin/sh -c '
-		status="/proc/$1/status"
-		[ -r "$status" ] || exit 1
-		uid_line="$(grep "^Uid:" "$status")"
-		gid_line="$(grep "^Gid:" "$status")"
-		uid_line="${uid_line#Uid:}"
-		gid_line="${gid_line#Gid:}"
-		set -- $uid_line
-		uid="$1:$2:$3:$4"
-		set -- $gid_line
-		gid="$1:$2:$3:$4"
-		printf "%s %s\\n" "$uid" "$gid"
-	' sh "$pid"
-}
-
 assert_process_identities() {
 	local container="$1" process_name="$2" output pid uid gid count=0
-	if ! output="$(all_process_identities "$container" "$process_name")"; then
-		fail "$container has no $process_name process"
-	fi
+	output="$(all_process_identities "$container" "$process_name")" || fail "$container has no $process_name process"
 	while IFS=' ' read -r pid uid gid; do
 		[[ -n "$pid" ]] || continue
-		[[ "$uid" == "$SMOKE_UID:$SMOKE_UID:$SMOKE_UID:$SMOKE_UID" ]] ||
-			fail "$container $process_name PID $pid has UID credentials $uid, expected $SMOKE_UID in every field"
-		[[ "$gid" == "$SMOKE_GID:$SMOKE_GID:$SMOKE_GID:$SMOKE_GID" ]] ||
-			fail "$container $process_name PID $pid has GID credentials $gid, expected $SMOKE_GID in every field"
+		[[ "$uid" == "$SMOKE_UID:$SMOKE_UID:$SMOKE_UID:$SMOKE_UID" ]] || fail "unexpected $process_name UID credentials"
+		[[ "$gid" == "$SMOKE_GID:$SMOKE_GID:$SMOKE_GID:$SMOKE_GID" ]] || fail "unexpected $process_name GID credentials"
 		count=$((count + 1))
 	done <<<"$output"
-	(( count > 0 )) || fail "$container has no $process_name process"
-	printf 'docker SMB smoke: %s %s process(es) run as %s:%s\n' "$process_name" "$count" "$SMOKE_UID" "$SMOKE_GID"
+	(( count > 0 )) || fail "missing $process_name process"
 }
 
-assert_pid_identity() {
-	local container="$1" name="$2" pid="$3" actual uid gid
-	actual="$(pid_identity "$container" "$pid")" || fail "$container $name PID $pid disappeared"
-	IFS=' ' read -r uid gid <<<"$actual"
-	[[ "$uid" == "$SMOKE_UID:$SMOKE_UID:$SMOKE_UID:$SMOKE_UID" ]] ||
-		fail "$container $name PID $pid has UID credentials $uid, expected $SMOKE_UID in every field"
-	[[ "$gid" == "$SMOKE_GID:$SMOKE_GID:$SMOKE_GID:$SMOKE_GID" ]] ||
-		fail "$container $name PID $pid has GID credentials $gid, expected $SMOKE_GID in every field"
-}
-
-wait_pid_file() {
-	local container="$1" path="$2" pid=''
-	for _ in {1..60}; do
-		pid="$(probe "read $path" docker exec "$container" cat "$path" 2>/dev/null || true)"
-		if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-			printf '%s\n' "$pid"
-			return 0
-		fi
-		sleep 0.2
-	done
-	fail "$container did not create $path"
-}
-
-assert_runtime_tree() {
-	local container="$1" path mode actual
-	for path in /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache \
-		/var/lib/samba /var/cache/samba /var/log/samba; do
-		mode=755
-		[[ "$path" == /run/samba/private ]] && mode=700
-		actual="$(probe "inspect $path" docker exec "$container" stat -c '%u:%g %a %n' "$path")" ||
-			fail "$container is missing Samba runtime path $path"
-		[[ "$actual" == "$SMOKE_UID:$SMOKE_GID $mode $path" ]] ||
-			fail "$container runtime path $path is '$actual', expected '$SMOKE_UID:$SMOKE_GID $mode $path'"
-	done
-	probe 'check Samba runtime access as configured identity' docker exec "$container" /bin/sh -c \
-		'for path in /run/samba /run/samba/private /run/samba/lock /run/samba/state /run/samba/cache /var/lib/samba /var/cache/samba /var/log/samba; do test -r "$path" && test -w "$path" && test -x "$path"; done' ||
-		fail "$container runtime directories are not usable by the configured identity"
+assert_native_app() {
+	local container="$1"
+	assert_process_identities "$container" torrentfs
+	probe 'check native process privileges and absence of FUSE/Samba' docker exec "$container" /bin/sh -eu -c '
+		test ! -e /dev/fuse
+		test ! -d /run/samba
+		! command -v smbd >/dev/null 2>&1
+		found=0
+		for status in /proc/[0-9]*/status; do
+			[ -r "$status" ] || continue
+			grep -q "^Name:[[:space:]]*torrentfs$" "$status" || continue
+			grep -q "^CapEff:[[:space:]]*0000000000000000$" "$status"
+			grep -q "^CapBnd:[[:space:]]*0000000000000000$" "$status"
+			grep -q "^NoNewPrivs:[[:space:]]*1$" "$status"
+			found=1
+		done
+		test "$found" = 1
+	'
 }
 
 # remove_work_dir deletes the scratch tree even when torrentfs created files as a
@@ -215,10 +174,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-for command_name in docker python3 sha256sum dd timeout findmnt; do
+for command_name in docker python3 sha256sum dd timeout; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
-[[ -c /dev/fuse ]] || fail '/dev/fuse is required; run this smoke with --device /dev/fuse'
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-smb.XXXXXX")"
 torrents_dir="$work_dir/torrents"
@@ -445,15 +403,23 @@ torrent_hash="$(<"$work_dir/infohash")"
 canonical_torrent="$torrents_dir/$torrent_hash.torrent"
 cp -- "$canonical_torrent" "$torrents_dir/manual-copy.torrent"
 
-printf 'docker SMB smoke: building generic application image for %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
-bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "$ROOT_DIR"
-image_built=1
-printf 'docker SMB smoke: building SMB client image\n'
-docker build --tag "$CLIENT_IMAGE" - <<'EOF'
+if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+	probe 'inspect prebuilt application image' docker image inspect "$IMAGE" >/dev/null
+else
+	printf 'docker SMB smoke: building native application image for %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
+	bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "$ROOT_DIR"
+	image_built=1
+fi
+if [[ -n "${TORRENTFS_SMOKE_CLIENT_IMAGE:-}" ]]; then
+	probe 'inspect prebuilt client image' docker image inspect "$CLIENT_IMAGE" >/dev/null
+else
+	printf 'docker SMB smoke: building SMB client image\n'
+	bounded "$DOCKER_BUILD_TIMEOUT" 'build SMB client image' docker build --tag "$CLIENT_IMAGE" - <<'EOF'
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends cifs-utils smbclient ca-certificates curl && rm -rf /var/lib/apt/lists/*
 EOF
-client_image_built=1
+	client_image_built=1
+fi
 bounded 30 'create SMB network' docker network create "$NETWORK" >/dev/null
 network_created=1
 
@@ -472,13 +438,13 @@ start_app() {
 	local env_args=(
 		--env "PUID=$SMOKE_UID"
 		--env "PGID=$SMOKE_GID"
-		--env TORRENTFS_SMB_ENABLED=true
+		--env TORRENTFS_FILESYSTEM_BACKEND=smb
 		--env "TORRENTFS_USERNAME=$smb_user"
 		--env "TORRENTFS_PASSWORD=$smb_password"
 		# The cache capacity accepts only a byte quantity with an explicit unit;
 		# CACHE_BYTES itself stays a plain number.
 		--env "TORRENTFS_CACHE_CAPACITY=${CACHE_BYTES}B"
-		--env "TORRENTFS_MOUNT_READ_TIMEOUT=$read_timeout"
+		--env "TORRENTFS_FILESYSTEM_READ_TIMEOUT=$read_timeout"
 	)
 	if [[ "$http_auth" == true ]]; then
 		env_args+=(
@@ -486,11 +452,10 @@ start_app() {
 			--env TORRENTFS_HTTP_AUTH_ENABLED=true
 		)
 	else
-		env_args+=(--env TORRENTFS_HTTP_AUTH_ENABLED=false)
+		env_args+=(--env TORRENTFS_HTTP_LISTEN_ADDR= --env TORRENTFS_HTTP_AUTH_ENABLED=false)
 	fi
 	if [[ "$strm_enabled" == true ]]; then
 		env_args+=(
-			--env TORRENTFS_STRM_ENABLED=true
 			--env "TORRENTFS_STRM_BASE_URL=http://$app:8080"
 		)
 	fi
@@ -498,11 +463,10 @@ start_app() {
 	bounded "$DOCKER_OP_TIMEOUT" "start $app" docker run --detach --name "$app" \
 		--network "$NETWORK" \
 		--add-host host.docker.internal:host-gateway \
-		--device /dev/fuse \
-		--cap-add SYS_ADMIN \
-		--cap-add NET_BIND_SERVICE \
-		--security-opt apparmor=unconfined \
-		--publish 127.0.0.1::445 \
+		--user "$SMOKE_UID:$SMOKE_GID" \
+		--cap-drop ALL \
+		--security-opt no-new-privileges:true \
+		--publish 127.0.0.1::1445 \
 		--mount "type=bind,src=$app_torrents,dst=/torrents" \
 		"${env_args[@]}" \
 		"$IMAGE" >/dev/null
@@ -515,11 +479,7 @@ start_app() {
 		fi
 		if [[ "$state" == running ]]; then
 			output="$(logs "$app")"
-			if has_log_line "$output" 'torrentfs-entrypoint: fuse ready: /share' &&
-				has_log_line "$output" 'torrentfs-entrypoint: starting smbd on TCP 445'; then
-				if [[ "$strm_enabled" == true ]] && ! has_log_line "$output" 'torrentfs-entrypoint: fuse ready: /share-strm'; then
-					fail "$app started Samba before both FUSE mounts became ready"
-				fi
+			if [[ "$output" == *'smb listening'* ]]; then
 				return 0
 			fi
 		fi
@@ -594,7 +554,7 @@ subtitle_smb_check() {
 		--mount "type=bind,src=$source,dst=/input/expected,readonly" \
 		"$CLIENT_IMAGE" sh -eu -c '
 			client() {
-				smbclient "//$APP/$SHARE" -A /run/secrets/smb-credentials -m SMB3 \
+				smbclient -p 1445 "//$APP/$SHARE" -A /run/secrets/smb-credentials -m SMB3 \
 					-t '"$CLIENT_SMB_TIMEOUT"' -c "$1"
 			}
 			expected_size="$(wc -c </input/expected)"
@@ -635,7 +595,7 @@ smb_share_client() {
 	shift 2
 	bounded "$CLIENT_TIMEOUT" "SMB client against $app/$share" docker run --rm --network "$NETWORK" \
 		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
-		"$CLIENT_IMAGE" smbclient "//$app/$share" \
+		"$CLIENT_IMAGE" smbclient -p 1445 "//$app/$share" \
 		-A "/run/secrets/$CLIENT_CREDENTIALS_NAME" -m SMB3 -t "$CLIENT_SMB_TIMEOUT" "$@"
 }
 
@@ -645,39 +605,30 @@ smb_client() {
 	smb_share_client "$app" torrentfs "$@"
 }
 
+smb_list_shares() {
+	local app="$1"
+	bounded "$CLIENT_TIMEOUT" "enumerate SMB shares on $app" docker run --rm --network "$NETWORK" \
+		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
+		"$CLIENT_IMAGE" smbclient -p 1445 -L "$app" -g \
+		-A "/run/secrets/$CLIENT_CREDENTIALS_NAME" -m SMB3 -t "$CLIENT_SMB_TIMEOUT"
+}
+
 printf 'docker SMB smoke: starting HTTP+SMB authenticated share as %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
 app_normal="${APP_PREFIX}-normal"
 start_app "$app_normal" "$torrents_dir" true
-assert_process_identities "$app_normal" torrentfs
-assert_process_identities "$app_normal" smbd
-torrentfs_pid="$(wait_pid_file "$app_normal" /run/torrentfs.pid)"
-assert_pid_identity "$app_normal" torrentfs "$torrentfs_pid"
-smbd_pid="$(wait_pid_file "$app_normal" /run/samba/smbd.pid)"
-assert_pid_identity "$app_normal" smbd "$smbd_pid"
-assert_runtime_tree "$app_normal"
-share_fstype="$(probe 'inspect FUSE share mount' docker exec "$app_normal" findmnt -T /share -n -o FSTYPE)"
-[[ "$share_fstype" == fuse.* ]] ||
-	fail "SMB backend at /share is not a FUSE mount: $share_fstype"
-smb_path="$(probe 'inspect effective Samba share path' docker exec "$app_normal" /bin/sh -c \
-	'testparm -s /run/samba/smb.conf 2>/dev/null | sed -n "/^\[torrentfs\]/,\$p" | grep -E "^[[:space:]]*path[[:space:]]*=[[:space:]]*/share[[:space:]]*$"')"
-[[ "$smb_path" == *'path = /share'* ]] ||
-	fail "Samba torrentfs share does not export /share: $smb_path"
-disabled_config="$(probe 'inspect disabled STRM share' docker exec "$app_normal" testparm -s /run/samba/smb.conf 2>/dev/null)"
-if has_log_line "$disabled_config" '[torrentfs-strm]'; then
-	fail 'STRM-disabled startup exported the second Samba share'
-fi
+assert_native_app "$app_normal"
+share_enumeration="$(smb_list_shares "$app_normal" 2>&1)" || fail "share enumeration failed: $share_enumeration"
+grep -Eq '^Disk\|torrentfs\|' <<<"$share_enumeration" || fail 'original share missing from srvsvc enumeration'
+if grep -Eq '^Disk\|torrentfs-strm\|' <<<"$share_enumeration"; then fail 'disabled STRM share was enumerated'; fi
 disabled_share_status=0
 disabled_share_output="$(smb_share_client "$app_normal" torrentfs-strm -c 'ls' 2>&1)" || disabled_share_status=$?
 [[ "$disabled_share_status" != 0 && "$disabled_share_output" == *NT_STATUS_BAD_NETWORK_NAME* ]] ||
 	fail 'STRM-disabled startup exposed torrentfs-strm or failed for an unrelated reason'
-probe 'check disabled STRM mount is absent' docker exec "$app_normal" /bin/sh -c \
-	'test "$(findmnt -T /share-strm -n -o TARGET)" != /share-strm' ||
-	fail 'STRM-disabled startup mounted /share-strm'
 http_client_authenticate "$app_normal"
 printf 'docker SMB smoke: combined HTTP authentication and disabled STRM isolation passed\n'
 
-published_smb_port="$(probe 'inspect published SMB port' docker port "$app_normal" 445/tcp | awk -F: 'NF { print $NF; exit }')"
-[[ -n "$published_smb_port" ]] || fail 'SMB port 445/tcp was not published'
+published_smb_port="$(probe 'inspect published SMB port' docker port "$app_normal" 1445/tcp | awk -F: 'NF { print $NF; exit }')"
+[[ -n "$published_smb_port" ]] || fail 'SMB port 1445/tcp was not published'
 [[ "$(docker port "$app_normal" 137/udp 2>/dev/null || true)" == '' ]] || fail 'unexpected NetBIOS UDP port was published'
 [[ "$(docker port "$app_normal" 139/tcp 2>/dev/null || true)" == '' ]] || fail 'unexpected NetBIOS TCP port was published'
 
@@ -686,20 +637,19 @@ if ! listing_output="$(smb_client "$app_normal" -c 'ls' 2>&1)"; then
 	fail "authenticated SMB directory listing failed: $listing_output\napp logs:\n$(logs "$app_normal")"
 fi
 [[ "$listing_output" == *'payload.bin'* ]] || fail "SMB share root did not list payload.bin: $listing_output"
-assert_process_identities "$app_normal" smbd
 wrong_credentials="$work_dir/wrong-credentials"
 printf 'username=%s\npassword=definitely-wrong\n' "$smb_user" >"$wrong_credentials"
 chmod 0400 "$wrong_credentials"
 wrong_status=0
 bounded "$CLIENT_TIMEOUT" 'SMB client with a wrong password' docker run --rm --network "$NETWORK" \
 	--mount "type=bind,src=$wrong_credentials,dst=/run/secrets/wrong,readonly" \
-	"$CLIENT_IMAGE" smbclient "//$app_normal/torrentfs" -A /run/secrets/wrong -m SMB3 \
+	"$CLIENT_IMAGE" smbclient -p 1445 "//$app_normal/torrentfs" -A /run/secrets/wrong -m SMB3 \
 	-t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || wrong_status=$?
 [[ "$wrong_status" != 0 ]] || fail 'wrong SMB password was accepted'
 
 guest_status=0
 bounded "$CLIENT_TIMEOUT" 'SMB guest client' docker run --rm --network "$NETWORK" "$CLIENT_IMAGE" \
-	smbclient "//$app_normal/torrentfs" -N -m SMB3 -t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || guest_status=$?
+	smbclient -p 1445 "//$app_normal/torrentfs" -N -m SMB3 -t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || guest_status=$?
 [[ "$guest_status" != 0 ]] || fail 'SMB guest access was accepted'
 
 # The whole file is read and hashed inside the client container: the transfer
@@ -711,7 +661,7 @@ bounded "$CLIENT_TIMEOUT" 'full SMB read' docker run --rm --network "$NETWORK" \
 	--env "APP=$app_normal" \
 	--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
 	"$CLIENT_IMAGE" sh -eu -c '
-		smbclient "//$APP/torrentfs" -A "/run/secrets/'"$CLIENT_CREDENTIALS_NAME"'" -m SMB3 \
+		smbclient -p 1445 "//$APP/torrentfs" -A "/run/secrets/'"$CLIENT_CREDENTIALS_NAME"'" -m SMB3 \
 			-t '"$CLIENT_SMB_TIMEOUT"' -c "get payload.bin /tmp/payload.bin" >/dev/null
 		sha256sum /tmp/payload.bin | cut -d" " -f1
 	' >"$work_dir/full-read.out" 2>"$full_read_log" || full_read_status=$?
@@ -744,7 +694,7 @@ write_status=0
 smb_client "$app_normal" -c 'put /etc/hosts write-probe' >/dev/null 2>&1 || write_status=$?
 [[ "$write_status" != 0 ]] || fail 'SMB read-only share accepted a write'
 metadata_status=0
-smb_client "$app_normal" -c 'ls .metadata' >/dev/null 2>&1 || metadata_status=$?
+smb_client "$app_normal" -c 'get .metadata/instance.lock /tmp/metadata-leak' >/dev/null 2>&1 || metadata_status=$?
 [[ "$metadata_status" != 0 ]] || fail 'SMB share exposed /torrents/.metadata'
 printf 'docker SMB smoke: authentication, listing, full read, guest denial, and write denial passed\n'
 
@@ -764,13 +714,14 @@ else
 		"$CLIENT_IMAGE" sh -ceu '
 		command -v mount.cifs >/dev/null || { echo "mount.cifs is missing"; exit 3; }
 		mkdir -p /mnt/torrentfs-client
-		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,ro"
+		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,port=1445,ro"
 		trap "umount /mnt/torrentfs-client" EXIT
-		dd if=/mnt/torrentfs-client/payload.bin bs=1 skip='"$RANDOM_OFFSET"' count='"$RANDOM_LENGTH"' status=none | sha256sum
+		dd if=/mnt/torrentfs-client/payload.bin of=/tmp/range.bin bs=1 skip='"$RANDOM_OFFSET"' count='"$RANDOM_LENGTH"' status=none
+		sha256sum /tmp/range.bin
 	' >"$range_output" 2>&1 || range_status=$?
 	if (( range_status != 0 )); then
 		if grep -Eq "$CIFS_UNAVAILABLE_PATTERN" "$range_output"; then
-			printf 'docker SMB smoke: host cannot mount CIFS (%s); the required Go/FUSE large-offset gate covers random reads in CI, and the same command is a manual step on a CIFS-capable host\n' \
+			printf 'docker SMB smoke: host cannot mount CIFS (%s); the SMB protocol tests still run; kernel CIFS range/concurrency validation remains a manual gate on a CIFS-capable host\n' \
 				"$(head -n1 "$range_output")"
 		else
 			fail "CIFS positional read failed (status=$range_status): $(sed -n '1,20p' "$range_output")"
@@ -789,17 +740,14 @@ stop_normal_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for $app_normal" docker
 [[ "$stop_normal_status" == 0 ]] || fail "normal SMB shutdown returned $stop_normal_status"
 normal_logs="$(logs "$app_normal")"
 [[ "$normal_logs" != *"$smb_password"* ]] || fail 'application logs contained the SMB password'
-smbd_line="$(grep -nFx 'torrentfs-entrypoint: smbd stopped' <<<"$normal_logs" | head -n1 | cut -d: -f1 || true)"
-torrent_line="$(grep -nFx 'torrentfs-entrypoint: torrentfs stopping' <<<"$normal_logs" | head -n1 | cut -d: -f1 || true)"
-[[ -n "$smbd_line" && -n "$torrent_line" && "$smbd_line" -lt "$torrent_line" ]] ||
-	fail "normal shutdown order was not smbd before torrentfs: $normal_logs"
+[[ "$normal_logs" == *'stopped'* ]] || fail 'native shutdown did not report completion'
 printf 'docker SMB smoke: normal SIGTERM shutdown was bounded and ordered\n'
 
 if (( cifs_available )); then
 	concurrent_torrents="$work_dir/concurrent-torrents"
 	mkdir -p "$concurrent_torrents"
 	chmod 0777 "$concurrent_torrents"
-	python3 - "$concurrent_torrents" "$canonical_torrent" "$torrents_dir/.metadata/state/$torrent_hash.json" <<'PY'
+	python3 -I - "$concurrent_torrents" "$canonical_torrent" "$torrents_dir/.metadata/state/$torrent_hash.json" <<'PY'
 import datetime
 import hashlib
 import json
@@ -846,8 +794,8 @@ with open(os.path.join(state_dir, infohash + ".json"), "w") as output:
     json.dump({"id": infohash, "info_hash": infohash, "name": "unavailable", "state": "ready", "created_at": now, "updated_at": now}, output)
 PY
 	app_concurrent="${APP_PREFIX}-concurrent"
-	# Webseed dispatch runs every five seconds; shorter deadlines also cancel healthy reads.
-	start_app "$app_concurrent" "$concurrent_torrents" true 10s
+	# Keep server and client slow-read deadlines above the 30-second healthy-read bound.
+	start_app "$app_concurrent" "$concurrent_torrents" true 45s
 	expected_prefix="$(dd if="$webseed_dir/payload.bin" bs=64K count=4096 iflag=count_bytes status=none | sha256sum | awk '{ print $1 }')"
 	client_concurrent="${APP_PREFIX}-concurrent-client"
 	app_names+=("$client_concurrent")
@@ -861,7 +809,7 @@ PY
 		--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
 		"$CLIENT_IMAGE" sh -ceu '
 		mkdir -p /mnt/torrentfs-client
-		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,ro"
+		mount.cifs "//$APP_HOST/torrentfs" /mnt/torrentfs-client -o "credentials=/run/secrets/smb-credentials,vers=3.0,port=1445,ro"
 		trap "umount -l /mnt/torrentfs-client >/dev/null 2>&1 || true" EXIT
 		if ! timeout --kill-after=2 30 dd if=/mnt/torrentfs-client/payload.bin of=/tmp/prefix \
 			bs=64K count=4096 iflag=count_bytes status=none; then
@@ -938,35 +886,10 @@ create_subtitle_fixture "$strm_torrents" "$work_dir/subtitle-infohash"
 subtitle_hash="$(<"$work_dir/subtitle-infohash")"
 app_strm="${APP_PREFIX}-strm"
 start_app "$app_strm" "$strm_torrents" true 30s true
-assert_process_identities "$app_strm" torrentfs
-assert_process_identities "$app_strm" smbd
-for mountpoint in /share /share-strm; do
-	mount_state="$(probe "inspect $mountpoint" docker exec "$app_strm" findmnt -T "$mountpoint" -n -o TARGET,FSTYPE)"
-	IFS=' ' read -r actual_target actual_fstype <<<"$mount_state"
-	[[ "$actual_target" == "$mountpoint" && "$actual_fstype" == fuse.* ]] ||
-		fail "STRM-enabled startup did not mount $mountpoint as FUSE"
-done
-probe 'check both effective Samba share contracts' docker exec "$app_strm" /bin/sh -eu -c '
-	parameter() {
-		testparm -s --section-name="$1" --parameter-name="$2" /run/samba/smb.conf 2>/dev/null
-	}
-	for share in torrentfs torrentfs-strm; do
-		path=/share
-		[ "$share" != torrentfs-strm ] || path=/share-strm
-		test "$(parameter "$share" path)" = "$path"
-		test "$(parameter "$share" "read only" | tr "[:upper:]" "[:lower:]")" = yes
-		test "$(parameter "$share" "guest ok" | tr "[:upper:]" "[:lower:]")" = no
-		test "$(parameter "$share" "valid users")" = torrentfs
-		test "$(parameter "$share" "force user")" = torrentfs
-		test "$(parameter "$share" "force group")" = torrentfs
-	done
-' || fail 'original and STRM shares have different authentication or read-only identities'
-strm_start_logs="$(logs "$app_strm")"
-smbd_line="$(grep -nFx 'torrentfs-entrypoint: starting smbd on TCP 445' <<<"$strm_start_logs" | cut -d: -f1)"
-for mountpoint in /share /share-strm; do
-	mount_line="$(grep -nFx "torrentfs-entrypoint: fuse ready: $mountpoint" <<<"$strm_start_logs" | cut -d: -f1)"
-	[[ -n "$mount_line" && -n "$smbd_line" && "$mount_line" -lt "$smbd_line" ]] ||
-		fail 'Samba started before both FUSE mounts became ready'
+assert_native_app "$app_strm"
+share_enumeration="$(smb_list_shares "$app_strm" 2>&1)" || fail "dual-share enumeration failed: $share_enumeration"
+for share in torrentfs torrentfs-strm; do
+	grep -Eq "^Disk\\|$share\\|" <<<"$share_enumeration" || fail "$share missing from srvsvc enumeration"
 done
 strm_original_listing="$(smb_client "$app_strm" -c 'ls' 2>&1)"
 [[ "$strm_original_listing" == *Movie.mkv* ]] || fail 'original share lost the video in STRM-enabled mode'
@@ -977,7 +900,7 @@ bounded "$CLIENT_TIMEOUT" 'read STRM over SMB and request HTTP HEAD without payl
 	--mount "type=bind,src=$credentials_file,dst=/run/secrets/$CLIENT_CREDENTIALS_NAME,readonly" \
 	--mount "type=bind,src=$client_output_dir,dst=/output" \
 	"$CLIENT_IMAGE" sh -eu -c '
-		smbclient "//$APP/torrentfs-strm" -A /run/secrets/smb-credentials -m SMB3 \
+		smbclient -p 1445 "//$APP/torrentfs-strm" -A /run/secrets/smb-credentials -m SMB3 \
 			-t '"$CLIENT_SMB_TIMEOUT"' -c "get Movie.strm /output/Movie.strm" >/dev/null
 		test "$(wc -l </output/Movie.strm)" -eq 1
 		test "$(wc -c </output/Movie.strm)" -lt 4096
@@ -1058,52 +981,33 @@ for share in torrentfs torrentfs-strm; do
 	smb_share_client "$app_strm" "$share" -c 'put /etc/hosts write-probe' >/dev/null 2>&1 || write_status=$?
 	[[ "$write_status" != 0 ]] || fail "STRM-enabled $share accepted a write"
 	metadata_status=0
-	smb_share_client "$app_strm" "$share" -c 'ls .metadata' >/dev/null 2>&1 || metadata_status=$?
+	smb_share_client "$app_strm" "$share" -c 'get .metadata/instance.lock /tmp/metadata-leak' >/dev/null 2>&1 || metadata_status=$?
 	[[ "$metadata_status" != 0 ]] || fail "STRM-enabled $share exposed session metadata"
 done
 strm_guest_status=0
 bounded "$CLIENT_TIMEOUT" 'STRM guest client' docker run --rm --network "$NETWORK" "$CLIENT_IMAGE" \
-	smbclient "//$app_strm/torrentfs-strm" -N -m SMB3 -t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || strm_guest_status=$?
+	smbclient -p 1445 "//$app_strm/torrentfs-strm" -N -m SMB3 -t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || strm_guest_status=$?
 [[ "$strm_guest_status" != 0 ]] || fail 'STRM share accepted guest access'
 strm_wrong_status=0
 bounded "$CLIENT_TIMEOUT" 'STRM client with a wrong password' docker run --rm --network "$NETWORK" \
 	--mount "type=bind,src=$wrong_credentials,dst=/run/secrets/wrong,readonly" \
-	"$CLIENT_IMAGE" smbclient "//$app_strm/torrentfs-strm" -A /run/secrets/wrong -m SMB3 \
+	"$CLIENT_IMAGE" smbclient -p 1445 "//$app_strm/torrentfs-strm" -A /run/secrets/wrong -m SMB3 \
 	-t "$CLIENT_SMB_TIMEOUT" -c 'ls' >/dev/null 2>&1 || strm_wrong_status=$?
 [[ "$strm_wrong_status" != 0 ]] || fail 'STRM share accepted a wrong password'
 bounded "$DOCKER_OP_TIMEOUT" "signal $app_strm" docker kill --signal TERM "$app_strm" >/dev/null
 strm_stop_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for $app_strm" docker wait "$app_strm")"
-[[ "$strm_stop_status" == 0 ]] || fail "dual-mount shutdown returned $strm_stop_status"
+[[ "$strm_stop_status" == 0 ]] || fail "dual-share shutdown returned $strm_stop_status"
 strm_logs="$(logs "$app_strm")"
-for mountpoint in /share /share-strm; do
-	has_log_line "$strm_logs" "torrentfs-entrypoint: fuse unmounted: $mountpoint" ||
-		fail "dual-mount shutdown did not unmount $mountpoint"
-done
+[[ "$strm_logs" == *'stopped'* ]] || fail 'dual-share native shutdown did not complete'
 strm_url="$(cat "$client_output_dir/Movie.strm")"
 strm_location="${strm_url#http://$app_strm:8080/stream/}"
 strm_location="${strm_location#*/}"
 strm_signature="${strm_location%%/*}"
 [[ "$strm_logs" != *"$smb_password"* && "$strm_logs" != *"$strm_url"* && "$strm_logs" != *"$strm_signature"* ]] ||
 	fail 'STRM-enabled application logs exposed credentials or a signed stream URL'
-printf 'docker SMB smoke: dual read-only shares, no-payload HEAD, Range 206/hash, signature 403, and dual unmount passed\n'
+printf 'docker SMB smoke: dual read-only shares, no-payload HEAD, Range 206/hash, signature 403, and bounded shutdown passed\n'
 
-for lost_mount in /share /share-strm; do
-	fault_name="${lost_mount#/}"
-	mount_fault_torrents="$work_dir/$fault_name-fault-torrents"
-	mkdir -p "$mount_fault_torrents"
-	chmod 0777 "$mount_fault_torrents"
-	app_mount_fault="${APP_PREFIX}-${fault_name}-mount-fault"
-	start_app "$app_mount_fault" "$mount_fault_torrents" true 30s true
-	bounded 30 "unmount $lost_mount in fault scenario" docker exec "$app_mount_fault" umount "$lost_mount"
-	mount_fault_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for $lost_mount fault" docker wait "$app_mount_fault")"
-	[[ "$mount_fault_status" != 0 ]] || fail "loss of $lost_mount was reported as clean"
-	mount_fault_logs="$(logs "$app_mount_fault")"
-	has_log_line "$mount_fault_logs" "torrentfs-entrypoint: FUSE mount disappeared while services were running: $lost_mount" ||
-		fail "loss of $lost_mount did not trigger linked service shutdown"
-done
-printf 'docker SMB smoke: loss of either FUSE mount stopped both services\n'
-
-printf 'docker SMB smoke: starting SMB-only share with HTTP auth disabled\n'
+printf 'docker SMB smoke: starting SMB-only share with the HTTP listener disabled\n'
 smb_only_torrents="$work_dir/smb-only-torrents"
 mkdir -p "$smb_only_torrents"
 chmod 0777 "$smb_only_torrents"
@@ -1128,20 +1032,13 @@ mkdir -p "$fault_torrents/.metadata/state" "$fault_torrents/.metadata/pending"
 chmod 0777 "$fault_torrents/.metadata" "$fault_torrents/.metadata/state" "$fault_torrents/.metadata/pending"
 cp -- "$torrents_dir/.metadata/layout_version" "$fault_torrents/.metadata/layout_version"
 cp -- "$torrents_dir/.metadata/state/$torrent_hash.json" "$fault_torrents/.metadata/state/$torrent_hash.json"
-app_smbd_fault="${APP_PREFIX}-smbd-fault"
-start_app "$app_smbd_fault" "$fault_torrents"
-bounded 30 'terminate smbd in fault scenario' docker exec "$app_smbd_fault" /bin/sh -c \
-	'kill -TERM "$(cat /run/samba/smbd.pid)"'
-smbd_fault_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for smbd fault" docker wait "$app_smbd_fault")"
-[[ "$smbd_fault_status" != 0 ]] || fail 'unexpected smbd exit was reported as clean'
-printf 'docker SMB smoke: smbd failure propagated as non-zero container exit\n'
-
 app_torrent_fault="${APP_PREFIX}-torrentfs-fault"
 start_app "$app_torrent_fault" "$fault_torrents"
-bounded 30 'terminate torrentfs in fault scenario' docker exec "$app_torrent_fault" /bin/sh -c \
-	'kill -TERM "$(cat /run/torrentfs.pid)"'
+torrentfs_pid="$(all_process_identities "$app_torrent_fault" torrentfs | awk 'NR == 1 { print $1 }')"
+[[ "$torrentfs_pid" =~ ^[1-9][0-9]*$ ]] || fail 'could not find native process for fault injection'
+bounded 30 'terminate native torrentfs in fault scenario' docker exec "$app_torrent_fault" /bin/sh -c 'kill -KILL "$1"' sh "$torrentfs_pid"
 torrent_fault_status="$(bounded "$DOCKER_OP_TIMEOUT" "wait for torrentfs fault" docker wait "$app_torrent_fault")"
-[[ "$torrent_fault_status" != 0 ]] || fail 'unexpected torrentfs exit was reported as clean'
-printf 'docker SMB smoke: torrentfs failure propagated as non-zero container exit\n'
+[[ "$torrent_fault_status" != 0 ]] || fail 'abrupt native process death was reported as clean'
+printf 'docker SMB smoke: abrupt native process death propagated as non-zero container exit\n'
 
 printf 'docker SMB smoke: all checks passed\n'

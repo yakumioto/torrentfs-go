@@ -13,7 +13,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 // Source identifies where the metainfo of a torrent to add comes from.
@@ -51,9 +51,9 @@ type Torrent struct {
 // torrentPayload is built once per Torrent object, only after metadata arrives.
 // Neither the files nor the path index are modified after publication.
 type torrentPayload struct {
-	files  []filesystem.FileView
+	files  []vfs.FileView
 	byPath map[string]*torrent.File
-	id     *filesystem.FileListID
+	id     *vfs.FileListID
 }
 
 func (t *Torrent) payloadSnapshot() *torrentPayload {
@@ -71,13 +71,13 @@ func (t *Torrent) payloadSnapshot() *torrentPayload {
 	}
 	files := t.tor.Files()
 	payload := &torrentPayload{
-		files:  make([]filesystem.FileView, len(files)),
+		files:  make([]vfs.FileView, len(files)),
 		byPath: make(map[string]*torrent.File, len(files)),
-		id:     &filesystem.FileListID{},
+		id:     &vfs.FileListID{},
 	}
 	for i, file := range files {
 		path := file.DisplayPath()
-		payload.files[i] = filesystem.FileView{Path: path, Size: file.Length()}
+		payload.files[i] = vfs.FileView{Path: path, Size: file.Length()}
 		// Keep the first duplicate, matching the historical linear lookup.
 		if _, ok := payload.byPath[path]; !ok {
 			payload.byPath[path] = file
@@ -287,21 +287,21 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+		return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)
 	}
 	if r, ok := t.readers[displayPath]; ok {
 		if !r.acquireHandle() {
-			return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+			return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)
 		}
-		return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.Mount.ReadTimeout)}, nil
+		return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.FileReadTimeout())}, nil
 	}
 	f := t.fileByPath(displayPath)
 	if f == nil {
-		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), filesystem.ErrNotFound)
+		return nil, fmt.Errorf("session: no file %q in torrent %s: %w", displayPath, t.InfoHash(), vfs.ErrNotFound)
 	}
 	info := t.tor.Info()
 	if info == nil {
-		return nil, fmt.Errorf("session: torrent info is not ready: %w", filesystem.ErrNotFound)
+		return nil, fmt.Errorf("session: torrent info is not ready: %w", vfs.ErrNotFound)
 	}
 	if t.loader == nil {
 		t.loader = newPieceFetcher(t.tor, t.cache)
@@ -321,10 +321,10 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		readahead:   defaultStreamingReadahead,
 	}
 	if !r.acquireHandle() {
-		return nil, fmt.Errorf("session: torrent is closed: %w", filesystem.ErrClosed)
+		return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)
 	}
 	t.readers[displayPath] = r
-	return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.Mount.ReadTimeout)}, nil
+	return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.FileReadTimeout())}, nil
 }
 
 // close releases every open reader handle for this torrent.

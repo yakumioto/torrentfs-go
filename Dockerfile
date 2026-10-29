@@ -10,34 +10,36 @@ RUN npm run build --prefix web
 FROM golang:1.27 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+COPY third_party/go-smb ./third_party/go-smb
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 COPY --from=web-build /src/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/torrentfs ./cmd/torrentfs
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/torrentfs ./cmd/torrentfs
 
 FROM debian:bookworm-slim
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        bash ca-certificates fuse3 passwd samba samba-common-bin tini util-linux; \
-    install -d -o root -g root -m 0755 /etc/torrentfs /share /share-strm; \
+        bash ca-certificates fuse3 passwd tini util-linux; \
+    groupadd --gid 1000 torrentfs; \
+    useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin torrentfs; \
+    install -d -o root -g root -m 0755 /etc/torrentfs; \
+    install -d -o torrentfs -g torrentfs -m 0755 /share /share-strm; \
     install -d -o root -g root -m 0777 /torrents; \
-    install -d -o root -g root -m 0755 \
-        /run/samba /run/samba/lock /run/samba/state /run/samba/cache \
-        /var/log/samba /var/cache/samba /var/lib/samba; \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
 COPY docker/entrypoint.sh /usr/local/bin/torrentfs-entrypoint
-COPY docker/smb.conf /etc/samba/torrentfs-smb.conf
-COPY docker/smb-strm.conf /etc/samba/torrentfs-smb-strm.conf
 COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
+COPY LICENSE /usr/share/licenses/torrentfs-go/LICENSE
+COPY third_party/go-smb/LICENSE /usr/share/licenses/torrentfs-go/go-smb.LICENSE
 RUN chmod 0755 /usr/local/bin/torrentfs-entrypoint
 
+USER 1000:1000
 WORKDIR /
-# 8080 serves the HTTP API and Web UI. 6881 is the fixed peer port from
-# docker/torrentfs.toml; publish it for both TCP and UDP to accept inbound
-# peers: -p 6881:6881/tcp -p 6881:6881/udp. SMB uses only direct-hosted TCP 445.
-# EXPOSE alone publishes nothing.
-EXPOSE 8080 445/tcp 6881/tcp 6881/udp
+# Publish host TCP 445 to container TCP 1445 for native SMB. FUSE is optional
+# and only needs its device/capabilities when filesystem.backend=fuse.
+EXPOSE 8080 1445/tcp 6881/tcp 6881/udp
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/torrentfs-entrypoint"]
 CMD ["-config", "/etc/torrentfs/torrentfs.toml", "/torrents"]

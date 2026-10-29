@@ -9,6 +9,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 // rootNode is the mount root. Its children are dynamically read from the
@@ -53,35 +55,7 @@ func (n *rootNode) categoryEntries() []rootEntry {
 // category directories, plus managed subtitles of unclassified single-file
 // torrents. A multi-file torrent's subtitles live inside its directory.
 func (n *rootNode) visibleChildren() []rootEntry {
-	torrents := n.children()
-	entries := append(torrents, n.categoryEntries()...)
-	used := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		used[entry.Name] = true
-	}
-	for _, entry := range torrents {
-		if _, single := mediaRoot(entry.View); !single {
-			continue
-		}
-		for _, subtitle := range entry.View.Subtitles {
-			if strings.Contains(subtitle.Path, "/") || used[subtitle.Path] {
-				continue
-			}
-			used[subtitle.Path] = true
-			entries = append(entries, rootEntry{
-				Name:       subtitle.Path,
-				View:       entry.View,
-				Path:       subtitle.Path,
-				Size:       subtitle.Size,
-				ModifiedAt: subtitle.ModifiedAt,
-				IsSubtitle: true,
-			})
-		}
-	}
-	slices.SortFunc(entries, func(a, b rootEntry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return entries
+	return vfs.VisibleRootEntries(n.torrentViews(), n.categoryNames(), "")
 }
 
 func (n *rootNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -159,7 +133,7 @@ func (n *rootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := make([]fuse.DirEntry, 0, len(cs))
 	for _, c := range cs {
 		mode := uint32(syscall.S_IFDIR)
-		if c.IsSubtitle || !c.isDir() {
+		if c.IsSubtitle || !c.IsDir() {
 			mode = syscall.S_IFREG
 		}
 		entries = append(entries, fuse.DirEntry{Name: c.Name, Mode: mode})
@@ -179,7 +153,7 @@ func (n *rootNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if !ok {
 		return errnoFor(ErrNotFound)
 	}
-	if !entry.isDir() {
+	if !entry.IsDir() {
 		return errnoFor(ErrNotDir)
 	}
 	return errnoFor(ErrReadOnly)
@@ -190,7 +164,7 @@ func (n *rootNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if !ok {
 		return errnoFor(ErrNotFound)
 	}
-	if entry.isDir() {
+	if entry.IsDir() {
 		return errnoFor(ErrIsDir)
 	}
 	return errnoFor(ErrReadOnly)

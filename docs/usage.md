@@ -10,11 +10,15 @@
 
 磁力链接可能先处于 `adding`，直到 peers 提供元信息。`ready` 只表示 metainfo 可用、能够建立文件视图；不表示所有内容已下载或所有 piece 都在缓存中。读取仍可能等待 peers，缓存淘汰后也可能重新获取内容。
 
-每次前台内容读取最多等待 `mount.read_timeout`（默认 `30s`）。没有来源或来不及取得已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除种子或取消其他读取；这个期限不限制整个视频或文件句柄的播放时长。慢来源或大 piece 可调长该值，也可用 `TORRENTFS_MOUNT_READ_TIMEOUT` 覆盖，修改后重启，见[配置参考](configuration.md)。
+每次前台内容读取最多等待 `filesystem.read_timeout`（默认 `30s`）。没有来源或来不及取得已验证 piece 时，超时后只结束当前读取并返回读取错误（客户端可能显示超时或 I/O 错误），不删除种子或取消其他读取；这个期限不限制整个视频或文件句柄的播放时长。慢来源或大 piece 可调长该值，也可用 `TORRENTFS_FILESYSTEM_READ_TIMEOUT` 覆盖（旧 `TORRENTFS_MOUNT_READ_TIMEOUT` 仍兼容），修改后重启，见[配置参考](configuration.md)。
 
-默认通过原生 FUSE 或 SMB 读取内容，HTTP API/Web UI 负责管理。显式配置 STRM 后，还可通过第二只读视图中的 `.strm` 文件取得签名 HTTP 播放直链，原文件视图不变。
+选择 `filesystem.backend=fuse` 或 `smb` 后通过对应输出读取内容，HTTP API/Web UI 负责管理。显式配置 STRM 后，还可通过第二只读视图中的 `.strm` 文件取得签名 HTTP 播放直链，原文件视图不变。
 
-## FUSE 文件布局
+<a id="fuse-文件布局"></a>
+
+## FUSE / SMB 共享虚拟文件布局
+
+两种后端共用以下树；`<mount>` 对 FUSE 是挂载点，对 SMB 是 share 根，并不要求服务器有实体挂载目录。
 
 ```text
 <mount>/
@@ -45,6 +49,12 @@ managed subtitle 以普通只读文件合并到视频旁边：
 ```
 
 字幕节点权限为 `0444`。即使多文件种子的目录或深层子目录已经访问过，上传后原始与 STRM 共享的新目录查询、stat 和 open 都能看到字幕，无需重新挂载。替换后新打开的 handle 读取新版本，已有文件 handle 继续读取原快照；已开始迭代的目录流保持自己的列表和 offset，需要新目录查询才能看到新增成员。播放器自身仍可能需要重扫或重新打开，具体一致性保证见[开发指南](development.md)。
+
+### SMB 名称与目录快照
+
+SMB 查找不区分大小写，并为 Windows 非法字符、保留名、超长或仅大小写冲突的成员生成稳定别名；媒体扩展名仍保留，文件不会被静默遗漏。按 SMB 实际列举的名称访问。API 的 `video_path` 仍使用原始 torrent display path；历史 `mount_path` 字段表示共享虚拟布局，不是宿主磁盘路径，也不承诺等于 SMB 编码别名。
+
+一次 SMB 枚举的续页使用固定快照；重新打开目录或 restart 枚举可见最新成员。服务端刷新不等于客户端媒体库缓存已刷新，仍可能需要重扫。
 
 ## STRM 视图与播放
 
@@ -97,7 +107,7 @@ HTTP 启用时，同一个 listener 提供嵌入式 Web UI 和 `/api/v1`。
 
 ### 分类
 
-分类名称既是稳定标识，也是 FUSE 根目录下的单层目录名。可创建、归类和解除归类；当前不支持重命名、删除、多级分类或一个任务多个分类。
+分类名称既是稳定标识，也是共享虚拟树根目录下的单层目录名。可创建、归类和解除归类；当前不支持重命名、删除、多级分类或一个任务多个分类。
 
 分类名称必须是单个路径组件，不能含 `/`、反斜杠或 NUL，不能含首尾空白。分类创建后即使为空也会出现在根目录，不能遮蔽已有未分类 torrent 或 root-level managed subtitle。
 
@@ -123,7 +133,7 @@ HTTP 启用时，同一个 listener 提供嵌入式 Web UI 和 `/api/v1`。
 - 不能覆盖种子自带 payload 文件。相同 stem 的多个视频、single-file torrent 可见名称被 hash 消歧等情况会使目标不可上传。
 - 元信息未就绪、没有支持的视频、任务正在删除、名称冲突时，UI 会说明原因。
 
-字幕写入 `torrents-dir/.metadata/subtitles` 后由只读 FUSE 投影；`docker cp`、FUSE 和 SMB 都不是写入口，不需要通过放宽挂载权限上传。支持的视频扩展名、精确路径规则和错误码见 [API 参考](api.md)。
+字幕写入 `torrents-dir/.metadata/subtitles` 后由只读 FUSE/SMB 视图投影；`docker cp`、FUSE 和 SMB 都不是写入口，不需要通过放宽挂载权限上传。支持的视频扩展名、精确路径规则和错误码见 [API 参考](api.md)。
 
 播放器可能缓存字幕，上传或替换后需要重新扫描或重新打开视频。仅监听 inotify 且不做定期 rescan 的消费方，替换后不一定自动刷新。部署时应手工验证：
 
@@ -205,7 +215,7 @@ UI/API 禁用时，已保存的规则仍会在启动时加载，但没有在线�
 | magnet 一直 `adding` | peers 尚未提供 metainfo，检查来源与网络可用性 |
 | `ready` 后读取等待 | 所需 piece 不在缓存，仍需 peers 提供，不代表完整下载已完成 |
 | 某个生成的 `.strm` 无法 stat 或打开 | 该文件的 URL 持续生成失败；目录快照仍保留条目，但 lookup/stat/open 明确报错，其他文件继续工作且不会无限重试；检查 STRM 配置与任务状态，恢复后重新读取 |
-| 视频或封面显示超时或 I/O 错误 | 单次读取可能超过 `mount.read_timeout`，默认 `30s`；检查来源与网络，慢来源或大 piece 可调长配置后重启 |
+| 视频或封面显示超时或 I/O 错误 | 单次读取可能超过 `filesystem.read_timeout`，默认 `30s`；检查来源与网络，慢来源或大 piece 可调长配置后重启 |
 | 字幕上传 `413` | 请求超过 `http.max_upload_size`，默认 `10MiB`；调高配置后重启 |
 | `415` + `subtitle_name_mismatch` | basename 不严格对应或多了语言后缀，改名后重试 |
 | `415` + `subtitle_format_unsupported` | 扩展名不是小写 `.srt`/`.ass`/`.vtt` |

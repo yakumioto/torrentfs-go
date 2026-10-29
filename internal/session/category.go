@@ -13,7 +13,7 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
-	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 const categoryIndexVersion = 1
@@ -132,7 +132,7 @@ func (s *Session) ListCategories() []CategoryView {
 	return index.Categories
 }
 
-// Categories returns category directory names for the read-only filesystem.
+// Categories returns category directory names for the read-only vfs.
 func (s *Session) Categories() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -165,7 +165,7 @@ func (s *Session) CreateCategory(ctx context.Context, name string) (CategoryView
 	if _, exists := s.categories[name]; exists {
 		return CategoryView{}, ErrCategoryExists
 	}
-	if filesystem.CategoryNameConflicts(name, s.filesystemViewsLocked(), s.categoryNamesLocked()) {
+	if vfs.CategoryNameConflicts(name, s.filesystemViewsLocked(), s.categoryNamesLocked()) {
 		return CategoryView{}, ErrCategoryNamespaceConflict
 	}
 	category := CategoryView{Name: name, CreatedAt: time.Now().UTC()}

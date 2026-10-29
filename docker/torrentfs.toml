@@ -48,9 +48,18 @@ level = "info"
 format = "text"
 add_source = false
 
-[mount]
-# Non-root deployments should leave this false unless /etc/fuse.conf contains
-# user_allow_other and the wider read access is intentional.
-allow_other = false
-# Upper bound per content read, not per playback session.
+[filesystem]
+# Default: none (HTTP-only). Explicitly select with TORRENTFS_FILESYSTEM_BACKEND
+# or a custom TOML. Omitting this leaf keeps legacy CLI/SMB env aliases working.
+# backend = "none"
 read_timeout = "30s"
+
+[fuse]
+mountpoint = ""
+strm_mountpoint = ""
+allow_other = false
+
+[smb]
+listen_addr = "0.0.0.0:1445"
+username = ""
+password_file = ""
