@@ -358,7 +358,11 @@ func TestPipeQueryInfoStandardInformation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Close connection: %v", err)
+		}
+	}()
 	dialer := independent.Dialer{Initiator: &independent.NTLMInitiator{User: testUser, Password: testPassword}}
 	sess, err := dialer.Dial(conn)
 	if err != nil {
@@ -382,7 +386,11 @@ func TestPipeQueryInfoStandardInformation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("Close pipe: %v", err)
+		}
+	}()
 	// SeekEnd issues FileStandardInformation; Stat additionally queries AllInformation.
 	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
