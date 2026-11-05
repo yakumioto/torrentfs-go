@@ -31,6 +31,22 @@ function runtimeStatsResponse(): Response {
   });
 }
 
+function disabledLabResponse(): Response {
+  return jsonResponse({
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    torrents: [],
+  });
+}
+
+function loginResponse(token: string): Response {
+  return jsonResponse({ token, token_type: 'Bearer', expires_in: 60 });
+}
+
 function renderApp() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -51,20 +67,41 @@ function renderApp() {
   return { queryClient, ...view };
 }
 
-function mockFetch(...responses: Response[]) {
-  const fetchMock = vi.fn<typeof fetch>(() => {
-    const response = responses.shift();
-    if (response === undefined) {
-      throw new Error('Unexpected fetch request in test.');
-    }
-    return Promise.resolve(response);
-  });
+/**
+ * URL-aware fetch double. The authenticated dashboard now issues three
+ * independent queries (list, runtime stats, lab status), so a fixed response
+ * sequence would make these tests depend on query start order.
+ */
+function mockFetch(handler: (url: string, request?: RequestInit) => Response | Promise<Response>) {
+  const fetchMock = vi.fn<typeof fetch>((input, init) => Promise.resolve(handler(String(input), init)));
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
 
 function authorization(request: RequestInit | undefined): string | null {
   return new Headers(request?.headers).get('Authorization');
+}
+
+/** Dashboard endpoints shared by the authenticated-session cases. */
+function dashboardHandler(options: {
+  list: (request: RequestInit | undefined) => Response;
+  login?: (request?: RequestInit) => Response;
+}) {
+  return (url: string, request?: RequestInit): Response => {
+    if (url.endsWith('/auth/login')) {
+      return options.login?.(request) ?? loginResponse('opaque');
+    }
+    if (url.endsWith('/torrents')) {
+      return options.list(request);
+    }
+    if (url.endsWith('/stats')) {
+      return runtimeStatsResponse();
+    }
+    if (url.endsWith('/lab')) {
+      return disabledLabResponse();
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
 }
 
 async function submitLogin(password = 'secret') {
@@ -88,7 +125,7 @@ afterEach(() => {
 
 describe('App authentication flow', () => {
   it('renders a password-only login page instead of exposing an unauthorized probe response', async () => {
-    const fetchMock = mockFetch(unauthorizedResponse());
+    const fetchMock = mockFetch(unauthorizedResponse);
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
@@ -102,7 +139,7 @@ describe('App authentication flow', () => {
   });
 
   it('does not submit an empty password', async () => {
-    const fetchMock = mockFetch(unauthorizedResponse());
+    const fetchMock = mockFetch(unauthorizedResponse);
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
@@ -114,21 +151,15 @@ describe('App authentication flow', () => {
   });
 
   it('restores a valid session after an authenticated page is remounted', async () => {
-    const fetchMock = mockFetch(
-      unauthorizedResponse(),
-      jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
-      jsonResponse([]),
-      runtimeStatsResponse(),
-      jsonResponse([]),
-      jsonResponse([]),
-      runtimeStatsResponse(),
-    );
+    const fetchMock = mockFetch(dashboardHandler({
+      list: (request) => (authorization(request) === null ? unauthorizedResponse() : jsonResponse([])),
+    }));
     const firstMount = renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
 
     expect(authorization(fetchMock.mock.calls[1][1])).toBeNull();
     expect(authorization(fetchMock.mock.calls[2][1])).toBe('Bearer opaque');
@@ -140,25 +171,28 @@ describe('App authentication flow', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
     expect(screen.queryByText(/重新登录/)).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(7);
-    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9));
     expect(authorization(fetchMock.mock.calls[5][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[6][1])).toBe('Bearer opaque');
   });
 
   it('returns to the login page and clears protected data when a session request expires', async () => {
-    const fetchMock = mockFetch(
-      unauthorizedResponse(),
-      jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
-      jsonResponse([]),
-      runtimeStatsResponse(),
-      unauthorizedResponse(),
-    );
+    let authorizedListCalls = 0;
+    const fetchMock = mockFetch(dashboardHandler({
+      list: (request) => {
+        if (authorization(request) === null) {
+          return unauthorizedResponse();
+        }
+        authorizedListCalls += 1;
+        return authorizedListCalls === 1 ? jsonResponse([]) : unauthorizedResponse();
+      },
+    }));
     const { queryClient } = renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
 
     fireEvent.click(screen.getByRole('button', { name: '刷新数据' }));
 
@@ -167,27 +201,30 @@ describe('App authentication flow', () => {
     expect(screen.getByRole('status')).toHaveTextContent('需要登录或当前会话已过期，请重新登录后继续。');
     expect(screen.queryByText('unauthorized')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
-    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
+    // The refresh is the first request after the initial dashboard queries.
+    expect(authorization(fetchMock.mock.calls[5][1])).toBe('Bearer opaque');
   });
 
   it('does not show a session notice after intentional logout and allows signing in again', async () => {
-    const fetchMock = mockFetch(
-      unauthorizedResponse(),
-      jsonResponse({ token: 'opaque', token_type: 'Bearer', expires_in: 60 }),
-      jsonResponse([]),
-      runtimeStatsResponse(),
-      new Response(null, { status: 204 }),
-      unauthorizedResponse(),
-      jsonResponse({ token: 'opaque-new', token_type: 'Bearer', expires_in: 60 }),
-      jsonResponse([]),
-      runtimeStatsResponse(),
-    );
+    let loginCount = 0;
+    const fetchMock = mockFetch((url, request) => {
+      if (url.endsWith('/auth/login')) {
+        loginCount += 1;
+        return loginResponse(loginCount === 1 ? 'opaque' : 'opaque-new');
+      }
+      if (url.endsWith('/auth/logout')) {
+        return new Response(null, { status: 204 });
+      }
+      return dashboardHandler({
+        list: (listRequest) => (authorization(listRequest) === null ? unauthorizedResponse() : jsonResponse([])),
+      })(url, request);
+    });
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
 
     fireEvent.click(screen.getByRole('button', { name: '退出登录' }));
 
@@ -195,18 +232,18 @@ describe('App authentication flow', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByText('需要登录或当前会话已过期，请重新登录后继续。')).not.toBeInTheDocument();
     expect(sessionStorage.getItem('torrentfs.access-token')).toBeNull();
-    expect(authorization(fetchMock.mock.calls[4][1])).toBe('Bearer opaque');
-    expect(authorization(fetchMock.mock.calls[5][1])).toBeNull();
+    expect(authorization(fetchMock.mock.calls[5][1])).toBe('Bearer opaque');
+    expect(authorization(fetchMock.mock.calls[6][1])).toBeNull();
 
     await submitLogin();
     await waitFor(() => expect(screen.getByRole('heading', { name: '任务列表' })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9));
-    expect(authorization(fetchMock.mock.calls[6][1])).toBeNull();
-    expect(authorization(fetchMock.mock.calls[7][1])).toBe('Bearer opaque-new');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(11));
+    expect(authorization(fetchMock.mock.calls[7][1])).toBeNull();
+    expect(authorization(fetchMock.mock.calls[8][1])).toBe('Bearer opaque-new');
   });
 
   it('keeps invalid passwords separate from the session notice', async () => {
-    const fetchMock = mockFetch(unauthorizedResponse(), unauthorizedResponse());
+    const fetchMock = mockFetch(unauthorizedResponse);
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '登录 TorrentFS' })).toBeInTheDocument());

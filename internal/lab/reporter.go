@@ -32,14 +32,14 @@ import (
 // The client's real counters are never modified; only the value written into
 // the announce request changes.
 type Reporter struct {
-	settings Settings
 	recorder *Recorder
 	// now is time.Now in production and a controllable clock in tests.
 	now func() time.Time
 	rng *rand.Rand
 
-	mu     sync.Mutex
-	byHash map[string]*schedule
+	mu      sync.Mutex
+	runtime RuntimeSettings
+	byHash  map[string]*schedule
 }
 
 type schedule struct {
@@ -52,12 +52,45 @@ type schedule struct {
 // LoadSettings first. recorder may be nil.
 func NewReporter(settings Settings, recorder *Recorder) *Reporter {
 	return &Reporter{
-		settings: settings,
 		recorder: recorder,
 		now:      time.Now,
 		rng:      rand.New(rand.NewSource(settings.Seed)),
+		runtime:  settings.RuntimeSettings,
 		byHash:   make(map[string]*schedule),
 	}
+}
+
+// UpdateRuntime applies validated runtime settings to every later announce.
+// The caller is expected to normalize the value first; an invalid value is
+// ignored rather than partially applied.
+func (r *Reporter) UpdateRuntime(settings RuntimeSettings) {
+	normalized, err := NormalizeRuntimeSettings(settings)
+	if err != nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runtime = normalized
+}
+
+// RuntimeSettings returns the runtime settings currently in force.
+func (r *Reporter) RuntimeSettings() RuntimeSettings {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runtime
+}
+
+// ReportedUpload returns the cumulative upload last reported per torrent,
+// keyed by hex info hash. It includes torrents that have announced at least
+// once in this process.
+func (r *Reporter) ReportedUpload() map[string]int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reported := make(map[string]int64, len(r.byHash))
+	for infoHash, schedule := range r.byHash {
+		reported[infoHashHex(infoHash)] = schedule.reported
+	}
+	return reported
 }
 
 // Director is the hook installed through
@@ -85,8 +118,8 @@ func (r *Reporter) Director(request *http.Request) error {
 	left := parseIntParam(rawQuery, "left")
 	event := stringParam(rawQuery, "event")
 
-	reported, realDelta, reportedDelta := r.report(infoHash, realUploaded)
-	if r.settings.Mode != ModeBaseline {
+	reported, realDelta, reportedDelta, mode := r.report(infoHash, realUploaded)
+	if mode != ModeBaseline {
 		request.URL.RawQuery = rawQuery[:valueStart] + strconv.FormatInt(reported, 10) + rawQuery[valueEnd:]
 	}
 	r.recorder.WriteAnnounce(AnnounceRecord{
@@ -94,7 +127,7 @@ func (r *Reporter) Director(request *http.Request) error {
 		InfoHash:         infoHashHex(infoHash),
 		Tracker:          request.URL.Host,
 		Event:            event,
-		Mode:             r.settings.Mode,
+		Mode:             mode,
 		RealUploaded:     realUploaded,
 		RealDownloaded:   realDownloaded,
 		Left:             left,
@@ -106,20 +139,21 @@ func (r *Reporter) Director(request *http.Request) error {
 }
 
 // report advances one torrent's schedule and returns the reported cumulative
-// upload plus the real and reported deltas observed for this announce.
-func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDelta, reportedDelta int64) {
+// upload, the real and reported deltas, and the mode that produced the value.
+func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDelta, reportedDelta int64, mode Mode) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	mode = r.runtime.Mode
 	now := r.now()
 	current := r.byHash[infoHash]
 	if current == nil {
 		current = &schedule{lastAnnounce: now, lastRealUploaded: realUploaded}
-		if r.settings.Mode == ModeBaseline {
+		if mode == ModeBaseline {
 			current.reported = realUploaded
 		}
 		r.byHash[infoHash] = current
-		return current.reported, 0, 0
+		return current.reported, 0, 0, mode
 	}
 
 	realDelta = realUploaded - current.lastRealUploaded
@@ -130,29 +164,38 @@ func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDe
 	}
 	current.lastAnnounce = now
 
-	var increment float64
-	switch r.settings.Mode {
+	previous := current.reported
+	switch mode {
+	case ModeBaseline:
+		// The request is passed through unchanged; the stored reported value
+		// tracks the real counter so the management API can still show it.
+		current.reported = realUploaded
 	case ModeInject:
-		increment = r.settings.RateBytesPerSecond * elapsed
+		current.reported += r.jittered(r.runtime.RateBytesPerSecond * elapsed)
 	case ModeAmplify:
 		if realDelta > 0 {
-			increment = float64(realDelta) * r.settings.Multiplier
+			current.reported += r.jittered(float64(realDelta) * r.runtime.Multiplier)
 		}
 	}
-	if increment > 0 {
-		factor := 1 + r.settings.JitterFraction*(2*r.rng.Float64()-1)
-		increment *= factor
+	if mode != ModeBaseline {
+		if capBytes := r.runtime.CapBytes; capBytes > 0 && current.reported > capBytes {
+			current.reported = capBytes
+		}
 	}
-	if increment < 0 {
-		increment = 0
-	}
+	return current.reported, realDelta, current.reported - previous, mode
+}
 
-	previous := current.reported
-	current.reported += int64(math.Round(increment))
-	if capBytes := r.settings.CapBytes; capBytes > 0 && current.reported > capBytes {
-		current.reported = capBytes
+// jittered applies the configured random deviation to a nominal increment and
+// returns it as a non-negative number of bytes.
+func (r *Reporter) jittered(nominal float64) int64 {
+	if nominal <= 0 {
+		return 0
 	}
-	return current.reported, realDelta, current.reported - previous
+	increment := nominal * (1 + r.runtime.JitterFraction*(2*r.rng.Float64()-1))
+	if increment < 0 {
+		return 0
+	}
+	return int64(math.Round(increment))
 }
 
 // infoHashHex renders the decoded 20-byte info hash as hex for the log.

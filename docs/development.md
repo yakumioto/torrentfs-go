@@ -61,6 +61,21 @@ Vite 默认监听 `127.0.0.1:5173`，将 `/api` 代理到 `http://127.0.0.1:8080
 - 客户端自身的真实计数与 Web UI/API 显示不受影响，改的只是发给 tracker 的数值。
 - 配置冲突或不完整会以退出码 2 拒绝启动，例如 `inject` 没有 rate、`baseline` 带了 rate、`amplify` 没有 multiplier。
 
+### 运行时设置与 Web UI
+
+设置 `TORRENTFS_LAB_*` 环境变量后实验在启动时启用。此后可在 Web UI 的「上传实验设置」页面（`/lab`）修改 mode、rate、multiplier、jitter、cap：保存立即作用于后续 announce，并原子持久化到 `<torrents-dir>/.metadata/lab_settings.json`，重启后自动恢复。
+
+环境变量只提供首次启动的初始值；一旦 sidecar 存在，运行时设置以 sidecar 为准。要回到环境变量值，删除该文件后重启。`TORRENTFS_LAB_ANNOUNCE_LOG`、`TORRENTFS_LAB_UPLOAD_SEED`、`TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` 仍是启动参数，不能在 Web 修改。
+
+Dashboard 顶部显示本次启动的真实上传、Tracker 上报与虚报量（reported − real）；任务列表与详情页显示逐种子的 real / reported / 虚报，可直接与服务端 tracker 数据对照。管理 API：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/lab` | 返回 `enabled`、`settings`、`seed`、`announce_log`、采样周期、`totals` 和逐种子 `real_uploaded_bytes`/`reported_uploaded_bytes` |
+| `PUT` | `/api/v1/lab/settings` | 更新运行时设置，body 为 `{mode, rate_bytes_per_second, multiplier, jitter_percent, cap_bytes}`，返回更新后的同一结构 |
+
+PUT 的错误码：`invalid_lab_settings`（400）、`lab_disabled`（409，未启用实验）、`lab_settings_storage_unavailable` / `lab_settings_durability_unconfirmed`（503）。
+
 ### ground-truth 日志
 
 `TORRENTFS_LAB_ANNOUNCE_LOG` 是 JSON Lines 文件，每行一条记录，用 `type` 区分：

@@ -143,3 +143,52 @@ func TestLoadSettingsRejectsInvalidConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeRuntimeSettings(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   RuntimeSettings
+		want    RuntimeSettings
+		wantErr bool
+	}{
+		{
+			name:  "baseline clears unused knobs",
+			input: RuntimeSettings{Mode: ModeBaseline, RateBytesPerSecond: 10, Multiplier: 5, JitterFraction: 0.2, CapBytes: 100},
+			want:  RuntimeSettings{Mode: ModeBaseline, JitterFraction: 0.2, CapBytes: 100},
+		},
+		{
+			name:  "inject keeps the rate",
+			input: RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Multiplier: 5, JitterFraction: 0.2},
+			want:  RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0.2},
+		},
+		{
+			name:  "amplify keeps the multiplier",
+			input: RuntimeSettings{Mode: ModeAmplify, RateBytesPerSecond: 10, Multiplier: 5, JitterFraction: 0.2, CapBytes: 5},
+			want:  RuntimeSettings{Mode: ModeAmplify, Multiplier: 5, JitterFraction: 0.2, CapBytes: 5},
+		},
+		{name: "inject without rate", input: RuntimeSettings{Mode: ModeInject, JitterFraction: 0.2}, wantErr: true},
+		{name: "amplify without multiplier", input: RuntimeSettings{Mode: ModeAmplify, JitterFraction: 0.2}, wantErr: true},
+		{name: "amplify multiplier at one", input: RuntimeSettings{Mode: ModeAmplify, Multiplier: 1, JitterFraction: 0.2}, wantErr: true},
+		{name: "unknown mode", input: RuntimeSettings{Mode: "turbo"}, wantErr: true},
+		{name: "jitter above one", input: RuntimeSettings{Mode: ModeBaseline, JitterFraction: 1.1}, wantErr: true},
+		{name: "negative jitter", input: RuntimeSettings{Mode: ModeBaseline, JitterFraction: -0.1}, wantErr: true},
+		{name: "negative cap", input: RuntimeSettings{Mode: ModeBaseline, JitterFraction: 0.2, CapBytes: -1}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeRuntimeSettings(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("NormalizeRuntimeSettings(%+v) = nil error, want rejection", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeRuntimeSettings(%+v): %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("NormalizeRuntimeSettings(%+v) = %+v, want %+v", tc.input, got, tc.want)
+			}
+		})
+	}
+}

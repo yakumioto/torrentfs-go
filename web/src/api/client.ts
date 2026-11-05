@@ -1,5 +1,7 @@
 import type {
   Category,
+  LabSettingsUpdate,
+  LabView,
   LoginResponse,
   Operation,
   PruneResult,
@@ -149,6 +151,18 @@ export class ApiClient {
 
   setUploadRateSettings(settings: UploadRateSettings, signal?: AbortSignal): Promise<UploadRateSettings> {
     return this.request<UploadRateSettings>('/settings/upload-rate', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+      signal,
+    });
+  }
+
+  getLab(signal?: AbortSignal): Promise<LabView> {
+    return this.request<LabView>('/lab', { signal });
+  }
+
+  setLabSettings(settings: LabSettingsUpdate, signal?: AbortSignal): Promise<LabView> {
+    return this.request<LabView>('/lab/settings', {
       method: 'PUT',
       body: JSON.stringify(settings),
       signal,

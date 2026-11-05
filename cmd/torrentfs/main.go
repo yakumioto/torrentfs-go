@@ -154,15 +154,14 @@ func run(args []string, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	experiment, experimentErr := startLabExperiment(logger)
-	if experimentErr != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", experimentErr)
+	labOptions, labErr := labSessionOptions(logger)
+	if labErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
 		return 2
 	}
-	defer experiment.Close()
 
 	sess, err := session.New(cfg, torrentsDir,
-		append([]session.Option{session.WithLogger(logger)}, experiment.sessionOptions()...)...)
+		append([]session.Option{session.WithLogger(logger)}, labOptions...)...)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {
@@ -170,7 +169,6 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 1
 	}
-	experiment.startSampler(rootCtx, sess)
 
 	sequence := shutdownSequence{logger: logger, sess: sess}
 	var apiServer *api.Server

@@ -35,6 +35,18 @@ function makeStatus(torrent: Torrent): TorrentStatus {
   return { torrent, metainfo_ready: true, piece_length: 16, pieces: [], files: [], subtitle_targets: [], subtitles: [] };
 }
 
+function disabledLab() {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    torrents: [],
+  };
+}
+
 function renderPage(fetchMock: ReturnType<typeof vi.fn>) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -85,6 +97,9 @@ describe('TorrentDetailPage', () => {
         const snapshot = statusSnapshots[Math.min(statusIndex++, statusSnapshots.length - 1)];
         return Promise.resolve(jsonResponse(snapshot));
       }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
       return Promise.resolve(jsonResponse(detailTorrent));
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -123,7 +138,7 @@ describe('TorrentDetailPage', () => {
     await queryClient.refetchQueries({ queryKey: queryKeys.torrentStatus('torrent-1') });
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Updated detail title' })).toBeInTheDocument());
     expect(screen.getAllByText('错误')).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it('keeps Torrent, file, and absolute piece scopes explicit', async () => {
@@ -146,8 +161,12 @@ describe('TorrentDetailPage', () => {
       subtitles: [],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).endsWith('/status')) {
+      const url = String(input);
+      if (url.endsWith('/status')) {
         return Promise.resolve(jsonResponse(status));
+      }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(torrent));
     });
@@ -196,8 +215,13 @@ describe('TorrentDetailPage', () => {
       ...makeStatus(torrent),
       files: [{ path: 'notes.txt', size: 9, piece_start: 0, piece_end: 1 }],
     };
-    const fetchMock = vi.fn((input: RequestInfo | URL) =>
-      Promise.resolve(jsonResponse(String(input).endsWith('/status') ? status : torrent)));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
+      return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
+    });
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'No video targets' })).toBeInTheDocument());
@@ -221,8 +245,13 @@ describe('TorrentDetailPage', () => {
         updated_at: '2026-09-26T12:00:00Z',
       }],
     };
-    const fetchMock = vi.fn((input: RequestInfo | URL) =>
-      Promise.resolve(jsonResponse(String(input).endsWith('/status') ? status : torrent)));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
+      return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
+    });
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByRole('button', { name: '上传字幕' })).toBeEnabled());
@@ -239,5 +268,35 @@ describe('TorrentDetailPage', () => {
     expect(screen.getByText('Show/Movie.2026.srt')).toBeInTheDocument();
     expect(screen.getByText('.srt')).toBeInTheDocument();
     expect(screen.getByText('12 B')).toBeInTheDocument();
+  });
+
+  it('shows the per-torrent lab counters only when the experiment is enabled', async () => {
+    const torrent = makeTorrent({ name: 'Lab fixture', state: 'ready', info_hash: 'abc123' });
+    const status = makeStatus(torrent);
+    const enabledLab = {
+      enabled: true,
+      settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
+      seed: 42,
+      announce_log: '/var/log/torrentfs/lab.jsonl',
+      peer_sample_interval_seconds: 5,
+      totals: { real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247, overreported_bytes: 4_196_247 },
+      torrents: [{ info_hash: 'abc123', real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247 }],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(enabledLab));
+      }
+      return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
+    });
+    renderPage(fetchMock);
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验' })).toBeInTheDocument());
+    expect(screen.getByText('真实上传')).toBeInTheDocument();
+    expect(screen.getByText('Tracker 上报')).toBeInTheDocument();
+    expect(screen.getByText('1000 B')).toBeInTheDocument();
+    expect(screen.getByText('4.0 MiB')).toBeInTheDocument();
+    expect(screen.getByText('+4.0 MiB')).toBeInTheDocument();
+    expect(screen.getByText(/peer 采样间隔为 5 秒/)).toBeInTheDocument();
   });
 });

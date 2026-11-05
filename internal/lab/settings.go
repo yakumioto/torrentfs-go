@@ -1,6 +1,7 @@
 package lab
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -63,21 +64,67 @@ const (
 	defaultPeerSampleInterval = 5 * time.Second
 )
 
-// Settings is the validated experiment configuration.
-type Settings struct {
-	Mode Mode
+// RuntimeSettings is the part of the experiment that can change while the
+// service runs, through the management API.
+type RuntimeSettings struct {
+	// Mode selects the reporting model. One of the Mode constants.
+	Mode Mode `json:"mode"`
 	// RateBytesPerSecond is the average growth of the reported cumulative
 	// upload in inject mode.
-	RateBytesPerSecond float64
+	RateBytesPerSecond float64 `json:"rate_bytes_per_second"`
 	// Multiplier is the reported-to-real factor in amplify mode.
-	Multiplier float64
+	Multiplier float64 `json:"multiplier"`
 	// JitterFraction is the maximum deviation from the nominal increment for a
 	// single announce, in the range [0, 1].
-	JitterFraction float64
+	JitterFraction float64 `json:"jitter_fraction"`
 	// CapBytes is the per-torrent ceiling on the reported cumulative upload.
 	// Zero means uncapped.
-	CapBytes int64
-	// Seed seeds the jitter sequence.
+	CapBytes int64 `json:"cap_bytes"`
+}
+
+// NormalizeRuntimeSettings validates runtime settings and clears fields that do
+// not apply to the selected mode, so a mode switch never carries a stale value
+// into a mode that would otherwise use it.
+func NormalizeRuntimeSettings(settings RuntimeSettings) (RuntimeSettings, error) {
+	switch settings.Mode {
+	case ModeBaseline, ModeInject, ModeAmplify:
+	default:
+		return RuntimeSettings{}, errors.New("mode must be baseline, inject, or amplify")
+	}
+	if math.IsNaN(settings.JitterFraction) || math.IsInf(settings.JitterFraction, 0) ||
+		settings.JitterFraction < 0 || settings.JitterFraction > 1 {
+		return RuntimeSettings{}, errors.New("jitter_percent must be between 0 and 100")
+	}
+	if settings.CapBytes < 0 {
+		return RuntimeSettings{}, errors.New("cap_bytes must not be negative")
+	}
+	normalized := RuntimeSettings{
+		Mode:           settings.Mode,
+		JitterFraction: settings.JitterFraction,
+		CapBytes:       settings.CapBytes,
+	}
+	switch settings.Mode {
+	case ModeInject:
+		if math.IsNaN(settings.RateBytesPerSecond) || math.IsInf(settings.RateBytesPerSecond, 0) ||
+			settings.RateBytesPerSecond <= 0 {
+			return RuntimeSettings{}, errors.New("inject mode requires rate_bytes_per_second greater than zero")
+		}
+		normalized.RateBytesPerSecond = settings.RateBytesPerSecond
+	case ModeAmplify:
+		if math.IsNaN(settings.Multiplier) || math.IsInf(settings.Multiplier, 0) || settings.Multiplier <= 1 {
+			return RuntimeSettings{}, errors.New("amplify mode requires multiplier greater than 1")
+		}
+		normalized.Multiplier = settings.Multiplier
+	}
+	return normalized, nil
+}
+
+// Settings is the startup configuration of the experiment: runtime settings
+// plus the values that are fixed for the lifetime of the process.
+type Settings struct {
+	RuntimeSettings
+	// Seed seeds the jitter sequence. It is fixed for the process because
+	// changing it would make an in-flight run impossible to reproduce.
 	Seed int64
 	// AnnounceLogPath is the JSON Lines ground-truth log. Empty disables it.
 	AnnounceLogPath string
@@ -136,14 +183,10 @@ func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, 
 		return Settings{}, false, fmt.Errorf("%s: unknown mode %q (want baseline, inject, or amplify)", EnvMode, rawMode)
 	}
 
-	settings = Settings{
-		Mode:               mode,
-		JitterFraction:     float64(defaultJitterPercent) / 100,
-		Seed:               time.Now().UnixNano(),
-		AnnounceLogPath:    rawLog,
-		PeerSampleInterval: defaultPeerSampleInterval,
+	runtime := RuntimeSettings{
+		Mode:           mode,
+		JitterFraction: float64(defaultJitterPercent) / 100,
 	}
-
 	switch mode {
 	case ModeBaseline:
 		if rawRate != "" || rawMultiplier != "" {
@@ -160,7 +203,7 @@ func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, 
 		if err != nil {
 			return Settings{}, false, err
 		}
-		settings.RateBytesPerSecond = rate
+		runtime.RateBytesPerSecond = rate
 	case ModeAmplify:
 		if rawMultiplier == "" {
 			return Settings{}, false, fmt.Errorf("mode %q requires %s", mode, EnvMultiplier)
@@ -172,41 +215,50 @@ func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, 
 		if err != nil {
 			return Settings{}, false, err
 		}
-		settings.Multiplier = multiplier
+		runtime.Multiplier = multiplier
 	}
-
 	if rawJitter != "" {
 		jitter, err := parseJitterPercent(rawJitter)
 		if err != nil {
 			return Settings{}, false, err
 		}
-		settings.JitterFraction = jitter
+		runtime.JitterFraction = jitter
 	}
 	if rawCap != "" {
 		capBytes, err := config.ParseByteQuantity(rawCap)
 		if err != nil {
 			return Settings{}, false, fmt.Errorf("%s: %w", EnvCap, err)
 		}
-		settings.CapBytes = capBytes
+		runtime.CapBytes = capBytes
 	}
+	runtime, err = NormalizeRuntimeSettings(runtime)
+	if err != nil {
+		return Settings{}, false, err
+	}
+
+	seed := time.Now().UnixNano()
 	if rawSeed != "" {
-		seed, err := strconv.ParseInt(rawSeed, 10, 64)
+		seed, err = strconv.ParseInt(rawSeed, 10, 64)
 		if err != nil {
 			return Settings{}, false, fmt.Errorf("%s: must be a signed integer", EnvSeed)
 		}
-		settings.Seed = seed
 	}
+	peerSampleInterval := defaultPeerSampleInterval
 	if rawInterval != "" {
 		if rawLog == "" {
 			return Settings{}, false, fmt.Errorf("%s requires %s", EnvPeerSampleInterval, EnvAnnounceLog)
 		}
-		interval, err := time.ParseDuration(rawInterval)
-		if err != nil || interval <= 0 {
+		peerSampleInterval, err = time.ParseDuration(rawInterval)
+		if err != nil || peerSampleInterval <= 0 {
 			return Settings{}, false, fmt.Errorf("%s: must be a positive duration such as 5s", EnvPeerSampleInterval)
 		}
-		settings.PeerSampleInterval = interval
 	}
-	return settings, true, nil
+	return Settings{
+		RuntimeSettings:    runtime,
+		Seed:               seed,
+		AnnounceLogPath:    rawLog,
+		PeerSampleInterval: peerSampleInterval,
+	}, true, nil
 }
 
 func parseByteRate(raw string) (float64, error) {

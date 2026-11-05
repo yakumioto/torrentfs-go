@@ -16,51 +16,56 @@ import (
 	"time"
 )
 
+func testReporter(runtime RuntimeSettings, seed int64) *Reporter {
+	return NewReporter(Settings{RuntimeSettings: runtime, Seed: seed}, nil)
+}
+
 func TestReporterInjectGrowsAndCaps(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{
+	reporter := testReporter(RuntimeSettings{
 		Mode:               ModeInject,
 		RateBytesPerSecond: 1 << 20,
 		JitterFraction:     0,
 		CapBytes:           3 << 20,
-		Seed:               1,
-	}, nil)
+	}, 1)
 	reporter.now = func() time.Time { return clock }
 
-	if reported, _, _ := reporter.report("hash", 0); reported != 0 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 0 {
 		t.Fatalf("first announce = %d, want 0", reported)
 	}
 	clock = clock.Add(time.Second)
-	if reported, _, _ := reporter.report("hash", 0); reported != 1<<20 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 1<<20 {
 		t.Fatalf("after 1s = %d, want %d", reported, 1<<20)
 	}
 	clock = clock.Add(2 * time.Second)
-	if reported, _, _ := reporter.report("hash", 0); reported != 3<<20 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 3<<20 {
 		t.Fatalf("after 3s = %d, want the %d cap", reported, 3<<20)
 	}
 	clock = clock.Add(10 * time.Second)
-	if reported, _, _ := reporter.report("hash", 0); reported != 3<<20 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 3<<20 {
 		t.Fatalf("after cap = %d, want the cap value", reported)
 	}
 }
 
 func TestReporterInjectJitterStaysWithinBounds(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{
+	reporter := testReporter(RuntimeSettings{
 		Mode:               ModeInject,
 		RateBytesPerSecond: 10_000,
 		JitterFraction:     0.25,
-		Seed:               9,
-	}, nil)
+	}, 9)
 	reporter.now = func() time.Time { return clock }
 
-	if reported, _, _ := reporter.report("hash", 0); reported != 0 {
-		t.Fatalf("first announce = %d, want 0", reported)
-	}
 	previous := int64(0)
 	for i := 0; i < 500; i++ {
 		clock = clock.Add(10 * time.Millisecond) // 100 nominal bytes per announce.
-		reported, _, _ := reporter.report("hash", 0)
+		reported, _, _, _ := reporter.report("hash", 0)
+		if i == 0 {
+			if reported != 0 {
+				t.Fatalf("first announce = %d, want 0", reported)
+			}
+			continue
+		}
 		increment := reported - previous
 		if increment < 74 || increment > 126 {
 			t.Fatalf("announce %d increment = %d, want within [74, 126]", i, increment)
@@ -73,74 +78,72 @@ func TestReporterInjectJitterStaysWithinBounds(t *testing.T) {
 }
 
 func TestReporterAmplifyFollowsRealTransfer(t *testing.T) {
-	reporter := NewReporter(Settings{
+	reporter := testReporter(RuntimeSettings{
 		Mode:           ModeAmplify,
 		Multiplier:     5,
 		JitterFraction: 0,
-		Seed:           1,
-	}, nil)
+	}, 1)
 
-	if reported, _, _ := reporter.report("hash", 0); reported != 0 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 0 {
 		t.Fatalf("first announce = %d, want 0", reported)
 	}
-	reported, realDelta, reportedDelta := reporter.report("hash", 1000)
+	reported, realDelta, reportedDelta, _ := reporter.report("hash", 1000)
 	if realDelta != 1000 || reportedDelta != 5000 || reported != 5000 {
 		t.Fatalf("after 1000 real bytes: realDelta=%d reportedDelta=%d reported=%d", realDelta, reportedDelta, reported)
 	}
 	// No real transfer since the previous announce: the reported value must not
 	// grow, unlike inject mode.
-	reported, realDelta, reportedDelta = reporter.report("hash", 1000)
+	reported, realDelta, reportedDelta, _ = reporter.report("hash", 1000)
 	if realDelta != 0 || reportedDelta != 0 || reported != 5000 {
 		t.Fatalf("after idle interval: realDelta=%d reportedDelta=%d reported=%d", realDelta, reportedDelta, reported)
 	}
-	reported, realDelta, reportedDelta = reporter.report("hash", 4000)
+	reported, realDelta, reportedDelta, _ = reporter.report("hash", 4000)
 	if realDelta != 3000 || reportedDelta != 15000 || reported != 20000 {
 		t.Fatalf("after 3000 more real bytes: realDelta=%d reportedDelta=%d reported=%d", realDelta, reportedDelta, reported)
 	}
 }
 
 func TestReporterAmplifyCapIsNeverExceeded(t *testing.T) {
-	reporter := NewReporter(Settings{
+	reporter := testReporter(RuntimeSettings{
 		Mode:           ModeAmplify,
 		Multiplier:     5,
 		JitterFraction: 0.2,
 		CapBytes:       8_000,
-		Seed:           11,
-	}, nil)
+	}, 11)
 
-	if reported, _, _ := reporter.report("hash", 0); reported != 0 {
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 0 {
 		t.Fatalf("first announce = %d, want 0", reported)
 	}
 	for i, real := range []int64{1000, 2000, 3000, 4000} {
-		reported, _, _ := reporter.report("hash", real)
+		reported, _, _, _ := reporter.report("hash", real)
 		if reported > 8_000 {
 			t.Fatalf("announce %d reported %d, exceeds the 8000 cap", i, reported)
 		}
 	}
-	if reported, _, _ := reporter.report("hash", 5000); reported != 8_000 {
+	if reported, _, _, _ := reporter.report("hash", 5000); reported != 8_000 {
 		t.Fatalf("after cap = %d, want 8000", reported)
 	}
 }
 
 func TestReporterKeepsTorrentsIndependent(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Seed: 1}, nil)
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20}, 1)
 	reporter.now = func() time.Time { return clock }
 
-	if reported, _, _ := reporter.report("first", 0); reported != 0 {
+	if reported, _, _, _ := reporter.report("first", 0); reported != 0 {
 		t.Fatalf("first torrent first announce = %d, want 0", reported)
 	}
 	clock = clock.Add(time.Second)
-	if reported, _, _ := reporter.report("first", 0); reported != 1<<20 {
+	if reported, _, _, _ := reporter.report("first", 0); reported != 1<<20 {
 		t.Fatalf("first torrent after 1s = %d, want %d", reported, 1<<20)
 	}
-	if reported, _, _ := reporter.report("second", 0); reported != 0 {
+	if reported, _, _, _ := reporter.report("second", 0); reported != 0 {
 		t.Fatalf("second torrent starts at %d, want 0", reported)
 	}
 }
 
-func TestReporterBaselineLeavesRequestUnchanged(t *testing.T) {
-	reporter := NewReporter(Settings{Mode: ModeBaseline}, nil)
+func TestReporterBaselineTracksRealCounter(t *testing.T) {
+	reporter := testReporter(RuntimeSettings{Mode: ModeBaseline}, 1)
 	const original = "passkey=SECRET&info_hash=%AA%BB&uploaded=123&downloaded=456&left=789&event=started"
 	request := &http.Request{URL: &url.URL{
 		Scheme:   "http",
@@ -156,11 +159,61 @@ func TestReporterBaselineLeavesRequestUnchanged(t *testing.T) {
 			t.Fatalf("baseline announce %d query = %q, want the original %q", i, request.URL.RawQuery, original)
 		}
 	}
+	reported := reporter.ReportedUpload()
+	if got := reported[hex.EncodeToString([]byte{0xaa, 0xbb})]; got != 123 {
+		t.Fatalf("baseline reported upload = %d, want the real 123", got)
+	}
+}
+
+func TestReporterHotUpdateChangesGrowth(t *testing.T) {
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reporter := testReporter(RuntimeSettings{
+		Mode:               ModeInject,
+		RateBytesPerSecond: 1 << 20,
+		JitterFraction:     0,
+	}, 1)
+	reporter.now = func() time.Time { return clock }
+
+	reporter.report("hash", 0)
+	clock = clock.Add(time.Second)
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 1<<20 {
+		t.Fatalf("before update = %d, want %d", reported, 1<<20)
+	}
+	reporter.UpdateRuntime(RuntimeSettings{
+		Mode:               ModeInject,
+		RateBytesPerSecond: 4 << 20,
+		JitterFraction:     0,
+	})
+	clock = clock.Add(time.Second)
+	if reported, _, _, _ := reporter.report("hash", 0); reported != 5<<20 {
+		t.Fatalf("after update = %d, want %d", reported, 5<<20)
+	}
+}
+
+func TestReporterUpdateRuntimeIgnoresInvalidSettings(t *testing.T) {
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20}, 1)
+	reporter.UpdateRuntime(RuntimeSettings{Mode: ModeInject})
+	if got := reporter.RuntimeSettings(); got.RateBytesPerSecond != 1<<20 {
+		t.Fatalf("rate = %v, want the previous value", got.RateBytesPerSecond)
+	}
+}
+
+func TestReporterReportedUploadSnapshotsPerTorrent(t *testing.T) {
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 0}, 1)
+	reporter.UpdateRuntime(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1})
+	reporter.report("\xaa\xbb", 0)
+	reported := reporter.ReportedUpload()
+	if len(reported) != 1 {
+		t.Fatalf("got %d entries, want 1", len(reported))
+	}
+	if _, ok := reported["aabb"]; !ok {
+		t.Fatalf("reported map = %v, want the hex key aabb", reported)
+	}
 }
 
 func TestReporterInjectsOnlyUploaded(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Seed: 1}, nil)
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20}, 1)
 	reporter.now = func() time.Time { return clock }
 
 	request := &http.Request{URL: &url.URL{
@@ -184,7 +237,7 @@ func TestReporterInjectsOnlyUploaded(t *testing.T) {
 
 func TestReporterReplacesTheLastUploadedParameter(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Seed: 1}, nil)
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20}, 1)
 	reporter.now = func() time.Time { return clock }
 
 	// The client appends announce parameters after a query already present in
@@ -209,7 +262,7 @@ func TestReporterReplacesTheLastUploadedParameter(t *testing.T) {
 }
 
 func TestReporterIgnoresRequestsWithoutAnnounceParameters(t *testing.T) {
-	reporter := NewReporter(Settings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Seed: 1}, nil)
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20}, 1)
 
 	cases := []*http.Request{
 		nil,
@@ -239,7 +292,10 @@ func TestReporterRecordsGroundTruth(t *testing.T) {
 		t.Fatalf("OpenRecorder: %v", err)
 	}
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	reporter := NewReporter(Settings{Mode: ModeInject, RateBytesPerSecond: 1 << 20, Seed: 1}, recorder)
+	reporter := NewReporter(Settings{
+		RuntimeSettings: RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1 << 20},
+		Seed:            1,
+	}, recorder)
 	reporter.now = func() time.Time { return clock }
 
 	const infoHash = "\xaa\xbb"
@@ -302,13 +358,12 @@ func TestReporterRecordsGroundTruth(t *testing.T) {
 }
 
 func TestReporterConcurrentUse(t *testing.T) {
-	reporter := NewReporter(Settings{
+	reporter := testReporter(RuntimeSettings{
 		Mode:               ModeInject,
 		RateBytesPerSecond: 1 << 20,
 		JitterFraction:     0.5,
 		CapBytes:           1 << 30,
-		Seed:               3,
-	}, nil)
+	}, 3)
 
 	var wait sync.WaitGroup
 	for torrent := 0; torrent < 8; torrent++ {
@@ -326,8 +381,8 @@ func TestReporterConcurrentUse(t *testing.T) {
 	reporter.mu.Lock()
 	defer reporter.mu.Unlock()
 	for hash, schedule := range reporter.byHash {
-		if schedule.reported < 0 || schedule.reported > reporter.settings.CapBytes {
-			t.Fatalf("%s reported %d, want within [0, %d]", hash, schedule.reported, reporter.settings.CapBytes)
+		if schedule.reported < 0 || schedule.reported > reporter.runtime.CapBytes {
+			t.Fatalf("%s reported %d, want within [0, %d]", hash, schedule.reported, reporter.runtime.CapBytes)
 		}
 	}
 }

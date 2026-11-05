@@ -2,16 +2,22 @@ import { ActionIcon, Badge, Menu, Tooltip } from '@mantine/core';
 import { IconDots, IconExternalLink, IconFolder, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { Torrent } from '../../types/api';
+import type { LabTorrentStat, Torrent } from '../../types/api';
 import { useAuth } from '../../app/auth-context';
 import { useSetFavorite } from '../../queries/hooks';
 import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
+import { formatSignedBytes, labOverreportedBytes } from '../../utils/lab';
 import { StateBadge } from './StateBadge';
 
-export function TorrentRow({ torrent }: { torrent: Torrent }) {
+export function TorrentRow({ torrent, labEnabled = false, labStat }: {
+  torrent: Torrent;
+  /** When the experiment is running, each row also shows reported/overreported bytes. */
+  labEnabled?: boolean;
+  labStat?: LabTorrentStat;
+}) {
   const auth = useAuth();
   const navigate = useNavigate();
   const favorite = useSetFavorite(auth.api);
@@ -43,6 +49,16 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
         <div className={`${styles.upload} text-mono`}>
           <span className={styles.mobileLabel}>上传量</span>
           <span>{formatBytes(torrent.uploaded_bytes)}</span>
+          {labEnabled && (
+            <span
+              className={styles.labValues}
+              title="上传实验：Tracker 上报量 / 相对真实上传的虚报量"
+            >
+              上报 {labStat === undefined ? '—' : formatBytes(labStat.reported_uploaded_bytes)}
+              {' · '}
+              虚报 {labStat === undefined ? '—' : formatSignedBytes(labOverreportedBytes(labStat.reported_uploaded_bytes, labStat.real_uploaded_bytes))}
+            </span>
+          )}
         </div>
         <div className={styles.state}>
           <span className={styles.mobileLabel}>状态</span>

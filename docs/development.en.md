@@ -58,6 +58,21 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 - The client's own counters and the Web UI/API keep the real values; only the number sent to the tracker changes.
 - Conflicting or incomplete configuration exits with code 2, for example `inject` without a rate, `baseline` with a rate, or `amplify` without a multiplier.
 
+### Runtime settings and the Web UI
+
+The experiment is enabled at startup by the `TORRENTFS_LAB_*` environment. After that, the Web UI page "Upload experiment" (`/lab`) can change mode, rate, multiplier, jitter, and cap. Saving applies the value to later announces immediately and atomically persists it to `<torrents-dir>/.metadata/lab_settings.json`, which the next start restores.
+
+The environment only supplies the initial values: once the sidecar exists, the runtime settings come from it. Delete the file and restart to fall back to the environment. `TORRENTFS_LAB_ANNOUNCE_LOG`, `TORRENTFS_LAB_UPLOAD_SEED`, and `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` remain startup-only and cannot be changed from the Web UI.
+
+The Dashboard shows this run's real upload, tracker-reported upload, and overreported bytes (reported minus real); the task list and detail page show the same three values per torrent so they can be compared with tracker-side records. Management API:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/api/v1/lab` | Returns `enabled`, `settings`, `seed`, `announce_log`, sample period, `totals`, and per-torrent `real_uploaded_bytes`/`reported_uploaded_bytes` |
+| `PUT` | `/api/v1/lab/settings` | Updates runtime settings; the body is `{mode, rate_bytes_per_second, multiplier, jitter_percent, cap_bytes}` and the response is the same structure |
+
+PUT error codes: `invalid_lab_settings` (400), `lab_disabled` (409, experiment not enabled), `lab_settings_storage_unavailable` / `lab_settings_durability_unconfirmed` (503).
+
 ### Ground-truth log
 
 The file at `TORRENTFS_LAB_ANNOUNCE_LOG` is JSON Lines with one record per line, distinguished by `type`:
