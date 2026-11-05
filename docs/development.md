@@ -26,37 +26,78 @@ npm run dev --prefix web
 
 Vite 默认监听 `127.0.0.1:5173`，将 `/api` 代理到 `http://127.0.0.1:8080`。生产 UI 由 Go embed 提供，使用同源相对 `/api/v1` 请求。
 
-## 合成上传统计（实验性）
+## 上传统计实验（实验性，测试分支）
 
-`internal/lab` 提供一个仅用于研究的 tracker announce 改写器，用于在你自建或自运营的 tracker 上构造可控的异常上传流量，验证服务端异常检测。它只在测试分支上开发，不提供 TOML 配置项；默认关闭，只有设置下列环境变量才生效。不要在未获授权的第三方站点上启用。
+`internal/lab` 是仅用于研究的可控上传统计工具，用于在你自建或自运营的 tracker 上验证服务端异常检测。它默认关闭，没有 TOML 配置项，只在设置 `TORRENTFS_LAB_*` 环境变量时生效。不要在未获授权的第三方站点上启用。
 
-| 环境变量 | 说明 |
+### 三种模式
+
+| 模式 | 上报 `uploaded` 的来源 | 实验用途 |
+| --- | --- | --- |
+| `baseline` | 客户端真实 payload 计数，不改写 | 对照组：只记录 ground truth |
+| `inject` | 按墙钟合成的计数，与真实传输完全无关 | 确定性异常样本：整个窗口无真实传输也会增长 |
+| `amplify` | 两次 announce 之间真实 payload 增量 × 倍率 | 与真实传输耦合的放大模型：没有真实传输就不增长 |
+
+模式由 `TORRENTFS_LAB_UPLOAD_MODE` 指定；不指定时按配置推断：有 rate 用 `inject`，有 multiplier 用 `amplify`，只有日志路径用 `baseline`。
+
+### 环境变量
+
+| 变量 | 说明 |
 | --- | --- |
-| `TORRENTFS_LAB_FAKE_UPLOAD_RATE` | 启用开关，必填。平均上报速率，带字节单位；`4MiB/s` 与 `4MiB` 都表示每秒 4 MiB。 |
-| `TORRENTFS_LAB_FAKE_UPLOAD_JITTER` | 可选。单次 announce 相对平均速率的随机偏差百分比（0–100），默认 `20`。 |
-| `TORRENTFS_LAB_FAKE_UPLOAD_CAP` | 可选。每个种子累计上报上限，带字节单位；不设置或 `0` 表示不封顶。 |
-| `TORRENTFS_LAB_FAKE_UPLOAD_SEED` | 可选。抖动随机序列的种子，用于复现实验；不设置时取自墙钟。 |
+| `TORRENTFS_LAB_UPLOAD_MODE` | `baseline`、`inject` 或 `amplify`，可选 |
+| `TORRENTFS_LAB_UPLOAD_RATE` | `inject` 必填；平均上报速率，`4MiB/s` 与 `4MiB` 都表示每秒 4 MiB |
+| `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | `amplify` 必填；大于 1 的倍率，`5` 与 `5x` 等价 |
+| `TORRENTFS_LAB_UPLOAD_JITTER` | 单次增量相对名义值的随机偏差百分比（0–100），默认 `20` |
+| `TORRENTFS_LAB_UPLOAD_CAP` | 每个种子累计上报上限，带字节单位；不设置表示不封顶 |
+| `TORRENTFS_LAB_UPLOAD_SEED` | 抖动随机序列种子，用于复现实验 |
+| `TORRENTFS_LAB_ANNOUNCE_LOG` | ground-truth JSONL 日志路径，append 写入 |
+| `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | Peer 与真实计数采样周期，默认 `5s`；必须同时设置日志路径 |
 
-行为约定：
+### 行为与边界
 
-- 只改写 HTTP(S) tracker announce 的 `uploaded` 参数；`downloaded`、`left`、`event`、passkey 等保持真实值。UDP tracker 与 DHT 不受影响。
-- 每个 info hash 的第一次 announce 上报 `0`（对应会话开始时的上传计数）；之后按 `rate × 距上次 announce 的墙钟时间` 增长，再乘以 `[1 - jitter, 1 + jitter]` 的随机因子。增量永不为负，所以上报值单调不减。
-- 达到 cap 后冻结在上限值；客户端真实上传计数被忽略，上报的是纯合成数据。
-- 配置不完整（例如只设置 jitter 而没有 rate）会作为配置错误退出（退出码 2），避免静默退回真实上报。
+- 只改写 HTTP(S) tracker announce 的 `uploaded`；`downloaded`、`left`、`event`、passkey 等保持真实值。UDP tracker 与 DHT 不受影响。
+- 每种子的第一次 announce 在 `inject`/`amplify` 下上报 `0`（对应 `started` 事件的会话计数语义）；之后单调不减，达到 cap 后冻结。
+- `amplify` 只在两次 announce 之间真实 payload 增量大于 0 时增长；没有真实传输就不增长，因此不会制造“完全无 Peer 活动却持续增长”的信号。这正是与 `inject` 的实验区别。
+- 客户端自身的真实计数与 Web UI/API 显示不受影响，改的只是发给 tracker 的数值。
+- 配置冲突或不完整会以退出码 2 拒绝启动，例如 `inject` 没有 rate、`baseline` 带了 rate、`amplify` 没有 multiplier。
+
+### ground-truth 日志
+
+`TORRENTFS_LAB_ANNOUNCE_LOG` 是 JSON Lines 文件，每行一条记录，用 `type` 区分：
+
+- `settings`：每次运行的实验参数（mode、rate、multiplier、jitter、cap、seed、采样周期）。
+- `announce`：每次 announce 的 `time`、`info_hash`、`tracker`（仅 host）、`event`、`real_uploaded`、`real_downloaded`、`left`、`real_delta`、`reported_uploaded`、`reported_delta`、`mode`。
+- `peers`：每个采样周期的 `info_hash`、`uploaded_bytes`（真实）、`downloaded_bytes`、`total_peers`、`pending_peers`、`active_peers`、`connected_seeders`。
+
+`real_delta` 是两次 announce 之间客户端真实发送的 payload 字节数；把它与 `reported_delta` 对照，就能判定某次上报增长是否有真实传输支撑，再结合 `peers` 记录还原 Peer 连接历史。日志刻意不记录 peer ID、passkey 或原始 query。
+
+### 示例
 
 ```sh
-TORRENTFS_LAB_FAKE_UPLOAD_RATE=4MiB/s \
-TORRENTFS_LAB_FAKE_UPLOAD_JITTER=25 \
-TORRENTFS_LAB_FAKE_UPLOAD_CAP=200GiB \
-TORRENTFS_LAB_FAKE_UPLOAD_SEED=42 \
+# 对照组：真实上报 + 记录 ground truth
+TORRENTFS_LAB_UPLOAD_MODE=baseline \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-baseline.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# 确定性异常：无真实传输也增长
+TORRENTFS_LAB_UPLOAD_MODE=inject TORRENTFS_LAB_UPLOAD_RATE=4MiB/s \
+TORRENTFS_LAB_UPLOAD_JITTER=25 TORRENTFS_LAB_UPLOAD_CAP=200GiB \
+TORRENTFS_LAB_UPLOAD_SEED=42 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-inject.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# 耦合放大：只有真实传输才放大
+TORRENTFS_LAB_UPLOAD_MODE=amplify TORRENTFS_LAB_UPLOAD_MULTIPLIER=5 \
+TORRENTFS_LAB_UPLOAD_JITTER=10 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-amplify.jsonl \
 go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
 ```
 
-启用时启动日志会输出一条 warn 级别的 `synthetic announce upload reporting is enabled`。单元测试和 loopback tracker 集成测试不需要外部网络：
+启用时启动日志会输出一条 warn 级别的 `lab upload experiment enabled`。测试不需要外部网络：
 
 ```sh
 go test ./internal/lab/
-go test ./internal/session/ -run TestSyntheticAnnounceUploadReachesTracker
+go test ./internal/session/ -run 'TestSyntheticAnnounceUpload|TestBaselineAnnounce|TestTorrentPeerActivities'
 ```
 
 ## 架构与边界

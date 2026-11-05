@@ -23,37 +23,78 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 
 [build-web.sh](../scripts/build-web.sh) installs frontend dependencies from the lockfile, builds `web/dist`, and removes `web/node_modules`; it does not remove `web/dist`.
 
-## Synthetic announce upload (experimental)
+## Upload-statistics experiments (experimental, test branch)
 
-`internal/lab` contains a research-only tracker announce rewriter. It builds controlled, anomalous upload traffic against a tracker you run, so tracker-side anomaly detection can be exercised. It lives on a test branch, has no TOML configuration, and stays off unless the environment variables below are set. Do not enable it against an unauthorized third-party tracker.
+`internal/lab` is research-only tooling for controlling the upload counter reported to a tracker you run, so tracker-side anomaly detection can be exercised. It is off by default, has no TOML configuration, and only activates through `TORRENTFS_LAB_*` environment variables. Do not enable it against an unauthorized third-party tracker.
+
+### Modes
+
+| Mode | Source of the reported `uploaded` | Experiment purpose |
+| --- | --- | --- |
+| `baseline` | The client's real payload counter, not rewritten | Control arm: records ground truth only |
+| `inject` | Wall-clock synthetic counter, unrelated to real traffic | Deterministic anomaly: growth with no real transfer at all |
+| `amplify` | Real payload delta between announces times a multiplier | Coupled adversary: no real transfer means no growth |
+
+`TORRENTFS_LAB_UPLOAD_MODE` selects the mode. When unset it is inferred: a rate means `inject`, a multiplier means `amplify`, and only an announce log means `baseline`.
+
+### Environment
 
 | Variable | Meaning |
 | --- | --- |
-| `TORRENTFS_LAB_FAKE_UPLOAD_RATE` | Required enable switch. Average reported rate as a byte quantity; both `4MiB/s` and `4MiB` mean 4 MiB per second. |
-| `TORRENTFS_LAB_FAKE_UPLOAD_JITTER` | Optional per-announce deviation from the average rate, in percent (0-100); defaults to `20`. |
-| `TORRENTFS_LAB_FAKE_UPLOAD_CAP` | Optional per-torrent ceiling on the cumulative reported upload as a byte quantity; unset or `0` means uncapped. |
-| `TORRENTFS_LAB_FAKE_UPLOAD_SEED` | Optional seed for the jitter sequence, for reproducible runs; unset seeds from the wall clock. |
+| `TORRENTFS_LAB_UPLOAD_MODE` | `baseline`, `inject`, or `amplify`; optional |
+| `TORRENTFS_LAB_UPLOAD_RATE` | Required by `inject`; average reported rate, `4MiB/s` or `4MiB` |
+| `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | Required by `amplify`; a factor greater than 1, `5` or `5x` |
+| `TORRENTFS_LAB_UPLOAD_JITTER` | Per-announce deviation from the nominal increment, 0-100 percent; defaults to `20` |
+| `TORRENTFS_LAB_UPLOAD_CAP` | Per-torrent cumulative ceiling as a byte quantity; unset means uncapped |
+| `TORRENTFS_LAB_UPLOAD_SEED` | Seed for the jitter sequence, for reproducible runs |
+| `TORRENTFS_LAB_ANNOUNCE_LOG` | Ground-truth JSON Lines log path, opened for append |
+| `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | Peer and real-counter sampling period, default `5s`; requires the announce log |
 
-Behavior:
+### Behavior and scope
 
-- Only the `uploaded` parameter of HTTP(S) tracker announces is rewritten; `downloaded`, `left`, `event`, passkey, and other parameters keep their real values. UDP trackers and DHT are unaffected.
-- The first announce for an info hash reports `0`, matching the upload counter at session start. Later announces add `rate × wall time since the previous announce`, multiplied by a random factor in `[1 - jitter, 1 + jitter]`. The increment is never negative, so the reported value is monotonic.
-- After the cap is reached the value freezes; the client's real upload counter is ignored and the reported number is purely synthetic.
-- An incomplete configuration (for example jitter without a rate) exits with a configuration error (exit code 2) instead of silently falling back to real reporting.
+- Only the `uploaded` parameter of HTTP(S) tracker announces is rewritten; `downloaded`, `left`, `event`, passkey, and the rest keep their real values. UDP trackers and DHT are unaffected.
+- The first announce for an info hash reports `0` in `inject`/`amplify`, matching the session counter of a `started` event. Later values are monotonic and freeze at the cap.
+- `amplify` only grows when the real payload delta between two announces is positive. No real transfer means no growth, so it never produces the "growth with no peer activity at all" signal that `inject` produces. That difference is the point of having both modes.
+- The client's own counters and the Web UI/API keep the real values; only the number sent to the tracker changes.
+- Conflicting or incomplete configuration exits with code 2, for example `inject` without a rate, `baseline` with a rate, or `amplify` without a multiplier.
+
+### Ground-truth log
+
+The file at `TORRENTFS_LAB_ANNOUNCE_LOG` is JSON Lines with one record per line, distinguished by `type`:
+
+- `settings`: the experiment parameters of each run (mode, rate, multiplier, jitter, cap, seed, sample period).
+- `announce`: `time`, `info_hash`, `tracker` (host only), `event`, `real_uploaded`, `real_downloaded`, `left`, `real_delta`, `reported_uploaded`, `reported_delta`, and `mode`.
+- `peers`: per sampling period, `info_hash`, real `uploaded_bytes`, `downloaded_bytes`, `total_peers`, `pending_peers`, `active_peers`, and `connected_seeders`.
+
+`real_delta` is the payload bytes the client actually sent between two announces. Comparing it with `reported_delta` shows whether a reported increase had any real transfer behind it, and the `peers` records reconstruct the peer-activity history. Peer IDs, passkeys, and the raw query are deliberately not logged.
+
+### Examples
 
 ```sh
-TORRENTFS_LAB_FAKE_UPLOAD_RATE=4MiB/s \
-TORRENTFS_LAB_FAKE_UPLOAD_JITTER=25 \
-TORRENTFS_LAB_FAKE_UPLOAD_CAP=200GiB \
-TORRENTFS_LAB_FAKE_UPLOAD_SEED=42 \
+# Control arm: real reporting plus ground truth.
+TORRENTFS_LAB_UPLOAD_MODE=baseline \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-baseline.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# Deterministic anomaly: growth without real transfer.
+TORRENTFS_LAB_UPLOAD_MODE=inject TORRENTFS_LAB_UPLOAD_RATE=4MiB/s \
+TORRENTFS_LAB_UPLOAD_JITTER=25 TORRENTFS_LAB_UPLOAD_CAP=200GiB \
+TORRENTFS_LAB_UPLOAD_SEED=42 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-inject.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# Coupled amplification: only real transfer is amplified.
+TORRENTFS_LAB_UPLOAD_MODE=amplify TORRENTFS_LAB_UPLOAD_MULTIPLIER=5 \
+TORRENTFS_LAB_UPLOAD_JITTER=10 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-amplify.jsonl \
 go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
 ```
 
-When enabled, startup logs a warning named `synthetic announce upload reporting is enabled`. Unit tests and the loopback tracker integration test need no external network:
+When enabled, startup logs a warning named `lab upload experiment enabled`. The tests need no external network:
 
 ```sh
 go test ./internal/lab/
-go test ./internal/session/ -run TestSyntheticAnnounceUploadReachesTracker
+go test ./internal/session/ -run 'TestSyntheticAnnounceUpload|TestBaselineAnnounce|TestTorrentPeerActivities'
 ```
 
 ## Architecture and storage model

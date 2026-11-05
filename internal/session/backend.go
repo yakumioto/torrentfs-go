@@ -351,6 +351,55 @@ func (s *Session) networkStatus(st *Torrent) NetworkStatus {
 	return status
 }
 
+// TorrentPeerActivity is one registered torrent's live peer gauges and real
+// payload counters at a sampling instant. It is diagnostics data, not a
+// registry view, and it does not include piece or file state.
+type TorrentPeerActivity struct {
+	InfoHash         string
+	UploadedBytes    int64
+	DownloadedBytes  int64
+	TotalPeers       int
+	PendingPeers     int
+	ActivePeers      int
+	ConnectedSeeders int
+}
+
+// TorrentPeerActivities returns the peer gauges and real payload counters of
+// every registered torrent, sorted by info hash. The lab experiment sampler
+// uses it to correlate tracker announce statistics with actual peer activity;
+// unlike TorrentStatusFor it does not build piece or file snapshots.
+func (s *Session) TorrentPeerActivities() []TorrentPeerActivity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state != stateActive {
+		return nil
+	}
+	hashes := make([]metainfo.Hash, 0, len(s.torrents))
+	for hash := range s.torrents {
+		hashes = append(hashes, hash)
+	}
+	sort.Slice(hashes, func(i, j int) bool { return bytes.Compare(hashes[i][:], hashes[j][:]) < 0 })
+	activities := make([]TorrentPeerActivity, 0, len(hashes))
+	for _, hash := range hashes {
+		st := s.torrents[hash]
+		if st == nil {
+			continue
+		}
+		stats := st.tor.Stats()
+		gauges := stats.TorrentGauges
+		activities = append(activities, TorrentPeerActivity{
+			InfoHash:         hash.HexString(),
+			UploadedBytes:    stats.ConnStats.BytesWrittenData.Int64(),
+			DownloadedBytes:  stats.ConnStats.BytesReadUsefulData.Int64(),
+			TotalPeers:       gauges.TotalPeers,
+			PendingPeers:     gauges.PendingPeers,
+			ActivePeers:      gauges.ActivePeers,
+			ConnectedSeeders: gauges.ConnectedSeeders,
+		})
+	}
+	return activities
+}
+
 // dhtStatus merges the last recorded bootstrap outcome per family with the live
 // node counts of each running DHT server, so a caller can tell "no server for
 // this family" from "server with an empty routing table".
