@@ -43,9 +43,20 @@ type Reporter struct {
 }
 
 type schedule struct {
-	lastAnnounce     time.Time
+	lastAnnounceAt   time.Time
 	lastRealUploaded int64
 	reported         int64
+}
+
+// ReportedState is one torrent's tracker-visible state at its last announce. It
+// is the same-instant counterpart of the live real counter: comparing the two is
+// what makes an over-report measurable. RealUploadedAtAnnounce is the real
+// payload counter when that announce was sent, so the pending bytes uploaded
+// since then are not yet reflected in ReportedBytes.
+type ReportedState struct {
+	ReportedBytes          int64
+	RealUploadedAtAnnounce int64
+	LastAnnounceAt         time.Time
 }
 
 // NewReporter builds a mode-aware reporter. The caller validates settings with
@@ -80,17 +91,21 @@ func (r *Reporter) RuntimeSettings() RuntimeSettings {
 	return r.runtime
 }
 
-// ReportedUpload returns the cumulative upload last reported per torrent,
-// keyed by hex info hash. It includes torrents that have announced at least
-// once in this process.
-func (r *Reporter) ReportedUpload() map[string]int64 {
+// ReportedStates returns the tracker-visible upload state per torrent, keyed by
+// hex info hash. It includes torrents that have announced at least once in this
+// process.
+func (r *Reporter) ReportedStates() map[string]ReportedState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	reported := make(map[string]int64, len(r.byHash))
+	states := make(map[string]ReportedState, len(r.byHash))
 	for infoHash, schedule := range r.byHash {
-		reported[infoHashHex(infoHash)] = schedule.reported
+		states[infoHashHex(infoHash)] = ReportedState{
+			ReportedBytes:          schedule.reported,
+			RealUploadedAtAnnounce: schedule.lastRealUploaded,
+			LastAnnounceAt:         schedule.lastAnnounceAt,
+		}
 	}
-	return reported
+	return states
 }
 
 // Director is the hook installed through
@@ -148,7 +163,7 @@ func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDe
 	now := r.now()
 	current := r.byHash[infoHash]
 	if current == nil {
-		current = &schedule{lastAnnounce: now, lastRealUploaded: realUploaded}
+		current = &schedule{lastAnnounceAt: now, lastRealUploaded: realUploaded}
 		if mode == ModeBaseline {
 			current.reported = realUploaded
 		}
@@ -158,11 +173,11 @@ func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDe
 
 	realDelta = realUploaded - current.lastRealUploaded
 	current.lastRealUploaded = realUploaded
-	elapsed := now.Sub(current.lastAnnounce).Seconds()
+	elapsed := now.Sub(current.lastAnnounceAt).Seconds()
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	current.lastAnnounce = now
+	current.lastAnnounceAt = now
 
 	previous := current.reported
 	switch mode {

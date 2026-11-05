@@ -159,9 +159,13 @@ func TestReporterBaselineTracksRealCounter(t *testing.T) {
 			t.Fatalf("baseline announce %d query = %q, want the original %q", i, request.URL.RawQuery, original)
 		}
 	}
-	reported := reporter.ReportedUpload()
-	if got := reported[hex.EncodeToString([]byte{0xaa, 0xbb})]; got != 123 {
-		t.Fatalf("baseline reported upload = %d, want the real 123", got)
+	states := reporter.ReportedStates()
+	state, ok := states[hex.EncodeToString([]byte{0xaa, 0xbb})]
+	if !ok {
+		t.Fatalf("reported states = %v, want the torrent", states)
+	}
+	if state.ReportedBytes != 123 || state.RealUploadedAtAnnounce != 123 {
+		t.Fatalf("baseline state = %+v, want reported and announce-time real both 123", state)
 	}
 }
 
@@ -198,16 +202,23 @@ func TestReporterUpdateRuntimeIgnoresInvalidSettings(t *testing.T) {
 	}
 }
 
-func TestReporterReportedUploadSnapshotsPerTorrent(t *testing.T) {
-	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 0}, 1)
-	reporter.UpdateRuntime(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1})
+func TestReporterReportedStatesSnapshotPerTorrent(t *testing.T) {
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reporter := testReporter(RuntimeSettings{Mode: ModeInject, RateBytesPerSecond: 1}, 1)
+	reporter.now = func() time.Time { return clock }
 	reporter.report("\xaa\xbb", 0)
-	reported := reporter.ReportedUpload()
-	if len(reported) != 1 {
-		t.Fatalf("got %d entries, want 1", len(reported))
+	clock = clock.Add(time.Second)
+	state, _, _, _ := reporter.report("\xaa\xbb", 40)
+	states := reporter.ReportedStates()
+	snapshot, ok := states["aabb"]
+	if !ok {
+		t.Fatalf("reported states = %v, want the hex key aabb", states)
 	}
-	if _, ok := reported["aabb"]; !ok {
-		t.Fatalf("reported map = %v, want the hex key aabb", reported)
+	if snapshot.ReportedBytes != state || snapshot.RealUploadedAtAnnounce != 40 {
+		t.Fatalf("state = %+v, want reported %d and announce-time real 40", snapshot, state)
+	}
+	if !snapshot.LastAnnounceAt.Equal(clock) {
+		t.Fatalf("last announce = %v, want %v", snapshot.LastAnnounceAt, clock)
 	}
 }
 

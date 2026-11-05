@@ -49,8 +49,19 @@ func TestGetLabEnabled(t *testing.T) {
 		AnnounceLogPath:    "/tmp/lab.jsonl",
 		PeerSampleInterval: 5 * time.Second,
 		Torrents: []session.LabTorrentStatus{
-			{InfoHash: "aaaa", RealUploadedBytes: 100, ReportedUploadedBytes: 5000},
-			{InfoHash: "bbbb", RealUploadedBytes: 50, ReportedUploadedBytes: 25},
+			{
+				InfoHash:                        "aaaa",
+				RealUploadedBytes:               100,
+				RealUploadedAtLastAnnounceBytes: 90,
+				ReportedUploadedBytes:           5000,
+				LastAnnounceAt:                  time.Date(2026, 11, 5, 15, 12, 0, 0, time.UTC),
+			},
+			{
+				InfoHash:                        "bbbb",
+				RealUploadedBytes:               50,
+				RealUploadedAtLastAnnounceBytes: 40,
+				ReportedUploadedBytes:           25,
+			},
 		},
 	}}
 	srv := newTestServer(t, backend, nil)
@@ -69,14 +80,18 @@ func TestGetLabEnabled(t *testing.T) {
 		AnnounceLog               string  `json:"announce_log"`
 		PeerSampleIntervalSeconds float64 `json:"peer_sample_interval_seconds"`
 		Totals                    struct {
-			RealUploadedBytes     int64 `json:"real_uploaded_bytes"`
-			ReportedUploadedBytes int64 `json:"reported_uploaded_bytes"`
-			OverreportedBytes     int64 `json:"overreported_bytes"`
+			RealUploadedBytes               int64 `json:"real_uploaded_bytes"`
+			RealUploadedAtLastAnnounceBytes int64 `json:"real_uploaded_at_last_announce_bytes"`
+			ReportedUploadedBytes           int64 `json:"reported_uploaded_bytes"`
+			OverreportedBytes               int64 `json:"overreported_bytes"`
+			PendingRealUploadBytes          int64 `json:"pending_real_upload_bytes"`
 		} `json:"totals"`
 		Torrents []struct {
-			InfoHash              string `json:"info_hash"`
-			RealUploadedBytes     int64  `json:"real_uploaded_bytes"`
-			ReportedUploadedBytes int64  `json:"reported_uploaded_bytes"`
+			InfoHash                        string  `json:"info_hash"`
+			RealUploadedBytes               int64   `json:"real_uploaded_bytes"`
+			RealUploadedAtLastAnnounceBytes int64   `json:"real_uploaded_at_last_announce_bytes"`
+			ReportedUploadedBytes           int64   `json:"reported_uploaded_bytes"`
+			LastAnnounceAt                  *string `json:"last_announce_at"`
 		} `json:"torrents"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -91,11 +106,21 @@ func TestGetLabEnabled(t *testing.T) {
 	if got.Seed != 42 || got.AnnounceLog != "/tmp/lab.jsonl" || got.PeerSampleIntervalSeconds != 5 {
 		t.Fatalf("metadata = seed %d log %q interval %v", got.Seed, got.AnnounceLog, got.PeerSampleIntervalSeconds)
 	}
-	if got.Totals.RealUploadedBytes != 150 || got.Totals.ReportedUploadedBytes != 5025 || got.Totals.OverreportedBytes != 4875 {
+	if got.Totals.RealUploadedBytes != 150 ||
+		got.Totals.RealUploadedAtLastAnnounceBytes != 130 ||
+		got.Totals.ReportedUploadedBytes != 5025 ||
+		got.Totals.OverreportedBytes != 4895 ||
+		got.Totals.PendingRealUploadBytes != 20 {
 		t.Fatalf("totals = %+v", got.Totals)
 	}
 	if len(got.Torrents) != 2 || got.Torrents[0].InfoHash != "aaaa" || got.Torrents[1].ReportedUploadedBytes != 25 {
 		t.Fatalf("torrents = %+v", got.Torrents)
+	}
+	if got.Torrents[0].RealUploadedAtLastAnnounceBytes != 90 || got.Torrents[0].LastAnnounceAt == nil {
+		t.Fatalf("announce-time fields = %+v", got.Torrents[0])
+	}
+	if got.Torrents[1].LastAnnounceAt != nil {
+		t.Fatalf("zero last announce time should serialize as null, got %v", *got.Torrents[1].LastAnnounceAt)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/lab"
@@ -37,18 +38,26 @@ type labSettingsBody struct {
 }
 
 // labTorrentBody is the per-torrent real versus reported upload comparison.
+// RealUploadedBytes is live; RealUploadedAtLastAnnounceBytes is the same counter
+// when the last announce was sent, which is the value the tracker can see.
 type labTorrentBody struct {
-	InfoHash              string `json:"info_hash"`
-	RealUploadedBytes     int64  `json:"real_uploaded_bytes"`
-	ReportedUploadedBytes int64  `json:"reported_uploaded_bytes"`
+	InfoHash                        string     `json:"info_hash"`
+	RealUploadedBytes               int64      `json:"real_uploaded_bytes"`
+	RealUploadedAtLastAnnounceBytes int64      `json:"real_uploaded_at_last_announce_bytes"`
+	ReportedUploadedBytes           int64      `json:"reported_uploaded_bytes"`
+	LastAnnounceAt                  *time.Time `json:"last_announce_at"`
 }
 
-// labTotalsBody aggregates the tracked torrents. OverreportedBytes is
-// reported minus real and may be negative.
+// labTotalsBody aggregates the tracked torrents. OverreportedBytes is reported
+// minus the real counter at the last announce and may be negative;
+// PendingRealUploadBytes is the live counter minus that same announce-time
+// counter, i.e. traffic the tracker has not seen yet.
 type labTotalsBody struct {
-	RealUploadedBytes     int64 `json:"real_uploaded_bytes"`
-	ReportedUploadedBytes int64 `json:"reported_uploaded_bytes"`
-	OverreportedBytes     int64 `json:"overreported_bytes"`
+	RealUploadedBytes               int64 `json:"real_uploaded_bytes"`
+	RealUploadedAtLastAnnounceBytes int64 `json:"real_uploaded_at_last_announce_bytes"`
+	ReportedUploadedBytes           int64 `json:"reported_uploaded_bytes"`
+	OverreportedBytes               int64 `json:"overreported_bytes"`
+	PendingRealUploadBytes          int64 `json:"pending_real_upload_bytes"`
 }
 
 // labBody is the GET /api/v1/lab response contract.
@@ -90,15 +99,23 @@ func newLabBody(status session.LabStatus) labBody {
 		CapBytes:           settings.CapBytes,
 	}
 	for _, torrent := range status.Torrents {
-		body.Torrents = append(body.Torrents, labTorrentBody{
-			InfoHash:              torrent.InfoHash,
-			RealUploadedBytes:     torrent.RealUploadedBytes,
-			ReportedUploadedBytes: torrent.ReportedUploadedBytes,
-		})
+		entry := labTorrentBody{
+			InfoHash:                        torrent.InfoHash,
+			RealUploadedBytes:               torrent.RealUploadedBytes,
+			RealUploadedAtLastAnnounceBytes: torrent.RealUploadedAtLastAnnounceBytes,
+			ReportedUploadedBytes:           torrent.ReportedUploadedBytes,
+		}
+		if !torrent.LastAnnounceAt.IsZero() {
+			lastAnnounce := torrent.LastAnnounceAt
+			entry.LastAnnounceAt = &lastAnnounce
+		}
+		body.Torrents = append(body.Torrents, entry)
 		body.Totals.RealUploadedBytes += torrent.RealUploadedBytes
+		body.Totals.RealUploadedAtLastAnnounceBytes += torrent.RealUploadedAtLastAnnounceBytes
 		body.Totals.ReportedUploadedBytes += torrent.ReportedUploadedBytes
 	}
-	body.Totals.OverreportedBytes = body.Totals.ReportedUploadedBytes - body.Totals.RealUploadedBytes
+	body.Totals.OverreportedBytes = body.Totals.ReportedUploadedBytes - body.Totals.RealUploadedAtLastAnnounceBytes
+	body.Totals.PendingRealUploadBytes = body.Totals.RealUploadedBytes - body.Totals.RealUploadedAtLastAnnounceBytes
 	return body
 }
 

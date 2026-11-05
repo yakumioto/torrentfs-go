@@ -15,8 +15,20 @@ function labView(overrides: Partial<LabView> = {}): LabView {
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
     peer_sample_interval_seconds: 5,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 4_197_247, overreported_bytes: 4_197_247 },
-    torrents: [{ info_hash: 'abc123', real_uploaded_bytes: 0, reported_uploaded_bytes: 4_197_247 }],
+    totals: {
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 4_197_247,
+      overreported_bytes: 4_197_247,
+      pending_real_upload_bytes: 5_000_000,
+    },
+    torrents: [{
+      info_hash: 'abc123',
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 4_197_247,
+      last_announce_at: '2026-11-05T15:12:00.123456Z',
+    }],
     ...overrides,
   };
 }

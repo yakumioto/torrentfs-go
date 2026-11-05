@@ -131,6 +131,12 @@ func TestSyntheticAnnounceUploadReachesTracker(t *testing.T) {
 	if status.Torrents[0].ReportedUploadedBytes != last.Uploaded {
 		t.Fatalf("reported uploaded = %d, want the last announced %d", status.Torrents[0].ReportedUploadedBytes, last.Uploaded)
 	}
+	if status.Torrents[0].RealUploadedAtLastAnnounceBytes != 0 {
+		t.Fatalf("announce-time real = %d, want 0 without peers", status.Torrents[0].RealUploadedAtLastAnnounceBytes)
+	}
+	if status.Torrents[0].LastAnnounceAt.IsZero() {
+		t.Fatal("last announce time is zero after a real announce")
+	}
 }
 
 // TestBaselineAnnounceKeepsRealUpload is the control arm: the same client and

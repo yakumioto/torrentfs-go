@@ -42,7 +42,13 @@ function disabledLab() {
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
     torrents: [],
   };
 }
@@ -273,14 +279,27 @@ describe('TorrentDetailPage', () => {
   it('shows the per-torrent lab counters only when the experiment is enabled', async () => {
     const torrent = makeTorrent({ name: 'Lab fixture', state: 'ready', info_hash: 'abc123' });
     const status = makeStatus(torrent);
+    const lastAnnounceAt = new Date(Date.now() - 13 * 60 * 1000).toISOString();
     const enabledLab = {
       enabled: true,
-      settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
+      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 2, jitter_percent: 20, cap_bytes: 0 },
       seed: 42,
       announce_log: '/var/log/torrentfs/lab.jsonl',
       peer_sample_interval_seconds: 5,
-      totals: { real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247, overreported_bytes: 4_196_247 },
-      torrents: [{ info_hash: 'abc123', real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247 }],
+      totals: {
+        real_uploaded_bytes: 5_000_000,
+        real_uploaded_at_last_announce_bytes: 1000,
+        reported_uploaded_bytes: 4_197_247,
+        overreported_bytes: 4_196_247,
+        pending_real_upload_bytes: 4_999_000,
+      },
+      torrents: [{
+        info_hash: 'abc123',
+        real_uploaded_bytes: 5_000_000,
+        real_uploaded_at_last_announce_bytes: 1000,
+        reported_uploaded_bytes: 4_197_247,
+        last_announce_at: lastAnnounceAt,
+      }],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -292,11 +311,16 @@ describe('TorrentDetailPage', () => {
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验' })).toBeInTheDocument());
-    expect(screen.getByText('真实上传')).toBeInTheDocument();
+    expect(screen.getByText('实时真实上传')).toBeInTheDocument();
+    expect(screen.getByText('上次上报时真实')).toBeInTheDocument();
     expect(screen.getByText('Tracker 上报')).toBeInTheDocument();
+    expect(screen.getByText('待上报真实增量')).toBeInTheDocument();
+    expect(screen.getByText('放大真实上传')).toBeInTheDocument();
     expect(screen.getByText('1000 B')).toBeInTheDocument();
-    expect(screen.getByText('4.0 MiB')).toBeInTheDocument();
     expect(screen.getByText('+4.0 MiB')).toBeInTheDocument();
+    expect(screen.getAllByText('4.8 MiB')).toHaveLength(2);
+    expect(screen.getByText(/分钟前/)).toBeInTheDocument();
+    expect(screen.getByText(/Tracker 只在上报（announce）时看到新值/)).toBeInTheDocument();
     expect(screen.getByText(/peer 采样间隔为 5 秒/)).toBeInTheDocument();
   });
 });

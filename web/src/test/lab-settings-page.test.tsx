@@ -20,7 +20,13 @@ function enabledLab(overrides: Partial<LabView> = {}): LabView {
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
     peer_sample_interval_seconds: 5,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 4_197_247, overreported_bytes: 4_197_247 },
+    totals: {
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 4_197_247,
+      overreported_bytes: 4_197_247,
+      pending_real_upload_bytes: 5_000_000,
+    },
     torrents: [],
     ...overrides,
   };
@@ -33,7 +39,13 @@ function disabledLab(): LabView {
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
     torrents: [],
   };
 }
@@ -88,6 +100,7 @@ describe('LabSettingsPage', () => {
     expect(screen.getByLabelText('虚报速率')).toHaveValue('2MiB/s');
     expect(screen.getByLabelText('抖动百分比')).toHaveValue('20');
     expect(screen.getByLabelText('上报上限（可选）')).toHaveValue('');
+    expect(screen.getByText(/amplify 的上报值在每次 announce 时按真实增量 × 倍率累积/)).toBeInTheDocument();
 
     const [url, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('/api/v1/lab');

@@ -12,7 +12,6 @@ import {
   formatSignedBytes,
   labModeLabel,
   labModeOption,
-  labOverreportedBytes,
   LAB_MODE_OPTIONS,
 } from '../utils/lab';
 import {
@@ -233,6 +232,10 @@ export function LabSettingsPage() {
               disabled={controlsDisabled}
             />
             <p className={styles.modeHint}>{modeOption?.description}</p>
+            <p className={styles.modeHint}>
+              amplify 的上报值在每次 announce 时按真实增量 × 倍率累积；两次 announce 之间实时真实量会领先于上报值，
+              Dashboard 已区分这两个时点。
+            </p>
 
             {mode === 'inject' && (
               <TextInput
@@ -330,9 +333,11 @@ export function LabSettingsPage() {
             <div><dt>随机种子</dt><dd className="text-mono">{enabled ? query.data?.seed : '—'}</dd></div>
             <div><dt>Announce 日志</dt><dd className="text-mono">{enabled && query.data?.announce_log ? query.data.announce_log : '—'}</dd></div>
             <div><dt>Peer 采样间隔</dt><dd>{enabled ? formatPeerSampleInterval(query.data?.peer_sample_interval_seconds ?? 0) : '—'}</dd></div>
-            <div><dt>本次启动真实上传</dt><dd className="text-mono">{formatBytes(totals?.real_uploaded_bytes ?? 0)}</dd></div>
+            <div><dt>实时真实上传</dt><dd className="text-mono">{formatBytes(totals?.real_uploaded_bytes ?? 0)}</dd></div>
+            <div><dt>上次上报时真实</dt><dd className="text-mono">{formatBytes(totals?.real_uploaded_at_last_announce_bytes ?? 0)}</dd></div>
             <div><dt>Tracker 上报</dt><dd className="text-mono">{formatBytes(totals?.reported_uploaded_bytes ?? 0)}</dd></div>
-            <div><dt>虚报量</dt><dd className="text-mono">{formatSignedBytes(labOverreportedBytes(totals?.reported_uploaded_bytes ?? 0, totals?.real_uploaded_bytes ?? 0))}</dd></div>
+            <div><dt>虚报量</dt><dd className="text-mono">{formatSignedBytes(totals?.overreported_bytes ?? 0)}</dd></div>
+            <div><dt>待上报真实增量</dt><dd className="text-mono">{formatBytes(totals?.pending_real_upload_bytes ?? 0)}</dd></div>
           </dl>
           {!enabled && (
             <p className={styles.metaEmpty}>启用实验后，这里会显示种子、日志路径与实时统计。</p>

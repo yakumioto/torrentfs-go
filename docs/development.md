@@ -71,8 +71,10 @@ Dashboard 顶部显示本次启动的真实上传、Tracker 上报与虚报量�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/v1/lab` | 返回 `enabled`、`settings`、`seed`、`announce_log`、采样周期、`totals` 和逐种子 `real_uploaded_bytes`/`reported_uploaded_bytes` |
+| `GET` | `/api/v1/lab` | 返回实验配置、`totals` 与逐种子计数。每个种子同时给出实时 `real_uploaded_bytes`、上次 announce 时的 `real_uploaded_at_last_announce_bytes`、`reported_uploaded_bytes` 和 `last_announce_at`；`totals` 另有 `overreported_bytes`（上报相对 announce 时真实量的差额）和 `pending_real_upload_bytes`（announce 之后尚未上报的真实增量） |
 | `PUT` | `/api/v1/lab/settings` | 更新运行时设置，body 为 `{mode, rate_bytes_per_second, multiplier, jitter_percent, cap_bytes}`，返回更新后的同一结构 |
+
+两个真实计数的时点不同：Tracker 只在上报（announce）时看到新值，所以 `reported_uploaded_bytes` 对应的是 `real_uploaded_at_last_announce_bytes`，而不是实时的 `real_uploaded_bytes`。两次 announce 之间真实上传继续发生，面板上的「待上报真实增量」就是这部分；直接用上报值减实时真实值会得到看似异常的负虚报量。判断倍率是否生效应使用 `overreported_bytes`（上报 − announce 时真实量）。
 
 PUT 的错误码：`invalid_lab_settings`（400）、`lab_disabled`（409，未启用实验）、`lab_settings_storage_unavailable` / `lab_settings_durability_unconfirmed`（503）。
 

@@ -38,7 +38,13 @@ function disabledLabResponse(): Response {
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
     torrents: [],
   });
 }

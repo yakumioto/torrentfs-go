@@ -161,15 +161,25 @@ export interface LabSettingsUpdate {
 
 export interface LabTorrentStat {
   info_hash: string;
+  /** Live real upload counter for this torrent. */
   real_uploaded_bytes: number;
+  /** Real upload counter captured when the last announce was sent. */
+  real_uploaded_at_last_announce_bytes: number;
   reported_uploaded_bytes: number;
+  /** RFC3339 timestamp of the last announce; may be null when unknown. */
+  last_announce_at?: string | null;
 }
 
 export interface LabTotals {
+  /** Live real upload counter since start. */
   real_uploaded_bytes: number;
+  /** Real upload counter at the moment the last announce was sent. */
+  real_uploaded_at_last_announce_bytes: number;
   reported_uploaded_bytes: number;
-  /** reported - real; may be negative. */
+  /** reported - real_at_last_announce; may be negative. */
   overreported_bytes: number;
+  /** real_live - real_at_last_announce: real bytes not yet part of a report. */
+  pending_real_upload_bytes: number;
 }
 
 export interface LabView {

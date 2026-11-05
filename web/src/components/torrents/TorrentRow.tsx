@@ -9,8 +9,26 @@ import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
-import { formatSignedBytes, labOverreportedBytes } from '../../utils/lab';
+import { formatSignedBytes, labOverreportedBytes, labPendingRealUploadBytes } from '../../utils/lab';
 import { StateBadge } from './StateBadge';
+
+/**
+ * The row compares reported bytes with the real counter captured at the last
+ * announce, not with the live counter: only the former is the value the
+ * tracker actually received. The pending real upload is surfaced in the title
+ * so the usually large live-vs-reported gap is explained instead of looking
+ * like a reporting bug.
+ */
+function labRowTitle(labStat: LabTorrentStat | undefined): string {
+  if (labStat === undefined) {
+    return '上传实验：这个种子还没有向 tracker 上报过上传量。';
+  }
+  const pending = labPendingRealUploadBytes(
+    labStat.real_uploaded_bytes,
+    labStat.real_uploaded_at_last_announce_bytes,
+  );
+  return `相对上次上报时真实量；待上报 ${formatBytes(pending)} 尚未计入`;
+}
 
 export function TorrentRow({ torrent, labEnabled = false, labStat }: {
   torrent: Torrent;
@@ -52,11 +70,11 @@ export function TorrentRow({ torrent, labEnabled = false, labStat }: {
           {labEnabled && (
             <span
               className={styles.labValues}
-              title="上传实验：Tracker 上报量 / 相对真实上传的虚报量"
+              title={labRowTitle(labStat)}
             >
               上报 {labStat === undefined ? '—' : formatBytes(labStat.reported_uploaded_bytes)}
               {' · '}
-              虚报 {labStat === undefined ? '—' : formatSignedBytes(labOverreportedBytes(labStat.reported_uploaded_bytes, labStat.real_uploaded_bytes))}
+              虚报 {labStat === undefined ? '—' : formatSignedBytes(labOverreportedBytes(labStat.reported_uploaded_bytes, labStat.real_uploaded_at_last_announce_bytes))}
             </span>
           )}
         </div>

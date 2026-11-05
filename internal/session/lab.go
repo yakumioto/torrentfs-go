@@ -193,12 +193,19 @@ func (s *Session) startLabSampler(state *labState) {
 	}()
 }
 
-// LabTorrentStatus is one torrent's real and tracker-reported upload counters.
+// LabTorrentStatus is one torrent's live real counter, the value the same
+// counter had when the last announce was sent, and the tracker-reported value.
 // Only torrents that have announced at least once in this process appear.
 type LabTorrentStatus struct {
-	InfoHash              string
-	RealUploadedBytes     int64
-	ReportedUploadedBytes int64
+	InfoHash          string
+	RealUploadedBytes int64
+	// RealUploadedAtLastAnnounceBytes is the real payload counter at the time the
+	// last announce was sent. Over-reporting must be measured against this value,
+	// not the live counter: bytes uploaded after the announce are not visible to
+	// the tracker until the next one.
+	RealUploadedAtLastAnnounceBytes int64
+	ReportedUploadedBytes           int64
+	LastAnnounceAt                  time.Time
 }
 
 // LabStatus is the management API's view of the experiment.
@@ -221,10 +228,10 @@ func (s *Session) LabStatus() LabStatus {
 	if state == nil || s.state != stateActive {
 		return LabStatus{}
 	}
-	reported := state.reporter.ReportedUpload()
+	states := state.reporter.ReportedStates()
 	torrents := make([]LabTorrentStatus, 0, len(s.torrents))
 	for hash, handle := range s.torrents {
-		reportedBytes, ok := reported[hash.HexString()]
+		reported, ok := states[hash.HexString()]
 		if !ok {
 			continue
 		}
@@ -234,9 +241,11 @@ func (s *Session) LabStatus() LabStatus {
 			realBytes = stats.ConnStats.BytesWrittenData.Int64()
 		}
 		torrents = append(torrents, LabTorrentStatus{
-			InfoHash:              hash.HexString(),
-			RealUploadedBytes:     realBytes,
-			ReportedUploadedBytes: reportedBytes,
+			InfoHash:                        hash.HexString(),
+			RealUploadedBytes:               realBytes,
+			RealUploadedAtLastAnnounceBytes: reported.RealUploadedAtAnnounce,
+			ReportedUploadedBytes:           reported.ReportedBytes,
+			LastAnnounceAt:                  reported.LastAnnounceAt,
 		})
 	}
 	sort.Slice(torrents, func(i, j int) bool { return torrents[i].InfoHash < torrents[j].InfoHash })

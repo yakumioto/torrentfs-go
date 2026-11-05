@@ -49,7 +49,13 @@ function disabledLab(): LabView {
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
-    totals: { real_uploaded_bytes: 0, reported_uploaded_bytes: 0, overreported_bytes: 0 },
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
     torrents: [],
   };
 }
@@ -61,8 +67,20 @@ function enabledLab(overrides: Partial<LabView> = {}): LabView {
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
     peer_sample_interval_seconds: 5,
-    totals: { real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247, overreported_bytes: 4_196_247 },
-    torrents: [{ info_hash: 'abc123', real_uploaded_bytes: 1000, reported_uploaded_bytes: 4_197_247 }],
+    totals: {
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 1000,
+      reported_uploaded_bytes: 4_197_247,
+      overreported_bytes: 4_196_247,
+      pending_real_upload_bytes: 4_999_000,
+    },
+    torrents: [{
+      info_hash: 'abc123',
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 1000,
+      reported_uploaded_bytes: 4_197_247,
+      last_announce_at: '2026-11-05T15:12:00.123456Z',
+    }],
     ...overrides,
   };
 }
@@ -261,12 +279,17 @@ describe('DashboardPage', () => {
     const card = screen.getByRole('link', { name: '上传实验：打开上传实验设置' });
     expect(card).toHaveTextContent('上传实验');
     expect(card).toHaveTextContent('注入虚报');
-    expect(card).toHaveTextContent('本次启动真实上传');
+    expect(card).toHaveTextContent('实时真实上传');
+    expect(card).toHaveTextContent('上次上报时真实');
     expect(card).toHaveTextContent('Tracker 上报');
+    expect(card).toHaveTextContent('待上报真实增量');
     expect(card).toHaveTextContent('+4.0 MiB');
+    expect(card).toHaveTextContent('上报值只在 tracker announce 时更新');
 
     const row = screen.getByRole('listitem');
     expect(row).toHaveTextContent('上报 4.0 MiB · 虚报 +4.0 MiB');
+    // The row explains that the live-vs-reported gap is pending, not a bug.
+    expect(screen.getByTitle('相对上次上报时真实量；待上报 4.8 MiB 尚未计入')).toBeInTheDocument();
 
     fireEvent.click(card);
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());

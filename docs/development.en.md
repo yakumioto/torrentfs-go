@@ -68,8 +68,10 @@ The Dashboard shows this run's real upload, tracker-reported upload, and overrep
 
 | Method | Path | Meaning |
 | --- | --- | --- |
-| `GET` | `/api/v1/lab` | Returns `enabled`, `settings`, `seed`, `announce_log`, sample period, `totals`, and per-torrent `real_uploaded_bytes`/`reported_uploaded_bytes` |
+| `GET` | `/api/v1/lab` | Returns the experiment configuration, `totals`, and per-torrent counters: the live `real_uploaded_bytes`, the counter at the last announce `real_uploaded_at_last_announce_bytes`, `reported_uploaded_bytes`, and `last_announce_at`. `totals` also carries `overreported_bytes` (reported minus announce-time real) and `pending_real_upload_bytes` (real bytes uploaded after the last announce, not yet reported) |
 | `PUT` | `/api/v1/lab/settings` | Updates runtime settings; the body is `{mode, rate_bytes_per_second, multiplier, jitter_percent, cap_bytes}` and the response is the same structure |
+
+The two real counters are sampled at different instants: a tracker only sees a new value at an announce, so `reported_uploaded_bytes` corresponds to `real_uploaded_at_last_announce_bytes`, not to the live `real_uploaded_bytes`. Real uploads continue between announces and appear as "pending real upload"; subtracting the live counter from the reported value produces a misleading negative over-report. Use `overreported_bytes` (reported minus announce-time real) to judge whether the multiplier is in force.
 
 PUT error codes: `invalid_lab_settings` (400), `lab_disabled` (409, experiment not enabled), `lab_settings_storage_unavailable` / `lab_settings_durability_unconfirmed` (503).
 
