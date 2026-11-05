@@ -23,6 +23,39 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 
 [build-web.sh](../scripts/build-web.sh) installs frontend dependencies from the lockfile, builds `web/dist`, and removes `web/node_modules`; it does not remove `web/dist`.
 
+## Synthetic announce upload (experimental)
+
+`internal/lab` contains a research-only tracker announce rewriter. It builds controlled, anomalous upload traffic against a tracker you run, so tracker-side anomaly detection can be exercised. It lives on a test branch, has no TOML configuration, and stays off unless the environment variables below are set. Do not enable it against an unauthorized third-party tracker.
+
+| Variable | Meaning |
+| --- | --- |
+| `TORRENTFS_LAB_FAKE_UPLOAD_RATE` | Required enable switch. Average reported rate as a byte quantity; both `4MiB/s` and `4MiB` mean 4 MiB per second. |
+| `TORRENTFS_LAB_FAKE_UPLOAD_JITTER` | Optional per-announce deviation from the average rate, in percent (0-100); defaults to `20`. |
+| `TORRENTFS_LAB_FAKE_UPLOAD_CAP` | Optional per-torrent ceiling on the cumulative reported upload as a byte quantity; unset or `0` means uncapped. |
+| `TORRENTFS_LAB_FAKE_UPLOAD_SEED` | Optional seed for the jitter sequence, for reproducible runs; unset seeds from the wall clock. |
+
+Behavior:
+
+- Only the `uploaded` parameter of HTTP(S) tracker announces is rewritten; `downloaded`, `left`, `event`, passkey, and other parameters keep their real values. UDP trackers and DHT are unaffected.
+- The first announce for an info hash reports `0`, matching the upload counter at session start. Later announces add `rate × wall time since the previous announce`, multiplied by a random factor in `[1 - jitter, 1 + jitter]`. The increment is never negative, so the reported value is monotonic.
+- After the cap is reached the value freezes; the client's real upload counter is ignored and the reported number is purely synthetic.
+- An incomplete configuration (for example jitter without a rate) exits with a configuration error (exit code 2) instead of silently falling back to real reporting.
+
+```sh
+TORRENTFS_LAB_FAKE_UPLOAD_RATE=4MiB/s \
+TORRENTFS_LAB_FAKE_UPLOAD_JITTER=25 \
+TORRENTFS_LAB_FAKE_UPLOAD_CAP=200GiB \
+TORRENTFS_LAB_FAKE_UPLOAD_SEED=42 \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+```
+
+When enabled, startup logs a warning named `synthetic announce upload reporting is enabled`. Unit tests and the loopback tracker integration test need no external network:
+
+```sh
+go test ./internal/lab/
+go test ./internal/session/ -run TestSyntheticAnnounceUploadReachesTracker
+```
+
 ## Architecture and storage model
 
 ```text

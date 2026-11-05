@@ -26,6 +26,39 @@ npm run dev --prefix web
 
 Vite 默认监听 `127.0.0.1:5173`，将 `/api` 代理到 `http://127.0.0.1:8080`。生产 UI 由 Go embed 提供，使用同源相对 `/api/v1` 请求。
 
+## 合成上传统计（实验性）
+
+`internal/lab` 提供一个仅用于研究的 tracker announce 改写器，用于在你自建或自运营的 tracker 上构造可控的异常上传流量，验证服务端异常检测。它只在测试分支上开发，不提供 TOML 配置项；默认关闭，只有设置下列环境变量才生效。不要在未获授权的第三方站点上启用。
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `TORRENTFS_LAB_FAKE_UPLOAD_RATE` | 启用开关，必填。平均上报速率，带字节单位；`4MiB/s` 与 `4MiB` 都表示每秒 4 MiB。 |
+| `TORRENTFS_LAB_FAKE_UPLOAD_JITTER` | 可选。单次 announce 相对平均速率的随机偏差百分比（0–100），默认 `20`。 |
+| `TORRENTFS_LAB_FAKE_UPLOAD_CAP` | 可选。每个种子累计上报上限，带字节单位；不设置或 `0` 表示不封顶。 |
+| `TORRENTFS_LAB_FAKE_UPLOAD_SEED` | 可选。抖动随机序列的种子，用于复现实验；不设置时取自墙钟。 |
+
+行为约定：
+
+- 只改写 HTTP(S) tracker announce 的 `uploaded` 参数；`downloaded`、`left`、`event`、passkey 等保持真实值。UDP tracker 与 DHT 不受影响。
+- 每个 info hash 的第一次 announce 上报 `0`（对应会话开始时的上传计数）；之后按 `rate × 距上次 announce 的墙钟时间` 增长，再乘以 `[1 - jitter, 1 + jitter]` 的随机因子。增量永不为负，所以上报值单调不减。
+- 达到 cap 后冻结在上限值；客户端真实上传计数被忽略，上报的是纯合成数据。
+- 配置不完整（例如只设置 jitter 而没有 rate）会作为配置错误退出（退出码 2），避免静默退回真实上报。
+
+```sh
+TORRENTFS_LAB_FAKE_UPLOAD_RATE=4MiB/s \
+TORRENTFS_LAB_FAKE_UPLOAD_JITTER=25 \
+TORRENTFS_LAB_FAKE_UPLOAD_CAP=200GiB \
+TORRENTFS_LAB_FAKE_UPLOAD_SEED=42 \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+```
+
+启用时启动日志会输出一条 warn 级别的 `synthetic announce upload reporting is enabled`。单元测试和 loopback tracker 集成测试不需要外部网络：
+
+```sh
+go test ./internal/lab/
+go test ./internal/session/ -run TestSyntheticAnnounceUploadReachesTracker
+```
+
 ## 架构与边界
 
 ```text

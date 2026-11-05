@@ -154,7 +154,14 @@ func run(args []string, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	sess, err := session.New(cfg, torrentsDir, session.WithLogger(logger))
+	labOptions, labErr := syntheticUploadOptions(logger)
+	if labErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
+		return 2
+	}
+
+	sess, err := session.New(cfg, torrentsDir,
+		append([]session.Option{session.WithLogger(logger)}, labOptions...)...)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {

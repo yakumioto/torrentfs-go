@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,12 +42,29 @@ type Option func(*sessionOptions)
 
 type sessionOptions struct {
 	logger *slog.Logger
+	// announceRequestDirector, when non-nil, rewrites each HTTP tracker
+	// announce request after the client fills in its parameters. Only the
+	// experimental synthetic-upload harness sets it; see internal/lab.
+	announceRequestDirector func(*http.Request) error
 }
 
 // WithLogger routes session and anacrolix client logs to l.
 func WithLogger(l *slog.Logger) Option {
 	return func(options *sessionOptions) {
 		options.logger = l
+	}
+}
+
+// WithAnnounceRequestDirector installs a hook that may rewrite each HTTP(S)
+// tracker announce request after the client fills in uploaded, downloaded,
+// left, event, and the other announce parameters. It exists for the
+// experimental synthetic-upload harness (internal/lab), which fabricates
+// announce statistics to exercise tracker-side anomaly detection; a normal
+// deployment never sets it. UDP tracker announces and DHT announcements bypass
+// the hook.
+func WithAnnounceRequestDirector(director func(*http.Request) error) Option {
+	return func(options *sessionOptions) {
+		options.announceRequestDirector = director
 	}
 }
 
@@ -273,6 +291,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	uploadRate.configure(cc)
 	if customize != nil {
 		customize(cc)
+	}
+	if options.announceRequestDirector != nil {
+		cc.HttpRequestDirector = options.announceRequestDirector
 	}
 	// The peer ID is resolved after customize so an explicitly injected client
 	// config always wins, and before NewClient so the durable identity is the
