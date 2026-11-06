@@ -1,7 +1,8 @@
 # Default configuration for the Docker image.
 # Every configuration key has an environment variable, derived from its path:
 # the path in upper case, with the dots replaced by underscores, under the
-# TORRENTFS_ prefix. There are no exceptions.
+# TORRENTFS_ prefix. The image names this file with -config; TORRENTFS_CONFIG
+# names it too, and the argument wins over the variable.
 
 # Default: none (HTTP-only). Explicitly select with TORRENTFS_BACKEND or a
 # custom TOML. A configured mountpoint does not select the FUSE output.

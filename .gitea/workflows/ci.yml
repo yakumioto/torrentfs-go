@@ -71,7 +71,7 @@ jobs:
       - name: Lint
         run: $(go env GOPATH)/bin/golangci-lint run ./...
 
-  # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
+  # Real-mount job. It sets TF_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
   # skipping every real-mount test. The runner executes jobs in a container,
   # so the FUSE device and the mount capability must be passed into that
@@ -83,7 +83,7 @@ jobs:
       image: ghcr.io/catthehacker/ubuntu:act-latest
       options: --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
     env:
-      TORRENTFS_FUSE_REQUIRED: "1"
+      TF_FUSE_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v4

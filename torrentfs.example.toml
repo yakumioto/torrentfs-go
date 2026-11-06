@@ -7,8 +7,12 @@
 # environment variable, derived from its path: the path in upper case, with the
 # dots replaced by underscores, under the TORRENTFS_ prefix. For example,
 # http.auth.token_ttl becomes TORRENTFS_HTTP_AUTH_TOKEN_TTL and cache.capacity
-# becomes TORRENTFS_CACHE_CAPACITY. There are no exceptions. The precedence is
-# environment variables, this file, then built-in defaults.
+# becomes TORRENTFS_CACHE_CAPACITY. The precedence is environment variables,
+# this file, then built-in defaults.
+#
+# This file is the one the -config argument names. TORRENTFS_CONFIG names it
+# too, for a deployment that cannot change the command line; the argument
+# wins over the variable. There is no implicit search path.
 #
 # Both FUSE and SMB expose only the same read-only virtual data tree. Management
 # (add, delete, status) happens over HTTP; internal metadata is never shared.

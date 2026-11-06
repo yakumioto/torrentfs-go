@@ -67,14 +67,14 @@ jobs:
       - name: Run single-container SMB smoke
         run: ./scripts/docker-smb-smoke.sh
 
-  # Real-mount job. It sets TORRENTFS_FUSE_REQUIRED=1, so a runner without
+  # Real-mount job. It sets TF_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
   # skipping every real-mount test.
   fuse:
     name: real FUSE mount tests (required)
     runs-on: ubuntu-latest
     env:
-      TORRENTFS_FUSE_REQUIRED: "1"
+      TF_FUSE_REQUIRED: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

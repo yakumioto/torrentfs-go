@@ -65,13 +65,17 @@ func (n RemovedName) migration() string {
 // errors and the README migration table are both derived from this table, so a
 // name cannot disappear from the code while it is still documented.
 //
+// The order is the order a reader meets the names in: a removed section
+// comes before the keys it holds, so the migration table reads from the
+// general to the specific.
+//
 // TOML keys are matched most specific first: a document that sets
 // "mount.read_timeout" is reported with that exact key instead of with the
 // removed "[mount]" section.
 var removedNames = []RemovedName{
+	{Kind: removedTOMLKey, Old: "mount", New: []string{"filesystem.read_timeout", "fuse.allow_other"}},
 	{Kind: removedTOMLKey, Old: "mount.read_timeout", New: []string{"filesystem.read_timeout"}},
 	{Kind: removedTOMLKey, Old: "mount.allow_other", New: []string{"fuse.allow_other"}},
-	{Kind: removedTOMLKey, Old: "mount", New: []string{"filesystem.read_timeout", "fuse.allow_other"}},
 	{Kind: removedTOMLKey, Old: "filesystem.backend", New: []string{"backend"}},
 	{Kind: removedTOMLKey, Old: "smb.strm_enabled", New: []string{"smb.strm"}},
 	{Kind: removedTOMLKey, Old: "http.auth.username", New: []string{"username"}},

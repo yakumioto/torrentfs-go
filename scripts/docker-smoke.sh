@@ -16,7 +16,7 @@ readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
 readonly FIXTURE_INFO_HASH="dd45d0108ac27c3c0fb1d7b28fd2b313c753bc9b"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt"
 readonly LEGACY_STATS_MARKER="/torrents/.stats/leftover.txt"
-readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-mio17-smoke:${BASHPID}}"
+readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-mio17-smoke:${BASHPID}}"
 readonly CONTAINER="torrentfs-mio17-${BASHPID}"
 readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
 readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
@@ -436,7 +436,7 @@ printf 'docker smoke: web seed serving the fixture on 127.0.0.1:%s\n' "$WEBSEED_
 mkdir -p "$TORRENT_HOST_DIR/.stats"
 printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
-if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+if [[ -n "${TF_SMOKE_IMAGE:-}" ]]; then
 	probe "inspect prebuilt FUSE test image" docker image inspect "$IMAGE" >/dev/null
 else
 	printf 'docker smoke: building %s\n' "$IMAGE"
@@ -483,12 +483,12 @@ printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
 
 PROCESS_CREDENTIALS="$(wait_process_identity "$CONTAINER" torrentfs)" || \
 	fail "could not read the FUSE torrentfs process credentials"
-IFS=' ' read -r TORRENTFS_PID TORRENTFS_UIDS TORRENTFS_GIDS <<<"$PROCESS_CREDENTIALS"
-[[ "$TORRENTFS_UIDS" == "$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID" ]] || \
-	fail "FUSE torrentfs UID credentials are $TORRENTFS_UIDS, expected $RUNTIME_UID in every field"
-[[ "$TORRENTFS_GIDS" == "$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID" ]] || \
-	fail "FUSE torrentfs GID credentials are $TORRENTFS_GIDS, expected $RUNTIME_GID in every field"
-printf 'docker smoke: torrentfs process %s runs as %s:%s\n' "$TORRENTFS_PID" "$RUNTIME_UID" "$RUNTIME_GID"
+IFS=' ' read -r TF_PID TF_UIDS TF_GIDS <<<"$PROCESS_CREDENTIALS"
+[[ "$TF_UIDS" == "$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID" ]] || \
+	fail "FUSE torrentfs UID credentials are $TF_UIDS, expected $RUNTIME_UID in every field"
+[[ "$TF_GIDS" == "$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID" ]] || \
+	fail "FUSE torrentfs GID credentials are $TF_GIDS, expected $RUNTIME_GID in every field"
+printf 'docker smoke: torrentfs process %s runs as %s:%s\n' "$TF_PID" "$RUNTIME_UID" "$RUNTIME_GID"
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do

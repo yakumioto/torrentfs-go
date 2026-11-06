@@ -82,6 +82,7 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	// unusable configuration value are the same kind of mistake, and a user
 	// who set both learns about both at once.
 	collector := &validationCollector{}
+	collector.add(unknownEnvironmentError(lookup))
 	if err := applyEnvironment(&cfg, lookup, sources); err != nil {
 		collector.add(err)
 	}

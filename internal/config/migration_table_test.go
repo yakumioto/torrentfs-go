@@ -3,7 +3,6 @@ package config_test
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -11,60 +10,81 @@ import (
 )
 
 // TestReadmeMigrationTableMatchesRemovalTable keeps the documented migration
-// table and the names the program actually rejects from one source: a name
-// that is removed from the code must also leave the README, and a name that
-// is documented must be rejected at startup.
+// table and the names the program actually rejects from one source: the table
+// in the README is the one the removal table renders, so a name that is
+// removed from the code also leaves the README, and a name that is
+// documented is rejected at startup.
+//
+// The README section is compared with the rendered table instead of being
+// parsed: a row that drifts from the removal table fails the comparison, and
+// a name the program does not reject cannot appear in it.
 func TestReadmeMigrationTableMatchesRemovalTable(t *testing.T) {
 	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatalf("read README: %v", err)
 	}
-	documented := documentedRemovedNames(string(readme))
+	want := config.MigrationTable()
+	got := readmeMigrationTable(string(readme))
+	if got == "" {
+		t.Fatal("the README has no migration table")
+	}
+	if got != want {
+		t.Fatalf("the README migration table does not match the removal table:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
 
-	for _, removed := range config.RemovedNames() {
-		if !documented[removed.Old] {
-			t.Fatalf("removed name %q is not listed in the README migration table", removed.Old)
+// readmeMigrationTable returns the migration table of the README.
+func readmeMigrationTable(readme string) string {
+	lines := strings.Split(readme, "\n")
+	start := -1
+	for index, line := range lines {
+		if line == "| 已删除 | 替代写法 |" {
+			start = index
+			break
 		}
 	}
-	for name := range documented {
-		if !removedNameExists(name) {
-			t.Fatalf("the README migration table lists %q, which the program does not reject", name)
+	if start < 0 {
+		return ""
+	}
+	var table []string
+	for _, line := range lines[start:] {
+		if !strings.HasPrefix(line, "|") {
+			break
+		}
+		table = append(table, line)
+	}
+	return strings.Join(table, "\n")
+}
+
+// TestMigrationTableNamesEveryRemovedName checks that the rendered table
+// lists every removed name, so a name the program rejects cannot be missing
+// from the documentation.
+func TestMigrationTableNamesEveryRemovedName(t *testing.T) {
+	table := config.MigrationTable()
+	for _, removed := range config.RemovedNames() {
+		if !strings.Contains(table, "`"+removed.Old+"`") {
+			t.Fatalf("removed name %q is missing from the migration table", removed.Old)
+		}
+		for _, replacement := range removed.New {
+			if !strings.Contains(table, "`"+replacement+"`") {
+				t.Fatalf("the migration table does not name the replacement %q of %q", replacement, removed.Old)
+			}
 		}
 	}
 }
 
-// removedNameExists reports whether the program rejects the given name.
-func removedNameExists(name string) bool {
-	for _, removed := range config.RemovedNames() {
-		if removed.Old == name {
-			return true
-		}
-	}
-	return false
-}
-
-// migrationTableRow matches one row of the README migration table.
-var migrationTableRow = regexp.MustCompile(`^\|\s*` + "`([^`]+)`" + `\s*\|`)
-
-// documentedRemovedNames returns the removed names the README migration table
-// lists.
-func documentedRemovedNames(readme string) map[string]bool {
-	documented := make(map[string]bool)
-	inTable := false
-	for _, line := range strings.Split(readme, "\n") {
-		if strings.HasPrefix(line, "| 已删除 | 替代写法 |") {
-			inTable = true
+// TestMigrationTableIsDerivedFromTheRemovalTable checks that the rendered
+// table has one row per removed name and no other row.
+func TestMigrationTableIsDerivedFromTheRemovalTable(t *testing.T) {
+	lines := strings.Split(config.MigrationTable(), "\n")
+	rows := 0
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
-		if inTable {
-			if !strings.HasPrefix(line, "|") {
-				break
-			}
-			match := migrationTableRow.FindStringSubmatch(line)
-			if match != nil {
-				documented[match[1]] = true
-			}
-		}
+		rows++
 	}
-	return documented
+	if rows != len(config.RemovedNames()) {
+		t.Fatalf("the migration table has %d rows, want %d", rows, len(config.RemovedNames()))
+	}
 }

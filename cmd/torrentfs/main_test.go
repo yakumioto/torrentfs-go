@@ -521,6 +521,76 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable covers the
+// configuration file entry: a deployment can point at its configuration file
+// with an environment variable instead of a command-line argument.
+func TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	configPath := filepath.Join(t.TempDir(), "torrentfs.toml")
+	if err := os.WriteFile(configPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", configPath)
+	var stderr bytes.Buffer
+
+	code := run([]string{t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), configPath) {
+		t.Fatalf("stderr = %q, want the configuration file path", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the environment named", stderr.String())
+	}
+}
+
+// TestRunPrefersTheConfigFlagOverTheEnvironmentVariable covers the
+// precedence: the command-line argument wins over the environment variable.
+func TestRunPrefersTheConfigFlagOverTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	work := t.TempDir()
+	flagPath := filepath.Join(work, "flag.toml")
+	if err := os.WriteFile(flagPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	environmentPath := filepath.Join(work, "environment.toml")
+	if err := os.WriteFile(environmentPath, []byte("[cache]\ncapacity = \"1B\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", environmentPath)
+	var stderr bytes.Buffer
+
+	code := run([]string{"-config", flagPath, t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the argument named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), environmentPath) {
+		t.Fatalf("stderr = %q, must not report the file the environment named", stderr.String())
+	}
+}
+
+// TestRunWithoutAConfigurationFileUsesTheDefaults covers the third step of
+// the precedence: with neither an argument nor the environment variable, the
+// program loads no configuration file and starts on the built-in defaults.
+func TestRunWithoutAConfigurationFileUsesTheDefaults(t *testing.T) {
+	unsetConfigEnvironment(t)
+	var stderr bytes.Buffer
+
+	// The process starts and then fails for another reason, so the assertion
+	// is that no configuration file was reported.
+	code := run([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "config: open") {
+		t.Fatalf("stderr = %q, want no configuration file to be loaded", stderr.String())
+	}
+}
+
 func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.toml")
 	if err := os.WriteFile(path, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
@@ -658,21 +728,60 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// TestRunRejectsUnknownConfigurationVariable covers the strictness of the
+// configuration namespace at the command-line entry: a misspelled variable is
+// named at startup instead of ignored.
+func TestRunRejectsUnknownConfigurationVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	t.Setenv("TORRENTFS_HTTP_LISEN_ADDR", "0.0.0.0:8080")
+	var stderr bytes.Buffer
+
+	code := run([]string{t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"TORRENTFS_HTTP_LISEN_ADDR", "not a known configuration item"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestRunIgnoresVariablesOutsideTheConfigurationNamespace checks that a
+// variable of another namespace does not stop the process: only the
+// configuration namespace is strict.
+func TestRunIgnoresVariablesOutsideTheConfigurationNamespace(t *testing.T) {
+	unsetConfigEnvironment(t)
+	t.Setenv("TF_FUSE_REQUIRED", "1")
+	var stderr bytes.Buffer
+
+	// The process starts and then fails on the missing torrents directory or
+	// on the HTTP listener, so the assertion is that the unknown-variable
+	// report is absent rather than that the process succeeded.
+	code := run([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	if strings.Contains(stderr.String(), "not a known configuration item") {
+		t.Fatalf("stderr = %q, want no unknown-variable report", stderr.String())
+	}
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+}
+
 // unsetConfigEnvironment clears every environment variable that configures
-// torrentfs, so a test observes the configuration it sets itself. The names
-// come from the configuration schema, so a new configuration key is covered
-// without a second registration.
+// torrentfs, so a test observes the configuration it sets itself.
+//
+// The whole configuration namespace is cleared, not only the names the schema
+// derives: the loader rejects an unknown variable, so a variable the
+// environment of the test runner happens to carry would fail the test for the
+// wrong reason.
 func unsetConfigEnvironment(t *testing.T) {
 	t.Helper()
-	names := []string{
-		// A removed name and a name that never configured anything: the
-		// program ignores or rejects them, but the test environment must
-		// not carry them either.
-		"TORRENTFS_PATHS_PAYLOAD_DIR",
-		"TORRENTFS_MOUNT_ALLOW_OTHER",
-		"TORRENTFS_MOUNT_READ_TIMEOUT",
-		"TORRENTFS_SMB_ENABLED",
-		"TORRENTFS_STRM_ENABLED",
+	var names []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "TORRENTFS_") {
+			names = append(names, name)
+		}
 	}
 	for _, key := range config.Schema() {
 		names = append(names, key.Environment)
