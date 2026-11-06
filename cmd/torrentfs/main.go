@@ -49,6 +49,10 @@ Flags:
   -config <file>          TOML configuration file
   -h, --help              show this help and exit
 
+The configuration file also has an environment variable, TORRENTFS_CONFIG.
+The -config argument wins over it, and there is no implicit search path: a
+deployment that wants a configuration file says where it is.
+
 SMB serves torrentfs and optionally torrentfs-strm directly without FUSE or Samba.
 Its default container port is 1445; publish host TCP 445 to container TCP 1445.
 Both file outputs are read-only: there is no metadata/ or stats/ control directory.
@@ -66,7 +70,9 @@ original view. Mountpoints must not be identical or nested, including symbolic-l
 Configuration precedence is the TORRENTFS_* environment variables, then TOML,
 then defaults. Every configuration key has an environment variable derived from
 its path: the path in upper case, dots replaced by underscores, under the
-TORRENTFS_ prefix. Send SIGINT or SIGTERM for bounded shutdown.
+TORRENTFS_ prefix. An unknown TORRENTFS_* variable is a startup error, so a
+misspelled name is reported instead of ignored. Send SIGINT or SIGTERM for
+bounded shutdown.
 `
 
 func main() {
@@ -104,7 +110,11 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, sources, err := loadConfig(*configPath)
+	// The command-line argument wins over the environment variable, and the
+	// environment variable wins over loading no file at all. There is no
+	// implicit search path.
+	configFile := config.ResolveConfigPath(*configPath)
+	cfg, sources, err := loadConfig(configFile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2

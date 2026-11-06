@@ -133,20 +133,24 @@ func TestEnvironmentExceptionsDoNotCoverTheConfigurationNamespace(t *testing.T) 
 	}
 }
 
-// TestEnvironmentExceptionsAreEmpty pins the exception table down.
+// TestEnvironmentExceptionsHoldOnlyTheConfigFileEntry pins the exception
+// table down.
 //
-// Every configuration key has a derived environment variable, and everything
-// that is not a configuration key lives outside the namespace: the test
-// switches, the CI smoke knobs, and the Compose interpolation use the TF_
-// prefix. A new exception means a new variable in the configuration
-// namespace, which is a decision the namespace rule makes visible.
-func TestEnvironmentExceptionsAreEmpty(t *testing.T) {
-	if len(environmentExceptions) != 0 {
-		var names []string
-		for _, exception := range environmentExceptions {
-			names = append(names, exception.Prefix+exception.Name)
-		}
-		t.Fatalf("environment exceptions = %v, want none", names)
+// The configuration file entry is the one variable in the namespace that
+// configures no configuration key: it names the file the configuration is
+// read from. Everything that is not a configuration key lives outside the
+// namespace: the test switches, the CI smoke knobs, and the Compose
+// interpolation use the TF_ prefix. A new exception means a new variable in
+// the configuration namespace, which is a decision the namespace rule makes
+// visible.
+func TestEnvironmentExceptionsHoldOnlyTheConfigFileEntry(t *testing.T) {
+	want := []string{ConfigPathEnvironment}
+	var got []string
+	for _, exception := range environmentExceptions {
+		got = append(got, exception.Prefix+exception.Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment exceptions = %v, want %v", got, want)
 	}
 }
 

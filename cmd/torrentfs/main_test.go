@@ -521,6 +521,76 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable covers the
+// configuration file entry: a deployment can point at its configuration file
+// with an environment variable instead of a command-line argument.
+func TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	configPath := filepath.Join(t.TempDir(), "torrentfs.toml")
+	if err := os.WriteFile(configPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", configPath)
+	var stderr bytes.Buffer
+
+	code := run([]string{t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), configPath) {
+		t.Fatalf("stderr = %q, want the configuration file path", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the environment named", stderr.String())
+	}
+}
+
+// TestRunPrefersTheConfigFlagOverTheEnvironmentVariable covers the
+// precedence: the command-line argument wins over the environment variable.
+func TestRunPrefersTheConfigFlagOverTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	work := t.TempDir()
+	flagPath := filepath.Join(work, "flag.toml")
+	if err := os.WriteFile(flagPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	environmentPath := filepath.Join(work, "environment.toml")
+	if err := os.WriteFile(environmentPath, []byte("[cache]\ncapacity = \"1B\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", environmentPath)
+	var stderr bytes.Buffer
+
+	code := run([]string{"-config", flagPath, t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the argument named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), environmentPath) {
+		t.Fatalf("stderr = %q, must not report the file the environment named", stderr.String())
+	}
+}
+
+// TestRunWithoutAConfigurationFileUsesTheDefaults covers the third step of
+// the precedence: with neither an argument nor the environment variable, the
+// program loads no configuration file and starts on the built-in defaults.
+func TestRunWithoutAConfigurationFileUsesTheDefaults(t *testing.T) {
+	unsetConfigEnvironment(t)
+	var stderr bytes.Buffer
+
+	// The process starts and then fails for another reason, so the assertion
+	// is that no configuration file was reported.
+	code := run([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "config: open") {
+		t.Fatalf("stderr = %q, want no configuration file to be loaded", stderr.String())
+	}
+}
+
 func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.toml")
 	if err := os.WriteFile(path, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {

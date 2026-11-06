@@ -42,12 +42,16 @@ func (e environmentException) matches(name string) bool {
 // non-configuration variable joins the program by adding one entry and the
 // unknown-variable rule stays one rule.
 //
-// The table is empty today: every configuration key has a derived
-// environment variable, and everything that is not a configuration key lives
-// outside the namespace. The test switches, the CI smoke knobs, and the
-// Compose interpolation use the TF_ prefix, so the TORRENTFS_ namespace means
-// configuration and nothing else.
-var environmentExceptions = []environmentException{}
+// The table holds the configuration file entry only: it names the file the
+// configuration is read from, not a setting inside it. Everything that is not
+// a configuration key lives outside the namespace: the test switches, the CI
+// smoke knobs, and the Compose interpolation use the TF_ prefix, so the
+// TORRENTFS_ namespace means configuration and nothing else.
+var environmentExceptions = []environmentException{
+	// The configuration file entry. It is known to the program, so the
+	// unknown-variable rule must not report it.
+	{Name: ConfigPathEnvironment},
+}
 
 // unknownEnvironmentNames reports the variables in the configuration
 // namespace that configure nothing.

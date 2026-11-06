@@ -141,6 +141,8 @@ strm = "off"
 - 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
+- **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
+- **未知变量会报错**：`TORRENTFS_` 前缀下拼错的名字在启动时会被点名，不会被静默忽略后按默认值启动。`TF_` 前缀是给测试开关、CI 冒烟与 Compose 插值用的，不属于配置命名空间。
 - **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
 - 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
@@ -148,6 +150,8 @@ strm = "off"
 ### 迁移对照表
 
 已删除的名称在启动时会报错并给出替代写法，不会被静默忽略。
+
+本表由程序内的删除表生成（`go run ./internal/config/cmd/config-doc migration-table`），测试会逐行比对两者是否一致。
 
 | 已删除 | 替代写法 |
 | --- | --- |
