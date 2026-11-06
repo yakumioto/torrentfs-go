@@ -21,7 +21,7 @@ func TestFilesystemSelectionAndUnusedBackendSettings(t *testing.T) {
 	for _, backend := range []Backend{BackendNone, BackendFUSE, BackendSMB} {
 		t.Run(string(backend), func(t *testing.T) {
 			text := "backend = \"" + string(backend) + "\"\n[filesystem]\nread_timeout = \"2s\"\n" +
-				"[fuse]\nmountpoint = \"/not-required-in-smb\"\n[smb]\npassword_file = \"/not-required-in-fuse\"\n"
+				"[fuse]\nmountpoint = \"/not-required-in-smb\"\n"
 			env := map[string]string{}
 			if backend == BackendSMB {
 				env["TORRENTFS_USERNAME"] = "a user"
@@ -72,19 +72,19 @@ func TestFilesystemRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestSMBSecretAndHTTPDisabled(t *testing.T) {
-	secret := filepath.Join(t.TempDir(), "smb-password")
-	if err := os.WriteFile(secret, []byte("  secret-with-spaces  \r\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	text := "backend=\"smb\"\n[http]\nlisten_addr=\"\"\n" +
-		"[http.auth]\nenabled=true\nusername=\"\"\ntoken_ttl=\"0s\"\n" +
-		"[smb]\nusername=\"not-a-Unix-account@example\"\npassword_file=\"" + secret + "\""
+// TestUnifiedCredentialsServeTheSMBOutput covers the shared credentials: the
+// SMB output uses the top-level user name and password.
+func TestUnifiedCredentialsServeTheSMBOutput(t *testing.T) {
+	text := "backend=\"smb\"\nusername=\"not-a-Unix-account@example\"\npassword=\"  secret-with-spaces  \"\n" +
+		"[http]\nlisten_addr=\"\"\n"
 	cfg, err := loadFilesystemTest(t, text, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SMB.Password != "  secret-with-spaces  " {
+	if cfg.Username != "not-a-Unix-account@example" {
+		t.Fatalf("username = %q, want the configured user name", cfg.Username)
+	}
+	if cfg.Password != "  secret-with-spaces  " {
 		t.Fatal("password whitespace was changed")
 	}
 	cfg, err = loadFilesystemTest(t, text, map[string]string{
@@ -93,16 +93,18 @@ func TestSMBSecretAndHTTPDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SMB.Username != "overridden" || len(cfg.SMB.Password) != 128 {
-		t.Fatal("shared credential override was not applied")
+	if cfg.Username != "overridden" || len(cfg.Password) != 128 {
+		t.Fatal("the environment did not override the credentials")
 	}
 }
 
-func TestSMBInvalidSecretsAreNotDisclosed(t *testing.T) {
+// TestInvalidCredentialsAreNotDisclosed covers the secrecy requirement: no
+// error message names the password value.
+func TestInvalidCredentialsAreNotDisclosed(t *testing.T) {
 	const secret = "must-not-appear-in-errors"
 	for _, text := range []string{
-		"[smb]\npassword=\"" + secret + "\"",
-		"backend=\"smb\"\n[smb]\nusername=\"user\"\npassword_file=\"/does-not-exist\"",
+		"backend=\"smb\"\nusername=\"user\"\npassword=\"" + secret + "\n",
+		"backend=\"none\"\npassword=\"" + secret + strings.Repeat("x", 80) + "\"\n[http.auth]\nenabled=true\n",
 	} {
 		_, err := loadFilesystemTest(t, text, nil)
 		if err == nil {

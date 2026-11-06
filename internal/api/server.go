@@ -102,7 +102,13 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	if cfg.HTTP.Auth.Enabled {
-		service, err := auth.New(cfg.HTTP.Auth)
+		hash, err := cfg.PasswordHash()
+		if err != nil {
+			err = fmt.Errorf("api: initialize authentication: %w", err)
+			s.logger.Error("http auth initialization failed", "stage", "authentication", "err", err)
+			return nil, err
+		}
+		service, err := auth.New(cfg.HTTP.Auth, hash)
 		if err != nil {
 			err = fmt.Errorf("api: initialize authentication: %w", err)
 			s.logger.Error("http auth initialization failed", "stage", "authentication", "err", err)

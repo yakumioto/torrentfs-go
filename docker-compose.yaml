@@ -36,9 +36,11 @@ services:
       TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
       TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
       TORRENTFS_HTTP_AUTH_ENABLED: "true"
+      # One credential pair serves the SMB login and the HTTP login. The HTTP
+      # login checks the password only.
       TORRENTFS_USERNAME: "torrentfs"
-      # Environment secrets remain visible to Docker administrators. For SMB
-      # without shared HTTP credentials, prefer smb.password_file in TOML.
+      # Environment secrets remain visible to Docker administrators. Keep the
+      # password in a private .env file rather than in this template.
       TORRENTFS_PASSWORD: "${TORRENTFS_PASSWORD:?set a strong shared HTTP/SMB password}"
       # Optional STRM share; the URL must be reachable from the player.
       # TORRENTFS_STRM_BASE_URL: "http://192.168.1.10:8080"

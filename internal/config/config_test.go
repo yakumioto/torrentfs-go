@@ -160,14 +160,14 @@ func TestLoadRejectsInvalidFilesystemReadTimeout(t *testing.T) {
 
 func TestLoadHTTPSection(t *testing.T) {
 	path := writeConfig(t, `
+password = "a-password"
+
 [http]
 listen_addr = "127.0.0.1:9000"
 max_upload_size = "2048B"
 
 [http.auth]
 enabled = true
-username = "test-user"
-password_hash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 token_ttl = "45m"
 `)
 
@@ -178,11 +178,11 @@ token_ttl = "45m"
 	if cfg.HTTP.ListenAddr != "127.0.0.1:9000" {
 		t.Fatalf("ListenAddr = %q", cfg.HTTP.ListenAddr)
 	}
-	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.Auth.Username != "test-user" {
-		t.Fatalf("Auth = %+v, want enabled test-user", cfg.HTTP.Auth)
+	if !cfg.HTTP.Auth.Enabled {
+		t.Fatalf("Auth = %+v, want enabled", cfg.HTTP.Auth)
 	}
-	if cfg.HTTP.Auth.PasswordHash == "" || cfg.HTTP.Auth.PasswordHashFile != "" {
-		t.Fatalf("Auth password hash source = %+v, want inline hash", cfg.HTTP.Auth)
+	if cfg.Password != "a-password" {
+		t.Fatalf("Password = %q, want the configured password", cfg.Password)
 	}
 	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 45*time.Minute {
 		t.Fatalf("Auth token TTL = %s, want 45m", cfg.HTTP.Auth.TokenTTL)
@@ -414,54 +414,6 @@ func TestValidateRejectsInvalidAuth(t *testing.T) {
 		setup func(*config.Config)
 		field string
 	}{
-		{
-			name: "enabled without username",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Enabled = true
-				cfg.HTTP.Auth.PasswordHash = "hash"
-			},
-			field: "http.auth.username",
-		},
-		{
-			name: "enabled without password hash",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Enabled = true
-				cfg.HTTP.Auth.Username = "alice"
-			},
-			field: "http.auth.password_hash",
-		},
-		{
-			name: "both password hash sources",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth = config.Auth{
-					Enabled:          true,
-					Username:         "alice",
-					PasswordHash:     "hash",
-					PasswordHashFile: "hash-file",
-					TokenTTL:         config.Duration(30 * time.Minute),
-				}
-			},
-			field: "http.auth.password_hash",
-		},
-		{
-			name: "disabled with credentials",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Username = "alice"
-			},
-			field: "http.auth.username",
-		},
-		{
-			name: "username control character",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth = config.Auth{
-					Enabled:      true,
-					Username:     "alice\n",
-					PasswordHash: "hash",
-					TokenTTL:     config.Duration(time.Minute),
-				}
-			},
-			field: "http.auth.username",
-		},
 		{
 			name: "non-positive token TTL",
 			setup: func(cfg *config.Config) {
@@ -714,11 +666,10 @@ func TestValidateAcceptsExposedAddressWithAuth(t *testing.T) {
 	cfg := config.Default()
 	cfg.HTTP.ListenAddr = "0.0.0.0:9000"
 	cfg.HTTP.Auth = config.Auth{
-		Enabled:      true,
-		Username:     "test-user",
-		PasswordHash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
-		TokenTTL:     config.Duration(30 * time.Minute),
+		Enabled:  true,
+		TokenTTL: config.Duration(30 * time.Minute),
 	}
+	cfg.Password = "a-password"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate exposed address with auth: %v", err)
 	}

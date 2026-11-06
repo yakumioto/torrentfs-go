@@ -3,8 +3,6 @@ package auth
 import (
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +13,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
-const testPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq"
+const testPassword = "password"
 
 type fakeClock struct {
 	mu  sync.Mutex
@@ -34,14 +32,22 @@ func (c *fakeClock) Advance(delta time.Duration) {
 	c.mu.Unlock()
 }
 
+// testHash returns the bcrypt hash of the test password.
+func testHash(t *testing.T) []byte {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword: %v", err)
+	}
+	return hash
+}
+
 func newTestService(t *testing.T, clock *fakeClock, random io.Reader) *Service {
 	t.Helper()
 	service, err := New(config.Auth{
-		Enabled:      true,
-		Username:     "alice",
-		PasswordHash: testPasswordHash,
-		TokenTTL:     config.Duration(time.Minute),
-	})
+		Enabled:  true,
+		TokenTTL: config.Duration(time.Minute),
+	}, testHash(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -78,8 +84,8 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if principal.Username != "alice" {
-		t.Fatalf("principal = %+v, want alice", principal)
+	if principal != (Principal{}) {
+		t.Fatalf("principal = %+v, want the empty principal", principal)
 	}
 	if gotExpiry != expiresAt {
 		t.Fatalf("expiry = %s, want unchanged %s", gotExpiry, expiresAt)
@@ -209,78 +215,15 @@ func TestConcurrentAuthenticationAndRevoke(t *testing.T) {
 	}
 }
 
-func TestNewLoadsRestrictedPasswordHashFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "password.hash")
-	if err := os.WriteFile(path, []byte(testPasswordHash+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	service, err := New(config.Auth{
-		Enabled:          true,
-		Username:         "alice",
-		PasswordHashFile: path,
-		TokenTTL:         config.Duration(time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("New with hash file: %v", err)
-	}
-	if _, _, err := service.Login("password"); err != nil {
-		t.Fatalf("Login with hash file: %v", err)
-	}
-}
-
-func TestNewRejectsUnsafePasswordHashFiles(t *testing.T) {
-	base := config.Auth{
-		Enabled:  true,
-		Username: "alice",
-		TokenTTL: config.Duration(time.Minute),
-	}
-
-	wide := filepath.Join(t.TempDir(), "wide.hash")
-	if err := os.WriteFile(wide, []byte(testPasswordHash), 0o640); err != nil {
-		t.Fatalf("WriteFile wide: %v", err)
-	}
-	base.PasswordHashFile = wide
-	if _, err := New(base); err == nil {
-		t.Fatal("New with group-readable hash file succeeded")
-	}
-
-	directory := filepath.Join(t.TempDir(), "hash-dir")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-	base.PasswordHashFile = directory
-	if _, err := New(base); err == nil {
-		t.Fatal("New with directory hash file succeeded")
-	}
-
-	missing := filepath.Join(t.TempDir(), "missing.hash")
-	base.PasswordHashFile = missing
-	if _, err := New(base); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("New missing hash file error = %v, want os.ErrNotExist", err)
-	}
-
-	target := filepath.Join(t.TempDir(), "target.hash")
-	if err := os.WriteFile(target, []byte(testPasswordHash), 0o600); err != nil {
-		t.Fatalf("WriteFile target: %v", err)
-	}
-	link := filepath.Join(t.TempDir(), "link.hash")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	base.PasswordHashFile = link
-	if _, err := New(base); err == nil {
-		t.Fatal("New with symlink hash file succeeded")
-	}
-}
-
+// TestNewRejectsInvalidAndWeakPasswordHashes covers the hash contract: the
+// service accepts a bcrypt hash of the default cost and rejects anything
+// else, because it can no longer fall back to reading a hash from a file.
 func TestNewRejectsInvalidAndWeakPasswordHashes(t *testing.T) {
 	cfg := config.Auth{
-		Enabled:      true,
-		Username:     "alice",
-		PasswordHash: "not-a-bcrypt-hash",
-		TokenTTL:     config.Duration(time.Minute),
+		Enabled:  true,
+		TokenTTL: config.Duration(time.Minute),
 	}
-	if _, err := New(cfg); err == nil {
+	if _, err := New(cfg, []byte("not-a-bcrypt-hash")); err == nil {
 		t.Fatal("New with invalid bcrypt hash succeeded")
 	}
 
@@ -288,8 +231,19 @@ func TestNewRejectsInvalidAndWeakPasswordHashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateFromPassword: %v", err)
 	}
-	cfg.PasswordHash = string(weak)
-	if _, err := New(cfg); err == nil {
+	if _, err := New(cfg, weak); err == nil {
 		t.Fatal("New with weak bcrypt hash succeeded")
+	}
+
+	if _, err := New(cfg, nil); err == nil {
+		t.Fatal("New without a password hash succeeded")
+	}
+}
+
+// TestNewRejectsDisabledAuthentication covers the completeness rule of the
+// service: it exists only for an enabled authentication.
+func TestNewRejectsDisabledAuthentication(t *testing.T) {
+	if _, err := New(config.Auth{TokenTTL: config.Duration(time.Minute)}, testHash(t)); err == nil {
+		t.Fatal("New with disabled authentication succeeded")
 	}
 }
