@@ -119,8 +119,8 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if cfg.Backend == config.BackendNone && !httpEnabled {
-		flags.Usage()
+	if err := cfg.ValidateOutput(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
 
