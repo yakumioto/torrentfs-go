@@ -140,7 +140,7 @@ func TestStorageUsesInjectedLogger(t *testing.T) {
 	// warn on open, which is the observable signal that the injected logger
 	// reaches the piece store.
 	cfg := testConfig()
-	cfg.Cache.CapacityBytes = testPieceLength + testPieceLength/8
+	cfg.Cache.CapacityBytes = config.ByteQuantity(testPieceLength + testPieceLength/8)
 	sess, err := session.New(cfg, torrentsDir, session.WithLogger(logger))
 	if err != nil {
 		t.Fatalf("session.New: %v", err)

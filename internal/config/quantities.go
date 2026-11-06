@@ -94,13 +94,21 @@ func formatByteQuantity(value int64) string {
 	return strconv.FormatInt(value, 10) + "B"
 }
 
-type tomlByteQuantity int64
+// ByteQuantity is a byte count decoded from a TOML byte quantity string such
+// as "2GiB". It is the schema type behind the byte-counting configuration
+// items, so the TOML decoder applies the same format rules as the environment
+// parser.
+type ByteQuantity int64
 
-func (q *tomlByteQuantity) UnmarshalText(text []byte) error {
+// UnmarshalText decodes a byte quantity from a TOML string.
+func (q *ByteQuantity) UnmarshalText(text []byte) error {
 	value, err := ParseByteQuantity(string(text))
 	if err != nil {
 		return err
 	}
-	*q = tomlByteQuantity(value)
+	*q = ByteQuantity(value)
 	return nil
 }
+
+// Int64 returns the quantity as a plain byte count.
+func (q ByteQuantity) Int64() int64 { return int64(q) }

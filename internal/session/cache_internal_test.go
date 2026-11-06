@@ -102,7 +102,7 @@ func TestSessionPieceCacheHitCountAndCloseInvalidation(t *testing.T) {
 func TestSessionUsesConfiguredPieceCacheCapacity(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
 	cfg := internalTestConfig()
-	cfg.Cache.CapacityBytes = 1234
+	cfg.Cache.CapacityBytes = config.ByteQuantity(1234)
 
 	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
 	if err != nil {
@@ -1044,7 +1044,7 @@ func TestSessionRejectsPieceLargerThanCache(t *testing.T) {
 	content := []byte("small request from a large piece")
 	pieceLength := int64(1024)
 	cfg := internalTestConfig()
-	cfg.Cache.CapacityBytes = pieceLength - 1
+	cfg.Cache.CapacityBytes = config.ByteQuantity(pieceLength - 1)
 	torrentPath, _ := buildInternalTestTorrentWithPieceLength(t, dataDir, work, content, pieceLength)
 
 	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
@@ -1238,7 +1238,7 @@ func TestTorrentStatusCachedBytesMatchesItsPieces(t *testing.T) {
 	cfg := internalTestConfig()
 	// Three pieces of capacity: the writer below keeps two or three resident,
 	// so evictions fire and the resident total oscillates.
-	cfg.Cache.CapacityBytes = 3 * internalTestPieceLength
+	cfg.Cache.CapacityBytes = config.ByteQuantity(3 * internalTestPieceLength)
 	sess, err := New(cfg, internalTestTorrentDir(t, dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)

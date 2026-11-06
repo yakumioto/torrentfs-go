@@ -37,7 +37,7 @@ func TestSessionRuntimeStatsUsesSharedCacheSnapshot(t *testing.T) {
 	if got.CacheUsedBytes != int64(len(content)) {
 		t.Fatalf("CacheUsedBytes = %d, want %d", got.CacheUsedBytes, len(content))
 	}
-	if got.CacheCapacityBytes != cfg.Cache.CapacityBytes {
+	if got.CacheCapacityBytes != cfg.Cache.CapacityBytes.Int64() {
 		t.Fatalf("CacheCapacityBytes = %d, want %d", got.CacheCapacityBytes, cfg.Cache.CapacityBytes)
 	}
 	if got.DownloadedBytes != 0 || got.UploadedBytes != 0 {

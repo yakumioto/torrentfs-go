@@ -50,7 +50,8 @@ add_source = false
 
 [filesystem]
 # Default: none (HTTP-only). Explicitly select with TORRENTFS_FILESYSTEM_BACKEND
-# or a custom TOML. Omitting this leaf keeps legacy CLI/SMB env aliases working.
+# or a custom TOML. Omitting this leaf keeps the CLI and SMB environment
+# aliases working.
 # backend = "none"
 read_timeout = "30s"
 

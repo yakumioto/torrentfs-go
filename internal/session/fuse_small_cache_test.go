@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
@@ -51,8 +52,8 @@ func TestFuseStreamsFileLargerThanCache(t *testing.T) {
 	// The leecher's cache holds two pieces at most, so a four-piece file cannot
 	// stay resident while it is read.
 	cfg := testConfig()
-	cfg.Cache.CapacityBytes = 2 * testPieceLength
-	if cfg.Cache.CapacityBytes >= int64(len(content)) {
+	cfg.Cache.CapacityBytes = config.ByteQuantity(2 * testPieceLength)
+	if cfg.Cache.CapacityBytes.Int64() >= int64(len(content)) {
 		t.Fatalf("test cache %d must be smaller than the %d byte file", cfg.Cache.CapacityBytes, len(content))
 	}
 	leecherDir := filepath.Join(work, "leecher-data")

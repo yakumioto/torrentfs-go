@@ -318,7 +318,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// Pieces live only in memory: the store keeps them in the LRU cache until
 	// they are evicted, and never writes them to disk. Because DefaultStorage is
 	// always set, the client's DataDir fallback is unused.
-	pieceCache := cache.New(cfg.Cache.CapacityBytes)
+	pieceCache := cache.New(cfg.Cache.CapacityBytes.Int64())
 	pieceStore := piecestore.New(pieceCache, logger)
 	cc.DefaultStorage = pieceStore
 	if forwardLogger {

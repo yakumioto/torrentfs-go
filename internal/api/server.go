@@ -97,7 +97,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	s := &Server{
 		backend:       backend,
 		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
-		maxUpload:     cfg.HTTP.MaxUploadBytes,
+		maxUpload:     cfg.HTTP.MaxUploadBytes.Int64(),
 		logger:        logger,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}

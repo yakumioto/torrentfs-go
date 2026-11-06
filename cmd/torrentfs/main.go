@@ -31,17 +31,16 @@ const usageText = `torrentfs exposes BitTorrent files as a read-only FUSE or nat
 and serves a torrent management HTTP API.
 
 Usage:
-  torrentfs [-config <file>] [-mountpoint <dir>] [-strm-mountpoint <dir>] <torrents-dir>
+  torrentfs [-config <file>] <torrents-dir>
 
 Configuration:
   [filesystem] backend = "fuse", "smb", or "none" (HTTP-only default)
-  [fuse] mountpoint / strm_mountpoint / allow_other
-  [smb] listen_addr / username / password_file
+  [fuse] fuse.mountpoint / fuse.strm_mountpoint / fuse.allow_other
+  [smb] smb.listen_addr / smb.username / smb.password_file
+  [strm] strm.base_url enables the signed streaming links
 
 Flags:
   -config <file>          TOML configuration file
-  -mountpoint <dir>       legacy FUSE mountpoint alias; conflicts with explicit smb/none
-  -strm-mountpoint <dir>  optional FUSE STRM view; requires strm.base_url and HTTP
   -h, --help              show this help and exit
 
 SMB serves torrentfs and optionally torrentfs-strm directly without FUSE or Samba.
@@ -69,14 +68,16 @@ func main() {
 // run executes the CLI and returns the process exit code: 0 on success, 1 on
 // runtime errors, 2 on usage or configuration errors.
 func run(args []string, stderr io.Writer) int {
+	if err := config.RemovedFlagError(args); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
 	flags := flag.NewFlagSet("torrentfs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { _, _ = io.WriteString(stderr, usageText) }
 
 	var (
-		mountpoint     = flags.String("mountpoint", "", "directory to mount on")
-		strmMountpoint = flags.String("strm-mountpoint", "", "directory for the STRM mount")
-		configPath     = flags.String("config", "", "TOML configuration file")
+		configPath = flags.String("config", "", "TOML configuration file")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -101,13 +102,13 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	if err = cfg.ResolveFilesystem(*mountpoint, *strmMountpoint); err != nil {
+	if err = cfg.ResolveFilesystem(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
-	*mountpoint, *strmMountpoint = "", ""
+	var mountpoint, strmMountpoint string
 	if cfg.Filesystem.Backend == config.BackendFUSE {
-		*mountpoint, *strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
+		mountpoint, strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 			return 2
@@ -137,8 +138,8 @@ func run(args []string, stderr io.Writer) int {
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"filesystem_backend", cfg.Filesystem.Backend,
-		"mountpoint", *mountpoint,
-		"strm_mountpoint", *strmMountpoint,
+		"mountpoint", mountpoint,
+		"strm_mountpoint", strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,
 		"mount_uid", os.Getuid(),
@@ -185,10 +186,10 @@ func run(args []string, stderr io.Writer) int {
 		sequence.api = apiServer
 	}
 
-	requests := []mountRequest{{mountpoint: *mountpoint, backend: sess}}
-	if *strmMountpoint != "" {
+	requests := []mountRequest{{mountpoint: mountpoint, backend: sess}}
+	if strmMountpoint != "" {
 		requests = append(requests, mountRequest{
-			mountpoint: *strmMountpoint,
+			mountpoint: strmMountpoint,
 			backend:    vfs.NewSTRMBackend(sess),
 		})
 	}
@@ -213,7 +214,7 @@ func run(args []string, stderr io.Writer) int {
 			shares[smb.STRMShareName] = vfs.New(vfs.NewSTRMBackend(sess))
 		}
 		native, startErr := smb.New(shares, smb.Options{Username: cfg.SMB.Username,
-			Password: cfg.SMB.Password, ReadTimeout: time.Duration(cfg.FileReadTimeout()), Logger: logger})
+			Password: cfg.SMB.Password, ReadTimeout: time.Duration(cfg.Filesystem.ReadTimeout), Logger: logger})
 		if startErr != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", startErr)
 			sequence.run()

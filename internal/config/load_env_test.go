@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +32,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
 		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
 		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
-		"TORRENTFS_MOUNT_ALLOW_OTHER":                          "true",
-		"TORRENTFS_MOUNT_READ_TIMEOUT":                         "250ms",
+		"TORRENTFS_FUSE_ALLOW_OTHER":                           "true",
+		"TORRENTFS_FILESYSTEM_READ_TIMEOUT":                    "250ms",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
 		"TORRENTFS_CACHE_CAPACITY":                             "123456B",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "torrentfs-test/1.0",
@@ -48,7 +49,6 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
 		"TORRENTFS_LOG_FORMAT":                                 "json",
 		"TORRENTFS_LOG_ADD_SOURCE":                             "true",
-		"TORRENTFS_FUSE_REQUIRED":                              "1",
 	}
 	got, err := load("", lookupEnvironment(values))
 	if err != nil {
@@ -68,11 +68,11 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if !reflect.DeepEqual(got.Connections, wantConnections) {
 		t.Fatalf("connections = %+v, want %+v", got.Connections, wantConnections)
 	}
-	if !got.Mount.AllowOther {
-		t.Fatal("mount.allow_other = false, want true")
+	if !got.FUSE.AllowOther {
+		t.Fatal("fuse.allow_other = false, want true")
 	}
-	if got.Mount.ReadTimeout != Duration(250*time.Millisecond) {
-		t.Fatalf("mount.read_timeout = %s, want 250ms", got.Mount.ReadTimeout)
+	if got.Filesystem.ReadTimeout != Duration(250*time.Millisecond) {
+		t.Fatalf("filesystem.read_timeout = %s, want 250ms", got.Filesystem.ReadTimeout)
 	}
 	if got.Proxy.Socks5URL != "socks5h://proxy.example:1080" {
 		t.Fatalf("proxy = %+v", got.Proxy)
@@ -113,14 +113,11 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	for _, binding := range environmentBindings {
 		wantNames[binding.name] = true
 	}
-	if len(environmentBindings) != 21 {
-		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
-	}
-	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
-		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)
+	for _, name := range filesystemEnvironmentNames {
+		wantNames[name] = true
 	}
 	for name := range values {
-		if name == "TORRENTFS_FUSE_REQUIRED" || name == httpUsernameEnvironment || name == httpPasswordEnvironment {
+		if name == httpUsernameEnvironment || name == httpPasswordEnvironment {
 			continue
 		}
 		if !wantNames[name] {
@@ -150,7 +147,7 @@ func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load defaults: %v", err)
 	}
-	if defaults.Cache.CapacityBytes != defaultCacheCapacityBytes {
+	if defaults.Cache.CapacityBytes != ByteQuantity(defaultCacheCapacityBytes) {
 		t.Fatalf("default cache capacity = %d, want %d", defaults.Cache.CapacityBytes, defaultCacheCapacityBytes)
 	}
 }
@@ -158,15 +155,15 @@ func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
 func TestLoadEnvironmentReadTimeoutOverridesFileBeforeValidation(t *testing.T) {
 	for _, fileValue := range []string{"30s", "0s"} {
 		t.Run(fileValue, func(t *testing.T) {
-			path := writeConfigFile(t, "[mount]\nread_timeout = \""+fileValue+"\"\n")
+			path := writeConfigFile(t, "[filesystem]\nread_timeout = \""+fileValue+"\"\n")
 			cfg, err := load(path, lookupEnvironment(map[string]string{
-				"TORRENTFS_MOUNT_READ_TIMEOUT": "250ms",
+				"TORRENTFS_FILESYSTEM_READ_TIMEOUT": "250ms",
 			}))
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if cfg.Mount.ReadTimeout != Duration(250*time.Millisecond) {
-				t.Fatalf("Mount.ReadTimeout = %s, want 250ms", cfg.Mount.ReadTimeout)
+			if cfg.Filesystem.ReadTimeout != Duration(250*time.Millisecond) {
+				t.Fatalf("filesystem.read_timeout = %s, want 250ms", cfg.Filesystem.ReadTimeout)
 			}
 		})
 	}
@@ -176,14 +173,14 @@ func TestLoadEnvironmentRejectsInvalidReadTimeout(t *testing.T) {
 	for _, raw := range []string{"", "30", "invalid", "0s", "-1s"} {
 		t.Run(raw, func(t *testing.T) {
 			_, err := load("", lookupEnvironment(map[string]string{
-				"TORRENTFS_MOUNT_READ_TIMEOUT": raw,
+				"TORRENTFS_FILESYSTEM_READ_TIMEOUT": raw,
 			}))
 			if !errors.Is(err, ErrInvalid) {
 				t.Fatalf("load error = %v, want ErrInvalid", err)
 			}
 			var validationErr *ValidationError
-			if !errors.As(err, &validationErr) || validationErr.Field != "mount.read_timeout" {
-				t.Fatalf("load error = %v, want mount.read_timeout validation error", err)
+			if !errors.As(err, &validationErr) || validationErr.Field != "filesystem.read_timeout" {
+				t.Fatalf("load error = %v, want filesystem.read_timeout validation error", err)
 			}
 		})
 	}
@@ -272,9 +269,9 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY", raw: "not-a-capacity", field: "cache.capacity"},
 		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_SIZE", raw: "not-a-limit", field: "http.max_upload_size"},
 		{name: "bool", env: "TORRENTFS_HTTP_AUTH_ENABLED", raw: "not-a-bool", field: "http.auth.enabled"},
-		{name: "mount bool", env: "TORRENTFS_MOUNT_ALLOW_OTHER", raw: "not-a-bool", field: "mount.allow_other"},
+		{name: "fuse bool", env: "TORRENTFS_FUSE_ALLOW_OTHER", raw: "not-a-bool", field: "fuse.allow_other"},
 		{name: "duration", env: "TORRENTFS_HTTP_AUTH_TOKEN_TTL", raw: "not-a-duration", field: "http.auth.token_ttl"},
-		{name: "read timeout", env: "TORRENTFS_MOUNT_READ_TIMEOUT", raw: "not-a-duration", field: "mount.read_timeout"},
+		{name: "read timeout", env: "TORRENTFS_FILESYSTEM_READ_TIMEOUT", raw: "not-a-duration", field: "filesystem.read_timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -551,11 +548,31 @@ func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
 	}
 }
 
+// lookupEnvironment injects a fixed set of environment variables. It is the
+// seam every configuration test drives the loader through.
 func lookupEnvironment(values map[string]string) envLookup {
-	return func(name string) (string, bool) {
-		value, ok := values[name]
-		return value, ok
+	return mapEnvironment(values)
+}
+
+// mapEnvironment adapts a map of environment variables to the envLookup seam.
+// The map is the source of truth for both lookup and enumeration, so a test
+// that adds a variable sees it in both.
+type mapEnvironment map[string]string
+
+// Lookup returns the value of one environment variable.
+func (m mapEnvironment) Lookup(name string) (string, bool) {
+	value, ok := m[name]
+	return value, ok
+}
+
+// Names returns the names of every environment variable that is set.
+func (m mapEnvironment) Names() []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	return names
 }
 
 func writeConfigFile(t *testing.T, body string) string {

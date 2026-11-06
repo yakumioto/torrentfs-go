@@ -10,31 +10,17 @@ func (c Config) SMBSTRMEnabled() bool {
 }
 
 func applySMBSTRMEnvironment(c *Config, lookup envLookup) error {
-	canonical, hasCanonical := lookup("TORRENTFS_SMB_STRM_ENABLED")
-	legacy, hasLegacy := lookup("TORRENTFS_STRM_ENABLED")
-	var selected *bool
-	if hasCanonical {
-		value, err := parseEnvBool(canonical)
-		if err != nil {
-			return invalid("smb.strm_enabled", errors.New("invalid TORRENTFS_SMB_STRM_ENABLED"))
-		}
-		selected = &value
+	canonical, hasCanonical := lookup.Lookup(envSMBSTRMEnabled)
+	if !hasCanonical {
+		return nil
 	}
-	if hasLegacy {
-		value, err := parseEnvBool(legacy)
-		if err != nil {
-			return invalid("smb.strm_enabled", errors.New("invalid TORRENTFS_STRM_ENABLED"))
-		}
-		if selected != nil && *selected != value {
-			return invalid("smb.strm_enabled", errors.New("conflicts with TORRENTFS_STRM_ENABLED"))
-		}
-		if value && c.Filesystem.Backend != BackendSMB {
-			return invalid("smb.strm_enabled", errors.New("TORRENTFS_STRM_ENABLED requires the SMB backend"))
-		}
-		selected = &value
+	value, err := parseEnvBool(canonical)
+	if err != nil {
+		return invalid("smb.strm_enabled", errors.New("invalid "+envSMBSTRMEnabled))
 	}
-	if selected != nil {
-		c.SMB.STRMEnabled = selected
+	if value && c.Filesystem.Backend != BackendSMB {
+		return invalid("smb.strm_enabled", errors.New(envSMBSTRMEnabled+" requires the SMB backend"))
 	}
+	c.SMB.STRMEnabled = &value
 	return nil
 }

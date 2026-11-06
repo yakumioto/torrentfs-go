@@ -44,6 +44,7 @@ var (
 const (
 	defaultCacheCapacityBytes int64 = 2 << 30
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
+	defaultSMBListenAddr            = "0.0.0.0:1445"
 	defaultMaxUploadBytes     int64 = 10 << 20
 	defaultLogLevel                 = "info"
 	defaultLogFormat                = "text"
@@ -89,19 +90,20 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 
 // Config holds torrentfs runtime settings.
 type Config struct {
-	Connections     Connections `toml:"connections"`
-	Proxy           Proxy       `toml:"proxy"`
-	Cache           Cache       `toml:"cache"`
-	Identity        Identity    `toml:"identity"`
-	HTTP            HTTP        `toml:"http"`
-	STRM            STRM        `toml:"strm"`
-	Log             Log         `toml:"log"`
-	Mount           Mount       `toml:"-"` // deprecated in-process compatibility
-	Filesystem      Filesystem  `toml:"filesystem"`
-	FUSE            FUSE        `toml:"fuse"`
-	SMB             SMB         `toml:"smb"`
+	Connections Connections `toml:"connections"`
+	Proxy       Proxy       `toml:"proxy"`
+	Cache       Cache       `toml:"cache"`
+	Identity    Identity    `toml:"identity"`
+	HTTP        HTTP        `toml:"http"`
+	STRM        STRM        `toml:"strm"`
+	Log         Log         `toml:"log"`
+	Filesystem  Filesystem  `toml:"filesystem"`
+	FUSE        FUSE        `toml:"fuse"`
+	SMB         SMB         `toml:"smb"`
+
+	// backendExplicit records whether the file output was chosen explicitly.
+	// Without it, a configured FUSE mountpoint selects the FUSE output.
 	backendExplicit bool
-	outputError     error
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -113,7 +115,7 @@ type HTTP struct {
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
-	MaxUploadBytes int64 `toml:"max_upload_size"`
+	MaxUploadBytes ByteQuantity `toml:"max_upload_size"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
@@ -128,15 +130,6 @@ type Log struct {
 	Level     string `toml:"level"`
 	Format    string `toml:"format"`
 	AddSource bool   `toml:"add_source"`
-}
-
-// Mount groups FUSE mount behaviour that is not derived from the process identity.
-type Mount struct {
-	// AllowOther passes allow_other to the kernel, lifting FUSE's default
-	// restriction that only the mounting user may access the mount.
-	// It defaults to false.
-	AllowOther  bool     `toml:"allow_other"`
-	ReadTimeout Duration `toml:"read_timeout"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -199,7 +192,7 @@ type Proxy struct {
 // Cache groups in-memory piece cache settings.
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
-	CapacityBytes int64 `toml:"capacity"`
+	CapacityBytes ByteQuantity `toml:"capacity"`
 }
 
 // Identity groups the client identity values sent to trackers and peers.
@@ -215,6 +208,10 @@ type Identity struct {
 // Default returns the default configuration: an ephemeral listen port, an
 // empty proxy, qBittorrent 4.4.0 identity values, owner-only FUSE access, and
 // a 2 GiB in-memory piece cache sized for a host with about 4 GB of RAM.
+//
+// This is the only place where configuration defaults are defined. A TOML
+// document is decoded directly onto this value, so a configuration file that
+// omits a key keeps the same default whether or not a file was loaded.
 func Default() Config {
 	return Config{
 		Connections: Connections{
@@ -223,14 +220,14 @@ func Default() Config {
 			NoPortForwarding: true,
 		},
 		Cache: Cache{
-			CapacityBytes: defaultCacheCapacityBytes,
+			CapacityBytes: ByteQuantity(defaultCacheCapacityBytes),
 		},
 		HTTP: HTTP{
 			ListenAddr: defaultHTTPListenAddr,
 			Auth: Auth{
 				TokenTTL: Duration(30 * time.Minute),
 			},
-			MaxUploadBytes: defaultMaxUploadBytes,
+			MaxUploadBytes: ByteQuantity(defaultMaxUploadBytes),
 		},
 		Identity: Identity{
 			TrackerUserAgent:               "qBittorrent/4.4.0",
@@ -241,9 +238,9 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Mount:      Mount{ReadTimeout: defaultReadTimeout},
 		Filesystem: Filesystem{Backend: BackendNone, ReadTimeout: defaultReadTimeout},
-		SMB:        SMB{ListenAddr: "0.0.0.0:1445"},
+		FUSE:       FUSE{AllowOther: false},
+		SMB:        SMB{ListenAddr: defaultSMBListenAddr},
 	}
 }
 
@@ -265,9 +262,6 @@ func (c Config) Validate() error {
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
 		return invalid("cache.capacity", errCapacityRange)
-	}
-	if c.Mount.ReadTimeout <= 0 {
-		return invalid("mount.read_timeout", errPositive)
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
 		return invalid("proxy.socks5_url", err)
