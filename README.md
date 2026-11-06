@@ -129,7 +129,7 @@ base_url = "http://192.168.1.10:8080"
 - 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
 - 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`filesystem.backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
-- `TORRENTFS_*` 环境变量只对文档化的名称生效，不会为每个 TOML 字段自动生成变量。
+- 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。唯一的例外是 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`（共享 HTTP/SMB 凭据，不对应任何配置项路径）。
 - 绑定非 loopback 地址时必须启用认证；Web 登录只校验密码，Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
 

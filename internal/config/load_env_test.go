@@ -42,8 +42,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE":                       "2048B",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
-		httpUsernameEnvironment:                                "alice",
-		httpPasswordEnvironment:                                "password",
+		environmentUsername:                                    "alice",
+		environmentPassword:                                    "password",
 		"TORRENTFS_HTTP_AUTH_TOKEN_TTL":                        "45m",
 		"TORRENTFS_STRM_BASE_URL":                              "https://media.example/torrentfs/",
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
@@ -109,17 +109,18 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		t.Fatalf("log = %+v", got.Log)
 	}
 
-	wantNames := make(map[string]bool, len(environmentBindings))
-	for _, binding := range environmentBindings {
-		wantNames[binding.name] = true
+	// Every environment variable the test sets must be one the schema
+	// derives, so a new configuration key needs no second registration.
+	wantNames := make(map[string]bool)
+	for _, key := range Schema() {
+		if key.Overridable {
+			wantNames[key.Environment] = true
+		}
 	}
-	for _, name := range filesystemEnvironmentNames {
-		wantNames[name] = true
+	for _, exception := range EnvironmentExceptions() {
+		wantNames[exception.Name] = true
 	}
 	for name := range values {
-		if name == httpUsernameEnvironment || name == httpPasswordEnvironment {
-			continue
-		}
 		if !wantNames[name] {
 			t.Fatalf("environment variable %q is not declared", name)
 		}
@@ -371,8 +372,8 @@ username = "file-user"
 password_hash_file = "/run/secrets/hash"
 `)
 	got, err := load(path, lookupEnvironment(map[string]string{
-		httpUsernameEnvironment: "env-user",
-		httpPasswordEnvironment: "password with spaces",
+		environmentUsername: "env-user",
+		environmentPassword: "password with spaces",
 	}))
 	if err != nil {
 		t.Fatalf("load with environment credentials: %v", err)
@@ -423,7 +424,7 @@ enabled = true
 username = "file-user"
 password_hash = "file-hash"
 `,
-			environment: map[string]string{httpUsernameEnvironment: "env-user"},
+			environment: map[string]string{environmentUsername: "env-user"},
 			wantError:   true,
 		},
 		{
@@ -433,15 +434,15 @@ enabled = true
 username = "file-user"
 password_hash = "file-hash"
 `,
-			environment: map[string]string{httpPasswordEnvironment: "secret"},
+			environment: map[string]string{environmentPassword: "secret"},
 			wantError:   true,
 		},
 		{
 			name:   "empty username",
 			config: "[http.auth]\nenabled = true\n",
 			environment: map[string]string{
-				httpUsernameEnvironment: "",
-				httpPasswordEnvironment: "secret",
+				environmentUsername: "",
+				environmentPassword: "secret",
 			},
 			wantError: true,
 		},
@@ -449,28 +450,28 @@ password_hash = "file-hash"
 			name:   "empty password",
 			config: "[http.auth]\nenabled = true\n",
 			environment: map[string]string{
-				httpUsernameEnvironment: "alice",
-				httpPasswordEnvironment: "",
+				environmentUsername: "alice",
+				environmentPassword: "",
 			},
 			wantError: true,
 		},
 		{
 			name: "disabled ignores complete pair",
 			environment: map[string]string{
-				httpUsernameEnvironment: "invalid\nusername",
-				httpPasswordEnvironment: strings.Repeat("x", 73),
+				environmentUsername: "invalid\nusername",
+				environmentPassword: strings.Repeat("x", 73),
 			},
 		},
 		{
 			name:        "disabled ignores half pair",
-			environment: map[string]string{httpUsernameEnvironment: "alice"},
+			environment: map[string]string{environmentUsername: "alice"},
 		},
 		{
 			name: "environment enables auth",
 			environment: map[string]string{
 				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
-				httpUsernameEnvironment:       "alice",
-				httpPasswordEnvironment:       "secret",
+				environmentUsername:           "alice",
+				environmentPassword:           "secret",
 			},
 			wantUsername: "alice",
 			wantPassword: "secret",
@@ -526,8 +527,8 @@ func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := load("", lookupEnvironment(map[string]string{
 				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
-				httpUsernameEnvironment:       "alice",
-				httpPasswordEnvironment:       tt.password,
+				environmentUsername:           "alice",
+				environmentPassword:           tt.password,
 			}))
 			if tt.wantErr {
 				if err == nil {

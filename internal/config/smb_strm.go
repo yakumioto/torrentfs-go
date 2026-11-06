@@ -1,6 +1,6 @@
 package config
 
-import "errors"
+import "fmt"
 
 // SMBSTRMEnabled selects the optional projection independently of the original
 // share. Without an explicit switch, a configured streaming base URL enables it.
@@ -9,18 +9,22 @@ func (c Config) SMBSTRMEnabled() bool {
 		(c.SMB.STRMEnabled == nil || *c.SMB.STRMEnabled)
 }
 
-func applySMBSTRMEnvironment(c *Config, lookup envLookup) error {
-	canonical, hasCanonical := lookup.Lookup(envSMBSTRMEnabled)
-	if !hasCanonical {
+// applySMBSTRMEnvironment applies the environment value of the STRM share
+// switch. The switch is only meaningful for the SMB output.
+func applySMBSTRMEnvironment(c *Config, values map[string]any) error {
+	value, ok := values[smbSTRMEnabledPath]
+	if !ok {
 		return nil
 	}
-	value, err := parseEnvBool(canonical)
-	if err != nil {
-		return invalid("smb.strm_enabled", errors.New("invalid "+envSMBSTRMEnabled))
+	enabled, ok := value.(*bool)
+	if !ok {
+		return invalid(smbSTRMEnabledPath, fmt.Errorf("the environment value of %s is not a boolean",
+			deriveEnvironmentName(smbSTRMEnabledPath)))
 	}
-	if value && c.Filesystem.Backend != BackendSMB {
-		return invalid("smb.strm_enabled", errors.New(envSMBSTRMEnabled+" requires the SMB backend"))
+	if *enabled && c.Filesystem.Backend != BackendSMB {
+		return invalid(smbSTRMEnabledPath, fmt.Errorf("%s requires the SMB backend",
+			deriveEnvironmentName(smbSTRMEnabledPath)))
 	}
-	c.SMB.STRMEnabled = &value
+	c.SMB.STRMEnabled = enabled
 	return nil
 }
