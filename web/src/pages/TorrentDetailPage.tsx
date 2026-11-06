@@ -8,11 +8,13 @@ import { DeleteTorrentDialog } from '../components/dialogs/DeleteTorrentDialog';
 import { UploadSubtitleDialog } from '../components/dialogs/UploadSubtitleDialog';
 import { TorrentDetailHeader } from '../components/detail/TorrentDetailHeader';
 import { TorrentFilesPanel } from '../components/detail/TorrentFilesPanel';
+import { TorrentLabSummary } from '../components/detail/TorrentLabSummary';
 import { TorrentLiveSummary } from '../components/detail/TorrentLiveSummary';
 import { TorrentOverview } from '../components/detail/TorrentOverview';
 import { TorrentPiecesPanel } from '../components/detail/TorrentPiecesPanel';
 import type { FileStatus, PieceStatus, Subtitle } from '../types/api';
 import {
+  useLab,
   useTorrentDetail,
   useTorrentLiveSummary,
   useTorrentStatus,
@@ -70,6 +72,7 @@ export function TorrentDetailPage() {
   const statusPieces = useTorrentStatusPieces(auth.api, id, enabled);
   const statusSubtitles = useTorrentStatusSubtitles(auth.api, id, enabled);
   const subtitleTargets = useTorrentSubtitleTargets(auth.api, id, enabled);
+  const lab = useLab(auth.api, enabled);
 
   if (detail.isPending) {
     return <div className={`panel panel--padding ${styles.loading}`} role="status" aria-busy="true" aria-label="正在加载任务详情"><div className={styles.loadingBar} /><div className={`${styles.loadingBar} ${styles.loadingBarShort}`} /><div className={styles.loadingBlock} /></div>;
@@ -119,6 +122,8 @@ export function TorrentDetailPage() {
       />
 
       <TorrentLiveSummary summary={liveSummary.data} />
+
+      <TorrentLabSummary lab={lab.data} infoHash={torrent.info_hash} />
 
       {pending && (
         <div className={styles.pendingPanel} role="status">

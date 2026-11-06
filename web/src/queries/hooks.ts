@@ -3,6 +3,8 @@ import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
 import type {
   Category,
+  LabSettingsUpdate,
+  LabView,
   Operation,
   PruneResult,
   RuntimeStats,
@@ -337,6 +339,36 @@ export function useSetUploadRateSettings(api: ApiClient) {
       // The daemon returns the normalized value it applied, so the cache holds
       // what a later read would return instead of the request echo.
       queryClient.setQueryData(queryKeys.uploadRateSettings, saved);
+    },
+  });
+}
+
+/**
+ * Live view of the experimental synthetic-upload harness. The counters grow
+ * with every tracker announce, so the dashboard polls faster than the torrent
+ * list to keep the displayed totals close to what the tracker just received.
+ */
+export function useLab(api: ApiClient, enabled: boolean) {
+  return useQuery<LabView>({
+    queryKey: queryKeys.lab,
+    queryFn: ({ signal }) => api.getLab(signal),
+    enabled,
+    refetchInterval: 2000,
+    refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+export function useSetLabSettings(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ settings, signal }: { settings: LabSettingsUpdate; signal?: AbortSignal }) =>
+      api.setLabSettings(settings, signal),
+    onSuccess: (saved: LabView) => {
+      // The response is the post-apply view, so it already contains both the
+      // normalized settings and the refreshed totals.
+      queryClient.setQueryData(queryKeys.lab, saved);
     },
   });
 }

@@ -1,5 +1,5 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconBox, IconLogout, IconPlus, IconRefresh, IconSettings } from '@tabler/icons-react';
+import { IconBox, IconFlask, IconLogout, IconPlus, IconRefresh, IconSettings } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -47,6 +47,17 @@ export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void;
               aria-label="上传限速设置"
             >
               <IconSettings size={18} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label="上传实验设置">
+            <ActionIcon
+              component={Link}
+              to="/lab"
+              variant="subtle"
+              color="gray"
+              aria-label="上传实验设置"
+            >
+              <IconFlask size={18} />
             </ActionIcon>
           </Tooltip>
           <Tooltip label="添加任务">

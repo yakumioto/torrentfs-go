@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 )
@@ -30,11 +31,15 @@ type loopbackTracker struct {
 }
 
 type trackerAnnounce struct {
-	UserAgent string
-	PeerID    []byte
-	Port      int
-	Key       string
-	Event     string
+	UserAgent  string
+	PeerID     []byte
+	Port       int
+	Key        string
+	Event      string
+	Uploaded   int64
+	Downloaded int64
+	Left       int64
+	At         time.Time
 }
 
 type trackerAnnounceResponse struct {
@@ -77,11 +82,15 @@ func (tr *loopbackTracker) announceSnapshot(hash string) []trackerAnnounce {
 	out := make([]trackerAnnounce, len(announces))
 	for i, announce := range announces {
 		out[i] = trackerAnnounce{
-			UserAgent: announce.UserAgent,
-			PeerID:    append([]byte(nil), announce.PeerID...),
-			Port:      announce.Port,
-			Key:       announce.Key,
-			Event:     announce.Event,
+			UserAgent:  announce.UserAgent,
+			PeerID:     append([]byte(nil), announce.PeerID...),
+			Port:       announce.Port,
+			Key:        announce.Key,
+			Event:      announce.Event,
+			Uploaded:   announce.Uploaded,
+			Downloaded: announce.Downloaded,
+			Left:       announce.Left,
+			At:         announce.At,
 		}
 	}
 	return out
@@ -112,12 +121,19 @@ func (tr *loopbackTracker) handleAnnounce(w http.ResponseWriter, r *http.Request
 		http.Error(w, "bad port", http.StatusBadRequest)
 		return
 	}
+	uploaded, _ := strconv.ParseInt(query.Get("uploaded"), 10, 64)
+	downloaded, _ := strconv.ParseInt(query.Get("downloaded"), 10, 64)
+	left, _ := strconv.ParseInt(query.Get("left"), 10, 64)
 	announce := trackerAnnounce{
-		UserAgent: r.UserAgent(),
-		PeerID:    append([]byte(nil), query.Get("peer_id")...),
-		Port:      announcePort,
-		Key:       query.Get("key"),
-		Event:     query.Get("event"),
+		UserAgent:  r.UserAgent(),
+		PeerID:     append([]byte(nil), query.Get("peer_id")...),
+		Port:       announcePort,
+		Key:        query.Get("key"),
+		Event:      query.Get("event"),
+		Uploaded:   uploaded,
+		Downloaded: downloaded,
+		Left:       left,
+		At:         time.Now(),
 	}
 
 	tr.mu.Lock()

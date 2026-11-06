@@ -59,6 +59,24 @@ function makeRuntimeStats() {
   };
 }
 
+function disabledLab() {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+    torrents: [],
+  };
+}
+
 function renderApp(path: string, fetchMock: FetchMock) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -105,6 +123,9 @@ describe('background refresh resilience', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
       listRequests += 1;
       return Promise.resolve(listRequests === 1 ? jsonResponse([torrent]) : failingResponse());
     });
@@ -134,6 +155,9 @@ describe('background refresh resilience', () => {
       if (url.endsWith('/status')) {
         statusRequests += 1;
         return Promise.resolve(statusRequests === 1 ? jsonResponse(makeStatus(torrent)) : failingResponse());
+      }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(torrent));
     });

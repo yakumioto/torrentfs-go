@@ -8,8 +8,9 @@ import { queryKeys } from '../queries/keys';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { AppLayout } from '../components/layout/AppLayout';
 import { DashboardPage } from '../pages/DashboardPage';
+import { LabSettingsPage } from '../pages/LabSettingsPage';
 import { theme } from '../styles/theme';
-import type { RuntimeStats, Torrent } from '../types/api';
+import type { LabView, RuntimeStats, Torrent } from '../types/api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -41,11 +42,55 @@ function runtimeStats(overrides: Partial<RuntimeStats> = {}): RuntimeStats {
   };
 }
 
+function disabledLab(): LabView {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+    torrents: [],
+  };
+}
+
+function enabledLab(overrides: Partial<LabView> = {}): LabView {
+  return {
+    enabled: true,
+    settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
+    seed: 42,
+    announce_log: '/var/log/torrentfs/lab.jsonl',
+    peer_sample_interval_seconds: 5,
+    totals: {
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 1000,
+      reported_uploaded_bytes: 4_197_247,
+      overreported_bytes: 4_196_247,
+      pending_real_upload_bytes: 4_999_000,
+    },
+    torrents: [{
+      info_hash: 'abc123',
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 1000,
+      reported_uploaded_bytes: 4_197_247,
+      last_announce_at: '2026-11-05T15:12:00.123456Z',
+    }],
+    ...overrides,
+  };
+}
+
 function renderDashboard(
   torrents: Torrent[],
   statsBody: unknown = runtimeStats(),
   statsStatus = 200,
   listResponses: Torrent[][] = [torrents],
+  labBody: unknown = disabledLab(),
 ) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -66,6 +111,9 @@ function renderDashboard(
     if (String(input).endsWith('/stats')) {
       return Promise.resolve(jsonResponse(statsBody, statsStatus));
     }
+    if (String(input).endsWith('/lab')) {
+      return Promise.resolve(jsonResponse(labBody));
+    }
     const response = listResponses[Math.min(listRequest++, listResponses.length - 1)] ?? [];
     return Promise.resolve(jsonResponse(response));
   });
@@ -78,6 +126,7 @@ function renderDashboard(
             <Routes>
               <Route element={<AppLayout />}>
                 <Route path="/" element={<DashboardPage />} />
+                <Route path="/lab" element={<LabSettingsPage />} />
               </Route>
             </Routes>
           </MemoryRouter>
@@ -221,5 +270,41 @@ describe('DashboardPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '添加第一个任务' }));
     await waitFor(() => expect(screen.getByRole('tab', { name: '磁力链接' })).toBeInTheDocument());
+  });
+
+  it('shows the lab summary and per-torrent reported counters when enabled', async () => {
+    renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, enabledLab());
+
+    await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
+    const card = screen.getByRole('link', { name: '上传实验：打开上传实验设置' });
+    expect(card).toHaveTextContent('上传实验');
+    expect(card).toHaveTextContent('注入虚报');
+    expect(card).toHaveTextContent('实时真实上传');
+    expect(card).toHaveTextContent('上次上报时真实');
+    expect(card).toHaveTextContent('Tracker 上报');
+    expect(card).toHaveTextContent('待上报真实增量');
+    expect(card).toHaveTextContent('+4.0 MiB');
+    expect(card).toHaveTextContent('上报值只在 tracker announce 时更新');
+
+    const row = screen.getByRole('listitem');
+    expect(row).toHaveTextContent('上报 4.0 MiB · 虚报 +4.0 MiB');
+    // The row explains that the live-vs-reported gap is pending, not a bug.
+    expect(screen.getByTitle('相对上次上报时真实量；待上报 4.8 MiB 尚未计入')).toBeInTheDocument();
+
+    fireEvent.click(card);
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());
+  });
+
+  it('renders a dash for torrents without lab counters and hides the card when disabled', async () => {
+    renderDashboard([torrent({ info_hash: 'not-reported-yet' })], runtimeStats(), 200, undefined, enabledLab({ torrents: [] }));
+
+    await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
+    expect(screen.getByText(/上报 — · 虚报 —/)).toBeInTheDocument();
+
+    cleanup();
+    renderDashboard([torrent()]);
+    await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
+    expect(screen.queryByText('上传实验')).not.toBeInTheDocument();
+    expect(screen.queryByText(/上报 .* · 虚报 /)).not.toBeInTheDocument();
   });
 });

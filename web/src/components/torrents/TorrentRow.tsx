@@ -2,16 +2,40 @@ import { ActionIcon, Badge, Menu, Tooltip } from '@mantine/core';
 import { IconDots, IconExternalLink, IconFolder, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { Torrent } from '../../types/api';
+import type { LabTorrentStat, Torrent } from '../../types/api';
 import { useAuth } from '../../app/auth-context';
 import { useSetFavorite } from '../../queries/hooks';
 import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
+import { formatSignedBytes, labOverreportedBytes, labPendingRealUploadBytes } from '../../utils/lab';
 import { StateBadge } from './StateBadge';
 
-export function TorrentRow({ torrent }: { torrent: Torrent }) {
+/**
+ * The row compares reported bytes with the real counter captured at the last
+ * announce, not with the live counter: only the former is the value the
+ * tracker actually received. The pending real upload is surfaced in the title
+ * so the usually large live-vs-reported gap is explained instead of looking
+ * like a reporting bug.
+ */
+function labRowTitle(labStat: LabTorrentStat | undefined): string {
+  if (labStat === undefined) {
+    return '上传实验：这个种子还没有向 tracker 上报过上传量。';
+  }
+  const pending = labPendingRealUploadBytes(
+    labStat.real_uploaded_bytes,
+    labStat.real_uploaded_at_last_announce_bytes,
+  );
+  return `相对上次上报时真实量；待上报 ${formatBytes(pending)} 尚未计入`;
+}
+
+export function TorrentRow({ torrent, labEnabled = false, labStat }: {
+  torrent: Torrent;
+  /** When the experiment is running, each row also shows reported/overreported bytes. */
+  labEnabled?: boolean;
+  labStat?: LabTorrentStat;
+}) {
   const auth = useAuth();
   const navigate = useNavigate();
   const favorite = useSetFavorite(auth.api);
@@ -43,6 +67,16 @@ export function TorrentRow({ torrent }: { torrent: Torrent }) {
         <div className={`${styles.upload} text-mono`}>
           <span className={styles.mobileLabel}>上传量</span>
           <span>{formatBytes(torrent.uploaded_bytes)}</span>
+          {labEnabled && (
+            <span
+              className={styles.labValues}
+              title={labRowTitle(labStat)}
+            >
+              上报 {labStat === undefined ? '—' : formatBytes(labStat.reported_uploaded_bytes)}
+              {' · '}
+              虚报 {labStat === undefined ? '—' : formatSignedBytes(labOverreportedBytes(labStat.reported_uploaded_bytes, labStat.real_uploaded_at_last_announce_bytes))}
+            </span>
+          )}
         </div>
         <div className={styles.state}>
           <span className={styles.mobileLabel}>状态</span>

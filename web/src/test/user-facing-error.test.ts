@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../api/errors';
-import { userFacingError, userFacingOperationCode, userFacingOperationError, userFacingSubtitleError } from '../utils/user-facing-error';
+import {
+  labSettingsApplied,
+  userFacingError,
+  userFacingLabError,
+  userFacingOperationCode,
+  userFacingOperationError,
+  userFacingSubtitleError,
+} from '../utils/user-facing-error';
 
 describe('user-facing error mapping', () => {
   it('maps known API statuses to Chinese copy', () => {
@@ -33,5 +40,19 @@ describe('user-facing error mapping', () => {
   it('explains a subtitle cleanup failure and its retry', () => {
     expect(userFacingOperationCode('subtitle_cleanup_failed')).toContain('再次删除');
     expect(userFacingOperationCode(undefined)).toBe('后台服务未能完成删除任务。');
+  });
+
+  it('maps lab failures by stable code and never relays server text', () => {
+    expect(userFacingLabError(new ApiError(400, 'internal detail', '', 'invalid_lab_settings'))).toContain('实验设置内容无效');
+    expect(userFacingLabError(new ApiError(409, 'disabled', '', 'lab_disabled'))).toContain('TORRENTFS_LAB_UPLOAD_MODE');
+    expect(userFacingLabError(new ApiError(503, 'storage', '', 'lab_settings_storage_unavailable'))).toContain('.metadata 目录权限');
+    expect(userFacingLabError(new ApiError(503, 'internal path /secret', '', 'new_lab_code'))).toBe('上传实验设置保存失败，请稍后重试。');
+    expect(userFacingLabError('network down')).toBe('上传实验设置保存失败，请稍后重试。');
+
+    const applied = new ApiError(503, 'durability', '', 'lab_settings_durability_unconfirmed');
+    expect(userFacingLabError(applied)).toContain('已生效');
+    expect(labSettingsApplied(applied)).toBe(true);
+    expect(labSettingsApplied(new ApiError(503, 'storage', '', 'lab_settings_storage_unavailable'))).toBe(false);
+    expect(labSettingsApplied(undefined)).toBe(false);
   });
 });

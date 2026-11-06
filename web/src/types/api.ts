@@ -126,3 +126,68 @@ export interface UploadRateSettings {
   rate_limit_bytes_per_second: number;
   schedule: UploadRateSchedule | null;
 }
+
+/**
+ * How the experimental synthetic-upload harness reports upload counters to
+ * trackers. `baseline` reports the real counters (control arm), `inject`
+ * fabricates a time-based counter, and `amplify` multiplies the real payload
+ * transfer.
+ */
+export type LabMode = 'baseline' | 'inject' | 'amplify';
+
+export interface LabSettings {
+  mode: LabMode;
+  /** Average synthetic growth per second in inject mode, in bytes. */
+  rate_bytes_per_second: number;
+  /** Reported-to-real factor in amplify mode; greater than one. */
+  multiplier: number;
+  /** Per-announce deviation in percent, 0-100. */
+  jitter_percent: number;
+  /** Per-torrent ceiling on the reported cumulative upload; zero is uncapped. */
+  cap_bytes: number;
+}
+
+/**
+ * Runtime-updatable part of the lab settings. Only `mode` is required by the
+ * management endpoint; omitted fields fall back to the daemon defaults.
+ */
+export interface LabSettingsUpdate {
+  mode: LabMode;
+  rate_bytes_per_second?: number;
+  multiplier?: number;
+  jitter_percent?: number;
+  cap_bytes?: number;
+}
+
+export interface LabTorrentStat {
+  info_hash: string;
+  /** Live real upload counter for this torrent. */
+  real_uploaded_bytes: number;
+  /** Real upload counter captured when the last announce was sent. */
+  real_uploaded_at_last_announce_bytes: number;
+  reported_uploaded_bytes: number;
+  /** RFC3339 timestamp of the last announce; may be null when unknown. */
+  last_announce_at?: string | null;
+}
+
+export interface LabTotals {
+  /** Live real upload counter since start. */
+  real_uploaded_bytes: number;
+  /** Real upload counter at the moment the last announce was sent. */
+  real_uploaded_at_last_announce_bytes: number;
+  reported_uploaded_bytes: number;
+  /** reported - real_at_last_announce; may be negative. */
+  overreported_bytes: number;
+  /** real_live - real_at_last_announce: real bytes not yet part of a report. */
+  pending_real_upload_bytes: number;
+}
+
+export interface LabView {
+  enabled: boolean;
+  settings: LabSettings | null;
+  seed: number;
+  announce_log: string;
+  peer_sample_interval_seconds: number;
+  totals: LabTotals;
+  torrents: LabTorrentStat[];
+}

@@ -57,6 +57,31 @@ export function uploadRateSettingsApplied(error: unknown): boolean {
   return error instanceof ApiError && error.code === 'upload_rate_settings_durability_unconfirmed';
 }
 
+/**
+ * Lab save failures are mapped by stable code. As with the upload rate, the
+ * "durability unconfirmed" case is not a plain failure: the new experiment
+ * configuration is already in force, only the restart-recovery guarantee is
+ * unproven.
+ */
+const LAB_CODE_MESSAGES: Record<string, string> = {
+  invalid_lab_settings: '实验设置内容无效，请检查模式、速率、倍率和上限后重试。',
+  lab_disabled: '上传实验未启用，需要设置 TORRENTFS_LAB_UPLOAD_MODE 等环境变量并重启后台服务后才能保存。',
+  lab_settings_storage_unavailable: '实验设置未能写入，当前配置未改变；请检查 .metadata 目录权限和磁盘空间后重试。',
+  lab_settings_durability_unconfirmed: '新实验设置已生效，但无法确认重启后仍能恢复；请重新读取确认当前状态。',
+};
+
+export function userFacingLabError(error: unknown, fallback = '上传实验设置保存失败，请稍后重试。'): string {
+  if (error instanceof ApiError) {
+    return LAB_CODE_MESSAGES[error.code] ?? fallback;
+  }
+  return fallback;
+}
+
+/** True when the daemon already applied the new lab settings despite the error. */
+export function labSettingsApplied(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'lab_settings_durability_unconfirmed';
+}
+
 export function userFacingSubtitleError(error: unknown, fallback = '后台服务未能完成字幕上传，请稍后重试。'): string {
   if (error instanceof ApiError) {
     return SUBTITLE_CODE_MESSAGES[error.code] ?? fallback;

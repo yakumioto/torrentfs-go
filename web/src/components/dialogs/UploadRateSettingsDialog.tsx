@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../app/auth-context';
 import { useSetUploadRateSettings, useUploadRateSettings } from '../../queries/hooks';
 import type { UploadRateSettings } from '../../types/api';
-import { formatUploadRate, parseUploadRate } from '../../utils/quantities';
+import { formatUploadRate, parseUploadRate, uploadRateInputError } from '../../utils/quantities';
 import { uploadRateSettingsApplied, userFacingUploadRateError } from '../../utils/user-facing-error';
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -15,25 +15,6 @@ function minutesOfDay(value: string): number | undefined {
   }
   const [hour, minute] = value.split(':');
   return Number(hour) * 60 + Number(minute);
-}
-
-function uploadRateInputError(result: ReturnType<typeof parseUploadRate>): string {
-  if ('value' in result) {
-    return result.value > 0 ? '' : '请输入大于 0 的速率。';
-  }
-  switch (result.error) {
-    case 'missing_rate_suffix':
-      return '请输入带单位的速率，例如 1MiB/s。';
-    case 'missing_unit':
-      return '速率必须包含字节单位，例如 32MB/s。';
-    case 'unknown_unit':
-      return '仅支持 B、KB、MB、GB、TB、KiB、MiB、GiB 或 TiB。';
-    case 'overflow':
-      return '速率超出浏览器可精确编辑的范围。';
-    case 'empty':
-    case 'invalid_format':
-      return '请输入整数速率，例如 1MiB/s；不支持小数或科学计数法。';
-  }
 }
 
 export function UploadRateSettingsDialog({ opened, onClose }: { opened: boolean; onClose: () => void }) {

@@ -23,6 +23,97 @@ mkdir -p "$PWD/torrents" "$PWD/mnt"
 
 [build-web.sh](../scripts/build-web.sh) installs frontend dependencies from the lockfile, builds `web/dist`, and removes `web/node_modules`; it does not remove `web/dist`.
 
+## Upload-statistics experiments (experimental, test branch)
+
+`internal/lab` is research-only tooling for controlling the upload counter reported to a tracker you run, so tracker-side anomaly detection can be exercised. It is off by default, has no TOML configuration, and only activates through `TORRENTFS_LAB_*` environment variables. Do not enable it against an unauthorized third-party tracker.
+
+### Modes
+
+| Mode | Source of the reported `uploaded` | Experiment purpose |
+| --- | --- | --- |
+| `baseline` | The client's real payload counter, not rewritten | Control arm: records ground truth only |
+| `inject` | Wall-clock synthetic counter, unrelated to real traffic | Deterministic anomaly: growth with no real transfer at all |
+| `amplify` | Real payload delta between announces times a multiplier | Coupled adversary: no real transfer means no growth |
+
+`TORRENTFS_LAB_UPLOAD_MODE` selects the mode. When unset it is inferred: a rate means `inject`, a multiplier means `amplify`, and only an announce log means `baseline`.
+
+### Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `TORRENTFS_LAB_UPLOAD_MODE` | `baseline`, `inject`, or `amplify`; optional |
+| `TORRENTFS_LAB_UPLOAD_RATE` | Required by `inject`; average reported rate, `4MiB/s` or `4MiB` |
+| `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | Required by `amplify`; a factor greater than 1, `5` or `5x` |
+| `TORRENTFS_LAB_UPLOAD_JITTER` | Per-announce deviation from the nominal increment, 0-100 percent; defaults to `20` |
+| `TORRENTFS_LAB_UPLOAD_CAP` | Per-torrent cumulative ceiling as a byte quantity; unset means uncapped |
+| `TORRENTFS_LAB_UPLOAD_SEED` | Seed for the jitter sequence, for reproducible runs |
+| `TORRENTFS_LAB_ANNOUNCE_LOG` | Ground-truth JSON Lines log path, opened for append |
+| `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | Peer and real-counter sampling period, default `5s`; requires the announce log |
+
+### Behavior and scope
+
+- Only the `uploaded` parameter of HTTP(S) tracker announces is rewritten; `downloaded`, `left`, `event`, passkey, and the rest keep their real values. UDP trackers and DHT are unaffected.
+- The first announce for an info hash reports `0` in `inject`/`amplify`, matching the session counter of a `started` event. Later values are monotonic and freeze at the cap.
+- `amplify` only grows when the real payload delta between two announces is positive. No real transfer means no growth, so it never produces the "growth with no peer activity at all" signal that `inject` produces. That difference is the point of having both modes.
+- The client's own counters and the Web UI/API keep the real values; only the number sent to the tracker changes.
+- Conflicting or incomplete configuration exits with code 2, for example `inject` without a rate, `baseline` with a rate, or `amplify` without a multiplier.
+
+### Runtime settings and the Web UI
+
+The experiment is enabled at startup by the `TORRENTFS_LAB_*` environment. After that, the Web UI page "Upload experiment" (`/lab`) can change mode, rate, multiplier, jitter, and cap. Saving applies the value to later announces immediately and atomically persists it to `<torrents-dir>/.metadata/lab_settings.json`, which the next start restores.
+
+The environment only supplies the initial values: once the sidecar exists, the runtime settings come from it. Delete the file and restart to fall back to the environment. `TORRENTFS_LAB_ANNOUNCE_LOG`, `TORRENTFS_LAB_UPLOAD_SEED`, and `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` remain startup-only and cannot be changed from the Web UI.
+
+The Dashboard shows this run's real upload, tracker-reported upload, and overreported bytes (reported minus real); the task list and detail page show the same three values per torrent so they can be compared with tracker-side records. Management API:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/api/v1/lab` | Returns the experiment configuration, `totals`, and per-torrent counters: the live `real_uploaded_bytes`, the counter at the last announce `real_uploaded_at_last_announce_bytes`, `reported_uploaded_bytes`, and `last_announce_at`. `totals` also carries `overreported_bytes` (reported minus announce-time real) and `pending_real_upload_bytes` (real bytes uploaded after the last announce, not yet reported) |
+| `PUT` | `/api/v1/lab/settings` | Updates runtime settings; the body is `{mode, rate_bytes_per_second, multiplier, jitter_percent, cap_bytes}` and the response is the same structure |
+
+The two real counters are sampled at different instants: a tracker only sees a new value at an announce, so `reported_uploaded_bytes` corresponds to `real_uploaded_at_last_announce_bytes`, not to the live `real_uploaded_bytes`. Real uploads continue between announces and appear as "pending real upload"; subtracting the live counter from the reported value produces a misleading negative over-report. Use `overreported_bytes` (reported minus announce-time real) to judge whether the multiplier is in force.
+
+PUT error codes: `invalid_lab_settings` (400), `lab_disabled` (409, experiment not enabled), `lab_settings_storage_unavailable` / `lab_settings_durability_unconfirmed` (503).
+
+### Ground-truth log
+
+The file at `TORRENTFS_LAB_ANNOUNCE_LOG` is JSON Lines with one record per line, distinguished by `type`:
+
+- `settings`: the experiment parameters of each run (mode, rate, multiplier, jitter, cap, seed, sample period).
+- `announce`: `time`, `info_hash`, `tracker` (host only), `event`, `real_uploaded`, `real_downloaded`, `left`, `real_delta`, `reported_uploaded`, `reported_delta`, and `mode`.
+- `peers`: per sampling period, `info_hash`, real `uploaded_bytes`, `downloaded_bytes`, `total_peers`, `pending_peers`, `active_peers`, and `connected_seeders`.
+
+`real_delta` is the payload bytes the client actually sent between two announces. Comparing it with `reported_delta` shows whether a reported increase had any real transfer behind it, and the `peers` records reconstruct the peer-activity history. Peer IDs, passkeys, and the raw query are deliberately not logged.
+
+### Examples
+
+```sh
+# Control arm: real reporting plus ground truth.
+TORRENTFS_LAB_UPLOAD_MODE=baseline \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-baseline.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# Deterministic anomaly: growth without real transfer.
+TORRENTFS_LAB_UPLOAD_MODE=inject TORRENTFS_LAB_UPLOAD_RATE=4MiB/s \
+TORRENTFS_LAB_UPLOAD_JITTER=25 TORRENTFS_LAB_UPLOAD_CAP=200GiB \
+TORRENTFS_LAB_UPLOAD_SEED=42 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-inject.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+
+# Coupled amplification: only real transfer is amplified.
+TORRENTFS_LAB_UPLOAD_MODE=amplify TORRENTFS_LAB_UPLOAD_MULTIPLIER=5 \
+TORRENTFS_LAB_UPLOAD_JITTER=10 \
+TORRENTFS_LAB_ANNOUNCE_LOG=/var/log/torrentfs/lab-amplify.jsonl \
+go run ./cmd/torrentfs -config ./torrentfs.toml /srv/torrents
+```
+
+When enabled, startup logs a warning named `lab upload experiment enabled`. The tests need no external network:
+
+```sh
+go test ./internal/lab/
+go test ./internal/session/ -run 'TestSyntheticAnnounceUpload|TestBaselineAnnounce|TestTorrentPeerActivities'
+```
+
 ## Architecture and storage model
 
 ```text

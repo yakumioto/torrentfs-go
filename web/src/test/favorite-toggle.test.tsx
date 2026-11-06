@@ -86,6 +86,23 @@ describe('favorite toggle', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(runtimeStats()));
       }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse({
+          enabled: false,
+          settings: null,
+          seed: 0,
+          announce_log: '',
+          peer_sample_interval_seconds: 0,
+          totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+          torrents: [],
+        }));
+      }
       if (init?.method === 'PUT') {
         favorited = true;
         return Promise.resolve(jsonResponse(torrent({ favorite: true })));

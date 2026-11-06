@@ -3,16 +3,43 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import { operationRefetchInterval, useAddTorrentFiles, useOperation } from '../queries/hooks';
+import { operationRefetchInterval, useAddTorrentFiles, useLab, useOperation, useSetLabSettings } from '../queries/hooks';
 import { queryKeys } from '../queries/keys';
 import { retryDelay, shouldRetry } from '../queries/retry';
-import type { Operation } from '../types/api';
+import type { LabView, Operation } from '../types/api';
+
+function labView(overrides: Partial<LabView> = {}): LabView {
+  return {
+    enabled: true,
+    settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
+    seed: 42,
+    announce_log: '/var/log/torrentfs/lab.jsonl',
+    peer_sample_interval_seconds: 5,
+    totals: {
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 4_197_247,
+      overreported_bytes: 4_197_247,
+      pending_real_upload_bytes: 5_000_000,
+    },
+    torrents: [{
+      info_hash: 'abc123',
+      real_uploaded_bytes: 5_000_000,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 4_197_247,
+      last_announce_at: '2026-11-05T15:12:00.123456Z',
+    }],
+    ...overrides,
+  };
+}
 
 describe('query contracts', () => {
   it('keeps the planned cache key shapes', () => {
     expect(queryKeys.torrents).toEqual(['torrents']);
     expect(queryKeys.categories).toEqual(['categories']);
     expect(queryKeys.runtimeStats).toEqual(['runtime-stats']);
+    expect(queryKeys.uploadRateSettings).toEqual(['upload-rate-settings']);
+    expect(queryKeys.lab).toEqual(['lab']);
     expect(queryKeys.torrent('abc')).toEqual(['torrent', 'abc']);
     expect(queryKeys.torrentStatus('abc')).toEqual(['torrent-status', 'abc']);
     expect(queryKeys.operation('op-1')).toEqual(['operation', 'op-1']);
@@ -34,8 +61,7 @@ describe('query contracts', () => {
     expect(operationRefetchInterval({ ...deleting, state: 'deleted' }, undefined)).toBe(false);
   });
 
-  it('stops the real operation hook after a 404 response', async () => {
-    const missing = new ApiError(404, 'unknown operation');
+  it('stops the real operation hook after a 404 response', async () => {    const missing = new ApiError(404, 'unknown operation');
     const api = {
       getOperation: vi.fn().mockResolvedValueOnce({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' }).mockRejectedValue(missing),
     } as unknown as ApiClient;
@@ -111,5 +137,43 @@ describe('query contracts', () => {
     const stopped = await act(async () => hook.result.current.mutateAsync({ files: stoppedFiles }));
     expect(stopped.items.map((item) => item.status)).toEqual(['failed', 'skipped']);
     expect(addTorrent).toHaveBeenCalledOnce();
+  });
+
+  it('polls the live lab view only while enabled', async () => {
+    const api = { getLab: vi.fn().mockResolvedValue(labView()) } as unknown as ApiClient;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+
+    const disabled = renderHook(() => useLab(api, false), { wrapper });
+    expect(disabled.result.current.fetchStatus).toBe('idle');
+    expect(api.getLab).not.toHaveBeenCalled();
+    disabled.unmount();
+
+    const enabled = renderHook(() => useLab(api, true), { wrapper });
+    await waitFor(() => expect(enabled.result.current.data?.totals.reported_uploaded_bytes).toBe(4_197_247));
+    expect(api.getLab).toHaveBeenCalledOnce();
+
+    enabled.unmount();
+    queryClient.clear();
+  });
+
+  it('stores the applied lab view returned by the settings write', async () => {
+    const applied = labView({
+      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 3, jitter_percent: 20, cap_bytes: 0 },
+    });
+    const api = { setLabSettings: vi.fn().mockResolvedValue(applied) } as unknown as ApiClient;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
+    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    const hook = renderHook(() => useSetLabSettings(api), { wrapper });
+
+    await act(async () => {
+      await hook.result.current.mutateAsync({ settings: { mode: 'amplify', multiplier: 3 } });
+    });
+
+    expect(api.setLabSettings).toHaveBeenCalledWith({ mode: 'amplify', multiplier: 3 }, undefined);
+    expect(queryClient.getQueryData(queryKeys.lab)).toEqual(applied);
+
+    hook.unmount();
+    queryClient.clear();
   });
 });

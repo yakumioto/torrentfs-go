@@ -40,6 +40,24 @@ function makeRuntimeStats() {
   };
 }
 
+function disabledLab() {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+    torrents: [],
+  };
+}
+
 function makeStatus(torrent: Torrent): TorrentStatus {
   return {
     torrent,
@@ -102,6 +120,9 @@ describe('Header refresh control', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
       listRequests += 1;
       if (listRequests === 1) {
         return Promise.resolve(jsonResponse([torrent]));
@@ -113,7 +134,7 @@ describe('Header refresh control', () => {
     const navigationError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     renderApp('/', fetchMock);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     fetchMock.mockClear();
 
     const refreshButton = screen.getByRole('button', { name: '刷新数据' });
@@ -143,6 +164,9 @@ describe('Header refresh control', () => {
       const url = String(input);
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
+      }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
       }
       if (url.endsWith('/settings/upload-rate')) {
         return Promise.resolve(jsonResponse({ rate_limit_bytes_per_second: 0, schedule: null }));
@@ -175,6 +199,9 @@ describe('Header refresh control', () => {
       if (url.endsWith('/status')) {
         return Promise.resolve(jsonResponse(status));
       }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
       if (url.endsWith('/torrent-1')) {
         return Promise.resolve(jsonResponse(torrent));
       }
@@ -183,7 +210,7 @@ describe('Header refresh control', () => {
 
     renderApp('/torrents/torrent-1', fetchMock);
     await waitFor(() => expect(screen.getByRole('heading', { name: torrent.name })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/torrents'))).toBe(false);
     fetchMock.mockClear();
 
@@ -197,5 +224,32 @@ describe('Header refresh control', () => {
     expect(screen.getByRole('tab', { name: /文件/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /数据块/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/torrents/torrent-1');
+  });
+
+  it('opens the lab settings page from the header flask link', async () => {
+    const torrent = makeTorrent();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/stats')) {
+        return Promise.resolve(jsonResponse(makeRuntimeStats()));
+      }
+      if (url.endsWith('/lab')) {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
+      if (url.endsWith('/torrents')) {
+        return Promise.resolve(jsonResponse([torrent]));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderApp('/', fetchMock);
+    await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
+
+    const link = screen.getByRole('link', { name: '上传实验设置' });
+    expect(link).toHaveAttribute('href', '/lab');
+    fireEvent.click(link);
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());
+    expect(screen.getByText('上传实验未启用')).toBeInTheDocument();
   });
 });
