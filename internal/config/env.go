@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -9,7 +10,33 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type envLookup func(string) (string, bool)
+// envLookup reads configuration values from the process environment. It also
+// enumerates the variables that are set, so a later stage can reject unknown
+// configuration variables without a second environment source.
+type envLookup interface {
+	// Lookup returns the value of one variable and reports whether it is set.
+	Lookup(name string) (string, bool)
+	// Names returns the names of every variable that is set.
+	Names() []string
+}
+
+// osEnvironment reads the process environment.
+type osEnvironment struct{}
+
+// Lookup returns the value of one environment variable.
+func (osEnvironment) Lookup(name string) (string, bool) { return os.LookupEnv(name) }
+
+// Names returns the names of every environment variable that is set.
+func (osEnvironment) Names() []string {
+	names := os.Environ()
+	result := make([]string, 0, len(names))
+	for _, entry := range names {
+		if index := strings.IndexByte(entry, '='); index > 0 {
+			result = append(result, entry[:index])
+		}
+	}
+	return result
+}
 
 type envBinding struct {
 	name  string
@@ -88,33 +115,6 @@ var environmentBindings = []envBinding{
 		},
 	},
 	{
-		name:  "TORRENTFS_MOUNT_ALLOW_OTHER",
-		field: "mount.allow_other",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Mount.AllowOther = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_MOUNT_READ_TIMEOUT",
-		field: "mount.read_timeout",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvDuration(raw)
-			if err != nil {
-				return err
-			}
-			if value <= 0 {
-				return errPositive
-			}
-			cfg.Mount.ReadTimeout = value
-			return nil
-		},
-	},
-	{
 		name:  "TORRENTFS_PROXY_SOCKS5_URL",
 		field: "proxy.socks5_url",
 		apply: func(cfg *Config, raw string) error {
@@ -130,7 +130,7 @@ var environmentBindings = []envBinding{
 			if err != nil {
 				return err
 			}
-			cfg.Cache.CapacityBytes = value
+			cfg.Cache.CapacityBytes = ByteQuantity(value)
 			return nil
 		},
 	},
@@ -174,7 +174,7 @@ var environmentBindings = []envBinding{
 			if err != nil {
 				return err
 			}
-			cfg.HTTP.MaxUploadBytes = value
+			cfg.HTTP.MaxUploadBytes = ByteQuantity(value)
 			return nil
 		},
 	},
@@ -241,8 +241,11 @@ var environmentBindings = []envBinding{
 }
 
 func applyEnvironment(cfg *Config, lookup envLookup) error {
+	if removed := removedEnvironmentNames(lookup); len(removed) > 0 {
+		return &RemovedError{Names: removed}
+	}
 	for _, binding := range environmentBindings {
-		raw, ok := lookup(binding.name)
+		raw, ok := lookup.Lookup(binding.name)
 		if !ok {
 			continue
 		}
@@ -261,8 +264,8 @@ func applyHTTPAuthenticationEnvironment(cfg *Config, lookup envLookup) error {
 		return nil
 	}
 
-	username, usernameSet := lookup(httpUsernameEnvironment)
-	password, passwordSet := lookup(httpPasswordEnvironment)
+	username, usernameSet := lookup.Lookup(httpUsernameEnvironment)
+	password, passwordSet := lookup.Lookup(httpPasswordEnvironment)
 	if !usernameSet && !passwordSet {
 		return nil
 	}

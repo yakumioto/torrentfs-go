@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -10,39 +11,18 @@ import (
 )
 
 // Load strictly decodes TOML, overlays the documented environment, and validates.
-func Load(path string) (Config, error) { return load(path, os.LookupEnv) }
+func Load(path string) (Config, error) { return load(path, osEnvironment{}) }
 
 func load(path string, lookup envLookup) (Config, error) {
 	cfg := Default()
 	if path != "" {
-		file, err := os.Open(path)
+		content, err := os.ReadFile(path)
 		if err != nil {
 			return Config{}, fmt.Errorf("config: open %q: %w", path, err)
 		}
-		defer func() { _ = file.Close() }()
-		fileCfg := newFileConfig(cfg)
-		if err := toml.NewDecoder(file).DisallowUnknownFields().Decode(&fileCfg); err != nil {
-			var strictErr *toml.StrictMissingError
-			if errors.As(err, &strictErr) {
-				if strings.Contains(strings.ToLower(strictErr.String()), "password") {
-					return Config{}, errors.New("config: unknown password field; use documented hash or secret-file settings")
-				}
-				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, strictErr.String(), err)
-			}
-			var decodeErr *toml.DecodeError
-			if errors.As(err, &decodeErr) {
-				message := decodeErr.String()
-				if strings.Contains(message, "CapacityBytes") {
-					message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
-				}
-				if strings.Contains(message, "MaxUploadBytes") {
-					message += "; http.max_upload_size must be a quoted byte quantity such as 10MiB or 32MB"
-				}
-				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, message, err)
-			}
-			return Config{}, fmt.Errorf("config: decode %q: %w", path, err)
+		if err := decodeFile(content, path, &cfg); err != nil {
+			return Config{}, err
 		}
-		cfg = fileCfg.runtimeConfig()
 	}
 	if err := applyEnvironment(&cfg, lookup); err != nil {
 		return Config{}, fmt.Errorf("config: apply environment: %w", err)
@@ -56,47 +36,43 @@ func load(path string, lookup envLookup) (Config, error) {
 	return cfg, nil
 }
 
-type fileConfig struct {
-	Connections Connections    `toml:"connections"`
-	Proxy       Proxy          `toml:"proxy"`
-	Cache       fileCache      `toml:"cache"`
-	Identity    Identity       `toml:"identity"`
-	HTTP        fileHTTP       `toml:"http"`
-	STRM        STRM           `toml:"strm"`
-	Log         Log            `toml:"log"`
-	Mount       fileMount      `toml:"mount"`
-	Filesystem  fileFilesystem `toml:"filesystem"`
-	FUSE        fileFUSE       `toml:"fuse"`
-	SMB         SMB            `toml:"smb"`
-}
-
-type fileCache struct {
-	CapacityBytes tomlByteQuantity `toml:"capacity"`
-}
-type fileHTTP struct {
-	ListenAddr     string           `toml:"listen_addr"`
-	Auth           Auth             `toml:"auth"`
-	MaxUploadBytes tomlByteQuantity `toml:"max_upload_size"`
-}
-
-func newFileConfig(cfg Config) fileConfig {
-	return fileConfig{
-		Connections: cfg.Connections, Proxy: cfg.Proxy,
-		Cache:    fileCache{CapacityBytes: tomlByteQuantity(cfg.Cache.CapacityBytes)},
-		Identity: cfg.Identity,
-		HTTP: fileHTTP{ListenAddr: cfg.HTTP.ListenAddr, Auth: cfg.HTTP.Auth,
-			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes)},
-		STRM: cfg.STRM, Log: cfg.Log, SMB: cfg.SMB,
+// decodeFile decodes one configuration file onto the default configuration.
+// The document is read twice: once into a generic tree to recognize removed
+// names and to learn which keys the document sets explicitly, and once
+// strictly into the configuration itself.
+func decodeFile(content []byte, path string, cfg *Config) error {
+	var document map[string]any
+	if err := toml.Unmarshal(content, &document); err != nil {
+		return fmt.Errorf("config: decode %q: %w", path, err)
 	}
-}
-
-func (c fileConfig) runtimeConfig() Config {
-	cfg := Config{
-		Connections: c.Connections, Proxy: c.Proxy,
-		Cache: Cache{CapacityBytes: int64(c.Cache.CapacityBytes)}, Identity: c.Identity,
-		HTTP: HTTP{ListenAddr: c.HTTP.ListenAddr, Auth: c.HTTP.Auth, MaxUploadBytes: int64(c.HTTP.MaxUploadBytes)},
-		STRM: c.STRM, Log: c.Log,
+	if removed := removedTOMLNames(document); len(removed) > 0 {
+		return fmt.Errorf("config: decode %q: %w", path, &RemovedError{Names: removed})
 	}
-	c.outputConfig(&cfg)
-	return cfg
+	// An explicitly selected file output wins over the mountpoint heuristic
+	// that the environment applies.
+	if documentUses(document, "filesystem.backend") {
+		cfg.backendExplicit = true
+	}
+	if err := toml.NewDecoder(bytes.NewReader(content)).DisallowUnknownFields().Decode(cfg); err != nil {
+		var strictErr *toml.StrictMissingError
+		if errors.As(err, &strictErr) {
+			if strings.Contains(strings.ToLower(strictErr.String()), "password") {
+				return errors.New("config: unknown password field; use documented hash or secret-file settings")
+			}
+			return fmt.Errorf("config: decode %q: %s: %w", path, strictErr.String(), err)
+		}
+		var decodeErr *toml.DecodeError
+		if errors.As(err, &decodeErr) {
+			message := decodeErr.String()
+			if strings.Contains(message, "CapacityBytes") {
+				message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
+			}
+			if strings.Contains(message, "MaxUploadBytes") {
+				message += "; http.max_upload_size must be a quoted byte quantity such as 10MiB or 32MB"
+			}
+			return fmt.Errorf("config: decode %q: %s: %w", path, message, err)
+		}
+		return fmt.Errorf("config: decode %q: %w", path, err)
+	}
+	return nil
 }

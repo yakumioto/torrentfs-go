@@ -18,145 +18,97 @@ const (
 	defaultReadTimeout = Duration(30 * time.Second)
 )
 
+// The environment variables of the file output settings.
+const (
+	envFilesystemBackend     = "TORRENTFS_FILESYSTEM_BACKEND"
+	envFilesystemReadTimeout = "TORRENTFS_FILESYSTEM_READ_TIMEOUT"
+	envFUSEMountpoint        = "TORRENTFS_FUSE_MOUNTPOINT"
+	envFUSESTRMMountpoint    = "TORRENTFS_FUSE_STRM_MOUNTPOINT"
+	envFUSEAllowOther        = "TORRENTFS_FUSE_ALLOW_OTHER"
+	envSMBListenAddr         = "TORRENTFS_SMB_LISTEN_ADDR"
+	envSMBUsername           = "TORRENTFS_SMB_USERNAME"
+	envSMBPasswordFile       = "TORRENTFS_SMB_PASSWORD_FILE"
+	envSMBSTRMEnabled        = "TORRENTFS_SMB_STRM_ENABLED"
+)
+
+// filesystemEnvironmentNames lists every environment variable that configures
+// the file output.
+var filesystemEnvironmentNames = []string{
+	envFilesystemBackend,
+	envFilesystemReadTimeout,
+	envFUSEMountpoint,
+	envFUSESTRMMountpoint,
+	envFUSEAllowOther,
+	envSMBListenAddr,
+	envSMBUsername,
+	envSMBPasswordFile,
+	envSMBSTRMEnabled,
+}
+
+// Filesystem groups the settings that describe the file output as a whole.
 type Filesystem struct {
-	Backend     string   `toml:"backend"`
+	// Backend selects the file output: none, fuse, or smb.
+	Backend string `toml:"backend"`
+	// ReadTimeout bounds a single read of a piece from the torrent.
 	ReadTimeout Duration `toml:"read_timeout"`
 }
 
+// FUSE groups the settings of the read-only FUSE file output.
 type FUSE struct {
-	Mountpoint     string `toml:"mountpoint"`
+	// Mountpoint is the directory the file tree is mounted on.
+	Mountpoint string `toml:"mountpoint"`
+	// STRMMountpoint is the directory the signed-streaming view is mounted on.
 	STRMMountpoint string `toml:"strm_mountpoint"`
-	AllowOther     bool   `toml:"allow_other"`
+	// AllowOther passes allow_other to the kernel, lifting FUSE's default
+	// restriction that only the mounting user may access the mount.
+	AllowOther bool `toml:"allow_other"`
 }
 
+// SMB groups the settings of the built-in read-only SMB file output.
 type SMB struct {
-	ListenAddr   string `toml:"listen_addr"`
-	Username     string `toml:"username"`
+	// ListenAddr is the address the SMB service binds.
+	ListenAddr string `toml:"listen_addr"`
+	// Username is the login name the SMB service accepts.
+	Username string `toml:"username"`
+	// PasswordFile is a file holding the SMB password.
 	PasswordFile string `toml:"password_file"`
-	Password     string `toml:"-"`
+	// Password is the plaintext SMB password. It is never read from TOML.
+	Password string `toml:"-"`
 	// Nil selects the STRM share automatically when strm.base_url is set.
 	STRMEnabled *bool `toml:"strm_enabled"`
 }
 
-type fileFilesystem struct {
-	Backend     *string   `toml:"backend"`
-	ReadTimeout *Duration `toml:"read_timeout"`
-}
-
-type fileFUSE struct {
-	Mountpoint     string `toml:"mountpoint"`
-	STRMMountpoint string `toml:"strm_mountpoint"`
-	AllowOther     *bool  `toml:"allow_other"`
-}
-
-type fileMount struct {
-	AllowOther  *bool     `toml:"allow_other"`
-	ReadTimeout *Duration `toml:"read_timeout"`
-}
-
-func (c fileConfig) outputConfig(cfg *Config) {
-	cfg.Filesystem = Filesystem{Backend: BackendNone, ReadTimeout: defaultReadTimeout}
-	cfg.SMB = c.SMB
-	if cfg.SMB.ListenAddr == "" {
-		cfg.SMB.ListenAddr = "0.0.0.0:1445"
-	}
-	cfg.FUSE = FUSE{Mountpoint: c.FUSE.Mountpoint, STRMMountpoint: c.FUSE.STRMMountpoint}
-	if c.Filesystem.Backend != nil {
-		cfg.Filesystem.Backend = *c.Filesystem.Backend
-		cfg.backendExplicit = true
-	}
-	if c.Filesystem.ReadTimeout != nil {
-		cfg.Filesystem.ReadTimeout = *c.Filesystem.ReadTimeout
-	}
-	if c.Mount.ReadTimeout != nil {
-		if c.Filesystem.ReadTimeout != nil && *c.Filesystem.ReadTimeout != *c.Mount.ReadTimeout {
-			cfg.outputError = invalid("filesystem.read_timeout", errors.New("conflicts with mount.read_timeout"))
-		}
-		cfg.Filesystem.ReadTimeout = *c.Mount.ReadTimeout
-	}
-	if c.FUSE.AllowOther != nil {
-		cfg.FUSE.AllowOther = *c.FUSE.AllowOther
-	}
-	if c.Mount.AllowOther != nil {
-		if c.FUSE.AllowOther != nil && *c.FUSE.AllowOther != *c.Mount.AllowOther {
-			cfg.outputError = invalid("fuse.allow_other", errors.New("conflicts with mount.allow_other"))
-		}
-		cfg.FUSE.AllowOther = *c.Mount.AllowOther
-	}
-	cfg.syncMount()
-}
-
-func (c *Config) syncMount() {
-	c.Mount = Mount{AllowOther: c.FUSE.AllowOther, ReadTimeout: c.Filesystem.ReadTimeout}
-}
-
-// FileReadTimeout preserves the in-process legacy Mount setting for existing
-// Backend callers; loaded configuration always normalizes both representations.
-func (c Config) FileReadTimeout() Duration {
-	if c.Filesystem.ReadTimeout == defaultReadTimeout && c.Mount.ReadTimeout != defaultReadTimeout {
-		return c.Mount.ReadTimeout
-	}
-	return c.Filesystem.ReadTimeout
-}
-
+// applyFilesystemEnvironment overlays the documented filesystem environment
+// variables on the configuration.
 func applyFilesystemEnvironment(c *Config, lookup envLookup) error {
-	if raw, ok := lookup("TORRENTFS_FILESYSTEM_BACKEND"); ok {
+	if raw, ok := lookup.Lookup(envFilesystemBackend); ok {
 		c.Filesystem.Backend, c.backendExplicit = raw, true
 	}
-	if raw, ok := lookup("TORRENTFS_SMB_ENABLED"); ok && raw != "" {
-		enabled, err := parseEnvBool(raw)
-		if err != nil {
-			return invalid("filesystem.backend", errors.New("TORRENTFS_SMB_ENABLED must be a boolean"))
-		}
-		if enabled {
-			if c.backendExplicit && c.Filesystem.Backend != BackendSMB {
-				return invalid("filesystem.backend", errors.New("conflicts with TORRENTFS_SMB_ENABLED"))
-			}
-			c.Filesystem.Backend, c.backendExplicit = BackendSMB, true
-		} else if c.backendExplicit && c.Filesystem.Backend == BackendSMB {
-			return invalid("filesystem.backend", errors.New("conflicts with TORRENTFS_SMB_ENABLED"))
-		}
-	}
 	for name, target := range map[string]*string{
-		"TORRENTFS_FUSE_MOUNTPOINT":      &c.FUSE.Mountpoint,
-		"TORRENTFS_FUSE_STRM_MOUNTPOINT": &c.FUSE.STRMMountpoint,
-		"TORRENTFS_SMB_LISTEN_ADDR":      &c.SMB.ListenAddr,
-		"TORRENTFS_SMB_USERNAME":         &c.SMB.Username,
-		"TORRENTFS_SMB_PASSWORD_FILE":    &c.SMB.PasswordFile,
+		envFUSEMountpoint:     &c.FUSE.Mountpoint,
+		envFUSESTRMMountpoint: &c.FUSE.STRMMountpoint,
+		envSMBListenAddr:      &c.SMB.ListenAddr,
+		envSMBUsername:        &c.SMB.Username,
+		envSMBPasswordFile:    &c.SMB.PasswordFile,
 	} {
-		if raw, ok := lookup(name); ok {
+		if raw, ok := lookup.Lookup(name); ok {
 			*target = raw
 		}
 	}
-	newTimeout, hasNewTimeout := lookup("TORRENTFS_FILESYSTEM_READ_TIMEOUT")
-	_, hasOldTimeout := lookup("TORRENTFS_MOUNT_READ_TIMEOUT")
-	if hasNewTimeout {
-		value, err := parseEnvDuration(newTimeout)
+	if raw, ok := lookup.Lookup(envFilesystemReadTimeout); ok {
+		value, err := parseEnvDuration(raw)
 		if err != nil {
-			return invalid("filesystem.read_timeout", errors.New("invalid TORRENTFS_FILESYSTEM_READ_TIMEOUT"))
-		}
-		if hasOldTimeout && value != c.Mount.ReadTimeout {
-			return invalid("filesystem.read_timeout", errors.New("conflicts with TORRENTFS_MOUNT_READ_TIMEOUT"))
+			return invalid("filesystem.read_timeout", errors.New("invalid "+envFilesystemReadTimeout))
 		}
 		c.Filesystem.ReadTimeout = value
-	} else if hasOldTimeout {
-		c.Filesystem.ReadTimeout = c.Mount.ReadTimeout
 	}
-	newOther, hasNewOther := lookup("TORRENTFS_FUSE_ALLOW_OTHER")
-	_, hasOldOther := lookup("TORRENTFS_MOUNT_ALLOW_OTHER")
-	if hasNewOther {
-		value, err := parseEnvBool(newOther)
+	if raw, ok := lookup.Lookup(envFUSEAllowOther); ok {
+		value, err := parseEnvBool(raw)
 		if err != nil {
-			return invalid("fuse.allow_other", errors.New("invalid TORRENTFS_FUSE_ALLOW_OTHER"))
-		}
-		if hasOldOther && value != c.Mount.AllowOther {
-			return invalid("fuse.allow_other", errors.New("conflicts with TORRENTFS_MOUNT_ALLOW_OTHER"))
+			return invalid("fuse.allow_other", errors.New("invalid "+envFUSEAllowOther))
 		}
 		c.FUSE.AllowOther = value
-	} else if hasOldOther {
-		c.FUSE.AllowOther = c.Mount.AllowOther
 	}
-	c.syncMount()
 	if !c.backendExplicit && (c.FUSE.Mountpoint != "" || c.FUSE.STRMMountpoint != "") {
 		c.Filesystem.Backend = BackendFUSE
 	}
@@ -164,8 +116,8 @@ func applyFilesystemEnvironment(c *Config, lookup envLookup) error {
 		return err
 	}
 	if c.Filesystem.Backend == BackendSMB {
-		username, userSet := lookup(httpUsernameEnvironment)
-		password, passwordSet := lookup(httpPasswordEnvironment)
+		username, userSet := lookup.Lookup(httpUsernameEnvironment)
+		password, passwordSet := lookup.Lookup(httpPasswordEnvironment)
 		if userSet != passwordSet {
 			return invalid("smb", errors.New("TORRENTFS_USERNAME and TORRENTFS_PASSWORD must be set together"))
 		}
@@ -187,21 +139,9 @@ func applyFilesystemEnvironment(c *Config, lookup envLookup) error {
 	return nil
 }
 
-// ResolveFilesystem applies legacy CLI aliases after loading TOML/env. Settings
-// of an unselected backend are retained so switching only backend is sufficient.
-func (c *Config) ResolveFilesystem(mountpoint, strmMountpoint string) error {
-	if mountpoint != "" || strmMountpoint != "" {
-		if c.backendExplicit && c.Filesystem.Backend != BackendFUSE {
-			return invalid("filesystem.backend", errors.New("FUSE CLI mountpoints conflict with selected backend"))
-		}
-		c.Filesystem.Backend = BackendFUSE
-		if mountpoint != "" {
-			c.FUSE.Mountpoint = mountpoint
-		}
-		if strmMountpoint != "" {
-			c.FUSE.STRMMountpoint = strmMountpoint
-		}
-	}
+// ResolveFilesystem completes the file output selection. Settings of an
+// unselected backend are retained so switching only the backend is sufficient.
+func (c *Config) ResolveFilesystem() error {
 	if c.Filesystem.Backend == BackendFUSE {
 		if c.FUSE.Mountpoint == "" && c.FUSE.STRMMountpoint == "" {
 			return invalid("fuse.mountpoint", errors.New("at least one FUSE mountpoint is required"))
@@ -214,9 +154,6 @@ func (c *Config) ResolveFilesystem(mountpoint, strmMountpoint string) error {
 }
 
 func (c Config) validateFilesystem() error {
-	if c.outputError != nil {
-		return c.outputError
-	}
 	switch c.Filesystem.Backend {
 	case BackendNone, BackendFUSE, BackendSMB:
 	default:

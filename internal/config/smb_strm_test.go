@@ -34,26 +34,20 @@ func TestSMBSTRMShareSelection(t *testing.T) {
 	}
 }
 
-func TestLegacySTRMSwitch(t *testing.T) {
+func TestSMBSTRMEnvironmentSwitch(t *testing.T) {
 	for _, enabled := range []string{"true", "false"} {
-		cfg, err := loadFilesystemTest(t, "[strm]\nbase_url=\"http://media.example.test:8080\"", map[string]string{
-			"TORRENTFS_SMB_ENABLED": "true", "TORRENTFS_USERNAME": "user",
-			"TORRENTFS_PASSWORD": "test-only-password", "TORRENTFS_STRM_ENABLED": enabled,
+		cfg, err := loadFilesystemTest(t, "[filesystem]\nbackend=\"smb\"\n[strm]\nbase_url=\"http://media.example.test:8080\"", map[string]string{
+			"TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": "test-only-password",
+			"TORRENTFS_SMB_STRM_ENABLED": enabled,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if cfg.SMBSTRMEnabled() != (enabled == "true") {
-			t.Fatalf("legacy switch %s ignored", enabled)
+			t.Fatalf("STRM switch %s ignored", enabled)
 		}
 	}
-	if _, err := loadFilesystemTest(t, "", map[string]string{"TORRENTFS_STRM_ENABLED": "true"}); err == nil {
-		t.Fatal("legacy STRM switch accepted without SMB")
-	}
-	if _, err := loadFilesystemTest(t, "", map[string]string{
-		"TORRENTFS_SMB_ENABLED": "true", "TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": "test-only-password",
-		"TORRENTFS_STRM_ENABLED": "true", "TORRENTFS_SMB_STRM_ENABLED": "false",
-	}); err == nil {
-		t.Fatal("conflicting STRM switches accepted")
+	if _, err := loadFilesystemTest(t, "", map[string]string{"TORRENTFS_SMB_STRM_ENABLED": "true"}); err == nil {
+		t.Fatal("STRM switch accepted without SMB")
 	}
 }

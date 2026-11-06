@@ -100,8 +100,7 @@ backend = "none"
 read_timeout = "30s"
 
 [fuse]
-# Required when backend=fuse; existing -mountpoint remains a legacy alias only
-# when no conflicting backend is explicitly selected.
+# Required when backend=fuse. The directory must exist.
 mountpoint = ""
 # Optional STRM mount; requires strm.base_url and the HTTP listener.
 strm_mountpoint = ""

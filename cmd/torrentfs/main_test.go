@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -509,7 +510,6 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	var stderr bytes.Buffer
 
 	code := run([]string{
-		"-mountpoint", t.TempDir(),
 		"-config", missing,
 		t.TempDir(),
 	}, &stderr)
@@ -529,7 +529,6 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	var stderr bytes.Buffer
 
 	code := run([]string{
-		"-mountpoint", t.TempDir(),
 		"-config", path,
 		t.TempDir(),
 	}, &stderr)
@@ -567,7 +566,7 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 
 func TestRunRejectsRemovedDataDirFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	code := run([]string{"-data-dir", t.TempDir(), "-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	code := run([]string{"-data-dir", t.TempDir(), t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -596,7 +595,7 @@ func TestRunRequiresExactlyOneTorrentsDirectory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			args := append([]string{"-mountpoint", t.TempDir()}, tt.args...)
+			args := tt.args
 			if code := run(args, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
@@ -614,7 +613,7 @@ func TestRunRejectsNonDirectoryTorrentInput(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), file}, &stderr)
+	code := run([]string{file}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -629,7 +628,7 @@ func TestRunRejectsMissingTorrentDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing-torrents")
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), missing}, &stderr)
+	code := run([]string{missing}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -645,7 +644,7 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	code := run([]string{t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -827,12 +826,16 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 			t.Setenv("TORRENTFS_HTTP_LISTEN_ADDR", tt.httpAddr)
 			torrents := t.TempDir()
 			strm := t.TempDir()
-			args := []string{"-strm-mountpoint", strm}
+			body := "[filesystem]\nbackend = \"fuse\"\n[fuse]\nstrm_mountpoint = " + strconv.Quote(strm) + "\n"
 			if tt.overlap {
-				args = append(args, "-mountpoint", strm)
+				body += "mountpoint = " + strconv.Quote(strm) + "\n"
+			}
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
 			}
 			var stderr bytes.Buffer
-			if code := run(append(args, torrents), &stderr); code != 2 {
+			if code := run([]string{"-config", configPath, torrents}, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			output := stderr.String()
@@ -849,21 +852,36 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 	}
 }
 
-func TestRunRecognizesSTRMMountpointFlagForms(t *testing.T) {
-	for _, flagName := range []string{"-strm-mountpoint", "--strm-mountpoint", "-strm-mountpoint=", "--strm-mountpoint="} {
-		t.Run(flagName, func(t *testing.T) {
+// TestRunRejectsRemovedMountpointFlags checks that the removed command-line
+// mountpoint flags are refused with the configuration key that replaces them.
+func TestRunRejectsRemovedMountpointFlags(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		wantRemoved string
+		wantNew     string
+	}{
+		{name: "mountpoint", args: []string{"-mountpoint", "/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+		{name: "strm mountpoint", args: []string{"-strm-mountpoint", "/srv/strm"}, wantRemoved: "-strm-mountpoint", wantNew: "fuse.strm_mountpoint"},
+		{name: "double dash", args: []string{"--mountpoint", "/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+		{name: "with value", args: []string{"-mountpoint=/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			unsetConfigEnvironment(t)
-			mountpoint := t.TempDir()
-			args := []string{flagName, mountpoint}
-			if strings.HasSuffix(flagName, "=") {
-				args = []string{flagName + mountpoint}
-			}
 			var stderr bytes.Buffer
-			if code := run(append(args, t.TempDir()), &stderr); code != 2 {
+			code := run(append(tt.args, t.TempDir()), &stderr)
+			if code != 2 {
 				t.Fatalf("run exit code = %d, want 2", code)
 			}
-			if !strings.Contains(stderr.String(), "strm.base_url") {
-				t.Fatalf("stderr = %q, want recognized STRM flag and missing base URL", stderr.String())
+			output := stderr.String()
+			if !strings.Contains(output, tt.wantRemoved) {
+				t.Fatalf("stderr = %q, want the removed flag %q", output, tt.wantRemoved)
+			}
+			if !strings.Contains(output, tt.wantNew) {
+				t.Fatalf("stderr = %q, want the replacement %q", output, tt.wantNew)
+			}
+			if strings.Contains(output, "torrentfs starting") {
+				t.Fatalf("the removed flag reached startup: %q", output)
 			}
 		})
 	}
@@ -886,7 +904,7 @@ func TestUsageDescribesAPIOnlyTorrentManagement(t *testing.T) {
 	if strings.Contains(usageText, "scanned "+"at startup") || strings.Contains(usageText, "while "+"running") {
 		t.Fatalf("usage still describes directory scanning: %q", usageText)
 	}
-	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "-strm-mountpoint", "strm.base_url", "mounted alone", "native SMB", "HTTP-only default", "SMB can run without HTTP", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
+	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "fuse.mountpoint", "strm.base_url", "mounted alone", "native SMB", "HTTP-only default", "SMB can run without HTTP", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage = %q, want %q", usageText, want)
 		}

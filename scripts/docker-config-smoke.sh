@@ -148,15 +148,14 @@ expect_failure 'no output' 'Usage:' --env TORRENTFS_FILESYSTEM_BACKEND=none --en
 expect_failure 'missing SMB credential pair' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
 expect_failure 'missing SMB password' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader
 expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
-expect_failure 'SMB/FUSE CLI conflict' 'conflict' --env TORRENTFS_FILESYSTEM_BACKEND=smb \
-	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" -- \
+expect_failure 'removed mountpoint flag' 'fuse.mountpoint' -- \
 	-mountpoint /share -config /etc/torrentfs/torrentfs.toml /torrents
-expect_failure 'conflicting old selector' 'conflicts' --env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_SMB_ENABLED=true
-expect_failure 'conflicting read deadlines' 'conflicts' --env TORRENTFS_MOUNT_READ_TIMEOUT=3s --env TORRENTFS_FILESYSTEM_READ_TIMEOUT=4s
+expect_failure 'removed SMB selector' 'TORRENTFS_FILESYSTEM_BACKEND' --env TORRENTFS_SMB_ENABLED=true
+expect_failure 'removed read deadline' 'TORRENTFS_FILESYSTEM_READ_TIMEOUT' --env TORRENTFS_MOUNT_READ_TIMEOUT=3s
 expect_failure 'STRM requires HTTP' 'strm.base_url' --env TORRENTFS_FILESYSTEM_BACKEND=smb \
 	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" \
 	--env TORRENTFS_HTTP_LISTEN_ADDR= --env TORRENTFS_STRM_BASE_URL=http://player.example:8080
-printf 'docker config smoke: identity, selector, credential, alias, and STRM failures passed\n'
+printf 'docker config smoke: identity, selector, credential, removed name, and STRM failures passed\n'
 
 mkdir -p "$work_dir/blocked"
 chmod 000 "$work_dir/blocked"

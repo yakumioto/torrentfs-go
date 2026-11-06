@@ -115,7 +115,6 @@ listen_addr = "0.0.0.0:1445"
 username = "torrentfs"
 password_file = "/run/secrets/torrentfs-password"
 ```
-
 **STRM（可选）**：设置播放器可达的 `strm.base_url` 后，SMB 会额外提供 `torrentfs-strm` 共享（FUSE 用 `fuse.strm_mountpoint`），视频会生成一行签名 URL 的 `.strm` 文件：
 
 ```toml
@@ -133,6 +132,22 @@ base_url = "http://192.168.1.10:8080"
 - `TORRENTFS_*` 环境变量只对文档化的名称生效，不会为每个 TOML 字段自动生成变量。
 - 绑定非 loopback 地址时必须启用认证；Web 登录只校验密码，Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
+
+### 迁移对照表
+
+已删除的名称在启动时会报错并给出替代写法，不会被静默忽略。
+
+| 已删除 | 替代写法 |
+| --- | --- |
+| `mount` | `filesystem.read_timeout`、`fuse.allow_other` |
+| `mount.read_timeout` | `filesystem.read_timeout` |
+| `mount.allow_other` | `fuse.allow_other` |
+| `-mountpoint` | `fuse.mountpoint` |
+| `-strm-mountpoint` | `fuse.strm_mountpoint` |
+| `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
+| `TORRENTFS_MOUNT_ALLOW_OTHER` | `TORRENTFS_FUSE_ALLOW_OTHER` |
+| `TORRENTFS_SMB_ENABLED` | `TORRENTFS_FILESYSTEM_BACKEND` |
+| `TORRENTFS_STRM_ENABLED` | `TORRENTFS_SMB_STRM_ENABLED` |
 
 ## 数据与状态
 
