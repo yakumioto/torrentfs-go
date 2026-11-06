@@ -42,9 +42,6 @@ func (e environmentException) matches(name string) bool {
 // non-configuration variable joins the program by adding one entry and the
 // unknown-variable rule stays one rule.
 var environmentExceptions = []environmentException{
-	// The upload experiment knobs are research tooling with their own
-	// namespace: they configure the experiment, not a configuration key.
-	{Prefix: "TORRENTFS_LAB_"},
 	// The smoke scripts and the CI jobs still use the configuration prefix
 	// for their own switches. They move to the TF_ prefix, and this group
 	// empties with them.
