@@ -57,8 +57,11 @@ and SMB can run without HTTP unless STRM links are enabled. Non-loopback HTTP
 listeners require http.auth. The FUSE STRM view can be mounted alone or beside the
 original view. Mountpoints must not be identical or nested, including symbolic-link aliases.
 
-Configuration precedence is documented TORRENTFS_* environment variables, then
-TOML, then defaults. Send SIGINT or SIGTERM for bounded shutdown.
+Configuration precedence is the TORRENTFS_* environment variables, then TOML,
+then defaults. Every configuration key has an environment variable derived from
+its path: the path in upper case, dots replaced by underscores, under the
+TORRENTFS_ prefix. TORRENTFS_USERNAME and TORRENTFS_PASSWORD are the only
+exceptions. Send SIGINT or SIGTERM for bounded shutdown.
 `
 
 func main() {

@@ -1,7 +1,9 @@
 # Default configuration for the Docker image.
-# Only documented environment variable names are read; there is no automatic
-# environment mapping for every TOML leaf. TORRENTFS_USERNAME and
-# TORRENTFS_PASSWORD are special shared HTTP/SMB credentials.
+# Every configuration key has an environment variable, derived from its path:
+# the path in upper case, with the dots replaced by underscores, under the
+# TORRENTFS_ prefix. TORRENTFS_USERNAME and TORRENTFS_PASSWORD are the only
+# exceptions: they carry the shared HTTP/SMB credentials and have no
+# configuration key of their own.
 
 [http]
 listen_addr = "127.0.0.1:8080"

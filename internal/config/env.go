@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -38,253 +40,209 @@ func (osEnvironment) Names() []string {
 	return result
 }
 
-type envBinding struct {
-	name  string
-	field string
-	apply func(*Config, string) error
-}
-
+// The names of the shared credential pair. The pair has no configuration key
+// of its own: it configures the credentials of the HTTP and the SMB service.
 const (
-	httpUsernameEnvironment = "TORRENTFS_USERNAME"
-	httpPasswordEnvironment = "TORRENTFS_PASSWORD"
+	environmentUsername = "TORRENTFS_USERNAME"
+	environmentPassword = "TORRENTFS_PASSWORD"
 )
 
-var environmentBindings = []envBinding{
+// The kinds of exception to the environment name derivation rule.
+const (
+	// exceptionCredential names a variable that configures no configuration
+	// key of its own.
+	exceptionCredential = "credential"
+	// exceptionExplicitSelection names a derived variable whose value also
+	// selects the output backend explicitly.
+	exceptionExplicitSelection = "explicit selection"
+	// exceptionExcludedKey names a configuration key that the environment
+	// does not override.
+	exceptionExcludedKey = "excluded key"
+)
+
+// EnvironmentException describes one environment variable that does not follow
+// the plain derivation rule, and why.
+type EnvironmentException struct {
+	// Name is the environment variable.
+	Name string
+	// Kind names the kind of the exception.
+	Kind string
+	// Path is the configuration key the variable relates to. It is empty for
+	// a credential variable, which configures a group of configuration keys.
+	Path string
+	// Reason explains why the variable is an exception.
+	Reason string
+	// SelectsOutputBackend reports whether setting the variable selects the
+	// output backend explicitly. Such a variable is the derived name of its
+	// configuration key: the exception is its effect, not its name.
+	SelectsOutputBackend bool
+}
+
+// environmentExceptions lists every environment variable that the plain
+// derivation rule does not cover.
+//
+// The table keeps the exceptions enumerable: a reader sees every variable the
+// rule does not explain, and the loader applies the same table instead of
+// scattering special cases over the code.
+var environmentExceptions = []EnvironmentException{
 	{
-		name:  "TORRENTFS_CONNECTIONS_LISTEN_HOST",
-		field: "connections.listen_host",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Connections.ListenHost = raw
-			return nil
-		},
+		Kind: exceptionCredential,
+		Name: environmentUsername,
+		Reason: "the shared credential pair has no configuration key of its own: it " +
+			"configures the login name of the HTTP and the SMB service, and the " +
+			"unified credentials replace it",
 	},
 	{
-		name:  "TORRENTFS_CONNECTIONS_LISTEN_PORT",
-		field: "connections.listen_port",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvInt(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.ListenPort = value
-			return nil
-		},
+		Kind: exceptionCredential,
+		Name: environmentPassword,
+		Reason: "the shared credential pair has no configuration key of its own: it " +
+			"configures the password of the HTTP and the SMB service, and the " +
+			"unified credentials replace it",
 	},
 	{
-		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV4",
-		field: "connections.disable_ipv4",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.DisableIPv4 = value
-			return nil
-		},
+		Kind: exceptionExplicitSelection,
+		Name: deriveEnvironmentName(outputBackendPath),
+		Path: outputBackendPath,
+		Reason: "setting it selects the output backend explicitly, so it wins over " +
+			"the mountpoint heuristic that would otherwise choose the FUSE output",
+		SelectsOutputBackend: true,
 	},
 	{
-		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV6",
-		field: "connections.disable_ipv6",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.DisableIPv6 = value
-			return nil
-		},
+		Kind: exceptionExcludedKey,
+		Name: deriveEnvironmentName("http.auth.username"),
+		Path: "http.auth.username",
+		Reason: "the shared credential pair configures the HTTP login name; a second " +
+			"source would let the two disagree",
 	},
 	{
-		name:  "TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING",
-		field: "connections.no_port_forwarding",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.NoPortForwarding = value
-			return nil
-		},
+		Kind: exceptionExcludedKey,
+		Name: deriveEnvironmentName("http.auth.password_hash"),
+		Path: "http.auth.password_hash",
+		Reason: "the shared credential pair generates the password hash; a second " +
+			"source would let the two disagree",
 	},
 	{
-		name:  "TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES",
-		field: "connections.bootstrap_nodes",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Connections.BootstrapNodes = parseEnvList(raw)
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_PROXY_SOCKS5_URL",
-		field: "proxy.socks5_url",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Proxy.Socks5URL = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CACHE_CAPACITY",
-		field: "cache.capacity",
-		apply: func(cfg *Config, raw string) error {
-			value, err := ParseByteQuantity(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Cache.CapacityBytes = ByteQuantity(value)
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
-		field: "identity.tracker_user_agent",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.TrackerUserAgent = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_PEER_ID_PREFIX",
-		field: "identity.peer_id_prefix",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.PeerIDPrefix = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION",
-		field: "identity.extended_handshake_client_version",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.ExtendedHandshakeClientVersion = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_LISTEN_ADDR",
-		field: "http.listen_addr",
-		apply: func(cfg *Config, raw string) error {
-			cfg.HTTP.ListenAddr = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_MAX_UPLOAD_SIZE",
-		field: "http.max_upload_size",
-		apply: func(cfg *Config, raw string) error {
-			value, err := ParseByteQuantity(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.MaxUploadBytes = ByteQuantity(value)
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_ENABLED",
-		field: "http.auth.enabled",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.Auth.Enabled = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_TOKEN_TTL",
-		field: "http.auth.token_ttl",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvDuration(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.Auth.TokenTTL = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_STRM_BASE_URL",
-		field: "strm.base_url",
-		apply: func(cfg *Config, raw string) error {
-			cfg.STRM.BaseURL = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_LEVEL",
-		field: "log.level",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Log.Level = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_FORMAT",
-		field: "log.format",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Log.Format = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_ADD_SOURCE",
-		field: "log.add_source",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Log.AddSource = value
-			return nil
-		},
+		Kind: exceptionExcludedKey,
+		Name: deriveEnvironmentName("http.auth.password_hash_file"),
+		Path: "http.auth.password_hash_file",
+		Reason: "the hash file is a configuration file setting only; the unified " +
+			"credentials remove it",
 	},
 }
 
+// EnvironmentExceptions returns every exception to the environment name
+// derivation rule. The result is a copy: callers cannot modify the table.
+func EnvironmentExceptions() []EnvironmentException {
+	exceptions := make([]EnvironmentException, len(environmentExceptions))
+	copy(exceptions, environmentExceptions)
+	return exceptions
+}
+
+// environmentOwns reports whether an exception keeps the environment from
+// overriding the configuration key with the given path.
+func environmentOwns(path string) bool {
+	for _, exception := range environmentExceptions {
+		if exception.Kind == exceptionExcludedKey && exception.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// applyEnvironment overlays the environment onto the configuration.
+//
+// The environment variable of a configuration key is derived from its path, so
+// a configuration key needs no registration to become overridable. The
+// exceptions to that rule are listed in environmentExceptions.
 func applyEnvironment(cfg *Config, lookup envLookup) error {
 	if removed := removedEnvironmentNames(lookup); len(removed) > 0 {
 		return &RemovedError{Names: removed}
 	}
-	for _, binding := range environmentBindings {
-		raw, ok := lookup.Lookup(binding.name)
-		if !ok {
-			continue
-		}
-		if err := binding.apply(cfg, raw); err != nil {
-			return invalid(binding.field, errors.New("environment variable "+binding.name+": "+err.Error()))
-		}
+	values, err := applySchema(configSchema, reflect.ValueOf(cfg).Elem(), lookup)
+	if err != nil {
+		return err
 	}
-	if err := applyFilesystemEnvironment(cfg, lookup); err != nil {
+	if selectsOutputBackend(values) {
+		// An explicit selection of the output backend wins over the
+		// mountpoint heuristic that would otherwise choose the FUSE output.
+		cfg.backendExplicit = true
+	}
+	if !cfg.backendExplicit && (cfg.FUSE.Mountpoint != "" || cfg.FUSE.STRMMountpoint != "") {
+		cfg.Filesystem.Backend = BackendFUSE
+	}
+	if err := applySMBSTRMEnvironment(cfg, values); err != nil {
+		return err
+	}
+	if err := applySMBEnvironmentCredentials(cfg, lookup); err != nil {
 		return err
 	}
 	return applyHTTPAuthenticationEnvironment(cfg, lookup)
 }
 
+// selectsOutputBackend reports whether the environment selected the output
+// backend explicitly.
+func selectsOutputBackend(values map[string]any) bool {
+	for _, exception := range environmentExceptions {
+		if !exception.SelectsOutputBackend {
+			continue
+		}
+		if _, selected := values[exception.Path]; selected {
+			return true
+		}
+	}
+	return false
+}
+
+// applySMBEnvironmentCredentials applies the shared credential pair to the SMB
+// service. Without the pair, the password comes from the configured password
+// file.
+func applySMBEnvironmentCredentials(cfg *Config, lookup envLookup) error {
+	if cfg.Filesystem.Backend != BackendSMB {
+		return nil
+	}
+	username, userSet := lookup.Lookup(environmentUsername)
+	password, passwordSet := lookup.Lookup(environmentPassword)
+	if userSet != passwordSet {
+		return invalid("smb", fmt.Errorf("%s and %s must be set together",
+			environmentUsername, environmentPassword))
+	}
+	if userSet {
+		cfg.SMB.Username, cfg.SMB.Password = username, password
+		return nil
+	}
+	return readSMBPasswordFile(cfg)
+}
+
+// applyHTTPAuthenticationEnvironment applies the shared credential pair to the
+// HTTP authentication service: the plaintext password becomes an in-memory
+// hash, so no password file is read.
 func applyHTTPAuthenticationEnvironment(cfg *Config, lookup envLookup) error {
 	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.ListenAddr == "" {
 		return nil
 	}
 
-	username, usernameSet := lookup.Lookup(httpUsernameEnvironment)
-	password, passwordSet := lookup.Lookup(httpPasswordEnvironment)
+	username, usernameSet := lookup.Lookup(environmentUsername)
+	password, passwordSet := lookup.Lookup(environmentPassword)
 	if !usernameSet && !passwordSet {
 		return nil
 	}
 	if !usernameSet || !passwordSet {
-		return invalid("http.auth", errors.New("environment variables TORRENTFS_USERNAME and TORRENTFS_PASSWORD must be set together"))
+		return invalid("http.auth", fmt.Errorf("environment variables %s and %s must be set together",
+			environmentUsername, environmentPassword))
 	}
 	if username == "" {
-		return invalid("http.auth.username", errors.New("environment variable TORRENTFS_USERNAME must not be empty"))
+		return invalid("http.auth.username", fmt.Errorf("environment variable %s must not be empty", environmentUsername))
 	}
 	if password == "" {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must not be empty"))
+		return invalid("http.auth.password", fmt.Errorf("environment variable %s must not be empty", environmentPassword))
 	}
 	if len([]byte(password)) > 72 {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must be at most 72 bytes"))
+		return invalid("http.auth.password", fmt.Errorf("environment variable %s must be at most 72 bytes", environmentPassword))
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD could not be hashed"))
+		return invalid("http.auth.password", fmt.Errorf("environment variable %s could not be hashed", environmentPassword))
 	}
 	auth := cfg.HTTP.Auth
 	auth.Username = username

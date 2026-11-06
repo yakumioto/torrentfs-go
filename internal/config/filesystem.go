@@ -18,32 +18,15 @@ const (
 	defaultReadTimeout = Duration(30 * time.Second)
 )
 
-// The environment variables of the file output settings.
+// The configuration keys of the file output settings.
 const (
-	envFilesystemBackend     = "TORRENTFS_FILESYSTEM_BACKEND"
-	envFilesystemReadTimeout = "TORRENTFS_FILESYSTEM_READ_TIMEOUT"
-	envFUSEMountpoint        = "TORRENTFS_FUSE_MOUNTPOINT"
-	envFUSESTRMMountpoint    = "TORRENTFS_FUSE_STRM_MOUNTPOINT"
-	envFUSEAllowOther        = "TORRENTFS_FUSE_ALLOW_OTHER"
-	envSMBListenAddr         = "TORRENTFS_SMB_LISTEN_ADDR"
-	envSMBUsername           = "TORRENTFS_SMB_USERNAME"
-	envSMBPasswordFile       = "TORRENTFS_SMB_PASSWORD_FILE"
-	envSMBSTRMEnabled        = "TORRENTFS_SMB_STRM_ENABLED"
+	// outputBackendPath is the configuration key that selects the output
+	// backend.
+	outputBackendPath = "filesystem.backend"
+	// smbSTRMEnabledPath is the configuration key that switches the STRM
+	// share of the SMB output on or off.
+	smbSTRMEnabledPath = "smb.strm_enabled"
 )
-
-// filesystemEnvironmentNames lists every environment variable that configures
-// the file output.
-var filesystemEnvironmentNames = []string{
-	envFilesystemBackend,
-	envFilesystemReadTimeout,
-	envFUSEMountpoint,
-	envFUSESTRMMountpoint,
-	envFUSEAllowOther,
-	envSMBListenAddr,
-	envSMBUsername,
-	envSMBPasswordFile,
-	envSMBSTRMEnabled,
-}
 
 // Filesystem groups the settings that describe the file output as a whole.
 type Filesystem struct {
@@ -78,64 +61,23 @@ type SMB struct {
 	STRMEnabled *bool `toml:"strm_enabled"`
 }
 
-// applyFilesystemEnvironment overlays the documented filesystem environment
-// variables on the configuration.
-func applyFilesystemEnvironment(c *Config, lookup envLookup) error {
-	if raw, ok := lookup.Lookup(envFilesystemBackend); ok {
-		c.Filesystem.Backend, c.backendExplicit = raw, true
+// readSMBPasswordFile reads the SMB password from the configured password
+// file. The file is the fallback for a deployment that sets no shared
+// credential pair.
+func readSMBPasswordFile(c *Config) error {
+	if c.SMB.PasswordFile == "" {
+		return nil
 	}
-	for name, target := range map[string]*string{
-		envFUSEMountpoint:     &c.FUSE.Mountpoint,
-		envFUSESTRMMountpoint: &c.FUSE.STRMMountpoint,
-		envSMBListenAddr:      &c.SMB.ListenAddr,
-		envSMBUsername:        &c.SMB.Username,
-		envSMBPasswordFile:    &c.SMB.PasswordFile,
-	} {
-		if raw, ok := lookup.Lookup(name); ok {
-			*target = raw
-		}
+	file, err := os.Open(c.SMB.PasswordFile)
+	if err != nil {
+		return invalid("smb.password_file", errors.New("cannot open password file"))
 	}
-	if raw, ok := lookup.Lookup(envFilesystemReadTimeout); ok {
-		value, err := parseEnvDuration(raw)
-		if err != nil {
-			return invalid("filesystem.read_timeout", errors.New("invalid "+envFilesystemReadTimeout))
-		}
-		c.Filesystem.ReadTimeout = value
+	bytes, readErr := io.ReadAll(io.LimitReader(file, 65537))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(bytes) > 65536 {
+		return invalid("smb.password_file", errors.New("cannot read password file (maximum 64 KiB)"))
 	}
-	if raw, ok := lookup.Lookup(envFUSEAllowOther); ok {
-		value, err := parseEnvBool(raw)
-		if err != nil {
-			return invalid("fuse.allow_other", errors.New("invalid "+envFUSEAllowOther))
-		}
-		c.FUSE.AllowOther = value
-	}
-	if !c.backendExplicit && (c.FUSE.Mountpoint != "" || c.FUSE.STRMMountpoint != "") {
-		c.Filesystem.Backend = BackendFUSE
-	}
-	if err := applySMBSTRMEnvironment(c, lookup); err != nil {
-		return err
-	}
-	if c.Filesystem.Backend == BackendSMB {
-		username, userSet := lookup.Lookup(httpUsernameEnvironment)
-		password, passwordSet := lookup.Lookup(httpPasswordEnvironment)
-		if userSet != passwordSet {
-			return invalid("smb", errors.New("TORRENTFS_USERNAME and TORRENTFS_PASSWORD must be set together"))
-		}
-		if userSet {
-			c.SMB.Username, c.SMB.Password = username, password
-		} else if c.SMB.PasswordFile != "" {
-			file, err := os.Open(c.SMB.PasswordFile)
-			if err != nil {
-				return invalid("smb.password_file", errors.New("cannot open password file"))
-			}
-			bytes, readErr := io.ReadAll(io.LimitReader(file, 65537))
-			closeErr := file.Close()
-			if readErr != nil || closeErr != nil || len(bytes) > 65536 {
-				return invalid("smb.password_file", errors.New("cannot read password file (maximum 64 KiB)"))
-			}
-			c.SMB.Password = strings.TrimSuffix(strings.TrimSuffix(string(bytes), "\n"), "\r")
-		}
-	}
+	c.SMB.Password = strings.TrimSuffix(strings.TrimSuffix(string(bytes), "\n"), "\r")
 	return nil
 }
 

@@ -658,41 +658,29 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// unsetConfigEnvironment clears every environment variable that configures
+// torrentfs, so a test observes the configuration it sets itself. The names
+// come from the configuration schema, so a new configuration key is covered
+// without a second registration.
 func unsetConfigEnvironment(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{
+	names := []string{
+		// A removed name and a name that never configured anything: the
+		// program ignores or rejects them, but the test environment must
+		// not carry them either.
 		"TORRENTFS_PATHS_PAYLOAD_DIR",
-		"TORRENTFS_CONNECTIONS_LISTEN_HOST",
-		"TORRENTFS_CONNECTIONS_LISTEN_PORT",
 		"TORRENTFS_MOUNT_ALLOW_OTHER",
 		"TORRENTFS_MOUNT_READ_TIMEOUT",
-		"TORRENTFS_FILESYSTEM_BACKEND",
-		"TORRENTFS_FILESYSTEM_READ_TIMEOUT",
-		"TORRENTFS_FUSE_MOUNTPOINT",
-		"TORRENTFS_FUSE_STRM_MOUNTPOINT",
-		"TORRENTFS_FUSE_ALLOW_OTHER",
 		"TORRENTFS_SMB_ENABLED",
-		"TORRENTFS_SMB_LISTEN_ADDR",
-		"TORRENTFS_SMB_USERNAME",
-		"TORRENTFS_SMB_PASSWORD_FILE",
-		"TORRENTFS_SMB_STRM_ENABLED",
 		"TORRENTFS_STRM_ENABLED",
-		"TORRENTFS_PROXY_SOCKS5_URL",
-		"TORRENTFS_CACHE_CAPACITY",
-		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
-		"TORRENTFS_IDENTITY_PEER_ID_PREFIX",
-		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION",
-		"TORRENTFS_HTTP_LISTEN_ADDR",
-		"TORRENTFS_STRM_BASE_URL",
-		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE",
-		"TORRENTFS_HTTP_AUTH_ENABLED",
-		"TORRENTFS_USERNAME",
-		"TORRENTFS_PASSWORD",
-		"TORRENTFS_HTTP_AUTH_TOKEN_TTL",
-		"TORRENTFS_LOG_LEVEL",
-		"TORRENTFS_LOG_FORMAT",
-		"TORRENTFS_LOG_ADD_SOURCE",
-	} {
+	}
+	for _, key := range config.Schema() {
+		names = append(names, key.Environment)
+	}
+	for _, exception := range config.EnvironmentExceptions() {
+		names = append(names, exception.Name)
+	}
+	for _, name := range names {
 		name := name
 		previous, wasSet := os.LookupEnv(name)
 		if err := os.Unsetenv(name); err != nil {
