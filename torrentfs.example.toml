@@ -1,7 +1,7 @@
 # torrentfs.example.toml — copy and adjust for a torrentfs startup.
 #
 # One existing torrents directory remains a required command-line input.
-# Select filesystem.backend = "fuse", "smb", or "none" (HTTP-only).
+# Select backend = "fuse", "smb", or "none" (HTTP-only).
 # FUSE mountpoints and the native SMB listener are configured independently.
 # Configuration is loaded on every startup. Every configuration key has an
 # environment variable, derived from its path: the path in upper case, with the
@@ -18,6 +18,12 @@
 # Piece data is cached in memory only and is never written to disk. Restarting
 # torrentfs starts from an empty cache: no piece completion is persisted and no
 # piece is recovered from disk.
+
+# Exactly one file output: fuse, smb, or none. HTTP management is independent.
+# Changing the backend does not require deleting the unselected backend's
+# settings. A configured mountpoint does not select the FUSE output: write
+# backend = "fuse" to use it.
+backend = "none"
 
 [http]
 # The listener serves both the embedded Web UI and the management API. Empty
@@ -95,13 +101,11 @@ format = "text"
 add_source = false
 
 [filesystem]
-# Exactly one file output: fuse, smb, or none. HTTP management is independent.
-# Changing backend does not require deleting the unselected backend's settings.
-backend = "none"
+# Bounds a single read of a piece from the torrent. Both file outputs use it.
 read_timeout = "30s"
 
 [fuse]
-# Required when backend=fuse. The directory must exist.
+# Required when backend = "fuse". The directory must exist.
 mountpoint = ""
 # Optional STRM mount; requires strm.base_url and the HTTP listener.
 strm_mountpoint = ""
@@ -113,8 +117,9 @@ allow_other = false
 # In Docker publish host 445 to container 1445 rather than granting low-port caps.
 listen_addr = "0.0.0.0:1445"
 username = "torrentfs"
-# Optional: false keeps signed HTTP links enabled without exporting a STRM share.
-# strm_enabled = false
+# The STRM share of the SMB output: auto provides it when strm.base_url is
+# configured, on forces it, and off forbids it.
+strm = "auto"
 # Readable by the process UID; a single trailing newline is removed. Do not put
 # a plaintext password in this TOML. Shared TORRENTFS_USERNAME/PASSWORD may
 # override this source and also configure HTTP authentication when enabled.

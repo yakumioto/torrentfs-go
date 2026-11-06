@@ -34,9 +34,9 @@ Usage:
   torrentfs [-config <file>] <torrents-dir>
 
 Configuration:
-  [filesystem] backend = "fuse", "smb", or "none" (HTTP-only default)
+  backend = "fuse", "smb", or "none" (HTTP-only default)
   [fuse] fuse.mountpoint / fuse.strm_mountpoint / fuse.allow_other
-  [smb] smb.listen_addr / smb.username / smb.password_file
+  [smb] smb.listen_addr / smb.username / smb.password_file / smb.strm
   [strm] strm.base_url enables the signed streaming links
 
 Flags:
@@ -105,12 +105,8 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	if err = cfg.ResolveFilesystem(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
-		return 2
-	}
 	var mountpoint, strmMountpoint string
-	if cfg.Filesystem.Backend == config.BackendFUSE {
+	if cfg.Backend == config.BackendFUSE {
 		mountpoint, strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
@@ -118,7 +114,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if cfg.Filesystem.Backend == config.BackendNone && !httpEnabled {
+	if cfg.Backend == config.BackendNone && !httpEnabled {
 		flags.Usage()
 		return 2
 	}
@@ -140,7 +136,7 @@ func run(args []string, stderr io.Writer) int {
 		"version", "dev",
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
-		"filesystem_backend", cfg.Filesystem.Backend,
+		"backend", cfg.Backend,
 		"mountpoint", mountpoint,
 		"strm_mountpoint", strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
@@ -211,7 +207,7 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	serveErr := make(chan error, 2)
-	if cfg.Filesystem.Backend == config.BackendSMB {
+	if cfg.Backend == config.BackendSMB {
 		shares := map[string]*vfs.Tree{smb.ShareName: vfs.New(sess)}
 		if cfg.SMBSTRMEnabled() {
 			shares[smb.STRMShareName] = vfs.New(vfs.NewSTRMBackend(sess))
@@ -458,7 +454,7 @@ func validateMountpoints(mountpoint, strmMountpoint, baseURL string) (string, st
 		return mountpoint, strmMountpoint, nil
 	}
 	if baseURL == "" {
-		return "", "", errors.New("strm.base_url is required with -strm-mountpoint")
+		return "", "", errors.New("strm.base_url is required with fuse.strm_mountpoint")
 	}
 	canonical := func(name, path string) (string, error) {
 		absolute, err := filepath.Abs(path)

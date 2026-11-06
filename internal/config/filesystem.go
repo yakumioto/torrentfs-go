@@ -11,27 +11,44 @@ import (
 	"unicode/utf8"
 )
 
+// Backend names the output backend: the way the file tree reaches the user.
+type Backend string
+
+// The output backends of torrentfs.
 const (
-	BackendNone        = "none"
-	BackendFUSE        = "fuse"
-	BackendSMB         = "smb"
-	defaultReadTimeout = Duration(30 * time.Second)
+	// BackendNone serves no file tree: only the HTTP API stays.
+	BackendNone Backend = "none"
+	// BackendFUSE serves the file tree as a read-only FUSE mount.
+	BackendFUSE Backend = "fuse"
+	// BackendSMB serves the file tree as a read-only SMB share.
+	BackendSMB Backend = "smb"
 )
 
-// The configuration keys of the file output settings.
+// STRMSwitch names the state of the STRM share of the SMB output.
+type STRMSwitch string
+
+// The states of the STRM share of the SMB output.
 const (
-	// outputBackendPath is the configuration key that selects the output
-	// backend.
-	outputBackendPath = "filesystem.backend"
-	// smbSTRMEnabledPath is the configuration key that switches the STRM
-	// share of the SMB output on or off.
-	smbSTRMEnabledPath = "smb.strm_enabled"
+	// STRMAuto provides the share when a streaming base URL is configured.
+	STRMAuto STRMSwitch = "auto"
+	// STRMOn always provides the share; it requires a streaming base URL.
+	STRMOn STRMSwitch = "on"
+	// STRMOff never provides the share.
+	STRMOff STRMSwitch = "off"
+)
+
+const (
+	defaultReadTimeout = Duration(30 * time.Second)
+
+	// backendPath is the configuration key that selects the output backend.
+	backendPath = "backend"
+	// smbSTRMPath is the configuration key that switches the STRM share of
+	// the SMB output on or off.
+	smbSTRMPath = "smb.strm"
 )
 
 // Filesystem groups the settings that describe the file output as a whole.
 type Filesystem struct {
-	// Backend selects the file output: none, fuse, or smb.
-	Backend string `toml:"backend"`
 	// ReadTimeout bounds a single read of a piece from the torrent.
 	ReadTimeout Duration `toml:"read_timeout"`
 }
@@ -57,8 +74,8 @@ type SMB struct {
 	PasswordFile string `toml:"password_file"`
 	// Password is the plaintext SMB password. It is never read from TOML.
 	Password string `toml:"-"`
-	// Nil selects the STRM share automatically when strm.base_url is set.
-	STRMEnabled *bool `toml:"strm_enabled"`
+	// STRM switches the STRM share of the SMB output: auto, on, or off.
+	STRM STRMSwitch `toml:"strm" enum:"auto,on,off"`
 }
 
 // readSMBPasswordFile reads the SMB password from the configured password
@@ -81,10 +98,24 @@ func readSMBPasswordFile(c *Config) error {
 	return nil
 }
 
-// ResolveFilesystem completes the file output selection. Settings of an
-// unselected backend are retained so switching only the backend is sufficient.
-func (c *Config) ResolveFilesystem() error {
-	if c.Filesystem.Backend == BackendFUSE {
+// validateFilesystem checks the settings of the selected output backend. The
+// settings of an unselected backend are retained so switching only the
+// backend is sufficient, but they are not checked: an unused mountpoint does
+// not have to exist.
+//
+// The value of an enumerated key is always checked, even when its backend is
+// not selected: an unusable value is a mistake wherever it stands.
+func (c Config) validateFilesystem() error {
+	if err := validateEnum(backendPath, string(c.Backend)); err != nil {
+		return err
+	}
+	if c.Filesystem.ReadTimeout <= 0 {
+		return invalid("filesystem.read_timeout", errPositive)
+	}
+	if err := validateEnum(smbSTRMPath, string(c.SMB.STRM)); err != nil {
+		return err
+	}
+	if c.Backend == BackendFUSE {
 		if c.FUSE.Mountpoint == "" && c.FUSE.STRMMountpoint == "" {
 			return invalid("fuse.mountpoint", errors.New("at least one FUSE mountpoint is required"))
 		}
@@ -92,23 +123,11 @@ func (c *Config) ResolveFilesystem() error {
 			return invalid("fuse.strm_mountpoint", errors.New("requires strm.base_url and HTTP"))
 		}
 	}
-	return c.validateFilesystem()
-}
-
-func (c Config) validateFilesystem() error {
-	switch c.Filesystem.Backend {
-	case BackendNone, BackendFUSE, BackendSMB:
-	default:
-		return invalid("filesystem.backend", errors.New("must be fuse, smb, or none"))
-	}
-	if c.Filesystem.ReadTimeout <= 0 {
-		return invalid("filesystem.read_timeout", errPositive)
-	}
-	if c.Filesystem.Backend != BackendSMB {
+	if c.Backend != BackendSMB {
 		return nil
 	}
-	if c.SMB.STRMEnabled != nil && *c.SMB.STRMEnabled && c.STRM.BaseURL == "" {
-		return invalid("smb.strm_enabled", errors.New("requires strm.base_url and the HTTP listener"))
+	if c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
+		return invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener"))
 	}
 	if c.SMB.Username == "" || strings.ContainsFunc(c.SMB.Username, unicode.IsControl) {
 		return invalid("smb.username", errors.New("must be nonempty and contain no control characters"))
@@ -123,6 +142,20 @@ func (c Config) validateFilesystem() error {
 	value, err := parseEnvInt(port)
 	if err != nil || value < 1 || value > 65535 {
 		return invalid("smb.listen_addr", errListenAddr)
+	}
+	return nil
+}
+
+// validateEnum reports whether a value is one of the accepted values of an
+// enumerated configuration key. The accepted values come from the schema, so
+// the validator and the environment parser name the same list.
+func validateEnum(path, value string) error {
+	values, ok := schemaEnumValues(path)
+	if !ok {
+		return nil
+	}
+	if err := acceptEnumValue(values, value); err != nil {
+		return invalid(path, err)
 	}
 	return nil
 }

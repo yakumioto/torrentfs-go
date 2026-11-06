@@ -90,20 +90,28 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 
 // Config holds torrentfs runtime settings.
 type Config struct {
+	// Backend selects the output backend: none, fuse, or smb.
+	Backend Backend `toml:"backend" enum:"none,fuse,smb"`
+	// Connections groups the network settings of the torrent session.
 	Connections Connections `toml:"connections"`
-	Proxy       Proxy       `toml:"proxy"`
-	Cache       Cache       `toml:"cache"`
-	Identity    Identity    `toml:"identity"`
-	HTTP        HTTP        `toml:"http"`
-	STRM        STRM        `toml:"strm"`
-	Log         Log         `toml:"log"`
-	Filesystem  Filesystem  `toml:"filesystem"`
-	FUSE        FUSE        `toml:"fuse"`
-	SMB         SMB         `toml:"smb"`
-
-	// backendExplicit records whether the file output was chosen explicitly.
-	// Without it, a configured FUSE mountpoint selects the FUSE output.
-	backendExplicit bool
+	// Proxy groups the optional outbound proxy settings.
+	Proxy Proxy `toml:"proxy"`
+	// Cache groups the in-memory piece cache settings.
+	Cache Cache `toml:"cache"`
+	// Identity groups the client identity values.
+	Identity Identity `toml:"identity"`
+	// HTTP groups the optional torrent-management HTTP service settings.
+	HTTP HTTP `toml:"http"`
+	// STRM groups the optional signed HTTP streaming settings.
+	STRM STRM `toml:"strm"`
+	// Log groups the process log settings.
+	Log Log `toml:"log"`
+	// Filesystem groups the settings that describe the file output as a whole.
+	Filesystem Filesystem `toml:"filesystem"`
+	// FUSE groups the settings of the read-only FUSE file output.
+	FUSE FUSE `toml:"fuse"`
+	// SMB groups the settings of the built-in read-only SMB file output.
+	SMB SMB `toml:"smb"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -214,6 +222,7 @@ type Identity struct {
 // omits a key keeps the same default whether or not a file was loaded.
 func Default() Config {
 	return Config{
+		Backend: BackendNone,
 		Connections: Connections{
 			ListenHost:       "",
 			ListenPort:       0,
@@ -238,9 +247,9 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Filesystem: Filesystem{Backend: BackendNone, ReadTimeout: defaultReadTimeout},
+		Filesystem: Filesystem{ReadTimeout: defaultReadTimeout},
 		FUSE:       FUSE{AllowOther: false},
-		SMB:        SMB{ListenAddr: defaultSMBListenAddr},
+		SMB:        SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
 	}
 }
 

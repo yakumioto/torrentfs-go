@@ -32,6 +32,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
 		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
 		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
+		"TORRENTFS_BACKEND":                                    "none",
 		"TORRENTFS_FUSE_ALLOW_OTHER":                           "true",
 		"TORRENTFS_FILESYSTEM_READ_TIMEOUT":                    "250ms",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
@@ -45,6 +46,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		environmentUsername:                                    "alice",
 		environmentPassword:                                    "password",
 		"TORRENTFS_HTTP_AUTH_TOKEN_TTL":                        "45m",
+		"TORRENTFS_SMB_STRM":                                   "off",
 		"TORRENTFS_STRM_BASE_URL":                              "https://media.example/torrentfs/",
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
 		"TORRENTFS_LOG_FORMAT":                                 "json",
@@ -70,6 +72,12 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	}
 	if !got.FUSE.AllowOther {
 		t.Fatal("fuse.allow_other = false, want true")
+	}
+	if got.Backend != BackendNone {
+		t.Fatalf("backend = %q, want the environment value %q", got.Backend, BackendNone)
+	}
+	if got.SMB.STRM != STRMOff {
+		t.Fatalf("smb.strm = %q, want the environment value %q", got.SMB.STRM, STRMOff)
 	}
 	if got.Filesystem.ReadTimeout != Duration(250*time.Millisecond) {
 		t.Fatalf("filesystem.read_timeout = %s, want 250ms", got.Filesystem.ReadTimeout)
@@ -196,6 +204,35 @@ func TestLoadIgnoresRemovedDataDirEnvironment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, Default()) {
 		t.Fatalf("config changed after removed environment variable: %+v", got)
+	}
+}
+
+// TestLoadRejectsRemovedEnvironmentNames covers the removed environment
+// variables of the output backend and of the STRM switch: the loader refuses
+// them and names the variable that replaces them.
+func TestLoadRejectsRemovedEnvironmentNames(t *testing.T) {
+	tests := []struct {
+		removed string
+		new     string
+	}{
+		{removed: "TORRENTFS_FILESYSTEM_BACKEND", new: "TORRENTFS_BACKEND"},
+		{removed: "TORRENTFS_SMB_STRM_ENABLED", new: "TORRENTFS_SMB_STRM"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.removed, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{tt.removed: "value"}))
+			if err == nil {
+				t.Fatal("load accepted the removed environment variable")
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("load error = %v, want ErrInvalid", err)
+			}
+			for _, want := range []string{tt.removed, tt.new} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("load error = %q, want it to name %q", err, want)
+				}
+			}
+		})
 	}
 }
 

@@ -29,6 +29,12 @@ func TestDefault(t *testing.T) {
 	if time.Duration(cfg.Filesystem.ReadTimeout) != 30*time.Second {
 		t.Fatalf("Default filesystem.read_timeout = %s, want 30s", cfg.Filesystem.ReadTimeout)
 	}
+	if cfg.Backend != config.BackendNone {
+		t.Fatalf("Default backend = %q, want %q", cfg.Backend, config.BackendNone)
+	}
+	if cfg.SMB.STRM != config.STRMAuto {
+		t.Fatalf("Default smb.strm = %q, want %q", cfg.SMB.STRM, config.STRMAuto)
+	}
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
 	}

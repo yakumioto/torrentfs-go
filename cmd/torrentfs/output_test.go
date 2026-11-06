@@ -51,8 +51,7 @@ func TestRunSMBDoesNotValidateOrMountUnusedFUSE(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	dir := t.TempDir()
 	file := filepath.Join(t.TempDir(), "config.toml")
-	text := fmt.Sprintf(`[filesystem]
-backend = "smb"
+	text := fmt.Sprintf(`backend = "smb"
 [http]
 listen_addr = ""
 [fuse]
@@ -84,10 +83,31 @@ bootstrap_nodes = ["127.0.0.1:1"]
 
 func TestRunExplicitNoneRejectsAllOutputsDisabled(t *testing.T) {
 	unsetConfigEnvironment(t)
-	t.Setenv("TORRENTFS_FILESYSTEM_BACKEND", "none")
+	t.Setenv("TORRENTFS_BACKEND", "none")
 	t.Setenv("TORRENTFS_HTTP_LISTEN_ADDR", "")
 	var stderr bytes.Buffer
 	if code := run([]string{t.TempDir()}, &stderr); code != 2 {
 		t.Fatalf("exit=%d stderr=%s", code, &stderr)
+	}
+}
+
+// TestRunRejectsFUSEWithoutAMountpoint covers the configuration completeness
+// rule: the FUSE output needs a mountpoint, and the failure happens before the
+// session starts.
+func TestRunRejectsFUSEWithoutAMountpoint(t *testing.T) {
+	unsetConfigEnvironment(t)
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("backend = \"fuse\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"-config", configPath, t.TempDir()}, &stderr); code != 2 {
+		t.Fatalf("exit=%d stderr=%s", code, &stderr)
+	}
+	if !strings.Contains(stderr.String(), "fuse.mountpoint") {
+		t.Fatalf("stderr=%s, want the fuse.mountpoint error", &stderr)
+	}
+	if strings.Contains(stderr.String(), "torrentfs starting") {
+		t.Fatalf("the incomplete configuration reached startup: %s", &stderr)
 	}
 }

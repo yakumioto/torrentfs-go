@@ -10,6 +10,10 @@ import (
 // configures torrentfs.
 const environmentPrefix = "TORRENTFS_"
 
+// enumTag names the tag that lists the accepted values of an enumerated
+// configuration key. The tag is the only place the values are written down.
+const enumTag = "enum"
+
 // SchemaKey describes one configuration key of the configuration schema.
 type SchemaKey struct {
 	// Path is the dot path of the configuration key, such as
@@ -24,8 +28,11 @@ type SchemaKey struct {
 	// configuration key.
 	Overridable bool
 	// Kind names the type of the value: string, bool, int, duration, byte
-	// quantity, or list.
+	// quantity, list, or enum.
 	Kind string
+	// Values lists the accepted values of an enumerated configuration key.
+	// It is empty for every other kind.
+	Values []string
 }
 
 // Schema returns the configuration schema: every configuration key of the
@@ -41,6 +48,7 @@ func Schema() []SchemaKey {
 			Environment: item.environment,
 			Overridable: item.overridable,
 			Kind:        item.kind,
+			Values:      item.values,
 		})
 	}
 	return keys
@@ -68,6 +76,9 @@ type schemaItem struct {
 	environment string
 	// kind names the type of the value.
 	kind string
+	// values lists the accepted values of an enumerated configuration key.
+	// It is empty for every other kind.
+	values []string
 	// index is the field index path from the root configuration.
 	index []int
 	// parse turns an environment value into a value of the field type. It is
@@ -113,15 +124,45 @@ func collectSchema(structType reflect.Type, index []int, prefix string, items *[
 			continue
 		}
 		parse, kind, ok := environmentParser(field.Type)
+		values := enumValues(field)
+		if len(values) > 0 {
+			kind = "enum"
+		}
 		*items = append(*items, schemaItem{
 			path:        path,
 			environment: deriveEnvironmentName(path),
 			kind:        kind,
+			values:      values,
 			index:       fieldIndex,
 			parse:       parse,
 			overridable: ok && !environmentOwns(path),
 		})
 	}
+}
+
+// enumValues returns the accepted values of an enumerated configuration key.
+// An empty result means the key is not enumerated.
+func enumValues(field reflect.StructField) []string {
+	raw, ok := field.Tag.Lookup(enumTag)
+	if !ok {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+// schemaEnumValues returns the accepted values of the enumerated configuration
+// key with the given path. It reports false for a key that is not enumerated.
+//
+// The schema is the only place the values are written down, so the validator
+// and the environment parser report the same list.
+func schemaEnumValues(path string) ([]string, bool) {
+	for _, item := range configSchema {
+		if item.path != path {
+			continue
+		}
+		return item.values, len(item.values) > 0
+	}
+	return nil, false
 }
 
 // applySchema applies the environment values of the schema items to the
@@ -141,6 +182,9 @@ func applySchema(items []schemaItem, root reflect.Value, lookup envLookup) (map[
 		if err != nil {
 			return values, invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err))
 		}
+		if err := item.accept(value); err != nil {
+			return values, invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err))
+		}
 		root.FieldByIndex(item.index).Set(reflect.ValueOf(value))
 		values[item.path] = value
 	}
@@ -152,6 +196,30 @@ func applySchema(items []schemaItem, root reflect.Value, lookup envLookup) (map[
 // underscores, under the TORRENTFS_ prefix.
 func deriveEnvironmentName(path string) string {
 	return environmentPrefix + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
+}
+
+// accept reports whether a value is one of the accepted values of an
+// enumerated configuration key. Every other kind accepts every value.
+func (i schemaItem) accept(value any) error {
+	if len(i.values) == 0 {
+		return nil
+	}
+	text := reflect.ValueOf(value)
+	if !text.IsValid() || text.Kind() != reflect.String {
+		return nil
+	}
+	return acceptEnumValue(i.values, text.String())
+}
+
+// acceptEnumValue reports whether a value is one of the accepted values of an
+// enumerated configuration key.
+func acceptEnumValue(values []string, value string) error {
+	for _, allowed := range values {
+		if value == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("must be one of %s", strings.Join(values, ", "))
 }
 
 // environmentParser returns the function that turns an environment value into
@@ -195,6 +263,15 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		}, "byte quantity", true
 	case reflect.TypeOf([]string(nil)):
 		return func(raw string) (any, error) { return parseEnvList(raw), nil }, "list", true
+	}
+	if fieldType.Kind() == reflect.String {
+		// A named string type carries the enumeration of its values; the
+		// environment writes the same text the configuration file writes.
+		return func(raw string) (any, error) {
+			value := reflect.New(fieldType).Elem()
+			value.SetString(raw)
+			return value.Interface(), nil
+		}, "string", true
 	}
 	if fieldType.Kind() == reflect.Pointer && fieldType.Elem().Kind() == reflect.Bool {
 		// A pointer to a boolean tells an unset value from false.
