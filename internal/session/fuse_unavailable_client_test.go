@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const unavailableClientMountEnv = "TORRENTFS_TEST_UNAVAILABLE_FUSE_MOUNT"
+const unavailableClientMountEnv = "TF_TEST_UNAVAILABLE_FUSE_MOUNT"
 
 type unavailableClientResult struct {
 	Index int

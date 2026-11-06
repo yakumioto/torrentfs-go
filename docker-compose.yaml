@@ -2,7 +2,7 @@
 # Set TORRENTFS_PASSWORD in a private .env file and choose a published image tag.
 # Create ./torrents with the UID/GID below, or inspect existing ownership first.
 # Defaults expose HTTP/SMB on host loopback only. To use a LAN player, set
-# TORRENTFS_BIND_ADDRESS to this host's trusted LAN IP and use firewall rules.
+# TF_BIND_ADDRESS to this host's trusted LAN IP and use firewall rules.
 #   docker compose up -d
 #   docker compose logs -f torrentfs
 services:
@@ -16,8 +16,8 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "${TORRENTFS_BIND_ADDRESS:-127.0.0.1}:445:1445/tcp"
-      - "${TORRENTFS_BIND_ADDRESS:-127.0.0.1}:8080:8080/tcp"
+      - "${TF_BIND_ADDRESS:-127.0.0.1}:445:1445/tcp"
+      - "${TF_BIND_ADDRESS:-127.0.0.1}:8080:8080/tcp"
       - "6881:6881/tcp"
       - "6881:6881/udp"
     volumes:

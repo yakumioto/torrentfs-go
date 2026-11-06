@@ -66,7 +66,7 @@ jobs:
     permissions:
       contents: read
     env:
-      TORRENTFS_FUSE_REQUIRED: "1"
+      TF_FUSE_REQUIRED: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -176,7 +176,7 @@ jobs:
 
           # Reuse the same non-root, zero-capability configuration gate for
           # both architectures; it does not rebuild or remove the supplied image.
-          TORRENTFS_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
+          TF_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
 
       - name: Build Linux arm64 validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -213,7 +213,7 @@ jobs:
 
           # Reuse the same non-root, zero-capability configuration gate for
           # both architectures; it does not rebuild or remove the supplied image.
-          TORRENTFS_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
+          TF_SMOKE_IMAGE="$IMAGE" ./scripts/docker-config-smoke.sh
 
       # Native amd64 runs the full native SMB deployment path, not just the image
       # contract: zero-capability application, authenticated read-only share,

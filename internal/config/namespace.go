@@ -41,17 +41,13 @@ func (e environmentException) matches(name string) bool {
 // The exceptions live in one table instead of an inline condition, so a new
 // non-configuration variable joins the program by adding one entry and the
 // unknown-variable rule stays one rule.
-var environmentExceptions = []environmentException{
-	// The smoke scripts and the CI jobs still use the configuration prefix
-	// for their own switches. They move to the TF_ prefix, and this group
-	// empties with them.
-	{Prefix: "TORRENTFS_SMOKE_"},
-	{Prefix: "TORRENTFS_RUNTIME_STATS_BROWSER_"},
-	{Name: "TORRENTFS_FUSE_REQUIRED"},
-	{Name: "TORRENTFS_SMB_SKIP_CIFS"},
-	{Name: "TORRENTFS_TEST_UNAVAILABLE_FUSE_MOUNT"},
-	{Name: "TORRENTFS_BIND_ADDRESS"},
-}
+//
+// The table is empty today: every configuration key has a derived
+// environment variable, and everything that is not a configuration key lives
+// outside the namespace. The test switches, the CI smoke knobs, and the
+// Compose interpolation use the TF_ prefix, so the TORRENTFS_ namespace means
+// configuration and nothing else.
+var environmentExceptions = []environmentException{}
 
 // unknownEnvironmentNames reports the variables in the configuration
 // namespace that configure nothing.

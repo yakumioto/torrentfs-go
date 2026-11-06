@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -128,4 +131,85 @@ func TestEnvironmentExceptionsDoNotCoverTheConfigurationNamespace(t *testing.T) 
 			t.Fatalf("the environment exception %q covers the whole configuration namespace", exception.Prefix)
 		}
 	}
+}
+
+// TestEnvironmentExceptionsAreEmpty pins the exception table down.
+//
+// Every configuration key has a derived environment variable, and everything
+// that is not a configuration key lives outside the namespace: the test
+// switches, the CI smoke knobs, and the Compose interpolation use the TF_
+// prefix. A new exception means a new variable in the configuration
+// namespace, which is a decision the namespace rule makes visible.
+func TestEnvironmentExceptionsAreEmpty(t *testing.T) {
+	if len(environmentExceptions) != 0 {
+		var names []string
+		for _, exception := range environmentExceptions {
+			names = append(names, exception.Prefix+exception.Name)
+		}
+		t.Fatalf("environment exceptions = %v, want none", names)
+	}
+}
+
+// TestNonConfigurationVariablesUseTheOtherNamespace checks that the
+// variables the repository uses for its own switches live outside the
+// configuration namespace.
+//
+// The check reads the repository files, so a variable that moves back into
+// the configuration namespace is caught here instead of at startup.
+func TestNonConfigurationVariablesUseTheOtherNamespace(t *testing.T) {
+	repository := filepath.Join("..", "..")
+	err := filepath.WalkDir(repository, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "web", "third_party", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(path) {
+		case ".go", ".sh", ".yml", ".yaml":
+		default:
+			return nil
+		}
+		if path == filepath.Join(repository, "internal", "config", "namespace_test.go") {
+			// This file names the variables it forbids, so it cannot obey
+			// the rule it states.
+			return nil
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, line := range strings.Split(string(content), "\n") {
+			for _, name := range nonConfigurationVariables {
+				if strings.Contains(line, name) {
+					t.Errorf("%s uses the configuration namespace for %q; use the TF_ prefix",
+						strings.TrimPrefix(path, repository+string(filepath.Separator)), name)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the repository: %v", err)
+	}
+}
+
+// nonConfigurationVariables lists the variables the repository uses for its
+// own switches. They configure no configuration key, so they belong to the
+// TF_ namespace.
+var nonConfigurationVariables = []string{
+	"TORRENTFS_FUSE_REQUIRED",
+	"TORRENTFS_SMOKE_IMAGE",
+	"TORRENTFS_SMOKE_CLIENT_IMAGE",
+	"TORRENTFS_SMOKE_UID",
+	"TORRENTFS_SMOKE_GID",
+	"TORRENTFS_SMB_SKIP_CIFS",
+	"TORRENTFS_TEST_UNAVAILABLE_FUSE_MOUNT",
+	"TORRENTFS_RUNTIME_STATS_BROWSER_HARNESS",
+	"TORRENTFS_RUNTIME_STATS_BROWSER_DONE",
+	"TORRENTFS_BIND_ADDRESS",
 }

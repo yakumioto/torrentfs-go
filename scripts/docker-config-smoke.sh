@@ -4,7 +4,7 @@ IFS=$'\n\t'
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-config-smoke:${BASHPID}}"
+readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-config-smoke:${BASHPID}}"
 readonly PREFIX="torrentfs-config-${BASHPID}"
 readonly SECRET="config-smoke-${BASHPID}-test-only-password"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-config.XXXXXX")"
@@ -28,7 +28,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 for tool in docker curl timeout python3; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 
-if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+if [[ -n "${TF_SMOKE_IMAGE:-}" ]]; then
 	timeout 30 docker image inspect "$IMAGE" >/dev/null
 else
 	printf 'docker config smoke: building native image\n'
