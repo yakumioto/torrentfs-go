@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -249,13 +250,48 @@ func (i schemaItem) accept(value any) error {
 
 // acceptEnumValue reports whether a value is one of the accepted values of an
 // enumerated configuration key.
+//
+// An empty value is accepted when the key has an unset state: the user left
+// the key out and the configuration decides what its absence means.
 func acceptEnumValue(values []string, value string) error {
+	if value == "" && allowsEmptyEnum(values) {
+		return nil
+	}
 	for _, allowed := range values {
 		if value == allowed {
 			return nil
 		}
 	}
-	return fmt.Errorf("must be one of %s", strings.Join(values, ", "))
+	return fmt.Errorf("must be one of %s", strings.Join(namedEnumValues(values), ", "))
+}
+
+// namedEnumValues returns the accepted values of an enumerated configuration
+// key without the empty one. The empty value means "not configured", so it is
+// not a value a user can write.
+func namedEnumValues(values []string) []string {
+	named := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		named = append(named, value)
+	}
+	return named
+}
+
+// allowsEmptyEnum reports whether an enumerated configuration key accepts an
+// empty value.
+//
+// A key whose values are all set has no unset state, so an empty value is a
+// mistake. A key that lists an empty value among its own has one: the empty
+// value is written there to mean "not configured".
+func allowsEmptyEnum(values []string) bool {
+	for _, allowed := range values {
+		if allowed == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // environmentParser returns the function that turns an environment value into
@@ -299,6 +335,60 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		}, "byte quantity", true
 	case reflect.TypeOf([]string(nil)):
 		return func(raw string) (any, error) { return parseEnvList(raw), nil }, "list", true
+	case reflect.TypeOf(ByteRate(0)):
+		return func(raw string) (any, error) {
+			value, err := ParseByteRate(raw)
+			if err != nil {
+				return nil, err
+			}
+			return ByteRate(value), nil
+		}, "byte rate", true
+	case reflect.TypeOf(Percent(0)):
+		return func(raw string) (any, error) {
+			value, err := ParsePercent(raw)
+			if err != nil {
+				return nil, err
+			}
+			return Percent(value), nil
+		}, "percent", true
+	case reflect.TypeOf(Ratio(0)):
+		return func(raw string) (any, error) {
+			value, err := ParseRatio(raw)
+			if err != nil {
+				return nil, err
+			}
+			return Ratio(value), nil
+		}, "ratio", true
+	case reflect.TypeOf(int64(0)):
+		return func(raw string) (any, error) {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("must be a signed integer")
+			}
+			return value, nil
+		}, "int64", true
+	case reflect.TypeOf(OptionalByteQuantity(0)):
+		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return OptionalByteQuantity(0), nil
+			}
+			value, err := ParseByteQuantity(raw)
+			if err != nil {
+				return nil, err
+			}
+			return OptionalByteQuantity(value), nil
+		}, "byte quantity", true
+	case reflect.TypeOf(OptionalDuration(0)):
+		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return OptionalDuration(0), nil
+			}
+			value, err := parseEnvDuration(raw)
+			if err != nil {
+				return nil, err
+			}
+			return OptionalDuration(value), nil
+		}, "duration", true
 	}
 	if fieldType.Kind() == reflect.String {
 		// A named string type carries the enumeration of its values; the

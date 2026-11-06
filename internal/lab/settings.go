@@ -135,10 +135,107 @@ type Settings struct {
 // Enabled reports whether an experiment mode was configured.
 func (s Settings) Enabled() bool { return s.Mode != "" }
 
+// SettingsFrom turns the configuration of the experiment into its settings.
+//
+// The configuration holds the values and checks their shape; the rules that
+// relate one setting to another live here, because they decide what a set of
+// settings means. enabled is false with a nil error when nothing is
+// configured. A partially configured setup is an error so a typo cannot
+// silently fall back to normal announce reporting.
+func SettingsFrom(cfg config.Lab) (settings Settings, enabled bool, err error) {
+	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.UploadMode)))
+	switch mode {
+	case "":
+		switch {
+		case cfg.UploadRate != 0:
+			mode = ModeInject
+		case cfg.UploadMultiplier != 0:
+			mode = ModeAmplify
+		case cfg.AnnounceLog != "":
+			mode = ModeBaseline
+		default:
+			for _, knob := range []struct {
+				key   string
+				value bool
+			}{
+				{"upload_jitter", cfg.UploadJitter != 0},
+				{"upload_cap", cfg.UploadCap != 0},
+				{"upload_seed", cfg.UploadSeed != 0},
+				{"peer_sample_interval", cfg.PeerSampleInterval != 0},
+			} {
+				if knob.value {
+					return Settings{}, false, fmt.Errorf("lab.%s is set but no experiment mode, rate, or announce log is configured", knob.key)
+				}
+			}
+			return Settings{}, false, nil
+		}
+	case ModeBaseline, ModeInject, ModeAmplify:
+	default:
+		return Settings{}, false, fmt.Errorf("lab.upload_mode: unknown mode %q (want baseline, inject, or amplify)", cfg.UploadMode)
+	}
+
+	runtime := RuntimeSettings{
+		Mode:           mode,
+		JitterFraction: float64(defaultJitterPercent) / 100,
+	}
+	switch mode {
+	case ModeBaseline:
+		if cfg.UploadRate != 0 || cfg.UploadMultiplier != 0 {
+			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use upload_rate or upload_multiplier", mode)
+		}
+	case ModeInject:
+		if cfg.UploadRate == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires upload_rate", mode)
+		}
+		if cfg.UploadMultiplier != 0 {
+			return Settings{}, false, fmt.Errorf("upload_multiplier only applies to mode %q", ModeAmplify)
+		}
+		runtime.RateBytesPerSecond = float64(cfg.UploadRate)
+	case ModeAmplify:
+		if cfg.UploadMultiplier == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires upload_multiplier", mode)
+		}
+		if cfg.UploadRate != 0 {
+			return Settings{}, false, fmt.Errorf("upload_rate only applies to mode %q", ModeInject)
+		}
+		runtime.Multiplier = float64(cfg.UploadMultiplier)
+	}
+	if cfg.UploadJitter != 0 {
+		runtime.JitterFraction = float64(cfg.UploadJitter) / 100
+	}
+	runtime.CapBytes = int64(cfg.UploadCap)
+	runtime, err = NormalizeRuntimeSettings(runtime)
+	if err != nil {
+		return Settings{}, false, err
+	}
+
+	seed := time.Now().UnixNano()
+	if cfg.UploadSeed != 0 {
+		seed = cfg.UploadSeed
+	}
+	peerSampleInterval := defaultPeerSampleInterval
+	if cfg.PeerSampleInterval != 0 {
+		if cfg.AnnounceLog == "" {
+			return Settings{}, false, fmt.Errorf("lab.peer_sample_interval requires lab.announce_log")
+		}
+		peerSampleInterval = time.Duration(cfg.PeerSampleInterval)
+	}
+	return Settings{
+		RuntimeSettings:    runtime,
+		Seed:               seed,
+		AnnounceLogPath:    cfg.AnnounceLog,
+		PeerSampleInterval: peerSampleInterval,
+	}, true, nil
+}
+
 // LoadSettings reads the lab environment variables through getenv. enabled is
 // false with a nil error when nothing is configured. A partially configured
 // setup is an error so a typo cannot silently fall back to normal announce
 // reporting.
+//
+// The variables are the ones the configuration derives from the [lab] keys,
+// so a caller that already loaded the configuration uses SettingsFrom
+// instead.
 func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, err error) {
 	if getenv == nil {
 		getenv = func(string) string { return "" }

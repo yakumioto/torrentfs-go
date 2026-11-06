@@ -128,3 +128,33 @@ listen_addr = "0.0.0.0:1445"
 # The STRM share of the SMB output: auto provides it when strm.base_url is
 # configured, on forces it, and off forbids it.
 strm = "auto"
+
+[lab]
+# The upload statistics experiment rewrites the upload counter reported to
+# trackers so that the anomaly detection of a tracker can be exercised. It is
+# off unless a mode is configured, and it belongs to a tracker you operate:
+# pointing it at a third-party tracker misreports that tracker's statistics.
+#
+# The reporting model: baseline reports the real counters, inject replaces the
+# reported upload with a synthetic counter, and amplify grows the reported
+# upload by a factor of the real payload bytes. Empty infers the model from
+# the other settings.
+upload_mode = ""
+# The average synthetic growth of the reported upload in inject mode.
+# A byte quantity with an optional "/s" suffix.
+upload_rate = ""
+# The reported-to-real factor of the upload in amplify mode; greater than 1.
+upload_multiplier = ""
+# The per-announce deviation from the nominal increment, in percent (0-100).
+upload_jitter = ""
+# The per-torrent ceiling on the cumulative reported upload. Zero is uncapped.
+upload_cap = ""
+# Fixes the random jitter sequence for reproducible runs. Zero lets the
+# process choose one.
+upload_seed = 0
+# The JSON Lines file that receives one record per tracker announce plus
+# periodic peer-activity samples. Empty disables it.
+announce_log = ""
+# How often peer gauges and real payload counters are sampled into the
+# announce log. It requires announce_log.
+peer_sample_interval = ""
