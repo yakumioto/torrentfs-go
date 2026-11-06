@@ -182,6 +182,16 @@ func removedTOMLDocument(key string) string {
 		return "[filesystem]\nbackend = \"fuse\"\n"
 	case "smb.strm_enabled":
 		return "[smb]\nstrm_enabled = true\n"
+	case "http.auth.username":
+		return "[http.auth]\nusername = \"file-user\"\n"
+	case "http.auth.password_hash":
+		return "[http.auth]\npassword_hash = \"file-hash\"\n"
+	case "http.auth.password_hash_file":
+		return "[http.auth]\npassword_hash_file = \"/file/hash\"\n"
+	case "smb.username":
+		return "[smb]\nusername = \"file-user\"\n"
+	case "smb.password_file":
+		return "[smb]\npassword_file = \"/file/secret\"\n"
 	default:
 		return "[unknown]\nvalue = true\n"
 	}

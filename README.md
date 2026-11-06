@@ -105,14 +105,16 @@ mkdir -p ./torrents
 ```toml
 backend = "smb"   # fuse / smb / none
 
+# 一套凭据服务 SMB 与 HTTP
+username = "torrentfs"
+password = ""      # 优先用 TORRENTFS_PASSWORD 传入
+
 # 选择 fuse 时配置挂载点
 [fuse]
 # mountpoint = "/srv/mnt"
 
 [smb]
 listen_addr = "0.0.0.0:1445"
-username = "torrentfs"
-password_file = "/run/secrets/torrentfs-password"
 ```
 
 不写 `backend` 就是 `none`：配置了挂载点也不会自动切换到 FUSE，要用 FUSE 必须显式写 `backend = "fuse"`。
@@ -138,8 +140,9 @@ strm = "off"
 - 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
 - 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
-- 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。唯一的例外是 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`（共享 HTTP/SMB 凭据，不对应任何配置项路径）。
-- 绑定非 loopback 地址时必须启用认证；Web 登录只校验密码，Bearer token 只存在内存中，重启失效。
+- 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
+- **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
+- 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
 
 ### 迁移对照表
@@ -153,6 +156,11 @@ strm = "off"
 | `mount.allow_other` | `fuse.allow_other` |
 | `filesystem.backend` | `backend` |
 | `smb.strm_enabled` | `smb.strm` |
+| `http.auth.username` | `username` |
+| `http.auth.password_hash` | `password` |
+| `http.auth.password_hash_file` | `password` |
+| `smb.username` | `username` |
+| `smb.password_file` | `password` |
 | `-mountpoint` | `fuse.mountpoint` |
 | `-strm-mountpoint` | `fuse.strm_mountpoint` |
 | `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
@@ -161,6 +169,8 @@ strm = "off"
 | `TORRENTFS_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
 | `TORRENTFS_FILESYSTEM_BACKEND` | `TORRENTFS_BACKEND` |
 | `TORRENTFS_SMB_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
+| `TORRENTFS_SMB_USERNAME` | `TORRENTFS_USERNAME` |
+| `TORRENTFS_SMB_PASSWORD_FILE` | `TORRENTFS_PASSWORD` |
 
 ## 数据与状态
 

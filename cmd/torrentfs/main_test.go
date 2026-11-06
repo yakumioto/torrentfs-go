@@ -546,7 +546,7 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 	work := t.TempDir()
 	configPath := filepath.Join(work, "config.toml")
 	configBody := "[http]\nlisten_addr = \"127.0.0.1:8080\"\n\n" +
-		"[http.auth]\nenabled = true\nusername = \"alice\"\npassword_hash = \"not-a-bcrypt-hash\"\n"
+		"[http.auth]\nenabled = true\n"
 	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -559,8 +559,8 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "password_hash") {
-		t.Fatalf("stderr = %q, want password_hash error", stderr.String())
+	if !strings.Contains(stderr.String(), "password") {
+		t.Fatalf("stderr = %q, want password error", stderr.String())
 	}
 }
 
@@ -676,9 +676,6 @@ func unsetConfigEnvironment(t *testing.T) {
 	}
 	for _, key := range config.Schema() {
 		names = append(names, key.Environment)
-	}
-	for _, exception := range config.EnvironmentExceptions() {
-		names = append(names, exception.Name)
 	}
 	for _, name := range names {
 		name := name

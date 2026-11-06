@@ -35,8 +35,14 @@ Usage:
 
 Configuration:
   backend = "fuse", "smb", or "none" (HTTP-only default)
+  username / password are the credentials: the SMB login name and the
+    password shared by SMB and the HTTP login. Both are required for the SMB
+    output; only the password is required for enabled HTTP authentication.
+    Prefer the TORRENTFS_USERNAME and TORRENTFS_PASSWORD environment
+    variables: a password in the configuration file is readable on disk and
+    earns a startup warning.
   [fuse] fuse.mountpoint / fuse.strm_mountpoint / fuse.allow_other
-  [smb] smb.listen_addr / smb.username / smb.password_file / smb.strm
+  [smb] smb.listen_addr / smb.strm
   [strm] strm.base_url enables the signed streaming links
 
 Flags:
@@ -60,8 +66,7 @@ original view. Mountpoints must not be identical or nested, including symbolic-l
 Configuration precedence is the TORRENTFS_* environment variables, then TOML,
 then defaults. Every configuration key has an environment variable derived from
 its path: the path in upper case, dots replaced by underscores, under the
-TORRENTFS_ prefix. TORRENTFS_USERNAME and TORRENTFS_PASSWORD are the only
-exceptions. Send SIGINT or SIGTERM for bounded shutdown.
+TORRENTFS_ prefix. Send SIGINT or SIGTERM for bounded shutdown.
 `
 
 func main() {
@@ -99,7 +104,7 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, sources, err := loadConfig(*configPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
@@ -147,6 +152,7 @@ func run(args []string, stderr io.Writer) int {
 		"log_level", logLevel,
 		"log_format", logFormat,
 	)
+	warnPlaintextPassword(logger, cfg, sources)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,8 +218,8 @@ func run(args []string, stderr io.Writer) int {
 		if cfg.SMBSTRMEnabled() {
 			shares[smb.STRMShareName] = vfs.New(vfs.NewSTRMBackend(sess))
 		}
-		native, startErr := smb.New(shares, smb.Options{Username: cfg.SMB.Username,
-			Password: cfg.SMB.Password, ReadTimeout: time.Duration(cfg.Filesystem.ReadTimeout), Logger: logger})
+		native, startErr := smb.New(shares, smb.Options{Username: cfg.Username,
+			Password: cfg.Password, ReadTimeout: time.Duration(cfg.Filesystem.ReadTimeout), Logger: logger})
 		if startErr != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", startErr)
 			sequence.run()
@@ -516,13 +522,29 @@ func unexpectedServeResult(name string, err error) error {
 	return fmt.Errorf("%s server: %w", name, err)
 }
 
-func loadConfig(path string) (config.Config, error) {
-	cfg, err := config.Load(path)
+// warnPlaintextPassword reports that the password came from a configuration
+// file, where it stays readable on disk.
+//
+// The warning names the key but never the password value. A password the
+// environment supplied is not warned about: the environment keeps it out of
+// the configuration file.
+func warnPlaintextPassword(logger *slog.Logger, cfg config.Config, sources config.Sources) {
+	if cfg.Password == "" || !sources.FromFile("password") {
+		return
+	}
+	logger.Warn("the password comes from the configuration file and is readable on disk; " +
+		"prefer the TORRENTFS_PASSWORD environment variable")
+}
+
+// loadConfig loads the configuration and reports where every effective value
+// came from.
+func loadConfig(path string) (config.Config, config.Sources, error) {
+	cfg, sources, err := config.LoadWithSources(path)
 	if err != nil {
 		if path == "" {
-			return config.Config{}, fmt.Errorf("load config: %w", err)
+			return config.Config{}, nil, fmt.Errorf("load config: %w", err)
 		}
-		return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
+		return config.Config{}, nil, fmt.Errorf("load config %q: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, sources, nil
 }

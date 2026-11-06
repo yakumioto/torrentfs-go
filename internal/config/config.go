@@ -12,33 +12,30 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 var (
 	// ErrInvalid identifies a configuration value that violates its contract.
 	ErrInvalid = errors.New("invalid configuration")
 
-	errRequired             = errors.New("value is required")
-	errPortRange            = errors.New("must be between 0 and 65535")
-	errCapacityRange        = errors.New("must be between 1 and the cache watermark safety limit")
-	errProxyURL             = errors.New("must be a valid URL")
-	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
-	errProxyHost            = errors.New("must include a proxy host")
-	errProxyPort            = errors.New("proxy port must be between 1 and 65535")
-	errPeerIDPrefixSize     = errors.New("must be at most 20 bytes")
-	errTrackerUserAgent     = errors.New("must not contain carriage return or line feed")
-	errListenAddr           = errors.New("must be a host:port address")
-	errPositive             = errors.New("must be positive")
-	errAddressFamilies      = errors.New("must not disable IPv4 and IPv6 at the same time")
-	errBootstrapNode        = errors.New("must be a host:port address with a port between 1 and 65535")
-	errAuthUsernameRequired = errors.New("must not be empty when authentication is enabled")
-	errAuthUsernameControl  = errors.New("must not contain control characters")
-	errAuthHashRequired     = errors.New("exactly one password hash source is required when authentication is enabled")
-	errAuthCredentialsSet   = errors.New("authentication credentials must be empty when authentication is disabled")
-	errAuthTokenTTLMax      = errors.New("must not exceed 24 hours")
-	errExposedNoAuth        = errors.New("exposing a non-loopback address requires enabled http.auth")
-	errLogLevel             = errors.New("must be one of debug, info, warn, error")
-	errLogFormat            = errors.New("must be one of text, json")
+	errRequired         = errors.New("value is required")
+	errPortRange        = errors.New("must be between 0 and 65535")
+	errCapacityRange    = errors.New("must be between 1 and the cache watermark safety limit")
+	errProxyURL         = errors.New("must be a valid URL")
+	errProxyScheme      = errors.New("must use socks5:// or socks5h://")
+	errProxyHost        = errors.New("must include a proxy host")
+	errProxyPort        = errors.New("proxy port must be between 1 and 65535")
+	errPeerIDPrefixSize = errors.New("must be at most 20 bytes")
+	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
+	errListenAddr       = errors.New("must be a host:port address")
+	errPositive         = errors.New("must be positive")
+	errAddressFamilies  = errors.New("must not disable IPv4 and IPv6 at the same time")
+	errBootstrapNode    = errors.New("must be a host:port address with a port between 1 and 65535")
+	errAuthTokenTTLMax  = errors.New("must not exceed 24 hours")
+	errExposedNoAuth    = errors.New("exposing a non-loopback address requires enabled http.auth")
+	errLogLevel         = errors.New("must be one of debug, info, warn, error")
+	errLogFormat        = errors.New("must be one of text, json")
 )
 
 const (
@@ -48,6 +45,11 @@ const (
 	defaultMaxUploadBytes     int64 = 10 << 20
 	defaultLogLevel                 = "info"
 	defaultLogFormat                = "text"
+
+	// maxPasswordBytes is the longest password bcrypt accepts. A longer
+	// password is truncated by bcrypt, so the configuration rejects it
+	// instead of silently accepting a weaker password than the user wrote.
+	maxPasswordBytes = 72
 )
 
 // ValidationError identifies the configuration field that failed validation.
@@ -92,6 +94,13 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 type Config struct {
 	// Backend selects the output backend: none, fuse, or smb.
 	Backend Backend `toml:"backend" enum:"none,fuse,smb"`
+	// Username is the login name the SMB output accepts. The HTTP login does
+	// not check a user name, so the key is only required for the SMB output.
+	Username string `toml:"username"`
+	// Password is the plaintext password shared by the SMB output and the
+	// HTTP login. It is required for the SMB output and for enabled HTTP
+	// authentication, and it has no default.
+	Password string `toml:"password" secret:"true"`
 	// Connections groups the network settings of the torrent session.
 	Connections Connections `toml:"connections"`
 	// Proxy groups the optional outbound proxy settings.
@@ -159,12 +168,13 @@ func (d Duration) String() string {
 }
 
 // Auth configures single-user password login and in-memory Bearer tokens.
+//
+// The credentials live in the top-level username and password keys: the
+// login checks the password only, so the authentication service needs no
+// user name of its own.
 type Auth struct {
-	Enabled          bool     `toml:"enabled"`
-	Username         string   `toml:"username"`
-	PasswordHash     string   `toml:"password_hash"`
-	PasswordHashFile string   `toml:"password_hash_file"`
-	TokenTTL         Duration `toml:"token_ttl"`
+	Enabled  bool     `toml:"enabled"`
+	TokenTTL Duration `toml:"token_ttl"`
 }
 
 // Connections groups network settings of the torrent session.
@@ -258,6 +268,9 @@ func (c Config) Validate() error {
 	if err := c.validateFilesystem(); err != nil {
 		return err
 	}
+	if err := c.validateCredentials(); err != nil {
+		return err
+	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		return invalid("connections.listen_port", errPortRange)
 	}
@@ -321,29 +334,45 @@ func validateAuth(auth Auth) error {
 	if time.Duration(auth.TokenTTL) > 24*time.Hour {
 		return invalid("http.auth.token_ttl", errAuthTokenTTLMax)
 	}
+	return nil
+}
 
-	hasPasswordHash := auth.PasswordHash != ""
-	hasPasswordHashFile := auth.PasswordHashFile != ""
-	if !auth.Enabled {
-		switch {
-		case auth.Username != "":
-			return invalid("http.auth.username", errAuthCredentialsSet)
-		case hasPasswordHash:
-			return invalid("http.auth.password_hash", errAuthCredentialsSet)
-		case hasPasswordHashFile:
-			return invalid("http.auth.password_hash_file", errAuthCredentialsSet)
-		default:
-			return nil
+// validateCredentials checks the credentials against the selected output and
+// the HTTP authentication.
+//
+// The password is required whenever a client has to authenticate against
+// torrentfs: the SMB output and the HTTP login. The user name is required for
+// the SMB output only, because the HTTP login checks the password alone.
+//
+// The shape of a credential is always checked, even when no output needs it
+// yet: the credentials are shared by every output, so a malformed one is a
+// mistake wherever it stands.
+func (c Config) validateCredentials() error {
+	if c.Username != "" && strings.IndexFunc(c.Username, unicode.IsControl) >= 0 {
+		return invalid("username", errors.New("must not contain control characters"))
+	}
+	if c.Password != "" {
+		if !utf8.ValidString(c.Password) {
+			return invalid("password", errors.New("must be valid UTF-8"))
+		}
+		if strings.ContainsAny(c.Password, "\r\n\x00") {
+			return invalid("password", errors.New("must be a single line without null bytes"))
 		}
 	}
-	if auth.Username == "" {
-		return invalid("http.auth.username", errAuthUsernameRequired)
+	if c.Backend == BackendSMB && c.Username == "" {
+		return invalid("username", errRequired)
 	}
-	if strings.IndexFunc(auth.Username, unicode.IsControl) >= 0 {
-		return invalid("http.auth.username", errAuthUsernameControl)
+	if c.Backend == BackendSMB || c.HTTP.Auth.Enabled {
+		if c.Password == "" {
+			return invalid("password", errRequired)
+		}
 	}
-	if hasPasswordHash == hasPasswordHashFile {
-		return invalid("http.auth.password_hash", errAuthHashRequired)
+	if c.HTTP.Auth.Enabled && len([]byte(c.Password)) > maxPasswordBytes {
+		// The HTTP login hashes the password with bcrypt, which ignores
+		// everything past the 72nd byte. A longer password would reach
+		// the SMB output in full and the HTTP login truncated, so the
+		// configuration rejects it instead.
+		return invalid("password", fmt.Errorf("must be at most %d bytes", maxPasswordBytes))
 	}
 	return nil
 }

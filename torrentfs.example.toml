@@ -7,10 +7,8 @@
 # environment variable, derived from its path: the path in upper case, with the
 # dots replaced by underscores, under the TORRENTFS_ prefix. For example,
 # http.auth.token_ttl becomes TORRENTFS_HTTP_AUTH_TOKEN_TTL and cache.capacity
-# becomes TORRENTFS_CACHE_CAPACITY. TORRENTFS_USERNAME and TORRENTFS_PASSWORD
-# are the only exceptions: they carry the shared HTTP/SMB credentials and have
-# no configuration key of their own. The precedence is environment variables,
-# this file, then built-in defaults.
+# becomes TORRENTFS_CACHE_CAPACITY. There are no exceptions. The precedence is
+# environment variables, this file, then built-in defaults.
 #
 # Both FUSE and SMB expose only the same read-only virtual data tree. Management
 # (add, delete, status) happens over HTTP; internal metadata is never shared.
@@ -25,6 +23,20 @@
 # backend = "fuse" to use it.
 backend = "none"
 
+# The credentials shared by the SMB output and the HTTP login.
+#
+# username is the SMB login name. The HTTP login checks the password only, so
+# the Web UI asks for a password and nothing else.
+#
+# password is required when backend = "smb" or http.auth.enabled = true.
+# username is required when backend = "smb".
+#
+# Prefer the environment variables TORRENTFS_USERNAME and TORRENTFS_PASSWORD:
+# a password written here stays readable on disk and earns a startup warning.
+# Environment override: TORRENTFS_USERNAME, TORRENTFS_PASSWORD.
+username = ""
+password = ""
+
 [http]
 # The listener serves both the embedded Web UI and the management API. Empty
 # disables both. The default binds loopback only; non-loopback listeners require
@@ -35,12 +47,9 @@ listen_addr = "127.0.0.1:8080"
 max_upload_size = "10MiB"
 
 [http.auth]
-# Login returns an in-memory opaque Bearer token when enabled.
+# Login returns an in-memory opaque Bearer token when enabled. The login checks
+# the password only; the user name is not part of it.
 enabled = false
-username = ""
-# Set exactly one bcrypt hash source; never put a plaintext password here.
-password_hash = ""
-password_hash_file = ""
 # A valid token request slides this inactivity window (30 minutes by default).
 token_ttl = "30m"
 
@@ -116,11 +125,6 @@ allow_other = false
 # Native SMB needs no FUSE mount, Samba, or host filesystem export.
 # In Docker publish host 445 to container 1445 rather than granting low-port caps.
 listen_addr = "0.0.0.0:1445"
-username = "torrentfs"
 # The STRM share of the SMB output: auto provides it when strm.base_url is
 # configured, on forces it, and off forbids it.
 strm = "auto"
-# Readable by the process UID; a single trailing newline is removed. Do not put
-# a plaintext password in this TOML. Shared TORRENTFS_USERNAME/PASSWORD may
-# override this source and also configure HTTP authentication when enabled.
-password_file = "/run/secrets/torrentfs_password"

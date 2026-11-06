@@ -203,18 +203,18 @@ var historicalEnvironmentCases = []struct {
 		want: "127.0.0.1:1446",
 	},
 	{
-		path: "smb.username",
-		name: "TORRENTFS_SMB_USERNAME",
-		file: "[smb]\nusername = \"file-user\"\n",
+		path: "username",
+		name: "TORRENTFS_USERNAME",
+		file: "username = \"file-user\"\n",
 		env:  "env-user",
 		want: "env-user",
 	},
 	{
-		path: "smb.password_file",
-		name: "TORRENTFS_SMB_PASSWORD_FILE",
-		file: "[smb]\npassword_file = \"/file/secret\"\n",
-		env:  "/env/secret",
-		want: "/env/secret",
+		path: "password",
+		name: "TORRENTFS_PASSWORD",
+		file: "password = \"file-password\"\n",
+		env:  "env-password",
+		want: "env-password",
 	},
 	{
 		path: "smb.strm",
@@ -391,50 +391,79 @@ func TestNewConfigurationKeyGetsEnvironmentOverride(t *testing.T) {
 	}
 }
 
-// TestEnvironmentExceptionsAreExplicit covers the exceptions to the derivation
-// rule: they are listed in one table, and every one of them says whether it
-// configures a configuration key of its own.
-func TestEnvironmentExceptionsAreExplicit(t *testing.T) {
+// TestEveryEnvironmentNameIsDerived covers the derivation rule: no
+// configuration key is an exception to it. Every environment variable comes
+// from the path of the configuration key it configures, so a new
+// configuration key needs no second registration.
+func TestEveryEnvironmentNameIsDerived(t *testing.T) {
 	derived := make(map[string]string)
 	for _, key := range Schema() {
-		if key.Overridable {
-			derived[key.Environment] = key.Path
+		if !key.Overridable {
+			t.Fatalf("the configuration key %q cannot be overridden by the environment", key.Path)
+		}
+		derived[key.Environment] = key.Path
+	}
+	if len(derived) != len(Schema()) {
+		t.Fatalf("the schema has %d configuration keys but %d environment variables",
+			len(Schema()), len(derived))
+	}
+}
+
+// TestTheCredentialsAreOrdinaryConfigurationKeys covers the unified
+// credentials: they are two ordinary top-level configuration keys with
+// derived environment names, not an exception to the derivation rule.
+func TestTheCredentialsAreOrdinaryConfigurationKeys(t *testing.T) {
+	want := map[string]string{
+		"username": "TORRENTFS_USERNAME",
+		"password": "TORRENTFS_PASSWORD",
+	}
+	for _, key := range Schema() {
+		name, ok := want[key.Path]
+		if !ok {
+			continue
+		}
+		if key.Environment != name {
+			t.Fatalf("the configuration key %q uses the environment variable %q, want %q",
+				key.Path, key.Environment, name)
+		}
+		if !key.Overridable {
+			t.Fatalf("the configuration key %q is not overridable by the environment", key.Path)
+		}
+		delete(want, key.Path)
+	}
+	for path := range want {
+		t.Fatalf("the schema has no configuration key %q", path)
+	}
+}
+
+// TestTheRemovedCredentialKeysAreGone covers the removal of the scattered
+// credentials: the schema knows one pair of credentials and nothing else.
+func TestTheRemovedCredentialKeysAreGone(t *testing.T) {
+	removed := []string{
+		"http.auth.username",
+		"http.auth.password_hash",
+		"http.auth.password_hash_file",
+		"smb.username",
+		"smb.password_file",
+	}
+	for _, path := range removed {
+		for _, key := range Schema() {
+			if key.Path == path {
+				t.Fatalf("the schema still knows the removed configuration key %q", path)
+			}
 		}
 	}
-	exceptions := EnvironmentExceptions()
-	if len(exceptions) == 0 {
-		t.Fatal("the exceptions to the derivation rule are not listed")
-	}
-	seen := make(map[string]bool)
-	for _, exception := range exceptions {
-		if seen[exception.Name] {
-			t.Fatalf("the environment variable %q is listed twice", exception.Name)
-		}
-		seen[exception.Name] = true
-		switch exception.Kind {
-		case exceptionCredential:
-			if exception.Path != "" {
-				t.Fatalf("the credential variable %q must not claim a configuration key", exception.Name)
+	for _, name := range []string{
+		"TORRENTFS_HTTP_AUTH_USERNAME",
+		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH",
+		"TORRENTFS_HTTP_AUTH_PASSWORD_HASH_FILE",
+		"TORRENTFS_SMB_USERNAME",
+		"TORRENTFS_SMB_PASSWORD_FILE",
+	} {
+		for _, key := range Schema() {
+			if key.Environment == name {
+				t.Fatalf("the schema still derives the removed environment variable %q", name)
 			}
-			if _, ok := derived[exception.Name]; ok {
-				t.Fatalf("the credential variable %q is a derived name", exception.Name)
-			}
-		case exceptionExcludedKey:
-			if exception.Path == "" {
-				t.Fatalf("the excluded variable %q must name its configuration key", exception.Name)
-			}
-			if exception.Name != deriveEnvironmentName(exception.Path) {
-				t.Fatalf("the excluded variable %q is not the derived name of %q",
-					exception.Name, exception.Path)
-			}
-			if _, ok := derived[exception.Name]; ok {
-				t.Fatalf("the excluded variable %q still overrides its configuration key", exception.Name)
-			}
-		default:
-			t.Fatalf("the exception %q has the unknown kind %q", exception.Name, exception.Kind)
-		}
-		if exception.Reason == "" {
-			t.Fatalf("the exception %q has no reason", exception.Name)
 		}
 	}
 }
@@ -518,45 +547,6 @@ func TestEnvironmentFUSEMountpointDoesNotSelectBackend(t *testing.T) {
 	if cfg.Backend != BackendNone {
 		t.Fatalf("backend = %q, want the default %q",
 			cfg.Backend, BackendNone)
-	}
-}
-
-// TestEnvironmentExcludedKeysKeepTheirConfigurationFileValue covers the keys
-// that the environment does not override: their value comes from the
-// configuration file alone.
-func TestEnvironmentExcludedKeysKeepTheirConfigurationFileValue(t *testing.T) {
-	for _, exception := range EnvironmentExceptions() {
-		if exception.Kind != exceptionExcludedKey {
-			continue
-		}
-		t.Run(exception.Path, func(t *testing.T) {
-			cfg, err := load(writeConfigFile(t, excludedKeyDocument(exception.Path)),
-				lookupEnvironment(map[string]string{
-					exception.Name: "environment-value",
-				}))
-			if err != nil {
-				t.Fatalf("load: %v", err)
-			}
-			got := configValue(t, &cfg, exception.Path)
-			if reflect.DeepEqual(got, "environment-value") {
-				t.Fatalf("%s = %#v, want the configuration file value", exception.Path, got)
-			}
-		})
-	}
-}
-
-// excludedKeyDocument writes a configuration file that sets an excluded
-// configuration key to a value the validator accepts.
-func excludedKeyDocument(path string) string {
-	switch path {
-	case "http.auth.username":
-		return "[http.auth]\nenabled = true\nusername = \"file-user\"\npassword_hash = \"file-hash\"\n"
-	case "http.auth.password_hash":
-		return "[http.auth]\nenabled = true\nusername = \"file-user\"\npassword_hash = \"file-hash\"\n"
-	case "http.auth.password_hash_file":
-		return "[http.auth]\nenabled = true\nusername = \"file-user\"\npassword_hash_file = \"/file/hash\"\n"
-	default:
-		return ""
 	}
 }
 

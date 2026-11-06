@@ -18,14 +18,14 @@ runtime_uid=1000
 runtime_gid=1000
 
 cat >"$work_dir/torrentfs.toml" <<'EOF'
+password = "password"
+
 [http]
 listen_addr = "0.0.0.0:8080"
 max_upload_size = "10MiB"
 
 [http.auth]
 enabled = true
-username = "alice"
-password_hash = "$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq"
 token_ttl = "30m"
 EOF
 

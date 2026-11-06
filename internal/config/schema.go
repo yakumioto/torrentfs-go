@@ -14,6 +14,11 @@ const environmentPrefix = "TORRENTFS_"
 // configuration key. The tag is the only place the values are written down.
 const enumTag = "enum"
 
+// secretTag names the tag that marks a configuration key whose value must
+// not be disclosed. A secret key is redacted wherever a configuration value
+// is printed.
+const secretTag = "secret"
+
 // SchemaKey describes one configuration key of the configuration schema.
 type SchemaKey struct {
 	// Path is the dot path of the configuration key, such as
@@ -21,8 +26,7 @@ type SchemaKey struct {
 	Path string
 	// Environment is the environment variable that the path derives. The
 	// environment overrides the configuration key only when Overridable
-	// reports true; otherwise an exception variable configures it, and
-	// EnvironmentExceptions names that variable.
+	// reports true.
 	Environment string
 	// Overridable reports whether the environment may override the
 	// configuration key.
@@ -33,6 +37,10 @@ type SchemaKey struct {
 	// Values lists the accepted values of an enumerated configuration key.
 	// It is empty for every other kind.
 	Values []string
+	// Secret reports whether the value of the configuration key must not be
+	// disclosed. A caller that prints configuration values redacts the
+	// secret ones.
+	Secret bool
 }
 
 // Schema returns the configuration schema: every configuration key of the
@@ -49,6 +57,7 @@ func Schema() []SchemaKey {
 			Overridable: item.overridable,
 			Kind:        item.kind,
 			Values:      item.values,
+			Secret:      item.secret,
 		})
 	}
 	return keys
@@ -66,6 +75,17 @@ func SchemaDefault(path string) (any, bool) {
 	return nil, false
 }
 
+// SchemaSecret reports whether the configuration key with the given path is a
+// secret. It reports false for a path the schema does not know.
+func SchemaSecret(path string) bool {
+	for _, item := range configSchema {
+		if item.path == path {
+			return item.secret
+		}
+	}
+	return false
+}
+
 // schemaItem is one registered configuration key. It carries everything the
 // loader needs to read the value from the configuration and to write it from
 // an environment value.
@@ -79,6 +99,8 @@ type schemaItem struct {
 	// values lists the accepted values of an enumerated configuration key.
 	// It is empty for every other kind.
 	values []string
+	// secret reports whether the value of the key must not be disclosed.
+	secret bool
 	// index is the field index path from the root configuration.
 	index []int
 	// parse turns an environment value into a value of the field type. It is
@@ -133,9 +155,10 @@ func collectSchema(structType reflect.Type, index []int, prefix string, items *[
 			environment: deriveEnvironmentName(path),
 			kind:        kind,
 			values:      values,
+			secret:      isSecret(field),
 			index:       fieldIndex,
 			parse:       parse,
-			overridable: ok && !environmentOwns(path),
+			overridable: ok,
 		})
 	}
 }
@@ -148,6 +171,13 @@ func enumValues(field reflect.StructField) []string {
 		return nil
 	}
 	return strings.Split(raw, ",")
+}
+
+// isSecret reports whether a configuration key is marked as a secret. Only the
+// exact value "true" marks a key, so a mistyped tag never hides a value that
+// the user expects to read.
+func isSecret(field reflect.StructField) bool {
+	return field.Tag.Get(secretTag) == "true"
 }
 
 // schemaEnumValues returns the accepted values of the enumerated configuration

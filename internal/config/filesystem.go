@@ -2,13 +2,8 @@ package config
 
 import (
 	"errors"
-	"io"
 	"net"
-	"os"
-	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // Backend names the output backend: the way the file tree reaches the user.
@@ -68,34 +63,8 @@ type FUSE struct {
 type SMB struct {
 	// ListenAddr is the address the SMB service binds.
 	ListenAddr string `toml:"listen_addr"`
-	// Username is the login name the SMB service accepts.
-	Username string `toml:"username"`
-	// PasswordFile is a file holding the SMB password.
-	PasswordFile string `toml:"password_file"`
-	// Password is the plaintext SMB password. It is never read from TOML.
-	Password string `toml:"-"`
 	// STRM switches the STRM share of the SMB output: auto, on, or off.
 	STRM STRMSwitch `toml:"strm" enum:"auto,on,off"`
-}
-
-// readSMBPasswordFile reads the SMB password from the configured password
-// file. The file is the fallback for a deployment that sets no shared
-// credential pair.
-func readSMBPasswordFile(c *Config) error {
-	if c.SMB.PasswordFile == "" {
-		return nil
-	}
-	file, err := os.Open(c.SMB.PasswordFile)
-	if err != nil {
-		return invalid("smb.password_file", errors.New("cannot open password file"))
-	}
-	bytes, readErr := io.ReadAll(io.LimitReader(file, 65537))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || len(bytes) > 65536 {
-		return invalid("smb.password_file", errors.New("cannot read password file (maximum 64 KiB)"))
-	}
-	c.SMB.Password = strings.TrimSuffix(strings.TrimSuffix(string(bytes), "\n"), "\r")
-	return nil
 }
 
 // validateFilesystem checks the settings of the selected output backend. The
@@ -128,12 +97,6 @@ func (c Config) validateFilesystem() error {
 	}
 	if c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
 		return invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener"))
-	}
-	if c.SMB.Username == "" || strings.ContainsFunc(c.SMB.Username, unicode.IsControl) {
-		return invalid("smb.username", errors.New("must be nonempty and contain no control characters"))
-	}
-	if c.SMB.Password == "" || !utf8.ValidString(c.SMB.Password) || strings.ContainsAny(c.SMB.Password, "\r\n\x00") {
-		return invalid("smb", errors.New("a nonempty, single-line password is required"))
 	}
 	_, port, err := net.SplitHostPort(c.SMB.ListenAddr)
 	if err != nil || port == "" {

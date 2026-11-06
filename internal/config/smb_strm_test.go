@@ -26,8 +26,8 @@ func TestSMBSTRMSwitchHasThreeStates(t *testing.T) {
 			cfg, err := load(writeConfigFile(t, "backend = \"smb\"\n[strm]\nbase_url = \""+tt.base+"\"\n"+
 				"[smb]\nstrm = \""+tt.state+"\"\n"),
 				lookupEnvironment(map[string]string{
-					environmentUsername: "smb-user",
-					environmentPassword: "test-only-password",
+					"TORRENTFS_USERNAME": "smb-user",
+					"TORRENTFS_PASSWORD": "test-only-password",
 				}))
 			if err != nil {
 				t.Fatalf("load: %v", err)
@@ -44,8 +44,8 @@ func TestSMBSTRMSwitchHasThreeStates(t *testing.T) {
 func TestSMBSTRMSwitchDefaultsToAuto(t *testing.T) {
 	cfg, err := load(writeConfigFile(t, "backend = \"smb\"\n[strm]\nbase_url = \"http://media.example:8080\"\n"),
 		lookupEnvironment(map[string]string{
-			environmentUsername: "smb-user",
-			environmentPassword: "test-only-password",
+			"TORRENTFS_USERNAME": "smb-user",
+			"TORRENTFS_PASSWORD": "test-only-password",
 		}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -60,8 +60,8 @@ func TestSMBSTRMSwitchDefaultsToAuto(t *testing.T) {
 func TestSMBSTRMSwitchOnRequiresABaseURL(t *testing.T) {
 	_, err := load(writeConfigFile(t, "backend = \"smb\"\n[smb]\nstrm = \"on\"\n"),
 		lookupEnvironment(map[string]string{
-			environmentUsername: "smb-user",
-			environmentPassword: "test-only-password",
+			"TORRENTFS_USERNAME": "smb-user",
+			"TORRENTFS_PASSWORD": "test-only-password",
 		}))
 	if err == nil {
 		t.Fatal("load accepted the STRM switch \"on\" without a base URL")
@@ -77,8 +77,8 @@ func TestSMBSTRMSwitchOnRequiresABaseURL(t *testing.T) {
 func TestSMBSTRMSwitchOffNeedsNoBaseURL(t *testing.T) {
 	cfg, err := load(writeConfigFile(t, "backend = \"smb\"\n[smb]\nstrm = \"off\"\n"),
 		lookupEnvironment(map[string]string{
-			environmentUsername: "smb-user",
-			environmentPassword: "test-only-password",
+			"TORRENTFS_USERNAME": "smb-user",
+			"TORRENTFS_PASSWORD": "test-only-password",
 		}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -93,8 +93,8 @@ func TestSMBSTRMSwitchOffNeedsNoBaseURL(t *testing.T) {
 func TestSMBSTRMSwitchRejectsAnUnknownState(t *testing.T) {
 	_, err := load(writeConfigFile(t, "backend = \"smb\"\n[smb]\nstrm = \"maybe\"\n"),
 		lookupEnvironment(map[string]string{
-			environmentUsername: "smb-user",
-			environmentPassword: "test-only-password",
+			"TORRENTFS_USERNAME": "smb-user",
+			"TORRENTFS_PASSWORD": "test-only-password",
 		}))
 	if err == nil {
 		t.Fatal("load accepted an unknown STRM switch state")
@@ -116,8 +116,8 @@ func TestSMBSTRMSwitchRejectsAnUnknownState(t *testing.T) {
 func TestSMBSTRMSwitchRejectsAnUnknownStateFromTheEnvironment(t *testing.T) {
 	_, err := load(writeConfigFile(t, "backend = \"smb\"\n"),
 		lookupEnvironment(map[string]string{
-			environmentUsername:  "smb-user",
-			environmentPassword:  "test-only-password",
+			"TORRENTFS_USERNAME": "smb-user",
+			"TORRENTFS_PASSWORD": "test-only-password",
 			"TORRENTFS_SMB_STRM": "maybe",
 		}))
 	if err == nil {
@@ -157,8 +157,8 @@ func TestSMBSTRMSwitchIsOverridableByTheEnvironment(t *testing.T) {
 			cfg, err := load(writeConfigFile(t, "backend = \"smb\"\n[strm]\nbase_url = \"http://media.example:8080\"\n"+
 				"[smb]\nstrm = \"auto\"\n"),
 				lookupEnvironment(map[string]string{
-					environmentUsername:  "smb-user",
-					environmentPassword:  "test-only-password",
+					"TORRENTFS_USERNAME": "smb-user",
+					"TORRENTFS_PASSWORD": "test-only-password",
 					"TORRENTFS_SMB_STRM": tt.state,
 				}))
 			if err != nil {

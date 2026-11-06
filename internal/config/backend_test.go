@@ -43,9 +43,9 @@ func TestBackendSelectsTheOutputBackend(t *testing.T) {
 		{
 			name: "smb from the environment",
 			env: map[string]string{
-				"TORRENTFS_BACKEND": "smb",
-				environmentUsername: "smb-user",
-				environmentPassword: "test-only-password",
+				"TORRENTFS_BACKEND":  "smb",
+				"TORRENTFS_USERNAME": "smb-user",
+				"TORRENTFS_PASSWORD": "test-only-password",
 			},
 			want: BackendSMB,
 		},
@@ -225,7 +225,7 @@ func TestBackendKeepsTheSettingsOfTheUnselectedBackend(t *testing.T) {
 // have to be usable, so a deployment can keep both sets of settings and
 // switch between them.
 func TestUnselectedBackendSettingsAreNotChecked(t *testing.T) {
-	cfg, err := load(writeConfigFile(t, "backend = \"none\"\n[smb]\nusername = \"\"\npassword_file = \"/does/not/exist\"\n"),
+	cfg, err := load(writeConfigFile(t, "backend = \"none\"\n[smb]\nlisten_addr = \"127.0.0.1:1445\"\n"),
 		lookupEnvironment(nil))
 	if err != nil {
 		t.Fatalf("load: %v", err)

@@ -25,9 +25,9 @@ readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly SUBTITLE_CONTAINER="torrentfs-mio17-subtitle-${BASHPID}"
 readonly SUBTITLE_OBSERVER_CONTAINER="torrentfs-mio17-subtitle-observer-${BASHPID}"
-# The bcrypt hash of "password", matching the API tests. The subtitle scenario
-# needs authentication enabled, and auth credentials are TOML-only.
-readonly SUBTITLE_PASSWORD_HASH='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq'
+# The password of the subtitle scenario. The subtitle scenario needs
+# authentication enabled, and the credentials are one shared pair.
+readonly SUBTITLE_PASSWORD='password'
 readonly SUBTITLE_VIDEO_NAME="video.mkv"
 readonly SUBTITLE_VIDEO_STEM="video"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
@@ -953,13 +953,13 @@ SUBTITLE_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.
 SUBTITLE_BASE="http://127.0.0.1:$SUBTITLE_PORT"
 mkdir -p "$TMP_DIR/subtitle-config"
 cat >"$TMP_DIR/subtitle-config/torrentfs.toml" <<EOF
+password = "$SUBTITLE_PASSWORD"
+
 [http]
 listen_addr = "127.0.0.1:$SUBTITLE_PORT"
 
 [http.auth]
 enabled = true
-username = "alice"
-password_hash = "$SUBTITLE_PASSWORD_HASH"
 token_ttl = "10m"
 EOF
 chmod 0644 "$TMP_DIR/subtitle-config/torrentfs.toml"
