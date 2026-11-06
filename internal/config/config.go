@@ -122,6 +122,43 @@ type Config struct {
 	FUSE FUSE `toml:"fuse"`
 	// SMB groups the settings of the built-in read-only SMB file output.
 	SMB SMB `toml:"smb"`
+	// Lab groups the settings of the upload statistics experiment.
+	Lab Lab `toml:"lab"`
+}
+
+// Lab groups the settings of the upload statistics experiment.
+//
+// The experiment rewrites the upload counter reported to trackers so that the
+// anomaly detection of a tracker can be exercised. It is off unless a mode is
+// configured, and it belongs to a tracker the operator runs: pointing it at a
+// third-party tracker misreports that tracker's statistics.
+//
+// The rules that relate one setting to another live in the experiment
+// package. The configuration holds the values and checks their shape.
+type Lab struct {
+	// UploadMode selects the reporting model: baseline, inject, or amplify.
+	// Empty infers the mode from the other settings.
+	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify"`
+	// UploadRate is the average synthetic growth of the reported upload in
+	// inject mode.
+	UploadRate ByteRate `toml:"upload_rate"`
+	// UploadMultiplier grows the reported upload by this factor of the real
+	// payload bytes in amplify mode.
+	UploadMultiplier Ratio `toml:"upload_multiplier"`
+	// UploadJitter is the per-announce deviation from the nominal increment,
+	// in percent.
+	UploadJitter Percent `toml:"upload_jitter"`
+	// UploadCap is the per-torrent ceiling on the cumulative reported upload.
+	UploadCap OptionalByteQuantity `toml:"upload_cap"`
+	// UploadSeed fixes the random jitter sequence for reproducible runs. Zero
+	// lets the process choose one.
+	UploadSeed int64 `toml:"upload_seed"`
+	// AnnounceLog is the JSON Lines file that receives one record per tracker
+	// announce. Empty disables it.
+	AnnounceLog string `toml:"announce_log"`
+	// PeerSampleInterval is how often peer activity is sampled into the
+	// announce log.
+	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -289,6 +326,7 @@ func (c Config) Validate() error {
 func (c Config) validateSyntax(collector *validationCollector) {
 	collector.add(validateEnum(backendPath, string(c.Backend)))
 	collector.add(validateEnum(smbSTRMPath, string(c.SMB.STRM)))
+	collector.add(validateEnum(labUploadModePath, strings.ToLower(strings.TrimSpace(c.Lab.UploadMode))))
 	if c.Filesystem.ReadTimeout <= 0 {
 		collector.add(invalid("filesystem.read_timeout", errPositive))
 	}
@@ -341,6 +379,29 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	collector.add(c.validateCredentialShape())
 	collector.add(c.validateSMBShape())
+	collector.add(c.validateLabShape())
+}
+
+// validateLabShape checks the shape of the upload statistics experiment
+// settings.
+//
+// The rules that relate one setting to another live in the experiment
+// package: they decide what a set of settings means, not whether a value is
+// usable on its own.
+func (c Config) validateLabShape() error {
+	if c.Lab.UploadRate < 0 {
+		return invalid("lab.upload_rate", errPositive)
+	}
+	if c.Lab.UploadJitter < 0 || c.Lab.UploadJitter > 100 {
+		return invalid("lab.upload_jitter", errors.New("must be between 0 and 100 percent"))
+	}
+	if c.Lab.UploadMultiplier != 0 && c.Lab.UploadMultiplier <= 1 {
+		return invalid("lab.upload_multiplier", errors.New("must be greater than 1"))
+	}
+	if c.Lab.PeerSampleInterval < 0 {
+		return invalid("lab.peer_sample_interval", errPositive)
+	}
+	return nil
 }
 
 // validateRequirements checks the configuration that has to be complete for

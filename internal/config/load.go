@@ -140,6 +140,11 @@ func decodeFile(content []byte, path string, cfg *Config) (map[string]any, error
 		var decodeErr *toml.DecodeError
 		if errors.As(err, &decodeErr) {
 			message := decodeErr.String()
+			if row, _ := decodeErr.Position(); row > 0 {
+				if key := keyRows(content).keyAt(row); key != "" {
+					message += fmt.Sprintf("; the configuration key %q holds the value", key)
+				}
+			}
 			if strings.Contains(message, "CapacityBytes") {
 				message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
 			}

@@ -3,31 +3,23 @@ package main
 import (
 	"log/slog"
 	"testing"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-func clearLabEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{
-		"TORRENTFS_LAB_UPLOAD_MODE",
-		"TORRENTFS_LAB_UPLOAD_RATE",
-		"TORRENTFS_LAB_UPLOAD_MULTIPLIER",
-		"TORRENTFS_LAB_UPLOAD_JITTER",
-		"TORRENTFS_LAB_UPLOAD_CAP",
-		"TORRENTFS_LAB_UPLOAD_SEED",
-		"TORRENTFS_LAB_ANNOUNCE_LOG",
-		"TORRENTFS_LAB_PEER_SAMPLE_INTERVAL",
-	} {
-		t.Setenv(key, "")
-	}
+// labConfig returns the configuration of an experiment with the given values.
+func labConfig(lab config.Lab) config.Config {
+	cfg := config.Default()
+	cfg.Lab = lab
+	return cfg
 }
 
 func TestLabSessionOptionsDisabledByDefault(t *testing.T) {
-	clearLabEnv(t)
-	options, err := labSessionOptions(testLogger())
+	options, err := labSessionOptions(labConfig(config.Lab{}), testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
 	}
@@ -37,9 +29,8 @@ func TestLabSessionOptionsDisabledByDefault(t *testing.T) {
 }
 
 func TestLabSessionOptionsInjectMode(t *testing.T) {
-	clearLabEnv(t)
-	t.Setenv("TORRENTFS_LAB_UPLOAD_RATE", "1MiB/s")
-	options, err := labSessionOptions(testLogger())
+	cfg := labConfig(config.Lab{UploadRate: config.ByteRate(1 << 20)})
+	options, err := labSessionOptions(cfg, testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
 	}
@@ -49,10 +40,22 @@ func TestLabSessionOptionsInjectMode(t *testing.T) {
 }
 
 func TestLabSessionOptionsBaselineMode(t *testing.T) {
-	clearLabEnv(t)
-	t.Setenv("TORRENTFS_LAB_UPLOAD_MODE", "baseline")
-	t.Setenv("TORRENTFS_LAB_ANNOUNCE_LOG", "/tmp/lab-test.jsonl")
-	options, err := labSessionOptions(testLogger())
+	cfg := labConfig(config.Lab{
+		UploadMode:  "baseline",
+		AnnounceLog: "/tmp/lab-test.jsonl",
+	})
+	options, err := labSessionOptions(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("labSessionOptions: %v", err)
+	}
+	if len(options) != 1 {
+		t.Fatalf("got %d options, want the lab experiment option", len(options))
+	}
+}
+
+func TestLabSessionOptionsAmplifyMode(t *testing.T) {
+	cfg := labConfig(config.Lab{UploadMultiplier: config.Ratio(3)})
+	options, err := labSessionOptions(cfg, testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
 	}
@@ -62,13 +65,19 @@ func TestLabSessionOptionsBaselineMode(t *testing.T) {
 }
 
 func TestLabSessionOptionsRejectsInvalidConfiguration(t *testing.T) {
-	clearLabEnv(t)
-	t.Setenv("TORRENTFS_LAB_UPLOAD_JITTER", "10")
-	options, err := labSessionOptions(testLogger())
+	cfg := labConfig(config.Lab{UploadJitter: config.Percent(10)})
+	options, err := labSessionOptions(cfg, testLogger())
 	if err == nil {
 		t.Fatal("labSessionOptions accepted jitter without a mode or rate")
 	}
 	if options != nil {
 		t.Fatalf("options = %v, want nil on configuration error", options)
+	}
+}
+
+func TestLabSessionOptionsRejectsRateWithoutInjectMode(t *testing.T) {
+	cfg := labConfig(config.Lab{UploadMode: "baseline", UploadRate: config.ByteRate(1 << 20)})
+	if _, err := labSessionOptions(cfg, testLogger()); err == nil {
+		t.Fatal("labSessionOptions accepted a rate in baseline mode")
 	}
 }

@@ -223,6 +223,62 @@ var historicalEnvironmentCases = []struct {
 		env:  "off",
 		want: STRMOff,
 	},
+	{
+		path: "lab.upload_mode",
+		name: "TORRENTFS_LAB_UPLOAD_MODE",
+		file: "[lab]\nupload_mode = \"baseline\"\n",
+		env:  "amplify",
+		want: "amplify",
+	},
+	{
+		path: "lab.upload_rate",
+		name: "TORRENTFS_LAB_UPLOAD_RATE",
+		file: "[lab]\nupload_rate = \"1MiB/s\"\n",
+		env:  "2MiB/s",
+		want: ByteRate(2 << 20),
+	},
+	{
+		path: "lab.upload_multiplier",
+		name: "TORRENTFS_LAB_UPLOAD_MULTIPLIER",
+		file: "[lab]\nupload_multiplier = \"2\"\n",
+		env:  "3",
+		want: Ratio(3),
+	},
+	{
+		path: "lab.upload_jitter",
+		name: "TORRENTFS_LAB_UPLOAD_JITTER",
+		file: "[lab]\nupload_jitter = \"10\"\n",
+		env:  "20",
+		want: Percent(20),
+	},
+	{
+		path: "lab.upload_cap",
+		name: "TORRENTFS_LAB_UPLOAD_CAP",
+		file: "[lab]\nupload_cap = \"1MiB\"\n",
+		env:  "2MiB",
+		want: OptionalByteQuantity(2 << 20),
+	},
+	{
+		path: "lab.upload_seed",
+		name: "TORRENTFS_LAB_UPLOAD_SEED",
+		file: "[lab]\nupload_seed = 1\n",
+		env:  "42",
+		want: int64(42),
+	},
+	{
+		path: "lab.announce_log",
+		name: "TORRENTFS_LAB_ANNOUNCE_LOG",
+		file: "[lab]\nannounce_log = \"/tmp/file.jsonl\"\n",
+		env:  "/tmp/env.jsonl",
+		want: "/tmp/env.jsonl",
+	},
+	{
+		path: "lab.peer_sample_interval",
+		name: "TORRENTFS_LAB_PEER_SAMPLE_INTERVAL",
+		file: "[lab]\npeer_sample_interval = \"10s\"\n",
+		env:  "5s",
+		want: OptionalDuration(5 * time.Second),
+	},
 }
 
 // TestEnvironmentNamesAreDerivedFromConfigurationPaths covers the derivation
@@ -493,8 +549,9 @@ func TestEnvironmentBackendIsAPlainConfigurationKey(t *testing.T) {
 // discover them without reading the source code.
 func TestEnumeratedConfigurationKeysListTheirValues(t *testing.T) {
 	want := map[string][]string{
-		"backend":  {"none", "fuse", "smb"},
-		"smb.strm": {"auto", "on", "off"},
+		"backend":         {"none", "fuse", "smb"},
+		"smb.strm":        {"auto", "on", "off"},
+		"lab.upload_mode": {"", "baseline", "inject", "amplify"},
 	}
 	for _, key := range Schema() {
 		values, ok := want[key.Path]
