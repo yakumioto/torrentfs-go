@@ -16,8 +16,7 @@ import (
 // runtime settings (mode, rate, multiplier, jitter, cap) without a restart.
 //
 // This is research tooling for exercising anomaly detection on a tracker you
-// operate; it is documented in docs/development.md and must not be pointed at a
-// third-party tracker.
+// operate and must not be pointed at a third-party tracker.
 func labSessionOptions(logger *slog.Logger) ([]session.Option, error) {
 	settings, enabled, err := lab.LoadSettings(os.Getenv)
 	if err != nil {
