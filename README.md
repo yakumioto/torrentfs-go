@@ -139,7 +139,9 @@ base_url = "http://192.168.1.10:8080"
 
 | 已删除 | 替代写法 |
 | --- | --- |
-| `[mount]` 配置节 | `filesystem.read_timeout`、`fuse.allow_other` |
+| `mount` | `filesystem.read_timeout`、`fuse.allow_other` |
+| `mount.read_timeout` | `filesystem.read_timeout` |
+| `mount.allow_other` | `fuse.allow_other` |
 | `-mountpoint` | `fuse.mountpoint` |
 | `-strm-mountpoint` | `fuse.strm_mountpoint` |
 | `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
