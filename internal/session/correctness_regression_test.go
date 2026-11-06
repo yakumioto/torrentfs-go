@@ -276,7 +276,7 @@ func TestCanonicalMetainfoDocumentationNamesRootPath(t *testing.T) {
 		t.Fatalf("read README: %v", err)
 	}
 	text := string(readme)
-	if !strings.Contains(text, "metainfo 持久化在 `torrents-dir/<infohash>.torrent`") {
+	if !strings.Contains(text, "`<torrents-dir>/<infohash>.torrent` 保存 canonical metainfo") {
 		t.Fatal("README does not state the canonical metainfo root path")
 	}
 	if strings.Contains(text, "由 API 管理的 metainfo、未完成的磁力链接意图和 peer identity 持久化在 `torrents-dir/.metadata`") {
