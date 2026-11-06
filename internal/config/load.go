@@ -27,6 +27,16 @@ func LoadWithSources(path string) (Config, Sources, error) {
 	return loadWithSources(path, osEnvironment{})
 }
 
+// LoadWithEnvironment loads the configuration from a given environment.
+//
+// The environment is a parameter so a caller can supply the variables it
+// knows about instead of the whole process environment. The configuration
+// reads the same variables either way.
+func LoadWithEnvironment(path string, lookup envLookup) (Config, error) {
+	cfg, _, err := loadWithSources(path, lookup)
+	return cfg, err
+}
+
 func load(path string, lookup envLookup) (Config, error) {
 	cfg, _, err := loadWithSources(path, lookup)
 	return cfg, err
@@ -40,10 +50,22 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	for _, item := range configSchema {
 		sources[item.path] = SourceDefault
 	}
+	// A removed name is reported before anything else is read, and the names
+	// of every input are collected together: a user who renamed a key in the
+	// file and in the environment learns about both at once.
+	removed := removedEnvironmentNames(lookup)
 	if path != "" {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return Config{}, nil, fmt.Errorf("config: open %q: %w", path, err)
+		}
+		document, err := decodeDocument(content, path)
+		if err != nil {
+			return Config{}, nil, err
+		}
+		removed = append(removed, removedTOMLNames(document)...)
+		if len(removed) > 0 {
+			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: removed})
 		}
 		set, err := decodeFile(content, path, &cfg)
 		if err != nil {
@@ -52,11 +74,19 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 		for key := range documentKeys(set) {
 			sources[key] = SourceFile
 		}
+	} else if len(removed) > 0 {
+		return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: removed})
 	}
+	// The environment and the values are both checked, and both sets of
+	// errors are reported together: a malformed environment value and an
+	// unusable configuration value are the same kind of mistake, and a user
+	// who set both learns about both at once.
+	collector := &validationCollector{}
 	if err := applyEnvironment(&cfg, lookup, sources); err != nil {
-		return Config{}, nil, fmt.Errorf("config: apply environment: %w", err)
+		collector.add(err)
 	}
-	if err := cfg.Validate(); err != nil {
+	collector.add(cfg.Validate())
+	if err := collector.err(); err != nil {
 		if path == "" {
 			return Config{}, nil, fmt.Errorf("config: validate: %w", err)
 		}
@@ -65,18 +95,39 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	return cfg, sources, nil
 }
 
-// decodeFile decodes one configuration file onto the default configuration and
-// reports the configuration keys the document sets.
+// ValidateOutput checks that the configuration enables at least one output.
 //
-// The document is read twice: once into a generic tree to recognize removed
-// names, and once strictly into the configuration itself.
-func decodeFile(content []byte, path string, cfg *Config) (map[string]any, error) {
+// The check belongs to the process, not to a configuration value: a
+// configuration file may describe a service that is switched off, but the
+// process itself needs something to serve. The command calls it while
+// starting, so a configuration that enables nothing is reported with the
+// other configuration errors.
+func (c Config) ValidateOutput() error {
+	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
+		return invalid("backend", errNoOutput)
+	}
+	return nil
+}
+
+// decodeDocument decodes a configuration file into a generic tree.
+//
+// The generic tree names the keys a document sets, including the keys that no
+// longer exist: the strict decoder would report an unknown table without
+// saying which setting replaces it.
+func decodeDocument(content []byte, path string) (map[string]any, error) {
 	var document map[string]any
 	if err := toml.Unmarshal(content, &document); err != nil {
 		return nil, fmt.Errorf("config: decode %q: %w", path, err)
 	}
-	if removed := removedTOMLNames(document); len(removed) > 0 {
-		return nil, fmt.Errorf("config: decode %q: %w", path, &RemovedError{Names: removed})
+	return document, nil
+}
+
+// decodeFile decodes one configuration file onto the default configuration and
+// reports the configuration keys the document sets.
+func decodeFile(content []byte, path string, cfg *Config) (map[string]any, error) {
+	document, err := decodeDocument(content, path)
+	if err != nil {
+		return nil, err
 	}
 	if err := toml.NewDecoder(bytes.NewReader(content)).DisallowUnknownFields().Decode(cfg); err != nil {
 		var strictErr *toml.StrictMissingError

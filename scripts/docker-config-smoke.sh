@@ -144,7 +144,7 @@ expect_failure 'zero PUID' 'PUID must be between' --env PUID=0
 expect_failure 'overflow PGID' 'PGID must be between' --env PGID=4294967295
 expect_failure 'mismatched PUID' 'PUID/PGID must match docker --user' --env PUID=99
 expect_failure 'unknown backend' 'backend' --env TORRENTFS_BACKEND=invalid
-expect_failure 'no output' 'Usage:' --env TORRENTFS_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
+expect_failure 'no output' 'at least one output must be enabled' --env TORRENTFS_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
 expect_failure 'missing SMB password' 'password' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader
 expect_failure 'missing SMB user name' 'username' --env TORRENTFS_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
 expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=

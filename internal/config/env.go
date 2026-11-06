@@ -44,9 +44,6 @@ func (osEnvironment) Names() []string {
 // applied values are recorded in sources, so a caller can tell which input
 // won for every configuration key.
 func applyEnvironment(cfg *Config, lookup envLookup, sources Sources) error {
-	if removed := removedEnvironmentNames(lookup); len(removed) > 0 {
-		return &RemovedError{Names: removed}
-	}
 	applied, err := applySchema(configSchema, reflect.ValueOf(cfg).Elem(), lookup)
 	if err != nil {
 		return err

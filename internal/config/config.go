@@ -36,6 +36,7 @@ var (
 	errExposedNoAuth    = errors.New("exposing a non-loopback address requires enabled http.auth")
 	errLogLevel         = errors.New("must be one of debug, info, warn, error")
 	errLogFormat        = errors.New("must be one of text, json")
+	errNoOutput         = errors.New("at least one output must be enabled")
 )
 
 const (
@@ -264,65 +265,122 @@ func Default() Config {
 }
 
 // Validate checks values that must be valid before starting a session.
+//
+// Every invalid value is reported, not just the first one: a user who changed
+// several values learns about all of them in one run.
+//
+// The checks split in two kinds. A syntax check rejects a value that can never
+// work, wherever it stands, so it runs for every configuration key even when
+// the key belongs to an output that is not selected. A requirement check
+// rejects a configuration that is incomplete for the selected output, so it
+// runs only when that output needs the key. Keeping both groups lets a user
+// keep the settings of two outputs and switch between them by changing one
+// value.
 func (c Config) Validate() error {
-	if err := c.validateFilesystem(); err != nil {
-		return err
-	}
-	if err := c.validateCredentials(); err != nil {
-		return err
+	collector := &validationCollector{}
+	c.validateSyntax(collector)
+	c.validateRequirements(collector)
+	return collector.err()
+}
+
+// validateSyntax checks the values that can never work. A malformed value is
+// a mistake wherever it stands, so these checks do not depend on the selected
+// output.
+func (c Config) validateSyntax(collector *validationCollector) {
+	collector.add(validateEnum(backendPath, string(c.Backend)))
+	collector.add(validateEnum(smbSTRMPath, string(c.SMB.STRM)))
+	if c.Filesystem.ReadTimeout <= 0 {
+		collector.add(invalid("filesystem.read_timeout", errPositive))
 	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
-		return invalid("connections.listen_port", errPortRange)
+		collector.add(invalid("connections.listen_port", errPortRange))
 	}
 	if c.Connections.DisableIPv4 && c.Connections.DisableIPv6 {
-		return invalid("connections.disable_ipv4", errAddressFamilies)
+		collector.add(invalid("connections.disable_ipv4", errAddressFamilies))
 	}
 	for _, node := range c.Connections.BootstrapNodes {
 		if err := validateBootstrapNode(node); err != nil {
-			return invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err))
+			collector.add(invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err)))
 		}
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
-		return invalid("cache.capacity", errCapacityRange)
+		collector.add(invalid("cache.capacity", errCapacityRange))
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
-		return invalid("proxy.socks5_url", err)
+		collector.add(invalid("proxy.socks5_url", err))
 	}
 	if len(c.Identity.PeerIDPrefix) > 20 {
-		return invalid("identity.peer_id_prefix", errPeerIDPrefixSize)
+		collector.add(invalid("identity.peer_id_prefix", errPeerIDPrefixSize))
 	}
 	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
-		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
+		collector.add(invalid("identity.tracker_user_agent", errTrackerUserAgent))
 	}
 	if c.HTTP.ListenAddr != "" {
-		if err := validateAuth(c.HTTP.Auth); err != nil {
-			return err
-		}
-	}
-	if c.HTTP.ListenAddr != "" {
-		host, _, err := net.SplitHostPort(c.HTTP.ListenAddr)
-		if err != nil {
-			return invalid("http.listen_addr", errListenAddr)
-		}
-		if !c.HTTP.Auth.Enabled && !isLoopbackHost(host) {
-			return invalid("http.listen_addr", errExposedNoAuth)
+		if host, _, err := net.SplitHostPort(c.HTTP.ListenAddr); err != nil {
+			collector.add(invalid("http.listen_addr", errListenAddr))
+		} else if !c.HTTP.Auth.Enabled && !isLoopbackHost(host) {
+			collector.add(invalid("http.listen_addr", errExposedNoAuth))
 		}
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
-		return invalid("http.max_upload_size", errPositive)
+		collector.add(invalid("http.max_upload_size", errPositive))
 	}
+	collector.add(validateAuth(c.HTTP.Auth))
 	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {
-		return invalid("strm.base_url", err)
+		collector.add(invalid("strm.base_url", err))
 	}
 	if _, err := ParseLogLevel(c.Log.Level); err != nil {
-		return invalid("log.level", errLogLevel)
+		collector.add(invalid("log.level", errLogLevel))
 	}
 	if rawFormat := strings.TrimSpace(c.Log.Format); rawFormat != "" {
 		switch strings.ToLower(rawFormat) {
 		case "text", "json":
 		default:
-			return invalid("log.format", errLogFormat)
+			collector.add(invalid("log.format", errLogFormat))
 		}
+	}
+	collector.add(c.validateCredentialShape())
+	collector.add(c.validateSMBShape())
+}
+
+// validateRequirements checks the configuration that has to be complete for
+// the selected output.
+func (c Config) validateRequirements(collector *validationCollector) {
+	switch c.Backend {
+	case BackendFUSE:
+		if c.FUSE.Mountpoint == "" && c.FUSE.STRMMountpoint == "" {
+			collector.add(invalid("fuse.mountpoint", errors.New("at least one FUSE mountpoint is required")))
+		}
+		if c.FUSE.STRMMountpoint != "" && c.STRM.BaseURL == "" {
+			collector.add(invalid("fuse.strm_mountpoint", errors.New("requires strm.base_url and HTTP")))
+		}
+	case BackendSMB:
+		if c.Username == "" {
+			collector.add(invalid("username", errRequired))
+		}
+	}
+	if c.Backend == BackendSMB || c.HTTP.Auth.Enabled {
+		if c.Password == "" {
+			collector.add(invalid("password", errRequired))
+		}
+	}
+	if c.Backend == BackendSMB && c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
+		collector.add(invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener")))
+	}
+}
+
+// validateSMBShape checks the shape of the SMB settings. The settings of an
+// unselected output are kept so switching only the output is sufficient, but
+// a value that can never work is still a mistake: an invalid listen address
+// would bind an unexpected port the moment the SMB output is selected.
+func (c Config) validateSMBShape() error {
+	_, port, err := net.SplitHostPort(c.SMB.ListenAddr)
+	if err != nil || port == "" {
+		return invalid("smb.listen_addr", errListenAddr)
+	}
+	value, err := parseEnvInt(port)
+	if err != nil || value < 1 || value > 65535 {
+		return invalid("smb.listen_addr", errListenAddr)
 	}
 	return nil
 }
@@ -337,17 +395,12 @@ func validateAuth(auth Auth) error {
 	return nil
 }
 
-// validateCredentials checks the credentials against the selected output and
-// the HTTP authentication.
+// validateCredentialShape checks the shape of the credentials.
 //
-// The password is required whenever a client has to authenticate against
-// torrentfs: the SMB output and the HTTP login. The user name is required for
-// the SMB output only, because the HTTP login checks the password alone.
-//
-// The shape of a credential is always checked, even when no output needs it
-// yet: the credentials are shared by every output, so a malformed one is a
-// mistake wherever it stands.
-func (c Config) validateCredentials() error {
+// The shape is always checked, even when no output needs a credential yet: the
+// credentials are shared by every output, so a malformed one is a mistake
+// wherever it stands.
+func (c Config) validateCredentialShape() error {
 	if c.Username != "" && strings.IndexFunc(c.Username, unicode.IsControl) >= 0 {
 		return invalid("username", errors.New("must not contain control characters"))
 	}
@@ -357,14 +410,6 @@ func (c Config) validateCredentials() error {
 		}
 		if strings.ContainsAny(c.Password, "\r\n\x00") {
 			return invalid("password", errors.New("must be a single line without null bytes"))
-		}
-	}
-	if c.Backend == BackendSMB && c.Username == "" {
-		return invalid("username", errRequired)
-	}
-	if c.Backend == BackendSMB || c.HTTP.Auth.Enabled {
-		if c.Password == "" {
-			return invalid("password", errRequired)
 		}
 	}
 	if c.HTTP.Auth.Enabled && len([]byte(c.Password)) > maxPasswordBytes {

@@ -198,8 +198,12 @@ func schemaEnumValues(path string) ([]string, bool) {
 // applySchema applies the environment values of the schema items to the
 // configuration and reports the value of every configuration key the
 // environment set.
+//
+// Every value that fails to parse is reported, not just the first one: a user
+// who set several variables learns about all of them at once.
 func applySchema(items []schemaItem, root reflect.Value, lookup envLookup) (map[string]any, error) {
 	values := make(map[string]any)
+	collector := &validationCollector{}
 	for _, item := range items {
 		if !item.overridable {
 			continue
@@ -210,15 +214,17 @@ func applySchema(items []schemaItem, root reflect.Value, lookup envLookup) (map[
 		}
 		value, err := item.parse(raw)
 		if err != nil {
-			return values, invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err))
+			collector.add(invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err)))
+			continue
 		}
 		if err := item.accept(value); err != nil {
-			return values, invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err))
+			collector.add(invalid(item.path, fmt.Errorf("environment variable %s: %w", item.environment, err)))
+			continue
 		}
 		root.FieldByIndex(item.index).Set(reflect.ValueOf(value))
 		values[item.path] = value
 	}
-	return values, nil
+	return values, collector.err()
 }
 
 // deriveEnvironmentName derives the environment variable of a configuration

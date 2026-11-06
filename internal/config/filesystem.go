@@ -1,8 +1,6 @@
 package config
 
 import (
-	"errors"
-	"net"
 	"time"
 )
 
@@ -65,48 +63,6 @@ type SMB struct {
 	ListenAddr string `toml:"listen_addr"`
 	// STRM switches the STRM share of the SMB output: auto, on, or off.
 	STRM STRMSwitch `toml:"strm" enum:"auto,on,off"`
-}
-
-// validateFilesystem checks the settings of the selected output backend. The
-// settings of an unselected backend are retained so switching only the
-// backend is sufficient, but they are not checked: an unused mountpoint does
-// not have to exist.
-//
-// The value of an enumerated key is always checked, even when its backend is
-// not selected: an unusable value is a mistake wherever it stands.
-func (c Config) validateFilesystem() error {
-	if err := validateEnum(backendPath, string(c.Backend)); err != nil {
-		return err
-	}
-	if c.Filesystem.ReadTimeout <= 0 {
-		return invalid("filesystem.read_timeout", errPositive)
-	}
-	if err := validateEnum(smbSTRMPath, string(c.SMB.STRM)); err != nil {
-		return err
-	}
-	if c.Backend == BackendFUSE {
-		if c.FUSE.Mountpoint == "" && c.FUSE.STRMMountpoint == "" {
-			return invalid("fuse.mountpoint", errors.New("at least one FUSE mountpoint is required"))
-		}
-		if c.FUSE.STRMMountpoint != "" && c.STRM.BaseURL == "" {
-			return invalid("fuse.strm_mountpoint", errors.New("requires strm.base_url and HTTP"))
-		}
-	}
-	if c.Backend != BackendSMB {
-		return nil
-	}
-	if c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
-		return invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener"))
-	}
-	_, port, err := net.SplitHostPort(c.SMB.ListenAddr)
-	if err != nil || port == "" {
-		return invalid("smb.listen_addr", errListenAddr)
-	}
-	value, err := parseEnvInt(port)
-	if err != nil || value < 1 || value > 65535 {
-		return invalid("smb.listen_addr", errListenAddr)
-	}
-	return nil
 }
 
 // validateEnum reports whether a value is one of the accepted values of an
