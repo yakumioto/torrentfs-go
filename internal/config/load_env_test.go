@@ -184,15 +184,28 @@ func TestLoadEnvironmentRejectsInvalidReadTimeout(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoresRemovedDataDirEnvironment(t *testing.T) {
-	got, err := load("", lookupEnvironment(map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR": filepath.Join(t.TempDir(), "ignored"),
-	}))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if !reflect.DeepEqual(got, Default()) {
-		t.Fatalf("config changed after removed environment variable: %+v", got)
+// TestLoadRejectsUnknownEnvironmentNames covers the strictness of the
+// configuration namespace: a variable that no configuration key derives is
+// reported instead of ignored, so a misspelled name cannot start the process
+// with a default value the user did not ask for.
+func TestLoadRejectsUnknownEnvironmentNames(t *testing.T) {
+	for _, name := range []string{
+		"TORRENTFS_PATHS_DATA_DIR",
+		"TORRENTFS_CACHE_CAPACITY_BYTES",
+		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{name: "value"}))
+			if err == nil {
+				t.Fatalf("load accepted the unknown environment variable %q", name)
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("load error = %v, want ErrInvalid", err)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("load error = %q, want it to name %q", err, name)
+			}
+		})
 	}
 }
 
@@ -225,16 +238,18 @@ func TestLoadRejectsRemovedEnvironmentNames(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoresUnitSuffixedEnvironment(t *testing.T) {
-	got, err := load("", lookupEnvironment(map[string]string{
+func TestLoadReportsEveryUnknownEnvironmentName(t *testing.T) {
+	_, err := load("", lookupEnvironment(map[string]string{
 		"TORRENTFS_CACHE_CAPACITY_BYTES":  "32MiB",
 		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES": "8GB",
 	}))
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	if err == nil {
+		t.Fatal("load accepted unknown environment variables")
 	}
-	if !reflect.DeepEqual(got, Default()) {
-		t.Fatalf("config changed after removed environment variables: %+v", got)
+	for _, name := range []string{"TORRENTFS_CACHE_CAPACITY_BYTES", "TORRENTFS_HTTP_MAX_UPLOAD_BYTES"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("load error = %q, want it to name %q", err, name)
+		}
 	}
 }
 
