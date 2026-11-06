@@ -52,9 +52,6 @@ const (
 	// exceptionCredential names a variable that configures no configuration
 	// key of its own.
 	exceptionCredential = "credential"
-	// exceptionExplicitSelection names a derived variable whose value also
-	// selects the output backend explicitly.
-	exceptionExplicitSelection = "explicit selection"
 	// exceptionExcludedKey names a configuration key that the environment
 	// does not override.
 	exceptionExcludedKey = "excluded key"
@@ -72,10 +69,6 @@ type EnvironmentException struct {
 	Path string
 	// Reason explains why the variable is an exception.
 	Reason string
-	// SelectsOutputBackend reports whether setting the variable selects the
-	// output backend explicitly. Such a variable is the derived name of its
-	// configuration key: the exception is its effect, not its name.
-	SelectsOutputBackend bool
 }
 
 // environmentExceptions lists every environment variable that the plain
@@ -98,14 +91,6 @@ var environmentExceptions = []EnvironmentException{
 		Reason: "the shared credential pair has no configuration key of its own: it " +
 			"configures the password of the HTTP and the SMB service, and the " +
 			"unified credentials replace it",
-	},
-	{
-		Kind: exceptionExplicitSelection,
-		Name: deriveEnvironmentName(outputBackendPath),
-		Path: outputBackendPath,
-		Reason: "setting it selects the output backend explicitly, so it wins over " +
-			"the mountpoint heuristic that would otherwise choose the FUSE output",
-		SelectsOutputBackend: true,
 	},
 	{
 		Kind: exceptionExcludedKey,
@@ -158,19 +143,7 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 	if removed := removedEnvironmentNames(lookup); len(removed) > 0 {
 		return &RemovedError{Names: removed}
 	}
-	values, err := applySchema(configSchema, reflect.ValueOf(cfg).Elem(), lookup)
-	if err != nil {
-		return err
-	}
-	if selectsOutputBackend(values) {
-		// An explicit selection of the output backend wins over the
-		// mountpoint heuristic that would otherwise choose the FUSE output.
-		cfg.backendExplicit = true
-	}
-	if !cfg.backendExplicit && (cfg.FUSE.Mountpoint != "" || cfg.FUSE.STRMMountpoint != "") {
-		cfg.Filesystem.Backend = BackendFUSE
-	}
-	if err := applySMBSTRMEnvironment(cfg, values); err != nil {
+	if _, err := applySchema(configSchema, reflect.ValueOf(cfg).Elem(), lookup); err != nil {
 		return err
 	}
 	if err := applySMBEnvironmentCredentials(cfg, lookup); err != nil {
@@ -179,25 +152,11 @@ func applyEnvironment(cfg *Config, lookup envLookup) error {
 	return applyHTTPAuthenticationEnvironment(cfg, lookup)
 }
 
-// selectsOutputBackend reports whether the environment selected the output
-// backend explicitly.
-func selectsOutputBackend(values map[string]any) bool {
-	for _, exception := range environmentExceptions {
-		if !exception.SelectsOutputBackend {
-			continue
-		}
-		if _, selected := values[exception.Path]; selected {
-			return true
-		}
-	}
-	return false
-}
-
 // applySMBEnvironmentCredentials applies the shared credential pair to the SMB
 // service. Without the pair, the password comes from the configured password
 // file.
 func applySMBEnvironmentCredentials(cfg *Config, lookup envLookup) error {
-	if cfg.Filesystem.Backend != BackendSMB {
+	if cfg.Backend != BackendSMB {
 		return nil
 	}
 	username, userSet := lookup.Lookup(environmentUsername)

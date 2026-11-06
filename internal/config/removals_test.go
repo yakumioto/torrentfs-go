@@ -178,6 +178,10 @@ func removedTOMLDocument(key string) string {
 		return "[mount]\nread_timeout = \"3s\"\n"
 	case "mount.allow_other":
 		return "[mount]\nallow_other = true\n"
+	case "filesystem.backend":
+		return "[filesystem]\nbackend = \"fuse\"\n"
+	case "smb.strm_enabled":
+		return "[smb]\nstrm_enabled = true\n"
 	default:
 		return "[unknown]\nvalue = true\n"
 	}

@@ -438,7 +438,7 @@ start_app() {
 	local env_args=(
 		--env "PUID=$SMOKE_UID"
 		--env "PGID=$SMOKE_GID"
-		--env TORRENTFS_FILESYSTEM_BACKEND=smb
+		--env TORRENTFS_BACKEND=smb
 		--env "TORRENTFS_USERNAME=$smb_user"
 		--env "TORRENTFS_PASSWORD=$smb_password"
 		# The cache capacity accepts only a byte quantity with an explicit unit;

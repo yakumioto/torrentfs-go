@@ -161,11 +161,11 @@ var historicalEnvironmentCases = []struct {
 		want: false,
 	},
 	{
-		path: "filesystem.backend",
-		name: "TORRENTFS_FILESYSTEM_BACKEND",
-		file: "[filesystem]\nbackend = \"fuse\"\n",
+		path: "backend",
+		name: "TORRENTFS_BACKEND",
+		file: "backend = \"fuse\"\n",
 		env:  "none",
-		want: "none",
+		want: BackendNone,
 	},
 	{
 		path: "filesystem.read_timeout",
@@ -217,11 +217,11 @@ var historicalEnvironmentCases = []struct {
 		want: "/env/secret",
 	},
 	{
-		path: "smb.strm_enabled",
-		name: "TORRENTFS_SMB_STRM_ENABLED",
-		file: "[smb]\nstrm_enabled = true\n",
-		env:  "false",
-		want: pointerTo(false),
+		path: "smb.strm",
+		name: "TORRENTFS_SMB_STRM",
+		file: "[smb]\nstrm = \"on\"\n",
+		env:  "off",
+		want: STRMOff,
 	},
 }
 
@@ -419,17 +419,6 @@ func TestEnvironmentExceptionsAreExplicit(t *testing.T) {
 			if _, ok := derived[exception.Name]; ok {
 				t.Fatalf("the credential variable %q is a derived name", exception.Name)
 			}
-		case exceptionExplicitSelection:
-			if exception.Path == "" {
-				t.Fatalf("the selection variable %q must name its configuration key", exception.Name)
-			}
-			if exception.Name != deriveEnvironmentName(exception.Path) {
-				t.Fatalf("the selection variable %q is not the derived name of %q",
-					exception.Name, exception.Path)
-			}
-			if !exception.SelectsOutputBackend {
-				t.Fatalf("the selection variable %q must select the output backend", exception.Name)
-			}
 		case exceptionExcludedKey:
 			if exception.Path == "" {
 				t.Fatalf("the excluded variable %q must name its configuration key", exception.Name)
@@ -450,36 +439,85 @@ func TestEnvironmentExceptionsAreExplicit(t *testing.T) {
 	}
 }
 
+// TestEnvironmentBackendIsAPlainConfigurationKey covers the consequence of
+// the removed heuristic: the output backend is an ordinary configuration key,
+// so its environment variable is a derived name and needs no exception.
+func TestEnvironmentBackendIsAPlainConfigurationKey(t *testing.T) {
+	for _, key := range Schema() {
+		if key.Path != "backend" {
+			continue
+		}
+		if key.Environment != "TORRENTFS_BACKEND" {
+			t.Fatalf("the configuration key %q uses the environment variable %q, want %q",
+				key.Path, key.Environment, "TORRENTFS_BACKEND")
+		}
+		if !key.Overridable {
+			t.Fatalf("the configuration key %q is not overridable by the environment", key.Path)
+		}
+		return
+	}
+	t.Fatal("the schema has no configuration key \"backend\"")
+}
+
+// TestEnumeratedConfigurationKeysListTheirValues covers the enumerated
+// configuration keys: the schema names the accepted values, so a user can
+// discover them without reading the source code.
+func TestEnumeratedConfigurationKeysListTheirValues(t *testing.T) {
+	want := map[string][]string{
+		"backend":  {"none", "fuse", "smb"},
+		"smb.strm": {"auto", "on", "off"},
+	}
+	for _, key := range Schema() {
+		values, ok := want[key.Path]
+		if !ok {
+			if key.Kind == "enum" {
+				t.Fatalf("the configuration key %q is enumerated but the test does not cover it", key.Path)
+			}
+			continue
+		}
+		if key.Kind != "enum" {
+			t.Fatalf("the configuration key %q has the kind %q, want enum", key.Path, key.Kind)
+		}
+		if !reflect.DeepEqual(key.Values, values) {
+			t.Fatalf("the configuration key %q accepts %v, want %v", key.Path, key.Values, values)
+		}
+		delete(want, key.Path)
+	}
+	for path := range want {
+		t.Fatalf("the schema has no enumerated configuration key %q", path)
+	}
+}
+
 // TestEnvironmentBackendSelectionIsExplicit covers the side effect of the
 // output backend variable: setting it selects the output backend, so a
 // configured FUSE mountpoint does not select it instead.
 func TestEnvironmentBackendSelectionIsExplicit(t *testing.T) {
 	cfg, err := load("", lookupEnvironment(map[string]string{
-		"TORRENTFS_FILESYSTEM_BACKEND": "none",
-		"TORRENTFS_FUSE_MOUNTPOINT":    "/env-mount",
+		"TORRENTFS_BACKEND":         "none",
+		"TORRENTFS_FUSE_MOUNTPOINT": "/env-mount",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Filesystem.Backend != BackendNone {
-		t.Fatalf("filesystem.backend = %q, want the explicit selection %q",
-			cfg.Filesystem.Backend, BackendNone)
+	if cfg.Backend != BackendNone {
+		t.Fatalf("backend = %q, want the explicit selection %q",
+			cfg.Backend, BackendNone)
 	}
 }
 
-// TestEnvironmentFUSEMountpointSelectsBackend covers the side effect of the
-// FUSE mountpoints: a mountpoint selects the FUSE output when the output
-// backend was not chosen explicitly.
-func TestEnvironmentFUSEMountpointSelectsBackend(t *testing.T) {
+// TestEnvironmentFUSEMountpointDoesNotSelectBackend covers the removed
+// heuristic: a mountpoint no longer selects the FUSE output, so the output
+// backend stays at its default until it is chosen explicitly.
+func TestEnvironmentFUSEMountpointDoesNotSelectBackend(t *testing.T) {
 	cfg, err := load("", lookupEnvironment(map[string]string{
 		"TORRENTFS_FUSE_STRM_MOUNTPOINT": "/env-strm",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Filesystem.Backend != BackendFUSE {
-		t.Fatalf("filesystem.backend = %q, want the implied selection %q",
-			cfg.Filesystem.Backend, BackendFUSE)
+	if cfg.Backend != BackendNone {
+		t.Fatalf("backend = %q, want the default %q",
+			cfg.Backend, BackendNone)
 	}
 }
 
@@ -544,6 +582,3 @@ func splitPath(path string) (string, string) {
 	}
 	return "", path
 }
-
-// pointerTo returns a pointer to a value.
-func pointerTo[T any](value T) *T { return &value }

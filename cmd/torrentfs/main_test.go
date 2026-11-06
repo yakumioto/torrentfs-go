@@ -814,7 +814,7 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 			t.Setenv("TORRENTFS_HTTP_LISTEN_ADDR", tt.httpAddr)
 			torrents := t.TempDir()
 			strm := t.TempDir()
-			body := "[filesystem]\nbackend = \"fuse\"\n[fuse]\nstrm_mountpoint = " + strconv.Quote(strm) + "\n"
+			body := "backend = \"fuse\"\n[fuse]\nstrm_mountpoint = " + strconv.Quote(strm) + "\n"
 			if tt.overlap {
 				body += "mountpoint = " + strconv.Quote(strm) + "\n"
 			}

@@ -72,12 +72,16 @@ var removedNames = []RemovedName{
 	{Kind: removedTOMLKey, Old: "mount.read_timeout", New: []string{"filesystem.read_timeout"}},
 	{Kind: removedTOMLKey, Old: "mount.allow_other", New: []string{"fuse.allow_other"}},
 	{Kind: removedTOMLKey, Old: "mount", New: []string{"filesystem.read_timeout", "fuse.allow_other"}},
+	{Kind: removedTOMLKey, Old: "filesystem.backend", New: []string{"backend"}},
+	{Kind: removedTOMLKey, Old: "smb.strm_enabled", New: []string{"smb.strm"}},
 	{Kind: removedCommandFlag, Old: "-mountpoint", New: []string{"fuse.mountpoint"}},
 	{Kind: removedCommandFlag, Old: "-strm-mountpoint", New: []string{"fuse.strm_mountpoint"}},
 	{Kind: removedEnvironment, Old: "TORRENTFS_MOUNT_READ_TIMEOUT", New: []string{"TORRENTFS_FILESYSTEM_READ_TIMEOUT"}},
 	{Kind: removedEnvironment, Old: "TORRENTFS_MOUNT_ALLOW_OTHER", New: []string{"TORRENTFS_FUSE_ALLOW_OTHER"}},
-	{Kind: removedEnvironment, Old: "TORRENTFS_SMB_ENABLED", New: []string{"TORRENTFS_FILESYSTEM_BACKEND"}},
-	{Kind: removedEnvironment, Old: "TORRENTFS_STRM_ENABLED", New: []string{"TORRENTFS_SMB_STRM_ENABLED"}},
+	{Kind: removedEnvironment, Old: "TORRENTFS_SMB_ENABLED", New: []string{"TORRENTFS_BACKEND"}},
+	{Kind: removedEnvironment, Old: "TORRENTFS_STRM_ENABLED", New: []string{"TORRENTFS_SMB_STRM"}},
+	{Kind: removedEnvironment, Old: "TORRENTFS_FILESYSTEM_BACKEND", New: []string{"TORRENTFS_BACKEND"}},
+	{Kind: removedEnvironment, Old: "TORRENTFS_SMB_STRM_ENABLED", New: []string{"TORRENTFS_SMB_STRM"}},
 }
 
 // RemovedNames returns every removed configuration name with its replacement.

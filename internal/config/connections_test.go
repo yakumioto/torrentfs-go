@@ -86,6 +86,23 @@ func TestShippedConfigurationsDecode(t *testing.T) {
 	}
 }
 
+// TestShippedConfigurationsUseTheTopLevelBackend covers the shipped
+// configurations: they select the output backend with the top-level key, and
+// the default they ship is the one the built-in defaults define.
+func TestShippedConfigurationsUseTheTopLevelBackend(t *testing.T) {
+	for _, name := range []string{"torrentfs.example.toml", "docker/torrentfs.toml"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := config.Load(filepath.Join("..", "..", name))
+			if err != nil {
+				t.Fatalf("Load(%s): %v", name, err)
+			}
+			if cfg.Backend != config.BackendNone {
+				t.Fatalf("backend = %q, want %q", cfg.Backend, config.BackendNone)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsInvalidConnections(t *testing.T) {
 	tests := []struct {
 		name  string

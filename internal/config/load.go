@@ -38,8 +38,7 @@ func load(path string, lookup envLookup) (Config, error) {
 
 // decodeFile decodes one configuration file onto the default configuration.
 // The document is read twice: once into a generic tree to recognize removed
-// names and to learn which keys the document sets explicitly, and once
-// strictly into the configuration itself.
+// names, and once strictly into the configuration itself.
 func decodeFile(content []byte, path string, cfg *Config) error {
 	var document map[string]any
 	if err := toml.Unmarshal(content, &document); err != nil {
@@ -47,11 +46,6 @@ func decodeFile(content []byte, path string, cfg *Config) error {
 	}
 	if removed := removedTOMLNames(document); len(removed) > 0 {
 		return fmt.Errorf("config: decode %q: %w", path, &RemovedError{Names: removed})
-	}
-	// An explicitly selected file output wins over the mountpoint heuristic
-	// that the environment applies.
-	if documentUses(document, "filesystem.backend") {
-		cfg.backendExplicit = true
 	}
 	if err := toml.NewDecoder(bytes.NewReader(content)).DisallowUnknownFields().Decode(cfg); err != nil {
 		var strictErr *toml.StrictMissingError

@@ -26,13 +26,13 @@ services:
         target: /torrents
         bind:
           create_host_path: false
-      # Optional custom TOML; filesystem.backend can also be selected there.
+      # Optional custom TOML; backend can also be selected there.
       # Remove the corresponding environment override below when using TOML.
       # - ./torrentfs.toml:/etc/torrentfs/torrentfs.toml:ro
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
-      TORRENTFS_FILESYSTEM_BACKEND: "smb"
+      TORRENTFS_BACKEND: "smb"
       TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
       TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
       TORRENTFS_HTTP_AUTH_ENABLED: "true"

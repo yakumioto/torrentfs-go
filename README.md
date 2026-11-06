@@ -61,7 +61,7 @@ docker run --detach --name torrentfs \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_FILESYSTEM_BACKEND=smb \
+  --env TORRENTFS_BACKEND=smb \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
@@ -92,18 +92,17 @@ mkdir -p ./torrents
 ./torrentfs ./torrents
 ```
 
-`<torrents-dir>` 是唯一必填的位置参数，必须已存在且不是符号链接；省略配置时使用默认值（HTTP `127.0.0.1:8080`、认证关闭、`filesystem.backend=none`）。需要自定义时，复制 `torrentfs.example.toml` 为 `torrentfs.toml` 后用 `-config` 指定。
+`<torrents-dir>` 是唯一必填的位置参数，必须已存在且不是符号链接；省略配置时使用默认值（HTTP `127.0.0.1:8080`、认证关闭、`backend=none`）。需要自定义时，复制 `torrentfs.example.toml` 为 `torrentfs.toml` 后用 `-config` 指定。
 
 ## 访问方式
 
-| `filesystem.backend` | 行为 | 依赖 |
+| `backend` | 行为 | 依赖 |
 | --- | --- | --- |
 | `none`（默认） | 不输出文件树，只保留 Web UI / HTTP API | 无 |
 | `smb` | 内置只读 SMB，导出 `torrentfs` 共享 | 无 FUSE / Samba |
 | `fuse` | 创建只读 FUSE 挂载 | Linux FUSE3、`/dev/fuse`、允许挂载的主机策略 |
 
 ```toml
-[filesystem]
 backend = "smb"   # fuse / smb / none
 
 # 选择 fuse 时配置挂载点
@@ -115,6 +114,9 @@ listen_addr = "0.0.0.0:1445"
 username = "torrentfs"
 password_file = "/run/secrets/torrentfs-password"
 ```
+
+不写 `backend` 就是 `none`：配置了挂载点也不会自动切换到 FUSE，要用 FUSE 必须显式写 `backend = "fuse"`。
+
 **STRM（可选）**：设置播放器可达的 `strm.base_url` 后，SMB 会额外提供 `torrentfs-strm` 共享（FUSE 用 `fuse.strm_mountpoint`），视频会生成一行签名 URL 的 `.strm` 文件：
 
 ```toml
@@ -124,11 +126,18 @@ base_url = "http://192.168.1.10:8080"
 
 `.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。
 
+SMB 的 STRM 共享由 `smb.strm` 三态控制，默认 `auto`（配了 `strm.base_url` 就提供）；`on` 强制提供（必须有 `strm.base_url`），`off` 强制不提供：
+
+```toml
+[smb]
+strm = "off"
+```
+
 ## 配置
 
 - 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
 - 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
-- 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`filesystem.backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
+- 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。唯一的例外是 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD`（共享 HTTP/SMB 凭据，不对应任何配置项路径）。
 - 绑定非 loopback 地址时必须启用认证；Web 登录只校验密码，Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
@@ -142,12 +151,16 @@ base_url = "http://192.168.1.10:8080"
 | `mount` | `filesystem.read_timeout`、`fuse.allow_other` |
 | `mount.read_timeout` | `filesystem.read_timeout` |
 | `mount.allow_other` | `fuse.allow_other` |
+| `filesystem.backend` | `backend` |
+| `smb.strm_enabled` | `smb.strm` |
 | `-mountpoint` | `fuse.mountpoint` |
 | `-strm-mountpoint` | `fuse.strm_mountpoint` |
 | `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
 | `TORRENTFS_MOUNT_ALLOW_OTHER` | `TORRENTFS_FUSE_ALLOW_OTHER` |
-| `TORRENTFS_SMB_ENABLED` | `TORRENTFS_FILESYSTEM_BACKEND` |
-| `TORRENTFS_STRM_ENABLED` | `TORRENTFS_SMB_STRM_ENABLED` |
+| `TORRENTFS_SMB_ENABLED` | `TORRENTFS_BACKEND` |
+| `TORRENTFS_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
+| `TORRENTFS_FILESYSTEM_BACKEND` | `TORRENTFS_BACKEND` |
+| `TORRENTFS_SMB_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
 
 ## 数据与状态
 

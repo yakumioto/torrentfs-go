@@ -143,16 +143,18 @@ expect_failure 'invalid PGID' 'PGID must be' --env PGID=-1
 expect_failure 'zero PUID' 'PUID must be between' --env PUID=0
 expect_failure 'overflow PGID' 'PGID must be between' --env PGID=4294967295
 expect_failure 'mismatched PUID' 'PUID/PGID must match docker --user' --env PUID=99
-expect_failure 'unknown backend' 'filesystem.backend' --env TORRENTFS_FILESYSTEM_BACKEND=invalid
-expect_failure 'no output' 'Usage:' --env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
-expect_failure 'missing SMB credential pair' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
-expect_failure 'missing SMB password' 'must be set together' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader
-expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_FILESYSTEM_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
+expect_failure 'unknown backend' 'backend' --env TORRENTFS_BACKEND=invalid
+expect_failure 'no output' 'Usage:' --env TORRENTFS_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
+expect_failure 'missing SMB credential pair' 'must be set together' --env TORRENTFS_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
+expect_failure 'missing SMB password' 'must be set together' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader
+expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
 expect_failure 'removed mountpoint flag' 'fuse.mountpoint' -- \
 	-mountpoint /share -config /etc/torrentfs/torrentfs.toml /torrents
-expect_failure 'removed SMB selector' 'TORRENTFS_FILESYSTEM_BACKEND' --env TORRENTFS_SMB_ENABLED=true
+expect_failure 'removed SMB selector' 'TORRENTFS_BACKEND' --env TORRENTFS_SMB_ENABLED=true
 expect_failure 'removed read deadline' 'TORRENTFS_FILESYSTEM_READ_TIMEOUT' --env TORRENTFS_MOUNT_READ_TIMEOUT=3s
-expect_failure 'STRM requires HTTP' 'strm.base_url' --env TORRENTFS_FILESYSTEM_BACKEND=smb \
+expect_failure 'removed backend variable' 'TORRENTFS_BACKEND' --env TORRENTFS_FILESYSTEM_BACKEND=smb
+expect_failure 'removed STRM switch' 'TORRENTFS_SMB_STRM' --env TORRENTFS_SMB_STRM_ENABLED=true
+expect_failure 'STRM requires HTTP' 'strm.base_url' --env TORRENTFS_BACKEND=smb \
 	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" \
 	--env TORRENTFS_HTTP_LISTEN_ADDR= --env TORRENTFS_STRM_BASE_URL=http://player.example:8080
 printf 'docker config smoke: identity, selector, credential, removed name, and STRM failures passed\n'
@@ -169,8 +171,8 @@ printf '%s\n' "$SECRET" >"$work_dir/password"
 # image's numeric UID even when the smoke runner uses a different host UID.
 chmod 0444 "$work_dir/password"
 cat >"$work_dir/native.toml" <<'EOF'
-[filesystem]
 backend = "smb"
+[filesystem]
 read_timeout = "30s"
 [http]
 listen_addr = ""
@@ -200,7 +202,7 @@ printf 'docker config smoke: TOML-selected SMB-only with a secret file and no FU
 # Existing shared environment credentials still enable HTTP password login.
 container="${PREFIX}-http"
 start "$container" --publish 127.0.0.1::8080 \
-	--env TORRENTFS_FILESYSTEM_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+	--env TORRENTFS_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
 	--env TORRENTFS_HTTP_AUTH_ENABLED=true --env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET"
 port="$(docker port "$container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
 url="http://127.0.0.1:$port"
