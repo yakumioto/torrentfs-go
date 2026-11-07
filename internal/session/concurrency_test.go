@@ -685,7 +685,7 @@ func TestFuseMissingReadTimesOutAndCanRetry(t *testing.T) {
 	ctx := testTimeout(t)
 	work := t.TempDir()
 	cfg := testConfig()
-	cfg.Mount.ReadTimeout = config.Duration(300 * time.Millisecond)
+	cfg.Filesystem.ReadTimeout = config.Duration(300 * time.Millisecond)
 	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
 	content := bytes.Repeat([]byte{31}, testPieceLength)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "timeout.bin", content, nil)
@@ -720,8 +720,8 @@ func TestFuseMissingReadTimesOutAndCanRetry(t *testing.T) {
 	firstDone := readAtAsync(file, 0, concurrencyReadChunk)
 	waitProbeEvent(t, events, "reader-started", 0)
 	outcome := waitReadOutcomeWithin(t, firstDone, "missing read timeout", 2*time.Second)
-	if elapsed := time.Since(readStarted); elapsed < time.Duration(cfg.Mount.ReadTimeout) {
-		t.Fatalf("missing read returned after %s, before its %s timeout", elapsed, cfg.Mount.ReadTimeout)
+	if elapsed := time.Since(readStarted); elapsed < time.Duration(cfg.Filesystem.ReadTimeout) {
+		t.Fatalf("missing read returned after %s, before its %s timeout", elapsed, cfg.Filesystem.ReadTimeout)
 	}
 	// Buffered FUSE reads can surface page-cache failures as EIO instead of ETIMEDOUT.
 	if !errors.Is(outcome.err, syscall.ETIMEDOUT) && !errors.Is(outcome.err, syscall.EIO) {
@@ -740,7 +740,7 @@ func TestFuseMissingReadTimesOutAndCanRetry(t *testing.T) {
 func TestSessionReadDeadlineKeepsSharedPieceFlight(t *testing.T) {
 	work := t.TempDir()
 	cfg := testConfig()
-	cfg.Mount.ReadTimeout = config.Duration(time.Second)
+	cfg.Filesystem.ReadTimeout = config.Duration(time.Second)
 	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
 	hash, content := seedPrefetchTorrent(t, sess, "shared.bin", 1)
 	first, err := sess.OpenFile(hash, "shared.bin")

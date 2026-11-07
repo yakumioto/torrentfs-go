@@ -28,11 +28,11 @@ type fuseSmokeProbe struct{ fs.Inode }
 // sets it on the FUSE-enabled job so a missing device or capability fails the
 // job instead of silently skipping every real-mount test.
 func fuseRequired() bool {
-	return os.Getenv("TORRENTFS_FUSE_REQUIRED") == "1"
+	return os.Getenv("TF_FUSE_REQUIRED") == "1"
 }
 
 // requireFuse skips the calling test when FUSE is unusable, or fails it when
-// TORRENTFS_FUSE_REQUIRED demands a real mount. Either way the caller is told
+// TF_FUSE_REQUIRED demands a real mount. Either way the caller is told
 // why, so an all-skip run cannot masquerade as a green FUSE job.
 func requireFuse(t *testing.T) {
 	t.Helper()
@@ -40,7 +40,7 @@ func requireFuse(t *testing.T) {
 		return
 	}
 	if fuseRequired() {
-		t.Fatalf("TORRENTFS_FUSE_REQUIRED=1 but FUSE is not usable: /dev/fuse, fusermount, or mount permission is missing")
+		t.Fatalf("TF_FUSE_REQUIRED=1 but FUSE is not usable: /dev/fuse, fusermount, or mount permission is missing")
 	}
 	t.Skipf("FUSE not usable in this environment (/dev/fuse or mount permission missing); real-mount test skipped")
 }

@@ -31,18 +31,36 @@ const usageText = `torrentfs exposes BitTorrent files as a read-only FUSE or nat
 and serves a torrent management HTTP API.
 
 Usage:
-  torrentfs [-config <file>] [-mountpoint <dir>] [-strm-mountpoint <dir>] <torrents-dir>
+  torrentfs [-config <file>] <torrents-dir>
+  torrentfs config check [--config <file>]
+  torrentfs config print [--config <file>] [--format toml|json] [--sources]
+
+Commands:
+  config check   Validate the configuration and report every problem on
+                 standard error. It needs no torrents directory.
+  config print   Print the effective configuration to standard output. A
+                 password is printed as <redacted>; the output is a report,
+                 not a configuration file.
 
 Configuration:
-  [filesystem] backend = "fuse", "smb", or "none" (HTTP-only default)
-  [fuse] mountpoint / strm_mountpoint / allow_other
-  [smb] listen_addr / username / password_file
+  backend = "fuse", "smb", or "none" (HTTP-only default)
+  username / password are the credentials: the SMB login name and the
+    password shared by SMB and the HTTP login. Both are required for the SMB
+    output; only the password is required for enabled HTTP authentication.
+    Prefer the TORRENTFS_USERNAME and TORRENTFS_PASSWORD environment
+    variables: a password in the configuration file is readable on disk and
+    earns a startup warning.
+  [fuse] fuse.mountpoint / fuse.strm_mountpoint / fuse.allow_other
+  [smb] smb.listen_addr / smb.strm
+  [strm] strm.base_url enables the signed streaming links
 
 Flags:
   -config <file>          TOML configuration file
-  -mountpoint <dir>       legacy FUSE mountpoint alias; conflicts with explicit smb/none
-  -strm-mountpoint <dir>  optional FUSE STRM view; requires strm.base_url and HTTP
   -h, --help              show this help and exit
+
+The configuration file also has an environment variable, TORRENTFS_CONFIG.
+The -config argument wins over it, and there is no implicit search path: a
+deployment that wants a configuration file says where it is.
 
 SMB serves torrentfs and optionally torrentfs-strm directly without FUSE or Samba.
 Its default container port is 1445; publish host TCP 445 to container TCP 1445.
@@ -58,25 +76,36 @@ and SMB can run without HTTP unless STRM links are enabled. Non-loopback HTTP
 listeners require http.auth. The FUSE STRM view can be mounted alone or beside the
 original view. Mountpoints must not be identical or nested, including symbolic-link aliases.
 
-Configuration precedence is documented TORRENTFS_* environment variables, then
-TOML, then defaults. Send SIGINT or SIGTERM for bounded shutdown.
+Configuration precedence is the TORRENTFS_* environment variables, then TOML,
+then defaults. Every configuration key has an environment variable derived from
+its path: the path in upper case, dots replaced by underscores, under the
+TORRENTFS_ prefix. An unknown TORRENTFS_* variable is a startup error, so a
+misspelled name is reported instead of ignored. Send SIGINT or SIGTERM for
+bounded shutdown.
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run executes the CLI and returns the process exit code: 0 on success, 1 on
 // runtime errors, 2 on usage or configuration errors.
-func run(args []string, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
+	if err := config.RemovedFlagError(args); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
+	// The configuration commands work on the configuration alone, so they
+	// come before the arguments of a start: they need no torrents directory.
+	if len(args) > 0 && args[0] == "config" {
+		return runConfigCommand(args[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("torrentfs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { _, _ = io.WriteString(stderr, usageText) }
 
 	var (
-		mountpoint     = flags.String("mountpoint", "", "directory to mount on")
-		strmMountpoint = flags.String("strm-mountpoint", "", "directory for the STRM mount")
-		configPath     = flags.String("config", "", "TOML configuration file")
+		configPath = flags.String("config", "", "TOML configuration file")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -95,29 +124,25 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*configPath)
+	// The command-line argument wins over the environment variable, and the
+	// environment variable wins over loading no file at all. There is no
+	// implicit search path.
+	configFile := config.ResolveConfigPath(*configPath)
+	cfg, sources, err := loadConfig(configFile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
 
-	if err = cfg.ResolveFilesystem(*mountpoint, *strmMountpoint); err != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
-		return 2
-	}
-	*mountpoint, *strmMountpoint = "", ""
-	if cfg.Filesystem.Backend == config.BackendFUSE {
-		*mountpoint, *strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
+	var mountpoint, strmMountpoint string
+	if cfg.Backend == config.BackendFUSE {
+		mountpoint, strmMountpoint, err = validateMountpoints(cfg.FUSE.Mountpoint, cfg.FUSE.STRMMountpoint, cfg.STRM.BaseURL)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 			return 2
 		}
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if cfg.Filesystem.Backend == config.BackendNone && !httpEnabled {
-		flags.Usage()
-		return 2
-	}
 
 	logger, _, err := logging.New(cfg.Log, stderr)
 	if err != nil {
@@ -136,9 +161,9 @@ func run(args []string, stderr io.Writer) int {
 		"version", "dev",
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
-		"filesystem_backend", cfg.Filesystem.Backend,
-		"mountpoint", *mountpoint,
-		"strm_mountpoint", *strmMountpoint,
+		"backend", cfg.Backend,
+		"mountpoint", mountpoint,
+		"strm_mountpoint", strmMountpoint,
 		"http_listen_addr", cfg.HTTP.ListenAddr,
 		"listen_port", cfg.Connections.ListenPort,
 		"mount_uid", os.Getuid(),
@@ -147,6 +172,8 @@ func run(args []string, stderr io.Writer) int {
 		"log_level", logLevel,
 		"log_format", logFormat,
 	)
+	warnPlaintextPassword(logger, cfg, sources)
+	logEffectiveConfig(logger, cfg, sources)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -154,7 +181,7 @@ func run(args []string, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(logger)
+	labOptions, labErr := labSessionOptions(cfg, logger)
 	if labErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
 		return 2
@@ -185,10 +212,10 @@ func run(args []string, stderr io.Writer) int {
 		sequence.api = apiServer
 	}
 
-	requests := []mountRequest{{mountpoint: *mountpoint, backend: sess}}
-	if *strmMountpoint != "" {
+	requests := []mountRequest{{mountpoint: mountpoint, backend: sess}}
+	if strmMountpoint != "" {
 		requests = append(requests, mountRequest{
-			mountpoint: *strmMountpoint,
+			mountpoint: strmMountpoint,
 			backend:    vfs.NewSTRMBackend(sess),
 		})
 	}
@@ -207,13 +234,13 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	serveErr := make(chan error, 2)
-	if cfg.Filesystem.Backend == config.BackendSMB {
+	if cfg.Backend == config.BackendSMB {
 		shares := map[string]*vfs.Tree{smb.ShareName: vfs.New(sess)}
 		if cfg.SMBSTRMEnabled() {
 			shares[smb.STRMShareName] = vfs.New(vfs.NewSTRMBackend(sess))
 		}
-		native, startErr := smb.New(shares, smb.Options{Username: cfg.SMB.Username,
-			Password: cfg.SMB.Password, ReadTimeout: time.Duration(cfg.FileReadTimeout()), Logger: logger})
+		native, startErr := smb.New(shares, smb.Options{Username: cfg.Username,
+			Password: cfg.Password, ReadTimeout: time.Duration(cfg.Filesystem.ReadTimeout), Logger: logger})
 		if startErr != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", startErr)
 			sequence.run()
@@ -454,7 +481,7 @@ func validateMountpoints(mountpoint, strmMountpoint, baseURL string) (string, st
 		return mountpoint, strmMountpoint, nil
 	}
 	if baseURL == "" {
-		return "", "", errors.New("strm.base_url is required with -strm-mountpoint")
+		return "", "", errors.New("strm.base_url is required with fuse.strm_mountpoint")
 	}
 	canonical := func(name, path string) (string, error) {
 		absolute, err := filepath.Abs(path)
@@ -516,13 +543,39 @@ func unexpectedServeResult(name string, err error) error {
 	return fmt.Errorf("%s server: %w", name, err)
 }
 
-func loadConfig(path string) (config.Config, error) {
-	cfg, err := config.Load(path)
+// warnPlaintextPassword reports that the password came from a configuration
+// file, where it stays readable on disk.
+//
+// The warning names the key but never the password value. A password the
+// environment supplied is not warned about: the environment keeps it out of
+// the configuration file.
+func warnPlaintextPassword(logger *slog.Logger, cfg config.Config, sources config.Sources) {
+	if cfg.Password == "" || !sources.FromFile("password") {
+		return
+	}
+	logger.Warn("the password comes from the configuration file and is readable on disk; " +
+		"prefer the TORRENTFS_PASSWORD environment variable")
+}
+
+// logEffectiveConfig records the effective configuration.
+//
+// The record names every configuration key, its effective value and the
+// input the value came from, so a user who asks why a setting did not take
+// effect reads the answer out of the log instead of guessing. The secret
+// values are redacted.
+func logEffectiveConfig(logger *slog.Logger, cfg config.Config, sources config.Sources) {
+	logger.Info("effective configuration", config.Summary(cfg, sources))
+}
+
+// loadConfig loads the configuration and reports where every effective value
+// came from.
+func loadConfig(path string) (config.Config, config.Sources, error) {
+	cfg, sources, err := loadAndCheck(path)
 	if err != nil {
 		if path == "" {
-			return config.Config{}, fmt.Errorf("load config: %w", err)
+			return cfg, sources, fmt.Errorf("load config: %w", err)
 		}
-		return config.Config{}, fmt.Errorf("load config %q: %w", path, err)
+		return cfg, sources, fmt.Errorf("load config %q: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, sources, nil
 }

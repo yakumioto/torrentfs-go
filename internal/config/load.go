@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -10,93 +11,175 @@ import (
 )
 
 // Load strictly decodes TOML, overlays the documented environment, and validates.
-func Load(path string) (Config, error) { return load(path, os.LookupEnv) }
+func Load(path string) (Config, error) {
+	cfg, _, err := LoadWithSources(path)
+	return cfg, err
+}
+
+// LoadWithSources loads the configuration and reports where every effective
+// value came from.
+//
+// The sources let a caller tell a value the user wrote in a configuration
+// file from a value the environment supplied, without repeating the merge.
+// The credential warning needs that distinction; a configuration audit needs
+// it for every key.
+func LoadWithSources(path string) (Config, Sources, error) {
+	return loadWithSources(path, osEnvironment{})
+}
+
+// LoadWithEnvironment loads the configuration from a given environment.
+//
+// The environment is a parameter so a caller can supply the variables it
+// knows about instead of the whole process environment. The configuration
+// reads the same variables either way.
+func LoadWithEnvironment(path string, lookup Environment) (Config, error) {
+	cfg, _, err := loadWithSources(path, lookup)
+	return cfg, err
+}
 
 func load(path string, lookup envLookup) (Config, error) {
+	cfg, _, err := loadWithSources(path, lookup)
+	return cfg, err
+}
+
+func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	cfg := Default()
+	sources := Sources{}
+	// Every configuration key starts at its built-in default, so the record
+	// names a source for every key even when no input touched it.
+	for _, item := range configSchema {
+		sources[item.path] = SourceDefault
+	}
+	// A removed key in the file has to stop the load before the strict
+	// decoder runs, because the decoder would report it as unknown. A removed
+	// environment name does not: it is reported with the other problems, so a
+	// user who also has a bad value learns about both at once.
+	envRemoved := removedEnvironmentNames(lookup)
 	if path != "" {
-		file, err := os.Open(path)
+		content, err := os.ReadFile(path)
 		if err != nil {
-			return Config{}, fmt.Errorf("config: open %q: %w", path, err)
+			return Config{}, nil, fmt.Errorf("config: open %q: %w", path, err)
 		}
-		defer func() { _ = file.Close() }()
-		fileCfg := newFileConfig(cfg)
-		if err := toml.NewDecoder(file).DisallowUnknownFields().Decode(&fileCfg); err != nil {
-			var strictErr *toml.StrictMissingError
-			if errors.As(err, &strictErr) {
-				if strings.Contains(strings.ToLower(strictErr.String()), "password") {
-					return Config{}, errors.New("config: unknown password field; use documented hash or secret-file settings")
-				}
-				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, strictErr.String(), err)
-			}
-			var decodeErr *toml.DecodeError
-			if errors.As(err, &decodeErr) {
-				message := decodeErr.String()
-				if strings.Contains(message, "CapacityBytes") {
-					message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
-				}
-				if strings.Contains(message, "MaxUploadBytes") {
-					message += "; http.max_upload_size must be a quoted byte quantity such as 10MiB or 32MB"
-				}
-				return Config{}, fmt.Errorf("config: decode %q: %s: %w", path, message, err)
-			}
-			return Config{}, fmt.Errorf("config: decode %q: %w", path, err)
+		document, err := decodeDocument(content, path)
+		if err != nil {
+			return Config{}, nil, err
 		}
-		cfg = fileCfg.runtimeConfig()
+		if fileRemoved := removedTOMLNames(document); len(fileRemoved) > 0 {
+			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: append(envRemoved, fileRemoved...)})
+		}
+		set, err := decodeFile(content, path, &cfg)
+		if err != nil {
+			return Config{}, nil, err
+		}
+		for key := range documentKeys(set) {
+			sources[key] = SourceFile
+		}
 	}
-	if err := applyEnvironment(&cfg, lookup); err != nil {
-		return Config{}, fmt.Errorf("config: apply environment: %w", err)
+	// The environment and the values are both checked, and both sets of
+	// errors are reported together: a malformed environment value and an
+	// unusable configuration value are the same kind of mistake, and a user
+	// who set both learns about both at once.
+	collector := &validationCollector{}
+	collector.add(unknownEnvironmentError(lookup))
+	if err := applyEnvironment(&cfg, lookup, sources); err != nil {
+		collector.add(err)
 	}
-	if err := cfg.Validate(); err != nil {
+	collector.add(cfg.Validate())
+	// The loaded values travel with the error so a caller can run the checks
+	// that live outside this package (the output rule and the rules of the
+	// upload statistics experiment) and report every problem at once. A
+	// failed decode leaves the zero value: there are no values to check then.
+	validateErr := collector.err()
+	if validateErr != nil {
 		if path == "" {
-			return Config{}, fmt.Errorf("config: validate: %w", err)
+			validateErr = fmt.Errorf("config: validate: %w", validateErr)
+		} else {
+			validateErr = fmt.Errorf("config: validate %q: %w", path, validateErr)
 		}
-		return Config{}, fmt.Errorf("config: validate %q: %w", path, err)
 	}
-	return cfg, nil
-}
-
-type fileConfig struct {
-	Connections Connections    `toml:"connections"`
-	Proxy       Proxy          `toml:"proxy"`
-	Cache       fileCache      `toml:"cache"`
-	Identity    Identity       `toml:"identity"`
-	HTTP        fileHTTP       `toml:"http"`
-	STRM        STRM           `toml:"strm"`
-	Log         Log            `toml:"log"`
-	Mount       fileMount      `toml:"mount"`
-	Filesystem  fileFilesystem `toml:"filesystem"`
-	FUSE        fileFUSE       `toml:"fuse"`
-	SMB         SMB            `toml:"smb"`
-}
-
-type fileCache struct {
-	CapacityBytes tomlByteQuantity `toml:"capacity"`
-}
-type fileHTTP struct {
-	ListenAddr     string           `toml:"listen_addr"`
-	Auth           Auth             `toml:"auth"`
-	MaxUploadBytes tomlByteQuantity `toml:"max_upload_size"`
-}
-
-func newFileConfig(cfg Config) fileConfig {
-	return fileConfig{
-		Connections: cfg.Connections, Proxy: cfg.Proxy,
-		Cache:    fileCache{CapacityBytes: tomlByteQuantity(cfg.Cache.CapacityBytes)},
-		Identity: cfg.Identity,
-		HTTP: fileHTTP{ListenAddr: cfg.HTTP.ListenAddr, Auth: cfg.HTTP.Auth,
-			MaxUploadBytes: tomlByteQuantity(cfg.HTTP.MaxUploadBytes)},
-		STRM: cfg.STRM, Log: cfg.Log, SMB: cfg.SMB,
+	if len(envRemoved) > 0 {
+		removedErr := fmt.Errorf("config: %w", &RemovedError{Names: envRemoved})
+		if validateErr == nil {
+			return cfg, sources, removedErr
+		}
+		return cfg, sources, errors.Join(removedErr, validateErr)
 	}
+	if validateErr != nil {
+		return cfg, sources, validateErr
+	}
+	return cfg, sources, nil
 }
 
-func (c fileConfig) runtimeConfig() Config {
-	cfg := Config{
-		Connections: c.Connections, Proxy: c.Proxy,
-		Cache: Cache{CapacityBytes: int64(c.Cache.CapacityBytes)}, Identity: c.Identity,
-		HTTP: HTTP{ListenAddr: c.HTTP.ListenAddr, Auth: c.HTTP.Auth, MaxUploadBytes: int64(c.HTTP.MaxUploadBytes)},
-		STRM: c.STRM, Log: c.Log,
+// decodeDocument decodes a configuration file into a generic tree.
+//
+// The generic tree names the keys a document sets, including the keys that no
+// longer exist: the strict decoder would report an unknown table without
+// saying which setting replaces it.
+func decodeDocument(content []byte, path string) (map[string]any, error) {
+	var document map[string]any
+	if err := toml.Unmarshal(content, &document); err != nil {
+		return nil, fmt.Errorf("config: decode %q: %w", path, err)
 	}
-	c.outputConfig(&cfg)
-	return cfg
+	return document, nil
+}
+
+// decodeFile decodes one configuration file onto the default configuration and
+// reports the configuration keys the document sets.
+func decodeFile(content []byte, path string, cfg *Config) (map[string]any, error) {
+	document, err := decodeDocument(content, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := toml.NewDecoder(bytes.NewReader(content)).DisallowUnknownFields().Decode(cfg); err != nil {
+		var strictErr *toml.StrictMissingError
+		if errors.As(err, &strictErr) {
+			if strings.Contains(strings.ToLower(strictErr.String()), "password") {
+				return nil, errors.New("config: unknown password field; use the top-level username and password keys")
+			}
+			return nil, fmt.Errorf("config: decode %q: %s: %w", path, strictErr.String(), err)
+		}
+		var decodeErr *toml.DecodeError
+		if errors.As(err, &decodeErr) {
+			message := decodeErr.String()
+			if row, _ := decodeErr.Position(); row > 0 {
+				if key := keyRows(content).keyAt(row); key != "" {
+					message += fmt.Sprintf("; the configuration key %q holds the value", key)
+				}
+			}
+			if strings.Contains(message, "CapacityBytes") {
+				message += "; cache.capacity must be a quoted byte quantity such as 32MB or 2GiB"
+			}
+			if strings.Contains(message, "MaxUploadBytes") {
+				message += "; http.max_upload_size must be a quoted byte quantity such as 10MiB or 32MB"
+			}
+			return nil, fmt.Errorf("config: decode %q: %s: %w", path, message, err)
+		}
+		return nil, fmt.Errorf("config: decode %q: %w", path, err)
+	}
+	return document, nil
+}
+
+// documentKeys returns the dot paths of every leaf a decoded TOML document
+// sets. A table contributes its leaves, not itself, so a document that sets
+// "http.auth.enabled" reports that path and not "http.auth".
+func documentKeys(document map[string]any) map[string]any {
+	keys := make(map[string]any)
+	collectDocumentKeys(document, "", keys)
+	return keys
+}
+
+// collectDocumentKeys walks one level of a decoded document and records the
+// paths of its leaves.
+func collectDocumentKeys(table map[string]any, prefix string, keys map[string]any) {
+	for name, value := range table {
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		if nested, ok := value.(map[string]any); ok {
+			collectDocumentKeys(nested, path, keys)
+			continue
+		}
+		keys[path] = value
+	}
 }

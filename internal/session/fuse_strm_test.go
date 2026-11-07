@@ -155,8 +155,8 @@ func TestFuseStrmDualMountSignedRangeAndDeletion(t *testing.T) {
 	work := t.TempDir()
 	cfg := testConfig()
 	cfg.STRM.BaseURL = "http://example.test"
-	cfg.Cache.CapacityBytes = 16 << 20
-	cfg.Mount.ReadTimeout = config.Duration(2 * time.Second)
+	cfg.Cache.CapacityBytes = config.ByteQuantity(16 << 20)
+	cfg.Filesystem.ReadTimeout = config.Duration(2 * time.Second)
 
 	const (
 		soloName       = "独立电影 %#?.mkv"
@@ -444,7 +444,7 @@ func TestFuseStrmRecoversAfterURLRaceDeletesAndReaddsSameHash(t *testing.T) {
 			work := t.TempDir()
 			cfg := testConfig()
 			cfg.STRM.BaseURL = "http://example.test"
-			cfg.Mount.ReadTimeout = config.Duration(time.Second)
+			cfg.Filesystem.ReadTimeout = config.Duration(time.Second)
 			sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
 			var torrentPath string
 			var hash metainfo.Hash

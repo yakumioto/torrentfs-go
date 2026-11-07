@@ -76,16 +76,16 @@ func (b *largeOffsetBackend) OpenFile(hash metainfo.Hash, path string) (io.Reade
 func requireInternalFuse(t *testing.T) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
-		if os.Getenv("TORRENTFS_FUSE_REQUIRED") == "1" {
-			t.Fatalf("TORRENTFS_FUSE_REQUIRED=1 but /dev/fuse is unavailable: %v", err)
+		if os.Getenv("TF_FUSE_REQUIRED") == "1" {
+			t.Fatalf("TF_FUSE_REQUIRED=1 but /dev/fuse is unavailable: %v", err)
 		}
 		t.Skip("FUSE is unavailable: /dev/fuse is missing")
 	}
 	mountpoint := t.TempDir()
 	server, err := fs.Mount(mountpoint, &largeOffsetFuseProbe{}, nil)
 	if err != nil {
-		if os.Getenv("TORRENTFS_FUSE_REQUIRED") == "1" {
-			t.Fatalf("TORRENTFS_FUSE_REQUIRED=1 but FUSE mount failed: %v", err)
+		if os.Getenv("TF_FUSE_REQUIRED") == "1" {
+			t.Fatalf("TF_FUSE_REQUIRED=1 but FUSE mount failed: %v", err)
 		}
 		t.Skipf("FUSE mount is unavailable: %v", err)
 	}

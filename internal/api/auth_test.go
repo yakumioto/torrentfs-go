@@ -13,15 +13,14 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
-const apiTestPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq"
+const apiTestPassword = "password"
 
 func dynamicAuth(cfg *config.Config) {
 	cfg.HTTP.Auth = config.Auth{
-		Enabled:      true,
-		Username:     "alice",
-		PasswordHash: apiTestPasswordHash,
-		TokenTTL:     config.Duration(time.Minute),
+		Enabled:  true,
+		TokenTTL: config.Duration(time.Minute),
 	}
+	cfg.Password = apiTestPassword
 }
 
 func TestAuthDisabledLoginReturnsNotFound(t *testing.T) {
@@ -226,10 +225,12 @@ func TestUnknownAuthRouteDoesNotBypassMiddleware(t *testing.T) {
 	}
 }
 
-func TestNewRejectsInvalidAuthMaterial(t *testing.T) {
+// TestNewRejectsMissingAuthenticationMaterial covers the completeness rule:
+// an enabled authentication without a password cannot serve a login.
+func TestNewRejectsMissingAuthenticationMaterial(t *testing.T) {
 	cfg := config.Default()
 	dynamicAuth(&cfg)
-	cfg.HTTP.Auth.PasswordHash = "not-a-bcrypt-hash"
+	cfg.Password = ""
 	if _, err := api.New(cfg, &fakeBackend{}); !errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("api.New error = %v, want config.ErrInvalid", err)
 	}

@@ -4,39 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-)
-
-const (
-	// EnvMode selects the experiment. An empty mode is inferred: a rate means
-	// "inject", an announce log without a rate means "baseline", and a
-	// multiplier alone means "amplify".
-	EnvMode = "TORRENTFS_LAB_UPLOAD_MODE"
-	// EnvRate enables inject mode and sets its average synthetic rate. The
-	// value is a byte quantity, optionally suffixed with "/s": "2MiB/s" and
-	// "2MiB" both mean two mebibytes per second.
-	EnvRate = "TORRENTFS_LAB_UPLOAD_RATE"
-	// EnvMultiplier enables amplify mode: the reported upload grows by this
-	// factor of the real payload bytes transferred since the previous announce.
-	EnvMultiplier = "TORRENTFS_LAB_UPLOAD_MULTIPLIER"
-	// EnvJitter is the per-announce deviation from the nominal increment, in
-	// percent (0-100). The default is 20 percent.
-	EnvJitter = "TORRENTFS_LAB_UPLOAD_JITTER"
-	// EnvCap is the per-torrent ceiling on the cumulative reported upload.
-	EnvCap = "TORRENTFS_LAB_UPLOAD_CAP"
-	// EnvSeed fixes the random jitter sequence for reproducible runs.
-	EnvSeed = "TORRENTFS_LAB_UPLOAD_SEED"
-	// EnvAnnounceLog is a JSON Lines file that receives one record per tracker
-	// announce plus periodic peer-activity samples. It is the ground truth used
-	// to compare reported statistics with real payload transfer.
-	EnvAnnounceLog = "TORRENTFS_LAB_ANNOUNCE_LOG"
-	// EnvPeerSampleInterval is how often peer gauges and real payload counters
-	// are sampled into the announce log. The default is 5s.
-	EnvPeerSampleInterval = "TORRENTFS_LAB_PEER_SAMPLE_INTERVAL"
 )
 
 // Mode selects how the upload counter reported to trackers relates to the real
@@ -135,52 +106,43 @@ type Settings struct {
 // Enabled reports whether an experiment mode was configured.
 func (s Settings) Enabled() bool { return s.Mode != "" }
 
-// LoadSettings reads the lab environment variables through getenv. enabled is
-// false with a nil error when nothing is configured. A partially configured
-// setup is an error so a typo cannot silently fall back to normal announce
-// reporting.
-func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, err error) {
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
-	rawMode := strings.ToLower(strings.TrimSpace(getenv(EnvMode)))
-	rawRate := strings.TrimSpace(getenv(EnvRate))
-	rawMultiplier := strings.TrimSpace(getenv(EnvMultiplier))
-	rawLog := strings.TrimSpace(getenv(EnvAnnounceLog))
-	rawInterval := strings.TrimSpace(getenv(EnvPeerSampleInterval))
-	rawJitter := strings.TrimSpace(getenv(EnvJitter))
-	rawCap := strings.TrimSpace(getenv(EnvCap))
-	rawSeed := strings.TrimSpace(getenv(EnvSeed))
-
-	mode := Mode(rawMode)
+// SettingsFrom turns the configuration of the experiment into its settings.
+//
+// The configuration holds the values and checks their shape; the rules that
+// relate one setting to another live here, because they decide what a set of
+// settings means. enabled is false with a nil error when nothing is
+// configured. A partially configured setup is an error so a typo cannot
+// silently fall back to normal announce reporting.
+func SettingsFrom(cfg config.Lab) (settings Settings, enabled bool, err error) {
+	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.UploadMode)))
 	switch mode {
 	case "":
 		switch {
-		case rawRate != "":
+		case cfg.UploadRate != 0:
 			mode = ModeInject
-		case rawMultiplier != "":
+		case cfg.UploadMultiplier != 0:
 			mode = ModeAmplify
-		case rawLog != "":
+		case cfg.AnnounceLog != "":
 			mode = ModeBaseline
 		default:
 			for _, knob := range []struct {
 				key   string
-				value string
+				value bool
 			}{
-				{EnvJitter, rawJitter},
-				{EnvCap, rawCap},
-				{EnvSeed, rawSeed},
-				{EnvPeerSampleInterval, rawInterval},
+				{"upload_jitter", cfg.UploadJitter != 0},
+				{"upload_cap", cfg.UploadCap != 0},
+				{"upload_seed", cfg.UploadSeed != 0},
+				{"peer_sample_interval", cfg.PeerSampleInterval != 0},
 			} {
-				if knob.value != "" {
-					return Settings{}, false, fmt.Errorf("%s is set but no experiment mode, rate, or announce log is configured", knob.key)
+				if knob.value {
+					return Settings{}, false, fmt.Errorf("lab.%s is set but no experiment mode, rate, or announce log is configured", knob.key)
 				}
 			}
 			return Settings{}, false, nil
 		}
 	case ModeBaseline, ModeInject, ModeAmplify:
 	default:
-		return Settings{}, false, fmt.Errorf("%s: unknown mode %q (want baseline, inject, or amplify)", EnvMode, rawMode)
+		return Settings{}, false, fmt.Errorf("lab.upload_mode: unknown mode %q (want baseline, inject, or amplify)", cfg.UploadMode)
 	}
 
 	runtime := RuntimeSettings{
@@ -189,110 +151,50 @@ func LoadSettings(getenv func(string) string) (settings Settings, enabled bool, 
 	}
 	switch mode {
 	case ModeBaseline:
-		if rawRate != "" || rawMultiplier != "" {
-			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use %s or %s", mode, EnvRate, EnvMultiplier)
+		if cfg.UploadRate != 0 || cfg.UploadMultiplier != 0 {
+			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use upload_rate or upload_multiplier", mode)
 		}
 	case ModeInject:
-		if rawRate == "" {
-			return Settings{}, false, fmt.Errorf("mode %q requires %s", mode, EnvRate)
+		if cfg.UploadRate == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires upload_rate", mode)
 		}
-		if rawMultiplier != "" {
-			return Settings{}, false, fmt.Errorf("%s only applies to mode %q", EnvMultiplier, ModeAmplify)
+		if cfg.UploadMultiplier != 0 {
+			return Settings{}, false, fmt.Errorf("upload_multiplier only applies to mode %q", ModeAmplify)
 		}
-		rate, err := parseByteRate(rawRate)
-		if err != nil {
-			return Settings{}, false, err
-		}
-		runtime.RateBytesPerSecond = rate
+		runtime.RateBytesPerSecond = float64(cfg.UploadRate)
 	case ModeAmplify:
-		if rawMultiplier == "" {
-			return Settings{}, false, fmt.Errorf("mode %q requires %s", mode, EnvMultiplier)
+		if cfg.UploadMultiplier == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires upload_multiplier", mode)
 		}
-		if rawRate != "" {
-			return Settings{}, false, fmt.Errorf("%s only applies to mode %q", EnvRate, ModeInject)
+		if cfg.UploadRate != 0 {
+			return Settings{}, false, fmt.Errorf("upload_rate only applies to mode %q", ModeInject)
 		}
-		multiplier, err := parseMultiplier(rawMultiplier)
-		if err != nil {
-			return Settings{}, false, err
-		}
-		runtime.Multiplier = multiplier
+		runtime.Multiplier = float64(cfg.UploadMultiplier)
 	}
-	if rawJitter != "" {
-		jitter, err := parseJitterPercent(rawJitter)
-		if err != nil {
-			return Settings{}, false, err
-		}
-		runtime.JitterFraction = jitter
+	if cfg.UploadJitter != 0 {
+		runtime.JitterFraction = float64(cfg.UploadJitter) / 100
 	}
-	if rawCap != "" {
-		capBytes, err := config.ParseByteQuantity(rawCap)
-		if err != nil {
-			return Settings{}, false, fmt.Errorf("%s: %w", EnvCap, err)
-		}
-		runtime.CapBytes = capBytes
-	}
+	runtime.CapBytes = int64(cfg.UploadCap)
 	runtime, err = NormalizeRuntimeSettings(runtime)
 	if err != nil {
 		return Settings{}, false, err
 	}
 
 	seed := time.Now().UnixNano()
-	if rawSeed != "" {
-		seed, err = strconv.ParseInt(rawSeed, 10, 64)
-		if err != nil {
-			return Settings{}, false, fmt.Errorf("%s: must be a signed integer", EnvSeed)
-		}
+	if cfg.UploadSeed != 0 {
+		seed = cfg.UploadSeed
 	}
 	peerSampleInterval := defaultPeerSampleInterval
-	if rawInterval != "" {
-		if rawLog == "" {
-			return Settings{}, false, fmt.Errorf("%s requires %s", EnvPeerSampleInterval, EnvAnnounceLog)
+	if cfg.PeerSampleInterval != 0 {
+		if cfg.AnnounceLog == "" {
+			return Settings{}, false, fmt.Errorf("lab.peer_sample_interval requires lab.announce_log")
 		}
-		peerSampleInterval, err = time.ParseDuration(rawInterval)
-		if err != nil || peerSampleInterval <= 0 {
-			return Settings{}, false, fmt.Errorf("%s: must be a positive duration such as 5s", EnvPeerSampleInterval)
-		}
+		peerSampleInterval = time.Duration(cfg.PeerSampleInterval)
 	}
 	return Settings{
 		RuntimeSettings:    runtime,
 		Seed:               seed,
-		AnnounceLogPath:    rawLog,
+		AnnounceLogPath:    cfg.AnnounceLog,
 		PeerSampleInterval: peerSampleInterval,
 	}, true, nil
-}
-
-func parseByteRate(raw string) (float64, error) {
-	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "/s"))
-	bytes, err := config.ParseByteQuantity(value)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", EnvRate, err)
-	}
-	if bytes <= 0 {
-		return 0, fmt.Errorf("%s: must be greater than zero", EnvRate)
-	}
-	return float64(bytes), nil
-}
-
-func parseMultiplier(raw string) (float64, error) {
-	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "x"))
-	multiplier, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
-		return 0, fmt.Errorf("%s: must be a number greater than 1", EnvMultiplier)
-	}
-	if multiplier <= 1 {
-		return 0, fmt.Errorf("%s: must be greater than 1", EnvMultiplier)
-	}
-	return multiplier, nil
-}
-
-func parseJitterPercent(raw string) (float64, error) {
-	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "%"))
-	percent, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(percent) || math.IsInf(percent, 0) {
-		return 0, fmt.Errorf("%s: must be a number between 0 and 100", EnvJitter)
-	}
-	if percent < 0 || percent > 100 {
-		return 0, fmt.Errorf("%s: must be between 0 and 100 percent", EnvJitter)
-	}
-	return percent / 100, nil
 }

@@ -5,11 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 func TestLoadWithoutPathUsesDefaults(t *testing.T) {
@@ -31,8 +30,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
 		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
 		"TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES":                "router.example:6881",
-		"TORRENTFS_MOUNT_ALLOW_OTHER":                          "true",
-		"TORRENTFS_MOUNT_READ_TIMEOUT":                         "250ms",
+		"TORRENTFS_BACKEND":                                    "none",
+		"TORRENTFS_FUSE_ALLOW_OTHER":                           "true",
+		"TORRENTFS_FILESYSTEM_READ_TIMEOUT":                    "250ms",
 		"TORRENTFS_PROXY_SOCKS5_URL":                           "socks5h://proxy.example:1080",
 		"TORRENTFS_CACHE_CAPACITY":                             "123456B",
 		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT":                "torrentfs-test/1.0",
@@ -41,14 +41,14 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE":                       "2048B",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
-		httpUsernameEnvironment:                                "alice",
-		httpPasswordEnvironment:                                "password",
+		"TORRENTFS_USERNAME":                                   "alice",
+		"TORRENTFS_PASSWORD":                                   "password",
 		"TORRENTFS_HTTP_AUTH_TOKEN_TTL":                        "45m",
+		"TORRENTFS_SMB_STRM":                                   "off",
 		"TORRENTFS_STRM_BASE_URL":                              "https://media.example/torrentfs/",
 		"TORRENTFS_LOG_LEVEL":                                  "debug",
 		"TORRENTFS_LOG_FORMAT":                                 "json",
 		"TORRENTFS_LOG_ADD_SOURCE":                             "true",
-		"TORRENTFS_FUSE_REQUIRED":                              "1",
 	}
 	got, err := load("", lookupEnvironment(values))
 	if err != nil {
@@ -68,11 +68,17 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if !reflect.DeepEqual(got.Connections, wantConnections) {
 		t.Fatalf("connections = %+v, want %+v", got.Connections, wantConnections)
 	}
-	if !got.Mount.AllowOther {
-		t.Fatal("mount.allow_other = false, want true")
+	if !got.FUSE.AllowOther {
+		t.Fatal("fuse.allow_other = false, want true")
 	}
-	if got.Mount.ReadTimeout != Duration(250*time.Millisecond) {
-		t.Fatalf("mount.read_timeout = %s, want 250ms", got.Mount.ReadTimeout)
+	if got.Backend != BackendNone {
+		t.Fatalf("backend = %q, want the environment value %q", got.Backend, BackendNone)
+	}
+	if got.SMB.STRM != STRMOff {
+		t.Fatalf("smb.strm = %q, want the environment value %q", got.SMB.STRM, STRMOff)
+	}
+	if got.Filesystem.ReadTimeout != Duration(250*time.Millisecond) {
+		t.Fatalf("filesystem.read_timeout = %s, want 250ms", got.Filesystem.ReadTimeout)
 	}
 	if got.Proxy.Socks5URL != "socks5h://proxy.example:1080" {
 		t.Fatalf("proxy = %+v", got.Proxy)
@@ -90,14 +96,8 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	if got.HTTP.ListenAddr != "127.0.0.1:9090" || got.HTTP.MaxUploadBytes != 2048 {
 		t.Fatalf("http = %+v", got.HTTP)
 	}
-	if !got.HTTP.Auth.Enabled || got.HTTP.Auth.Username != "alice" || got.HTTP.Auth.PasswordHashFile != "" || got.HTTP.Auth.PasswordHash == "password" {
-		t.Fatalf("auth = %+v", got.HTTP.Auth)
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte("password")); err != nil {
-		t.Fatalf("generated password hash does not match password: %v", err)
-	}
-	if cost, err := bcrypt.Cost([]byte(got.HTTP.Auth.PasswordHash)); err != nil || cost != bcrypt.DefaultCost {
-		t.Fatalf("generated password hash cost = %d, error = %v, want %d", cost, err, bcrypt.DefaultCost)
+	if got.Username != "alice" || got.Password != "password" {
+		t.Fatalf("credentials = %q/%q, want the environment values", got.Username, got.Password)
 	}
 	if got.HTTP.Auth.TokenTTL != Duration(45*time.Minute) {
 		t.Fatalf("auth token TTL = %s, want 45m", got.HTTP.Auth.TokenTTL)
@@ -109,20 +109,15 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		t.Fatalf("log = %+v", got.Log)
 	}
 
-	wantNames := make(map[string]bool, len(environmentBindings))
-	for _, binding := range environmentBindings {
-		wantNames[binding.name] = true
-	}
-	if len(environmentBindings) != 21 {
-		t.Fatalf("environment binding count = %d, want 21", len(environmentBindings))
-	}
-	if httpUsernameEnvironment != "TORRENTFS_USERNAME" || httpPasswordEnvironment != "TORRENTFS_PASSWORD" {
-		t.Fatalf("special environment variables = %q, %q", httpUsernameEnvironment, httpPasswordEnvironment)
+	// Every environment variable the test sets must be one the schema
+	// derives, so a new configuration key needs no second registration.
+	wantNames := make(map[string]bool)
+	for _, key := range Schema() {
+		if key.Overridable {
+			wantNames[key.Environment] = true
+		}
 	}
 	for name := range values {
-		if name == "TORRENTFS_FUSE_REQUIRED" || name == httpUsernameEnvironment || name == httpPasswordEnvironment {
-			continue
-		}
 		if !wantNames[name] {
 			t.Fatalf("environment variable %q is not declared", name)
 		}
@@ -150,7 +145,7 @@ func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load defaults: %v", err)
 	}
-	if defaults.Cache.CapacityBytes != defaultCacheCapacityBytes {
+	if defaults.Cache.CapacityBytes != ByteQuantity(defaultCacheCapacityBytes) {
 		t.Fatalf("default cache capacity = %d, want %d", defaults.Cache.CapacityBytes, defaultCacheCapacityBytes)
 	}
 }
@@ -158,15 +153,15 @@ func TestLoadFileAndEnvironmentPrecedence(t *testing.T) {
 func TestLoadEnvironmentReadTimeoutOverridesFileBeforeValidation(t *testing.T) {
 	for _, fileValue := range []string{"30s", "0s"} {
 		t.Run(fileValue, func(t *testing.T) {
-			path := writeConfigFile(t, "[mount]\nread_timeout = \""+fileValue+"\"\n")
+			path := writeConfigFile(t, "[filesystem]\nread_timeout = \""+fileValue+"\"\n")
 			cfg, err := load(path, lookupEnvironment(map[string]string{
-				"TORRENTFS_MOUNT_READ_TIMEOUT": "250ms",
+				"TORRENTFS_FILESYSTEM_READ_TIMEOUT": "250ms",
 			}))
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if cfg.Mount.ReadTimeout != Duration(250*time.Millisecond) {
-				t.Fatalf("Mount.ReadTimeout = %s, want 250ms", cfg.Mount.ReadTimeout)
+			if cfg.Filesystem.ReadTimeout != Duration(250*time.Millisecond) {
+				t.Fatalf("filesystem.read_timeout = %s, want 250ms", cfg.Filesystem.ReadTimeout)
 			}
 		})
 	}
@@ -176,41 +171,85 @@ func TestLoadEnvironmentRejectsInvalidReadTimeout(t *testing.T) {
 	for _, raw := range []string{"", "30", "invalid", "0s", "-1s"} {
 		t.Run(raw, func(t *testing.T) {
 			_, err := load("", lookupEnvironment(map[string]string{
-				"TORRENTFS_MOUNT_READ_TIMEOUT": raw,
+				"TORRENTFS_FILESYSTEM_READ_TIMEOUT": raw,
 			}))
 			if !errors.Is(err, ErrInvalid) {
 				t.Fatalf("load error = %v, want ErrInvalid", err)
 			}
 			var validationErr *ValidationError
-			if !errors.As(err, &validationErr) || validationErr.Field != "mount.read_timeout" {
-				t.Fatalf("load error = %v, want mount.read_timeout validation error", err)
+			if !errors.As(err, &validationErr) || validationErr.Field != "filesystem.read_timeout" {
+				t.Fatalf("load error = %v, want filesystem.read_timeout validation error", err)
 			}
 		})
 	}
 }
 
-func TestLoadIgnoresRemovedDataDirEnvironment(t *testing.T) {
-	got, err := load("", lookupEnvironment(map[string]string{
-		"TORRENTFS_PATHS_DATA_DIR": filepath.Join(t.TempDir(), "ignored"),
-	}))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if !reflect.DeepEqual(got, Default()) {
-		t.Fatalf("config changed after removed environment variable: %+v", got)
+// TestLoadRejectsUnknownEnvironmentNames covers the strictness of the
+// configuration namespace: a variable that no configuration key derives is
+// reported instead of ignored, so a misspelled name cannot start the process
+// with a default value the user did not ask for.
+func TestLoadRejectsUnknownEnvironmentNames(t *testing.T) {
+	for _, name := range []string{
+		"TORRENTFS_PATHS_DATA_DIR",
+		"TORRENTFS_CACHE_CAPACITY_BYTES",
+		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{name: "value"}))
+			if err == nil {
+				t.Fatalf("load accepted the unknown environment variable %q", name)
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("load error = %v, want ErrInvalid", err)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("load error = %q, want it to name %q", err, name)
+			}
+		})
 	}
 }
 
-func TestLoadIgnoresUnitSuffixedEnvironment(t *testing.T) {
-	got, err := load("", lookupEnvironment(map[string]string{
+// TestLoadRejectsRemovedEnvironmentNames covers the removed environment
+// variables of the output backend and of the STRM switch: the loader refuses
+// them and names the variable that replaces them.
+func TestLoadRejectsRemovedEnvironmentNames(t *testing.T) {
+	tests := []struct {
+		removed string
+		new     string
+	}{
+		{removed: "TORRENTFS_FILESYSTEM_BACKEND", new: "TORRENTFS_BACKEND"},
+		{removed: "TORRENTFS_SMB_STRM_ENABLED", new: "TORRENTFS_SMB_STRM"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.removed, func(t *testing.T) {
+			_, err := load("", lookupEnvironment(map[string]string{tt.removed: "value"}))
+			if err == nil {
+				t.Fatal("load accepted the removed environment variable")
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("load error = %v, want ErrInvalid", err)
+			}
+			for _, want := range []string{tt.removed, tt.new} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("load error = %q, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadReportsEveryUnknownEnvironmentName(t *testing.T) {
+	_, err := load("", lookupEnvironment(map[string]string{
 		"TORRENTFS_CACHE_CAPACITY_BYTES":  "32MiB",
 		"TORRENTFS_HTTP_MAX_UPLOAD_BYTES": "8GB",
 	}))
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	if err == nil {
+		t.Fatal("load accepted unknown environment variables")
 	}
-	if !reflect.DeepEqual(got, Default()) {
-		t.Fatalf("config changed after removed environment variables: %+v", got)
+	for _, name := range []string{"TORRENTFS_CACHE_CAPACITY_BYTES", "TORRENTFS_HTTP_MAX_UPLOAD_BYTES"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("load error = %q, want it to name %q", err, name)
+		}
 	}
 }
 
@@ -272,9 +311,9 @@ func TestLoadEnvironmentParseErrorsIdentifyBindingWithoutRawValue(t *testing.T) 
 		{name: "cache", env: "TORRENTFS_CACHE_CAPACITY", raw: "not-a-capacity", field: "cache.capacity"},
 		{name: "upload", env: "TORRENTFS_HTTP_MAX_UPLOAD_SIZE", raw: "not-a-limit", field: "http.max_upload_size"},
 		{name: "bool", env: "TORRENTFS_HTTP_AUTH_ENABLED", raw: "not-a-bool", field: "http.auth.enabled"},
-		{name: "mount bool", env: "TORRENTFS_MOUNT_ALLOW_OTHER", raw: "not-a-bool", field: "mount.allow_other"},
+		{name: "fuse bool", env: "TORRENTFS_FUSE_ALLOW_OTHER", raw: "not-a-bool", field: "fuse.allow_other"},
 		{name: "duration", env: "TORRENTFS_HTTP_AUTH_TOKEN_TTL", raw: "not-a-duration", field: "http.auth.token_ttl"},
-		{name: "read timeout", env: "TORRENTFS_MOUNT_READ_TIMEOUT", raw: "not-a-duration", field: "mount.read_timeout"},
+		{name: "read timeout", env: "TORRENTFS_FILESYSTEM_READ_TIMEOUT", raw: "not-a-duration", field: "filesystem.read_timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -367,28 +406,30 @@ func TestLoadEnvironmentRejectsProxyCredentialsWithoutLeakingThem(t *testing.T) 
 	}
 }
 
-func TestLoadEnvironmentAuthenticationPairOverridesTOMLSource(t *testing.T) {
-	path := writeConfigFile(t, `[http.auth]
-enabled = true
-username = "file-user"
-password_hash_file = "/run/secrets/hash"
-`)
+// TestLoadEnvironmentCredentialsOverrideTheConfigurationFile covers the
+// precedence of the unified credentials: the environment wins over the
+// configuration file, and the credentials are ordinary configuration keys.
+func TestLoadEnvironmentCredentialsOverrideTheConfigurationFile(t *testing.T) {
+	path := writeConfigFile(t, "username = \"file-user\"\npassword = \"file-password\"\n")
 	got, err := load(path, lookupEnvironment(map[string]string{
-		httpUsernameEnvironment: "env-user",
-		httpPasswordEnvironment: "password with spaces",
+		"TORRENTFS_USERNAME": "env-user",
+		"TORRENTFS_PASSWORD": "password with spaces",
 	}))
 	if err != nil {
 		t.Fatalf("load with environment credentials: %v", err)
 	}
-	if got.HTTP.Auth.Username != "env-user" || got.HTTP.Auth.PasswordHashFile != "" {
-		t.Fatalf("auth sources = %+v, want environment username and inline hash", got.HTTP.Auth)
+	if got.Username != "env-user" {
+		t.Fatalf("username = %q, want the environment value", got.Username)
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte("password with spaces")); err != nil {
-		t.Fatalf("generated password hash does not match password: %v", err)
+	if got.Password != "password with spaces" {
+		t.Fatalf("password = %q, want the environment value", got.Password)
 	}
 }
 
-func TestLoadEnvironmentAuthenticationPairRules(t *testing.T) {
+// TestLoadEnvironmentCredentialsRules covers the rules the unified
+// credentials follow: the environment supplies them one at a time, and the
+// requirements follow the selected output and the HTTP authentication.
+func TestLoadEnvironmentCredentialsRules(t *testing.T) {
 	tests := []struct {
 		name         string
 		config       string
@@ -396,86 +437,70 @@ func TestLoadEnvironmentAuthenticationPairRules(t *testing.T) {
 		wantError    bool
 		wantUsername string
 		wantPassword string
-		wantHash     string
-		wantHashFile string
 	}{
 		{
-			name: "pair absent preserves inline source",
-			config: `[http.auth]
-enabled = true
-username = "file-user"
-password_hash = "file-hash"
-`,
+			name:         "the file supplies both credentials",
+			config:       "backend = \"smb\"\nusername = \"file-user\"\npassword = \"file-password\"\n",
 			wantUsername: "file-user",
-			wantHash:     "file-hash",
+			wantPassword: "file-password",
 		},
 		{
-			name: "pair absent preserves file source",
-			config: `[http.auth]
-enabled = true
-username = "file-user"
-password_hash_file = "/run/secrets/hash"
-`,
+			name:         "the environment supplies only the user name",
+			config:       "backend = \"smb\"\nusername = \"file-user\"\npassword = \"file-password\"\n",
+			environment:  map[string]string{"TORRENTFS_USERNAME": "env-user"},
+			wantUsername: "env-user",
+			wantPassword: "file-password",
+		},
+		{
+			name:         "the environment supplies only the password",
+			config:       "backend = \"smb\"\nusername = \"file-user\"\npassword = \"file-password\"\n",
+			environment:  map[string]string{"TORRENTFS_PASSWORD": "env-password"},
 			wantUsername: "file-user",
-			wantHashFile: "/run/secrets/hash",
+			wantPassword: "env-password",
 		},
 		{
-			name: "username only does not borrow TOML password",
-			config: `[http.auth]
-enabled = true
-username = "file-user"
-password_hash = "file-hash"
-`,
-			environment: map[string]string{httpUsernameEnvironment: "env-user"},
-			wantError:   true,
-		},
-		{
-			name: "password only does not borrow TOML username",
-			config: `[http.auth]
-enabled = true
-username = "file-user"
-password_hash = "file-hash"
-`,
-			environment: map[string]string{httpPasswordEnvironment: "secret"},
-			wantError:   true,
-		},
-		{
-			name:   "empty username",
-			config: "[http.auth]\nenabled = true\n",
-			environment: map[string]string{
-				httpUsernameEnvironment: "",
-				httpPasswordEnvironment: "secret",
-			},
+			name:      "SMB without any credential is rejected",
+			config:    "backend = \"smb\"\n",
 			wantError: true,
 		},
 		{
-			name:   "empty password",
-			config: "[http.auth]\nenabled = true\n",
-			environment: map[string]string{
-				httpUsernameEnvironment: "alice",
-				httpPasswordEnvironment: "",
-			},
+			name:      "SMB without a user name is rejected",
+			config:    "backend = \"smb\"\npassword = \"a-password\"\n",
 			wantError: true,
 		},
 		{
-			name: "disabled ignores complete pair",
+			name:      "SMB without a password is rejected",
+			config:    "backend = \"smb\"\nusername = \"reader\"\n",
+			wantError: true,
+		},
+		{
+			name:   "the HTTP login needs no user name",
+			config: "[http.auth]\nenabled = true\n",
 			environment: map[string]string{
-				httpUsernameEnvironment: "invalid\nusername",
-				httpPasswordEnvironment: strings.Repeat("x", 73),
+				"TORRENTFS_PASSWORD": "a-password",
 			},
+			wantPassword: "a-password",
 		},
 		{
-			name:        "disabled ignores half pair",
-			environment: map[string]string{httpUsernameEnvironment: "alice"},
+			name:      "the HTTP login needs a password",
+			config:    "[http.auth]\nenabled = true\n",
+			wantError: true,
 		},
 		{
-			name: "environment enables auth",
+			name: "a disabled authentication does not need a password",
+			environment: map[string]string{
+				"TORRENTFS_USERNAME": "a-user",
+				"TORRENTFS_PASSWORD": "a-password",
+			},
+			wantUsername: "a-user",
+			wantPassword: "a-password",
+		},
+		{
+			name: "the environment enables the authentication",
 			environment: map[string]string{
 				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
-				httpUsernameEnvironment:       "alice",
-				httpPasswordEnvironment:       "secret",
+				"TORRENTFS_PASSWORD":          "secret",
 			},
-			wantUsername: "alice",
 			wantPassword: "secret",
 		},
 	}
@@ -495,19 +520,11 @@ password_hash = "file-hash"
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if got.HTTP.Auth.Username != tt.wantUsername {
-				t.Fatalf("auth username = %q, want %q", got.HTTP.Auth.Username, tt.wantUsername)
+			if got.Username != tt.wantUsername {
+				t.Fatalf("username = %q, want %q", got.Username, tt.wantUsername)
 			}
-			if tt.wantPassword == "" && got.HTTP.Auth.PasswordHash != tt.wantHash {
-				t.Fatalf("auth password hash = %q, want %q", got.HTTP.Auth.PasswordHash, tt.wantHash)
-			}
-			if got.HTTP.Auth.PasswordHashFile != tt.wantHashFile {
-				t.Fatalf("auth password hash file = %q, want %q", got.HTTP.Auth.PasswordHashFile, tt.wantHashFile)
-			}
-			if tt.wantPassword != "" {
-				if err := bcrypt.CompareHashAndPassword([]byte(got.HTTP.Auth.PasswordHash), []byte(tt.wantPassword)); err != nil {
-					t.Fatalf("generated password hash does not match password: %v", err)
-				}
+			if got.Password != tt.wantPassword {
+				t.Fatalf("password = %q, want %q", got.Password, tt.wantPassword)
 			}
 		})
 	}
@@ -529,8 +546,8 @@ func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := load("", lookupEnvironment(map[string]string{
 				"TORRENTFS_HTTP_AUTH_ENABLED": "true",
-				httpUsernameEnvironment:       "alice",
-				httpPasswordEnvironment:       tt.password,
+				"TORRENTFS_USERNAME":          "alice",
+				"TORRENTFS_PASSWORD":          tt.password,
 			}))
 			if tt.wantErr {
 				if err == nil {
@@ -551,11 +568,25 @@ func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
 	}
 }
 
-func lookupEnvironment(values map[string]string) envLookup {
-	return func(name string) (string, bool) {
-		value, ok := values[name]
-		return value, ok
+// mapEnvironment adapts a map of environment variables to the environment
+// seam. The map is the source of truth for both lookup and enumeration, so a
+// test that adds a variable sees it in both.
+type mapEnvironment map[string]string
+
+// Lookup returns the value of one environment variable.
+func (m mapEnvironment) Lookup(name string) (string, bool) {
+	value, ok := m[name]
+	return value, ok
+}
+
+// Names returns the names of every environment variable that is set.
+func (m mapEnvironment) Names() []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	return names
 }
 
 func writeConfigFile(t *testing.T, body string) string {
@@ -565,4 +596,29 @@ func writeConfigFile(t *testing.T, body string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+// lookupEnvironment injects a fixed set of environment variables. It is the
+// seam the configuration tests drive the loader through.
+func lookupEnvironment(values map[string]string) envLookup {
+	return mapEnvironment(values)
+}
+
+// TestLoadReportsARemovedEnvironmentNameWithTheValueErrors covers the contract
+// that one run reports every problem: a removed environment name is not
+// hidden behind an invalid value.
+func TestLoadReportsARemovedEnvironmentNameWithTheValueErrors(t *testing.T) {
+	path := writeConfigFile(t, "[cache]\ncapacity = \"0B\"\n")
+
+	_, err := load(path, lookupEnvironment(map[string]string{
+		"TORRENTFS_SMB_ENABLED": "true",
+	}))
+	if err == nil {
+		t.Fatal("load accepted a removed environment variable and an invalid value")
+	}
+	for _, want := range []string{"TORRENTFS_SMB_ENABLED", "cache.capacity"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("load error %q does not name %q", err, want)
+		}
+	}
 }

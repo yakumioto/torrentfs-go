@@ -61,7 +61,7 @@ docker run --detach --name torrentfs \
   --mount type=bind,src=/srv/torrents,dst=/torrents \
   --env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
   --env TORRENTFS_HTTP_AUTH_ENABLED=true \
-  --env TORRENTFS_FILESYSTEM_BACKEND=smb \
+  --env TORRENTFS_BACKEND=smb \
   --env TORRENTFS_USERNAME \
   --env TORRENTFS_PASSWORD \
   torrentfs
@@ -92,19 +92,22 @@ mkdir -p ./torrents
 ./torrentfs ./torrents
 ```
 
-`<torrents-dir>` 是唯一必填的位置参数，必须已存在且不是符号链接；省略配置时使用默认值（HTTP `127.0.0.1:8080`、认证关闭、`filesystem.backend=none`）。需要自定义时，复制 `torrentfs.example.toml` 为 `torrentfs.toml` 后用 `-config` 指定。
+`<torrents-dir>` 是唯一必填的位置参数，必须已存在且不是符号链接；省略配置时使用默认值（HTTP `127.0.0.1:8080`、认证关闭、`backend=none`）。需要自定义时，复制 `torrentfs.example.toml` 为 `torrentfs.toml` 后用 `-config` 指定。
 
 ## 访问方式
 
-| `filesystem.backend` | 行为 | 依赖 |
+| `backend` | 行为 | 依赖 |
 | --- | --- | --- |
 | `none`（默认） | 不输出文件树，只保留 Web UI / HTTP API | 无 |
 | `smb` | 内置只读 SMB，导出 `torrentfs` 共享 | 无 FUSE / Samba |
 | `fuse` | 创建只读 FUSE 挂载 | Linux FUSE3、`/dev/fuse`、允许挂载的主机策略 |
 
 ```toml
-[filesystem]
 backend = "smb"   # fuse / smb / none
+
+# 一套凭据服务 SMB 与 HTTP
+username = "torrentfs"
+password = ""      # 优先用 TORRENTFS_PASSWORD 传入
 
 # 选择 fuse 时配置挂载点
 [fuse]
@@ -112,9 +115,9 @@ backend = "smb"   # fuse / smb / none
 
 [smb]
 listen_addr = "0.0.0.0:1445"
-username = "torrentfs"
-password_file = "/run/secrets/torrentfs-password"
 ```
+
+不写 `backend` 就是 `none`：配置了挂载点也不会自动切换到 FUSE，要用 FUSE 必须显式写 `backend = "fuse"`。
 
 **STRM（可选）**：设置播放器可达的 `strm.base_url` 后，SMB 会额外提供 `torrentfs-strm` 共享（FUSE 用 `fuse.strm_mountpoint`），视频会生成一行签名 URL 的 `.strm` 文件：
 
@@ -125,14 +128,118 @@ base_url = "http://192.168.1.10:8080"
 
 `.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。
 
+SMB 的 STRM 共享由 `smb.strm` 三态控制，默认 `auto`（配了 `strm.base_url` 就提供）；`on` 强制提供（必须有 `strm.base_url`），`off` 强制不提供：
+
+```toml
+[smb]
+strm = "off"
+```
+
 ## 配置
 
 - 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
-- 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
-- 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`filesystem.backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
-- `TORRENTFS_*` 环境变量只对文档化的名称生效，不会为每个 TOML 字段自动生成变量。
-- 绑定非 loopback 地址时必须启用认证；Web 登录只校验密码，Bearer token 只存在内存中，重启失效。
+- 完整配置项与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
+- 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
+- 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
+- **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
+- **未知变量会报错**：`TORRENTFS_` 前缀下拼错的名字在启动时会被点名，不会被静默忽略后按默认值启动。`TF_` 前缀是给测试开关、CI 冒烟与 Compose 插值用的，不属于配置命名空间。
+- **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
+- 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
+
+### 配置项速查
+
+下表由配置 schema 生成，与 [torrentfs.example.toml](torrentfs.example.toml) 同源；各配置项的完整注释见该文件。
+
+<!-- BEGIN generated:readme-reference -->
+| 配置项 | 环境变量 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `backend` | `TORRENTFS_BACKEND` | `none` | Backend selects the output backend: none, fuse, or smb. |
+| `username` | `TORRENTFS_USERNAME` | `` | Username is the login name the SMB output accepts. The HTTP login does not check a user name, so the key is only required for the SMB output. |
+| `password` | `TORRENTFS_PASSWORD` | `` | Password is the plaintext password shared by the SMB output and the HTTP login. It is required for the SMB output and for enabled HTTP authentication, and it has no default. |
+| `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | `` | ListenHost is the address the session listens on for peer connections. Empty lets the client pick its default. |
+| `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | `0` | ListenPort is the TCP/UDP port for incoming peer connections. 0 selects a random free port. |
+| `connections.disable_ipv4` | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | `false` | DisableIPv4 turns off every IPv4 listener, dialer, and DHT server. |
+| `connections.disable_ipv6` | `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | `false` | DisableIPv6 turns off every IPv6 listener, dialer, and DHT server. Only one family may be disabled: disabling both leaves no transport. |
+| `connections.no_port_forwarding` | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `true` | NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true so a deployment with no UPnP device behaves the same as one that has a device but no mapping rule. |
+| `connections.bootstrap_nodes` | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `[]` | BootstrapNodes overrides the default DHT bootstrap hosts with explicit host:port entries. Entries are resolved per address family and filtered to the family of the socket that asks for them. Empty uses the client's built-in bootstrap list. |
+| `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | `` | Socks5URL is an optional SOCKS5 or SOCKS5H endpoint. |
+| `cache.capacity` | `TORRENTFS_CACHE_CAPACITY` | `2GiB` | CapacityBytes is the maximum number of bytes retained in memory. |
+| `identity.tracker_user_agent` | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `qBittorrent/4.4.0` | TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces. |
+| `identity.peer_id_prefix` | `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | `-qB4400-` | PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID. |
+| `identity.extended_handshake_client_version` | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `qBittorrent/4.4.0` | ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field. |
+| `http.listen_addr` | `TORRENTFS_HTTP_LISTEN_ADDR` | `127.0.0.1:8080` | ListenAddr is the address the HTTP service binds. Empty disables the service. The default binds loopback only. |
+| `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | `false` | Enabled turns on the HTTP login. It is required for a listener that is not bound to the loopback address. |
+| `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `30m0s` | TokenTTL is the inactivity window of a login token. A valid request slides the window; the tokens live in memory and die with the process. |
+| `http.max_upload_size` | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `10MiB` | MaxUploadBytes caps any uploaded request body: a .torrent upload or a managed subtitle file. |
+| `strm.base_url` | `TORRENTFS_STRM_BASE_URL` | `` | BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse proxy path prefix. Empty disables signed streaming links. |
+| `log.level` | `TORRENTFS_LOG_LEVEL` | `info` | Level is the minimum level of a log record: debug, info, warn, or error. Debug is disabled by default. |
+| `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |
+| `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | `false` | AddSource adds the source file and line to every log record. |
+| `filesystem.read_timeout` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `30s` | ReadTimeout bounds a single read of a piece from the torrent. |
+| `fuse.mountpoint` | `TORRENTFS_FUSE_MOUNTPOINT` | `` | Mountpoint is the directory the file tree is mounted on. |
+| `fuse.strm_mountpoint` | `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `` | STRMMountpoint is the directory the signed-streaming view is mounted on. |
+| `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
+| `smb.listen_addr` | `TORRENTFS_SMB_LISTEN_ADDR` | `0.0.0.0:1445` | ListenAddr is the address the SMB service binds. |
+| `smb.strm` | `TORRENTFS_SMB_STRM` | `auto` | STRM switches the STRM share of the SMB output: auto, on, or off. |
+| `lab.upload_mode` | `TORRENTFS_LAB_UPLOAD_MODE` | `` | UploadMode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
+| `lab.upload_rate` | `TORRENTFS_LAB_UPLOAD_RATE` | `` | UploadRate is the average synthetic growth of the reported upload in inject mode. |
+| `lab.upload_multiplier` | `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | `0` | UploadMultiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
+| `lab.upload_jitter` | `TORRENTFS_LAB_UPLOAD_JITTER` | `0` | UploadJitter is the per-announce deviation from the nominal increment, in percent. |
+| `lab.upload_cap` | `TORRENTFS_LAB_UPLOAD_CAP` | `0B` | UploadCap is the per-torrent ceiling on the cumulative reported upload. |
+| `lab.upload_seed` | `TORRENTFS_LAB_UPLOAD_SEED` | `0` | UploadSeed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
+| `lab.announce_log` | `TORRENTFS_LAB_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |
+| `lab.peer_sample_interval` | `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. |
+<!-- END generated:readme-reference -->
+
+### 检查与查看配置
+
+两个子命令只处理配置，不需要 torrents 目录：
+
+```sh
+# 部署前校验：配置正确时静默退出 0，有问题时打印全部错误并退出 2
+torrentfs config check --config ./torrentfs.toml
+
+# 查看生效配置；口令一律显示为 <redacted>
+torrentfs config print --config ./torrentfs.toml
+torrentfs config print --format json --sources   # 附带每个值的配置来源
+```
+
+`--sources` 会标出每个值来自**内置默认值**、**配置文件**还是**环境变量**，用来排查"为什么没生效"。打印结果是**报告**，不是配置文件——脱敏后的占位符无法回灌。
+
+`config print` 把报告写到标准输出，`config check` 的诊断写到标准错误，所以 `torrentfs config print --format json | jq` 可以直接管道处理。
+
+正常启动时日志里也会记录一份脱敏的生效配置摘要（`effective configuration`）。
+
+
+### 迁移对照表
+
+已删除的名称在启动时会报错并给出替代写法，不会被静默忽略。
+
+本表由程序内的删除表生成（`go run ./internal/config/cmd/config-doc migration-table`），测试会逐行比对两者是否一致。
+
+| 已删除 | 替代写法 |
+| --- | --- |
+| `mount` | `filesystem.read_timeout`、`fuse.allow_other` |
+| `mount.read_timeout` | `filesystem.read_timeout` |
+| `mount.allow_other` | `fuse.allow_other` |
+| `filesystem.backend` | `backend` |
+| `smb.strm_enabled` | `smb.strm` |
+| `http.auth.username` | `username` |
+| `http.auth.password_hash` | `password` |
+| `http.auth.password_hash_file` | `password` |
+| `smb.username` | `username` |
+| `smb.password_file` | `password` |
+| `-mountpoint` | `fuse.mountpoint` |
+| `-strm-mountpoint` | `fuse.strm_mountpoint` |
+| `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
+| `TORRENTFS_MOUNT_ALLOW_OTHER` | `TORRENTFS_FUSE_ALLOW_OTHER` |
+| `TORRENTFS_SMB_ENABLED` | `TORRENTFS_BACKEND` |
+| `TORRENTFS_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
+| `TORRENTFS_FILESYSTEM_BACKEND` | `TORRENTFS_BACKEND` |
+| `TORRENTFS_SMB_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
+| `TORRENTFS_SMB_USERNAME` | `TORRENTFS_USERNAME` |
+| `TORRENTFS_SMB_PASSWORD_FILE` | `TORRENTFS_PASSWORD` |
 
 ## 数据与状态
 

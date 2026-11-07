@@ -39,7 +39,7 @@ RUN chmod 0755 /usr/local/bin/torrentfs-entrypoint
 USER 1000:1000
 WORKDIR /
 # Publish host TCP 445 to container TCP 1445 for native SMB. FUSE is optional
-# and only needs its device/capabilities when filesystem.backend=fuse.
+# and only needs its device/capabilities when backend=fuse.
 EXPOSE 8080 1445/tcp 6881/tcp 6881/udp
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/torrentfs-entrypoint"]
 CMD ["-config", "/etc/torrentfs/torrentfs.toml", "/torrents"]

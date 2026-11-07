@@ -17,17 +17,23 @@ import (
 
 func TestDefault(t *testing.T) {
 	cfg := config.Default()
-	if cfg.Cache.CapacityBytes != 2<<30 {
+	if cfg.Cache.CapacityBytes != config.ByteQuantity(2<<30) {
 		t.Fatalf("Default cache capacity = %d, want %d", cfg.Cache.CapacityBytes, 2<<30)
 	}
 	if cfg.Log != (config.Log{Level: "info", Format: "text"}) {
 		t.Fatalf("Default log = %+v, want info/text", cfg.Log)
 	}
-	if cfg.Mount.AllowOther {
-		t.Fatal("Default mount.allow_other = true, want false")
+	if cfg.FUSE.AllowOther {
+		t.Fatal("Default fuse.allow_other = true, want false")
 	}
-	if time.Duration(cfg.Mount.ReadTimeout) != 30*time.Second {
-		t.Fatalf("Default mount.read_timeout = %s, want 30s", cfg.Mount.ReadTimeout)
+	if time.Duration(cfg.Filesystem.ReadTimeout) != 30*time.Second {
+		t.Fatalf("Default filesystem.read_timeout = %s, want 30s", cfg.Filesystem.ReadTimeout)
+	}
+	if cfg.Backend != config.BackendNone {
+		t.Fatalf("Default backend = %q, want %q", cfg.Backend, config.BackendNone)
+	}
+	if cfg.SMB.STRM != config.STRMAuto {
+		t.Fatalf("Default smb.strm = %q, want %q", cfg.SMB.STRM, config.STRMAuto)
 	}
 	if cfg.Proxy.Socks5URL != "" {
 		t.Fatalf("Default proxy URL = %q, want empty", cfg.Proxy.Socks5URL)
@@ -38,7 +44,7 @@ func TestDefault(t *testing.T) {
 	if cfg.HTTP.ListenAddr != "127.0.0.1:8080" {
 		t.Fatalf("Default listen address = %q, want 127.0.0.1:8080", cfg.HTTP.ListenAddr)
 	}
-	if cfg.HTTP.MaxUploadBytes != 10<<20 {
+	if cfg.HTTP.MaxUploadBytes != config.ByteQuantity(10<<20) {
 		t.Fatalf("Default max upload = %d, want %d", cfg.HTTP.MaxUploadBytes, 10<<20)
 	}
 	if cfg.HTTP.Auth.Enabled {
@@ -82,7 +88,7 @@ level = "debug"
 format = "json"
 add_source = true
 
-[mount]
+[fuse]
 allow_other = true
 `)
 
@@ -99,10 +105,10 @@ allow_other = true
 	if cfg.Log != (config.Log{Level: "debug", Format: "json", AddSource: true}) {
 		t.Fatalf("Log = %+v, want debug/json/source", cfg.Log)
 	}
-	if !cfg.Mount.AllowOther {
-		t.Fatal("Mount.AllowOther = false, want true")
+	if !cfg.FUSE.AllowOther {
+		t.Fatal("FUSE.AllowOther = false, want true")
 	}
-	if cfg.Cache.CapacityBytes != 8192 {
+	if cfg.Cache.CapacityBytes != config.ByteQuantity(8192) {
 		t.Fatalf("CapacityBytes = %d, want 8192", cfg.Cache.CapacityBytes)
 	}
 	wantIdentity := config.Identity{
@@ -115,33 +121,33 @@ allow_other = true
 	}
 }
 
-func TestLoadMountReadTimeout(t *testing.T) {
+func TestLoadFilesystemReadTimeout(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		body string
 		want time.Duration
 	}{
 		{name: "omitted section", body: "", want: 30 * time.Second},
-		{name: "omitted field", body: "[mount]\nallow_other = true\n", want: 30 * time.Second},
-		{name: "seconds", body: "[mount]\nread_timeout = \"30s\"\n", want: 30 * time.Second},
-		{name: "milliseconds", body: "[mount]\nread_timeout = \"250ms\"\n", want: 250 * time.Millisecond},
+		{name: "omitted field", body: "[fuse]\nallow_other = true\n", want: 30 * time.Second},
+		{name: "seconds", body: "[filesystem]\nread_timeout = \"30s\"\n", want: 30 * time.Second},
+		{name: "milliseconds", body: "[filesystem]\nread_timeout = \"250ms\"\n", want: 250 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := config.Load(writeConfig(t, tt.body))
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if time.Duration(cfg.Mount.ReadTimeout) != tt.want {
-				t.Fatalf("Mount.ReadTimeout = %s, want %s", cfg.Mount.ReadTimeout, tt.want)
+			if time.Duration(cfg.Filesystem.ReadTimeout) != tt.want {
+				t.Fatalf("Filesystem.ReadTimeout = %s, want %s", cfg.Filesystem.ReadTimeout, tt.want)
 			}
 		})
 	}
 }
 
-func TestLoadRejectsInvalidMountReadTimeout(t *testing.T) {
+func TestLoadRejectsInvalidFilesystemReadTimeout(t *testing.T) {
 	for _, raw := range []string{"30", `"30"`, `"invalid"`, `""`, `"0s"`, `"-1s"`} {
 		t.Run(raw, func(t *testing.T) {
-			_, err := config.Load(writeConfig(t, "[mount]\nread_timeout = "+raw+"\n"))
+			_, err := config.Load(writeConfig(t, "[filesystem]\nread_timeout = "+raw+"\n"))
 			if err == nil {
 				t.Fatal("Load succeeded")
 			}
@@ -154,14 +160,14 @@ func TestLoadRejectsInvalidMountReadTimeout(t *testing.T) {
 
 func TestLoadHTTPSection(t *testing.T) {
 	path := writeConfig(t, `
+password = "a-password"
+
 [http]
 listen_addr = "127.0.0.1:9000"
 max_upload_size = "2048B"
 
 [http.auth]
 enabled = true
-username = "test-user"
-password_hash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 token_ttl = "45m"
 `)
 
@@ -172,16 +178,16 @@ token_ttl = "45m"
 	if cfg.HTTP.ListenAddr != "127.0.0.1:9000" {
 		t.Fatalf("ListenAddr = %q", cfg.HTTP.ListenAddr)
 	}
-	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.Auth.Username != "test-user" {
-		t.Fatalf("Auth = %+v, want enabled test-user", cfg.HTTP.Auth)
+	if !cfg.HTTP.Auth.Enabled {
+		t.Fatalf("Auth = %+v, want enabled", cfg.HTTP.Auth)
 	}
-	if cfg.HTTP.Auth.PasswordHash == "" || cfg.HTTP.Auth.PasswordHashFile != "" {
-		t.Fatalf("Auth password hash source = %+v, want inline hash", cfg.HTTP.Auth)
+	if cfg.Password != "a-password" {
+		t.Fatalf("Password = %q, want the configured password", cfg.Password)
 	}
 	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 45*time.Minute {
 		t.Fatalf("Auth token TTL = %s, want 45m", cfg.HTTP.Auth.TokenTTL)
 	}
-	if cfg.HTTP.MaxUploadBytes != 2048 {
+	if cfg.HTTP.MaxUploadBytes != config.ByteQuantity(2048) {
 		t.Fatalf("MaxUploadBytes = %d, want 2048", cfg.HTTP.MaxUploadBytes)
 	}
 }
@@ -258,8 +264,14 @@ func TestLoadUsesDefaultsForOmittedValues(t *testing.T) {
 	if cfg.Log != defaults.Log {
 		t.Fatalf("Log = %+v, want defaults %+v", cfg.Log, defaults.Log)
 	}
-	if cfg.Mount != defaults.Mount {
-		t.Fatalf("Mount = %+v, want defaults %+v", cfg.Mount, defaults.Mount)
+	if cfg.Filesystem != defaults.Filesystem {
+		t.Fatalf("Filesystem = %+v, want defaults %+v", cfg.Filesystem, defaults.Filesystem)
+	}
+	if cfg.FUSE != defaults.FUSE {
+		t.Fatalf("FUSE = %+v, want defaults %+v", cfg.FUSE, defaults.FUSE)
+	}
+	if cfg.SMB != defaults.SMB {
+		t.Fatalf("SMB = %+v, want defaults %+v", cfg.SMB, defaults.SMB)
 	}
 }
 
@@ -403,54 +415,6 @@ func TestValidateRejectsInvalidAuth(t *testing.T) {
 		field string
 	}{
 		{
-			name: "enabled without username",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Enabled = true
-				cfg.HTTP.Auth.PasswordHash = "hash"
-			},
-			field: "http.auth.username",
-		},
-		{
-			name: "enabled without password hash",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Enabled = true
-				cfg.HTTP.Auth.Username = "alice"
-			},
-			field: "http.auth.password_hash",
-		},
-		{
-			name: "both password hash sources",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth = config.Auth{
-					Enabled:          true,
-					Username:         "alice",
-					PasswordHash:     "hash",
-					PasswordHashFile: "hash-file",
-					TokenTTL:         config.Duration(30 * time.Minute),
-				}
-			},
-			field: "http.auth.password_hash",
-		},
-		{
-			name: "disabled with credentials",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth.Username = "alice"
-			},
-			field: "http.auth.username",
-		},
-		{
-			name: "username control character",
-			setup: func(cfg *config.Config) {
-				cfg.HTTP.Auth = config.Auth{
-					Enabled:      true,
-					Username:     "alice\n",
-					PasswordHash: "hash",
-					TokenTTL:     config.Duration(time.Minute),
-				}
-			},
-			field: "http.auth.username",
-		},
-		{
 			name: "non-positive token TTL",
 			setup: func(cfg *config.Config) {
 				cfg.HTTP.Auth.TokenTTL = 0
@@ -524,16 +488,16 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 		{
 			name: "zero read timeout",
 			setup: func(cfg *config.Config) {
-				cfg.Mount.ReadTimeout = 0
+				cfg.Filesystem.ReadTimeout = 0
 			},
-			field: "mount.read_timeout",
+			field: "filesystem.read_timeout",
 		},
 		{
 			name: "negative read timeout",
 			setup: func(cfg *config.Config) {
-				cfg.Mount.ReadTimeout = config.Duration(-time.Second)
+				cfg.Filesystem.ReadTimeout = config.Duration(-time.Second)
 			},
-			field: "mount.read_timeout",
+			field: "filesystem.read_timeout",
 		},
 		{
 			name: "wrong proxy scheme",
@@ -702,19 +666,21 @@ func TestValidateAcceptsExposedAddressWithAuth(t *testing.T) {
 	cfg := config.Default()
 	cfg.HTTP.ListenAddr = "0.0.0.0:9000"
 	cfg.HTTP.Auth = config.Auth{
-		Enabled:      true,
-		Username:     "test-user",
-		PasswordHash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
-		TokenTTL:     config.Duration(30 * time.Minute),
+		Enabled:  true,
+		TokenTTL: config.Duration(30 * time.Minute),
 	}
+	cfg.Password = "a-password"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate exposed address with auth: %v", err)
 	}
 
+	// HTTP may be switched off while the FUSE output serves the process.
 	cfg = config.Default()
-	cfg.HTTP.ListenAddr = "" // HTTP disabled
+	cfg.Backend = config.BackendFUSE
+	cfg.FUSE.Mountpoint = "/mnt/torrentfs"
+	cfg.HTTP.ListenAddr = ""
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate disabled HTTP: %v", err)
+		t.Fatalf("Validate disabled HTTP with the FUSE output: %v", err)
 	}
 }
 
@@ -785,10 +751,10 @@ token_ttl = "30m"
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Cache.CapacityBytes != 32_000_000 {
+	if cfg.Cache.CapacityBytes != config.ByteQuantity(32_000_000) {
 		t.Fatalf("Cache.CapacityBytes = %d, want 32000000", cfg.Cache.CapacityBytes)
 	}
-	if cfg.HTTP.MaxUploadBytes != 8_000_000_000 {
+	if cfg.HTTP.MaxUploadBytes != config.ByteQuantity(8_000_000_000) {
 		t.Fatalf("HTTP.MaxUploadBytes = %d, want 8000000000", cfg.HTTP.MaxUploadBytes)
 	}
 	if time.Duration(cfg.HTTP.Auth.TokenTTL) != 30*time.Minute {
@@ -824,7 +790,7 @@ func TestLoadRejectsByteQuantityWithoutUnit(t *testing.T) {
 
 func TestValidateRejectsCacheWatermarkOverflow(t *testing.T) {
 	cfg := config.Default()
-	cfg.Cache.CapacityBytes = 9223372036854775807/7 + 1
+	cfg.Cache.CapacityBytes = config.ByteQuantity(9223372036854775807/7 + 1)
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted a cache capacity that overflows watermark calculation")
 	}

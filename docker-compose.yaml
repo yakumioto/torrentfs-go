@@ -2,7 +2,7 @@
 # Set TORRENTFS_PASSWORD in a private .env file and choose a published image tag.
 # Create ./torrents with the UID/GID below, or inspect existing ownership first.
 # Defaults expose HTTP/SMB on host loopback only. To use a LAN player, set
-# TORRENTFS_BIND_ADDRESS to this host's trusted LAN IP and use firewall rules.
+# TF_BIND_ADDRESS to this host's trusted LAN IP and use firewall rules.
 #   docker compose up -d
 #   docker compose logs -f torrentfs
 services:
@@ -16,8 +16,8 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "${TORRENTFS_BIND_ADDRESS:-127.0.0.1}:445:1445/tcp"
-      - "${TORRENTFS_BIND_ADDRESS:-127.0.0.1}:8080:8080/tcp"
+      - "${TF_BIND_ADDRESS:-127.0.0.1}:445:1445/tcp"
+      - "${TF_BIND_ADDRESS:-127.0.0.1}:8080:8080/tcp"
       - "6881:6881/tcp"
       - "6881:6881/udp"
     volumes:
@@ -26,22 +26,26 @@ services:
         target: /torrents
         bind:
           create_host_path: false
-      # Optional custom TOML; filesystem.backend can also be selected there.
+      # Optional custom TOML; backend can also be selected there.
       # Remove the corresponding environment override below when using TOML.
       # - ./torrentfs.toml:/etc/torrentfs/torrentfs.toml:ro
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
-      TORRENTFS_FILESYSTEM_BACKEND: "smb"
+      TORRENTFS_BACKEND: "smb"
       TORRENTFS_SMB_LISTEN_ADDR: "0.0.0.0:1445"
       TORRENTFS_HTTP_LISTEN_ADDR: "0.0.0.0:8080"
       TORRENTFS_HTTP_AUTH_ENABLED: "true"
+      # One credential pair serves the SMB login and the HTTP login. The HTTP
+      # login checks the password only.
       TORRENTFS_USERNAME: "torrentfs"
-      # Environment secrets remain visible to Docker administrators. For SMB
-      # without shared HTTP credentials, prefer smb.password_file in TOML.
+      # Environment secrets remain visible to Docker administrators. Keep the
+      # password in a private .env file rather than in this template.
       TORRENTFS_PASSWORD: "${TORRENTFS_PASSWORD:?set a strong shared HTTP/SMB password}"
       # Optional STRM share; the URL must be reachable from the player.
       # TORRENTFS_STRM_BASE_URL: "http://192.168.1.10:8080"
-      TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
-      TORRENTFS_CACHE_CAPACITY: "2GiB"
-      TORRENTFS_FILESYSTEM_READ_TIMEOUT: "30s"
+      # The peer port and the cache capacity keep their image defaults; set
+      # them here only to change them.
+      # TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
+      # TORRENTFS_CACHE_CAPACITY: "2GiB"
+      # TORRENTFS_FILESYSTEM_READ_TIMEOUT: "30s"

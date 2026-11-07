@@ -14,14 +14,14 @@ func loadFilesystemTest(t *testing.T, text string, env map[string]string) (Confi
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return load(path, func(name string) (string, bool) { value, ok := env[name]; return value, ok })
+	return load(path, lookupEnvironment(env))
 }
 
 func TestFilesystemSelectionAndUnusedBackendSettings(t *testing.T) {
-	for _, backend := range []string{BackendNone, BackendFUSE, BackendSMB} {
-		t.Run(backend, func(t *testing.T) {
-			text := "[filesystem]\nbackend = \"" + backend + "\"\nread_timeout = \"2s\"\n" +
-				"[fuse]\nmountpoint = \"/not-required-in-smb\"\n[smb]\npassword_file = \"/not-required-in-fuse\"\n"
+	for _, backend := range []Backend{BackendNone, BackendFUSE, BackendSMB} {
+		t.Run(string(backend), func(t *testing.T) {
+			text := "backend = \"" + string(backend) + "\"\n[filesystem]\nread_timeout = \"2s\"\n" +
+				"[fuse]\nmountpoint = \"/not-required-in-smb\"\n"
 			env := map[string]string{}
 			if backend == BackendSMB {
 				env["TORRENTFS_USERNAME"] = "a user"
@@ -31,11 +31,8 @@ func TestFilesystemSelectionAndUnusedBackendSettings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := cfg.ResolveFilesystem("", ""); err != nil {
-				t.Fatal(err)
-			}
-			if cfg.Filesystem.Backend != backend || cfg.Filesystem.ReadTimeout != Duration(2*time.Second) {
-				t.Fatalf("selection = %+v", cfg.Filesystem)
+			if cfg.Backend != backend || cfg.Filesystem.ReadTimeout != Duration(2*time.Second) {
+				t.Fatalf("selection = %+v %+v", cfg.Backend, cfg.Filesystem)
 			}
 			if backend != BackendFUSE && cfg.FUSE.Mountpoint == "" {
 				t.Fatal("unselected backend settings were discarded")
@@ -44,89 +41,51 @@ func TestFilesystemSelectionAndUnusedBackendSettings(t *testing.T) {
 	}
 }
 
-func TestFilesystemLegacyCLIAndConflictingSelection(t *testing.T) {
-	cfg, err := loadFilesystemTest(t, "", nil)
+func TestFilesystemFUSEMountpointDoesNotSelectBackend(t *testing.T) {
+	cfg, err := loadFilesystemTest(t, "[fuse]\nmountpoint = \"/virtual-mount\"\n", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.ResolveFilesystem("/virtual-mount", ""); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Filesystem.Backend != BackendFUSE || cfg.FUSE.Mountpoint != "/virtual-mount" {
-		t.Fatalf("legacy flags: %+v", cfg.FUSE)
-	}
-	for _, backend := range []string{BackendNone, BackendSMB} {
-		cfg, err := loadFilesystemTest(t, "[filesystem]\nbackend=\""+backend+"\"", map[string]string{
-			"TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": "test-only-password",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := cfg.ResolveFilesystem("/mount", ""); err == nil {
-			t.Fatalf("%s accepted FUSE CLI flags", backend)
-		}
-	}
-	cfg, err = loadFilesystemTest(t, "[filesystem]\nbackend=\"fuse\"", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cfg.ResolveFilesystem("", ""); err == nil {
-		t.Fatal("FUSE without a mountpoint accepted")
+	if cfg.Backend != BackendNone {
+		t.Fatalf("backend = %q, want the default %q", cfg.Backend, BackendNone)
 	}
 }
 
-func TestFilesystemLegacyAliasesAndConflicts(t *testing.T) {
-	cfg, err := loadFilesystemTest(t, "[mount]\nread_timeout=\"3s\"\nallow_other=true", nil)
-	if err != nil {
-		t.Fatal(err)
+func TestFilesystemFUSEWithoutMountpointIsRejected(t *testing.T) {
+	_, err := loadFilesystemTest(t, "backend=\"fuse\"", nil)
+	if err == nil {
+		t.Fatal("FUSE without a mountpoint accepted")
 	}
-	if cfg.Filesystem.ReadTimeout != Duration(3*time.Second) || !cfg.FUSE.AllowOther {
-		t.Fatalf("legacy aliases: %+v %+v", cfg.Filesystem, cfg.FUSE)
+	if !strings.Contains(err.Error(), "fuse.mountpoint") {
+		t.Fatalf("load error = %q, want fuse.mountpoint", err)
 	}
+}
+
+func TestFilesystemRejectsInvalidValues(t *testing.T) {
 	for _, text := range []string{
-		"[mount]\nread_timeout=\"3s\"\n[filesystem]\nread_timeout=\"4s\"",
-		"[mount]\nallow_other=true\n[fuse]\nallow_other=false",
-		"[filesystem]\nbackend=\"unsupported\"",
+		"backend=\"unsupported\"",
 		"[filesystem]\nread_timeout=\"0s\"",
 	} {
 		if _, err := loadFilesystemTest(t, text, nil); err == nil {
 			t.Fatalf("accepted invalid configuration %q", text)
 		}
 	}
-	if _, err := loadFilesystemTest(t, "", map[string]string{
-		"TORRENTFS_MOUNT_READ_TIMEOUT": "3s", "TORRENTFS_FILESYSTEM_READ_TIMEOUT": "4s",
-	}); err == nil {
-		t.Fatal("conflicting timeout environment accepted")
-	}
-	if _, err := loadFilesystemTest(t, "", map[string]string{
-		"TORRENTFS_MOUNT_ALLOW_OTHER": "true", "TORRENTFS_FUSE_ALLOW_OTHER": "false",
-	}); err == nil {
-		t.Fatal("conflicting FUSE environment accepted")
-	}
-	if _, err := loadFilesystemTest(t, "[filesystem]\nbackend=\"none\"", map[string]string{
-		"TORRENTFS_SMB_ENABLED": "true",
-	}); err == nil {
-		t.Fatal("conflicting legacy SMB selector accepted")
-	}
 }
 
-func TestSMBSecretAndHTTPDisabled(t *testing.T) {
-	secret := filepath.Join(t.TempDir(), "smb-password")
-	if err := os.WriteFile(secret, []byte("  secret-with-spaces  \r\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	text := "[filesystem]\nbackend=\"smb\"\n[http]\nlisten_addr=\"\"\n" +
-		"[http.auth]\nenabled=true\nusername=\"\"\ntoken_ttl=\"0s\"\n" +
-		"[smb]\nusername=\"not-a-Unix-account@example\"\npassword_file=\"" + secret + "\""
+// TestUnifiedCredentialsServeTheSMBOutput covers the shared credentials: the
+// SMB output uses the top-level user name and password.
+func TestUnifiedCredentialsServeTheSMBOutput(t *testing.T) {
+	text := "backend=\"smb\"\nusername=\"not-a-Unix-account@example\"\npassword=\"  secret-with-spaces  \"\n" +
+		"[http]\nlisten_addr=\"\"\n"
 	cfg, err := loadFilesystemTest(t, text, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SMB.Password != "  secret-with-spaces  " {
-		t.Fatal("password whitespace was changed")
+	if cfg.Username != "not-a-Unix-account@example" {
+		t.Fatalf("username = %q, want the configured user name", cfg.Username)
 	}
-	if err := cfg.ResolveFilesystem("", ""); err != nil {
-		t.Fatal(err)
+	if cfg.Password != "  secret-with-spaces  " {
+		t.Fatal("password whitespace was changed")
 	}
 	cfg, err = loadFilesystemTest(t, text, map[string]string{
 		"TORRENTFS_USERNAME": "overridden", "TORRENTFS_PASSWORD": strings.Repeat("p", 128),
@@ -134,16 +93,18 @@ func TestSMBSecretAndHTTPDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SMB.Username != "overridden" || len(cfg.SMB.Password) != 128 {
-		t.Fatal("shared credential override was not applied")
+	if cfg.Username != "overridden" || len(cfg.Password) != 128 {
+		t.Fatal("the environment did not override the credentials")
 	}
 }
 
-func TestSMBInvalidSecretsAreNotDisclosed(t *testing.T) {
+// TestInvalidCredentialsAreNotDisclosed covers the secrecy requirement: no
+// error message names the password value.
+func TestInvalidCredentialsAreNotDisclosed(t *testing.T) {
 	const secret = "must-not-appear-in-errors"
 	for _, text := range []string{
-		"[smb]\npassword=\"" + secret + "\"",
-		"[filesystem]\nbackend=\"smb\"\n[smb]\nusername=\"user\"\npassword_file=\"/does-not-exist\"",
+		"backend=\"smb\"\nusername=\"user\"\npassword=\"" + secret + "\n",
+		"backend=\"none\"\npassword=\"" + secret + strings.Repeat("x", 80) + "\"\n[http.auth]\nenabled=true\n",
 	} {
 		_, err := loadFilesystemTest(t, text, nil)
 		if err == nil {
@@ -154,9 +115,9 @@ func TestSMBInvalidSecretsAreNotDisclosed(t *testing.T) {
 		}
 	}
 	for _, env := range []map[string]string{
-		{"TORRENTFS_FILESYSTEM_BACKEND": "smb", "TORRENTFS_USERNAME": "user"},
-		{"TORRENTFS_FILESYSTEM_BACKEND": "smb", "TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": ""},
-		{"TORRENTFS_FILESYSTEM_BACKEND": "smb", "TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": secret + "\n"},
+		{"TORRENTFS_BACKEND": "smb", "TORRENTFS_USERNAME": "user"},
+		{"TORRENTFS_BACKEND": "smb", "TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": ""},
+		{"TORRENTFS_BACKEND": "smb", "TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": secret + "\n"},
 	} {
 		_, err := loadFilesystemTest(t, "", env)
 		if err == nil {
@@ -165,5 +126,36 @@ func TestSMBInvalidSecretsAreNotDisclosed(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatal("environment password disclosed")
 		}
+	}
+}
+
+// TestSMBListenAddrExplicitEmptyIsRejected covers the decision that an
+// explicitly empty listen address is a configuration mistake rather than a
+// request for the default address: silently restoring the default hides a
+// typo that would otherwise expose the SMB port on every interface.
+func TestSMBListenAddrExplicitEmptyIsRejected(t *testing.T) {
+	_, err := loadFilesystemTest(t, "backend=\"smb\"\n[smb]\nlisten_addr=\"\"\n", map[string]string{
+		"TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": "test-only-password",
+	})
+	if err == nil {
+		t.Fatal("an explicitly empty smb.listen_addr was accepted")
+	}
+	if !strings.Contains(err.Error(), "smb.listen_addr") {
+		t.Fatalf("load error = %q, want smb.listen_addr", err)
+	}
+}
+
+// TestSMBListenAddrOmittedKeepsDefault checks that an omitted listen address
+// still yields the built-in default, so the single default source stays
+// authoritative.
+func TestSMBListenAddrOmittedKeepsDefault(t *testing.T) {
+	cfg, err := loadFilesystemTest(t, "backend=\"smb\"\n", map[string]string{
+		"TORRENTFS_USERNAME": "user", "TORRENTFS_PASSWORD": "test-only-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SMB.ListenAddr != "0.0.0.0:1445" {
+		t.Fatalf("smb.listen_addr = %q, want the built-in default", cfg.SMB.ListenAddr)
 	}
 }

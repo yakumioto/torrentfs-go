@@ -50,7 +50,7 @@ func newLoopbackSessionWithCustomize(t *testing.T, cfg config.Config, torrentsDi
 // seeder that already holds the data and a leecher with an empty data
 // directory discover each other through a loopback HTTP tracker, and the
 // leecher streams the content through a real FUSE mount. It skips (or fails
-// under TORRENTFS_FUSE_REQUIRED=1) where FUSE is unavailable.
+// under TF_FUSE_REQUIRED=1) where FUSE is unavailable.
 func TestFuseSwarmStreamsFromSeeder(t *testing.T) {
 	requireFuse(t)
 

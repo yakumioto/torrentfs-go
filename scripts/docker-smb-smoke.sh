@@ -4,8 +4,8 @@ IFS=$'\n\t'
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-smb-smoke:${BASHPID}}"
-readonly CLIENT_IMAGE="${TORRENTFS_SMOKE_CLIENT_IMAGE:-torrentfs-smb-client:${BASHPID}}"
+readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-smb-smoke:${BASHPID}}"
+readonly CLIENT_IMAGE="${TF_SMOKE_CLIENT_IMAGE:-torrentfs-smb-client:${BASHPID}}"
 readonly NETWORK="torrentfs-smb-network-${BASHPID}"
 readonly APP_PREFIX="torrentfs-smb-app-${BASHPID}"
 readonly CLIENT_CREDENTIALS_NAME="smb-credentials"
@@ -18,8 +18,8 @@ readonly START_TIMEOUT=60
 # web-seeded download finishes comfortably inside this bound on a slow runner.
 readonly CLIENT_TIMEOUT=180
 readonly CLIENT_SMB_TIMEOUT=120
-readonly SMOKE_UID="${TORRENTFS_SMOKE_UID:-99}"
-readonly SMOKE_GID="${TORRENTFS_SMOKE_GID:-100}"
+readonly SMOKE_UID="${TF_SMOKE_UID:-99}"
+readonly SMOKE_GID="${TF_SMOKE_GID:-100}"
 readonly FILE_SIZE=$((64 * 1024 * 1024 + 123))
 readonly PIECE_LENGTH=$((1 * 1024 * 1024))
 # Smaller than the payload and large enough for the reader's readahead window;
@@ -403,14 +403,14 @@ torrent_hash="$(<"$work_dir/infohash")"
 canonical_torrent="$torrents_dir/$torrent_hash.torrent"
 cp -- "$canonical_torrent" "$torrents_dir/manual-copy.torrent"
 
-if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+if [[ -n "${TF_SMOKE_IMAGE:-}" ]]; then
 	probe 'inspect prebuilt application image' docker image inspect "$IMAGE" >/dev/null
 else
 	printf 'docker SMB smoke: building native application image for %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
 	bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "$ROOT_DIR"
 	image_built=1
 fi
-if [[ -n "${TORRENTFS_SMOKE_CLIENT_IMAGE:-}" ]]; then
+if [[ -n "${TF_SMOKE_CLIENT_IMAGE:-}" ]]; then
 	probe 'inspect prebuilt client image' docker image inspect "$CLIENT_IMAGE" >/dev/null
 else
 	printf 'docker SMB smoke: building SMB client image\n'
@@ -438,7 +438,7 @@ start_app() {
 	local env_args=(
 		--env "PUID=$SMOKE_UID"
 		--env "PGID=$SMOKE_GID"
-		--env TORRENTFS_FILESYSTEM_BACKEND=smb
+		--env TORRENTFS_BACKEND=smb
 		--env "TORRENTFS_USERNAME=$smb_user"
 		--env "TORRENTFS_PASSWORD=$smb_password"
 		# The cache capacity accepts only a byte quantity with an explicit unit;
@@ -702,8 +702,8 @@ printf 'docker SMB smoke: authentication, listing, full read, guest denial, and 
 # one, because that is the only client path that issues true pread-style ranges
 # instead of a sequential download. Hosts without the CIFS module are reported
 # as such; a mount that succeeds but returns wrong bytes is never skipped.
-if [[ "${TORRENTFS_SMB_SKIP_CIFS:-0}" == 1 ]]; then
-	printf 'docker SMB smoke: skipping CIFS positional-read check because TORRENTFS_SMB_SKIP_CIFS=1\n'
+if [[ "${TF_SMB_SKIP_CIFS:-0}" == 1 ]]; then
+	printf 'docker SMB smoke: skipping CIFS positional-read check because TF_SMB_SKIP_CIFS=1\n'
 else
 	expected_range="$(dd if="$webseed_dir/payload.bin" bs=1 skip="$RANDOM_OFFSET" count="$RANDOM_LENGTH" status=none | sha256sum | awk '{ print $1 }')"
 	range_output="$work_dir/range-output"

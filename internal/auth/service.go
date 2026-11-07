@@ -1,4 +1,4 @@
-// Package auth provides single-user password authentication and in-memory tokens.
+// Package auth provides password authentication and in-memory tokens.
 package auth
 
 import (
@@ -8,11 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -20,13 +17,12 @@ import (
 )
 
 const (
-	tokenSize            = 32
-	minimumPasswordCost  = 10
-	maxPasswordHashBytes = 1024
+	tokenSize           = 32
+	minimumPasswordCost = 10
 )
 
 var (
-	// ErrInvalidCredentials is returned when a login does not match the configured user.
+	// ErrInvalidCredentials is returned when a login does not match the configured password.
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrInvalidToken is returned when a token is missing, expired, unknown, or revoked.
 	ErrInvalidToken = errors.New("invalid token")
@@ -51,20 +47,20 @@ func (e *ConfigError) Is(target error) bool {
 	return target == config.ErrInvalid
 }
 
-// Principal identifies the configured user authenticated by a token.
-type Principal struct {
-	Username string
-}
+// Principal identifies the authenticated caller of a token.
+//
+// The login checks the password only, so the principal carries no user name:
+// the credentials are a single password, and the HTTP login does not ask for
+// one.
+type Principal struct{}
 
 type tokenEntry struct {
-	username  string
 	expiresAt time.Time
 }
 
-// Service authenticates the configured user and owns the in-memory token store.
+// Service authenticates the configured password and owns the in-memory token store.
 type Service struct {
 	mu           sync.Mutex
-	username     string
 	passwordHash []byte
 	tokenTTL     time.Duration
 	tokens       map[[sha256.Size]byte]tokenEntry
@@ -73,16 +69,15 @@ type Service struct {
 	closed       bool
 }
 
-// New validates the authentication configuration and creates an empty token store.
-func New(cfg config.Auth) (*Service, error) {
+// New creates an authentication service from the configured settings and the
+// bcrypt hash of the password.
+//
+// The hash is the input rather than the plaintext password: the configuration
+// layer owns the credentials and turns the plaintext into a hash once, so the
+// service never sees the plaintext and never reads a file to obtain it.
+func New(cfg config.Auth, passwordHash []byte) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, invalidConfig("http.auth.enabled", errors.New("authentication is disabled"))
-	}
-	if cfg.Username == "" {
-		return nil, invalidConfig("http.auth.username", errors.New("must not be empty"))
-	}
-	if strings.IndexFunc(cfg.Username, unicode.IsControl) >= 0 {
-		return nil, invalidConfig("http.auth.username", errors.New("must not contain control characters"))
 	}
 	if cfg.TokenTTL <= 0 {
 		return nil, invalidConfig("http.auth.token_ttl", errors.New("must be positive"))
@@ -90,27 +85,18 @@ func New(cfg config.Auth) (*Service, error) {
 	if time.Duration(cfg.TokenTTL) > 24*time.Hour {
 		return nil, invalidConfig("http.auth.token_ttl", errors.New("must not exceed 24 hours"))
 	}
-
-	hasPasswordHash := cfg.PasswordHash != ""
-	hasPasswordHashFile := cfg.PasswordHashFile != ""
-	if hasPasswordHash == hasPasswordHashFile {
-		return nil, invalidConfig("http.auth.password_hash", errors.New("exactly one password hash source is required"))
-	}
-
-	passwordHash, field, err := loadPasswordHash(cfg)
-	if err != nil {
-		return nil, invalidConfig(field, err)
+	if len(passwordHash) == 0 {
+		return nil, invalidConfig("password", errors.New("a password hash is required"))
 	}
 	cost, err := bcrypt.Cost(passwordHash)
 	if err != nil {
-		return nil, invalidConfig(field, errors.New("must be a valid bcrypt hash"))
+		return nil, invalidConfig("password", errors.New("must be a valid bcrypt hash"))
 	}
 	if cost < minimumPasswordCost {
-		return nil, invalidConfig(field, fmt.Errorf("bcrypt cost must be at least %d", minimumPasswordCost))
+		return nil, invalidConfig("password", fmt.Errorf("bcrypt cost must be at least %d", minimumPasswordCost))
 	}
 
 	return &Service{
-		username:     cfg.Username,
 		passwordHash: passwordHash,
 		tokenTTL:     time.Duration(cfg.TokenTTL),
 		tokens:       make(map[[sha256.Size]byte]tokenEntry),
@@ -121,57 +107,6 @@ func New(cfg config.Auth) (*Service, error) {
 
 func invalidConfig(field string, cause error) error {
 	return &ConfigError{Field: field, Cause: cause}
-}
-
-func loadPasswordHash(cfg config.Auth) ([]byte, string, error) {
-	if cfg.PasswordHashFile != "" {
-		passwordHash, err := readPasswordHashFile(cfg.PasswordHashFile)
-		return passwordHash, "http.auth.password_hash_file", err
-	}
-	return []byte(cfg.PasswordHash), "http.auth.password_hash", nil
-}
-
-func readPasswordHashFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("read password hash file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("password hash file must not be a symbolic link")
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("password hash file must be regular")
-	}
-	permissions := info.Mode().Perm()
-	if permissions&0o400 == 0 || permissions&0o077 != 0 {
-		return nil, errors.New("password hash file must be owner-readable only")
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read password hash file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat password hash file: %w", err)
-	}
-	if !os.SameFile(info, openedInfo) {
-		return nil, errors.New("password hash file changed while opening")
-	}
-
-	data, err := io.ReadAll(io.LimitReader(file, maxPasswordHashBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read password hash file: %w", err)
-	}
-	if len(data) > maxPasswordHashBytes {
-		return nil, errors.New("password hash file is too large")
-	}
-	hash := strings.TrimSpace(string(data))
-	if hash == "" {
-		return nil, errors.New("password hash file is empty")
-	}
-	return []byte(hash), nil
 }
 
 // Login verifies credentials, creates a random opaque token, and returns its expiry.
@@ -208,7 +143,7 @@ func (s *Service) Login(password string) (string, time.Time, error) {
 			continue
 		}
 		expiresAt := now.Add(s.tokenTTL)
-		s.tokens[key] = tokenEntry{username: s.username, expiresAt: expiresAt}
+		s.tokens[key] = tokenEntry{expiresAt: expiresAt}
 		s.mu.Unlock()
 		return token, expiresAt, nil
 	}
@@ -234,7 +169,7 @@ func (s *Service) Authenticate(token string, renew bool) (Principal, time.Time, 
 		entry.expiresAt = now.Add(s.tokenTTL)
 		s.tokens[key] = entry
 	}
-	return Principal{Username: entry.username}, entry.expiresAt, nil
+	return Principal{}, entry.expiresAt, nil
 }
 
 // Revoke removes a token without extending its expiry.

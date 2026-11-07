@@ -94,7 +94,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        test "${TORRENTFS_FUSE_REQUIRED:-}" = "1"
+        test "${TF_FUSE_REQUIRED:-}" = "1"
         test -e /dev/fuse
 
     - name: Real-mount smoke, concurrency, error, and swarm tests

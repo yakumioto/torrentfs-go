@@ -180,7 +180,7 @@ func TestStreamCorruptKeyFailsStartupAndReleasesLock(t *testing.T) {
 func TestStreamPeerlessReadTimeoutAndCancellation(t *testing.T) {
 	cfg := testConfig()
 	cfg.STRM.BaseURL = "http://example.test"
-	cfg.Mount.ReadTimeout = config.Duration(100 * time.Millisecond)
+	cfg.Filesystem.ReadTimeout = config.Duration(100 * time.Millisecond)
 	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
 	data := bytes.Repeat([]byte("no peer data"), 128)
 	metainfoBytes, hash := buildSingleFileTorrentBytes(t, "Movie.mkv", data, nil)

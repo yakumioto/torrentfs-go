@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,11 +32,22 @@ func TestLoadSTRM(t *testing.T) {
 	}
 }
 
-func TestFileConfigPreservesSTRM(t *testing.T) {
-	cfg := Default()
-	cfg.STRM.BaseURL = "https://media.example/torrentfs/"
-	if got := newFileConfig(cfg).runtimeConfig(); !reflect.DeepEqual(got, cfg) {
-		t.Fatalf("file config round trip = %+v, want %+v", got, cfg)
+// TestLoadKeepsDefaultWhenDocumentOmitsSection checks that a document that
+// omits a section keeps the built-in default, which is only possible when the
+// document is decoded onto the default configuration.
+func TestLoadKeepsDefaultWhenDocumentOmitsSection(t *testing.T) {
+	cfg, err := load(writeConfigFile(t, "[connections]\nlisten_port = 1234\n"), lookupEnvironment(nil))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.STRM.BaseURL != Default().STRM.BaseURL {
+		t.Fatalf("STRM.BaseURL = %q, want the built-in default %q", cfg.STRM.BaseURL, Default().STRM.BaseURL)
+	}
+	if cfg.Filesystem != Default().Filesystem {
+		t.Fatalf("Filesystem = %+v, want defaults %+v", cfg.Filesystem, Default().Filesystem)
+	}
+	if cfg.SMB.ListenAddr != Default().SMB.ListenAddr {
+		t.Fatalf("SMB.ListenAddr = %q, want the built-in default %q", cfg.SMB.ListenAddr, Default().SMB.ListenAddr)
 	}
 }
 

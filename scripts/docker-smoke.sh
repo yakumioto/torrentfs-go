@@ -16,7 +16,7 @@ readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
 readonly FIXTURE_INFO_HASH="dd45d0108ac27c3c0fb1d7b28fd2b313c753bc9b"
 readonly MOUNTED_PAYLOAD="/mnt/payload.txt"
 readonly LEGACY_STATS_MARKER="/torrents/.stats/leftover.txt"
-readonly IMAGE="${TORRENTFS_SMOKE_IMAGE:-torrentfs-mio17-smoke:${BASHPID}}"
+readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-mio17-smoke:${BASHPID}}"
 readonly CONTAINER="torrentfs-mio17-${BASHPID}"
 readonly FILE_INPUT_CONTAINER="torrentfs-mio17-file-input-${BASHPID}"
 readonly MISSING_DIR_CONTAINER="torrentfs-mio17-missing-dir-${BASHPID}"
@@ -25,9 +25,9 @@ readonly BLOCKED_READ_CONTAINER="torrentfs-mio17-blocked-${BASHPID}"
 readonly PEER_DAEMON_CONTAINER="torrentfs-mio17-peer-ns-${BASHPID}"
 readonly SUBTITLE_CONTAINER="torrentfs-mio17-subtitle-${BASHPID}"
 readonly SUBTITLE_OBSERVER_CONTAINER="torrentfs-mio17-subtitle-observer-${BASHPID}"
-# The bcrypt hash of "password", matching the API tests. The subtitle scenario
-# needs authentication enabled, and auth credentials are TOML-only.
-readonly SUBTITLE_PASSWORD_HASH='$2a$10$N9qo8uLOickgx2ZMRZoMye8fOsiTWZqYtkxvXkKm8BMzjT7t/vIdq'
+# The password of the subtitle scenario. The subtitle scenario needs
+# authentication enabled, and the credentials are one shared pair.
+readonly SUBTITLE_PASSWORD='password'
 readonly SUBTITLE_VIDEO_NAME="video.mkv"
 readonly SUBTITLE_VIDEO_STEM="video"
 readonly PEER_HOLDER_CONTAINER="torrentfs-mio17-peer-holder-${BASHPID}"
@@ -301,6 +301,25 @@ subtitle_upload() {
 	esac
 }
 
+# write_fuse_config writes the minimal configuration that selects the FUSE
+# output and mounts it on the given path, and prints the host file name. The
+# scenario names the file, so every scenario gets its own configuration. The
+# removed -mountpoint flag is gone, so the mountpoint is configured through
+# the configuration file instead: the top-level backend key names the output
+# and fuse.mountpoint names the directory.
+write_fuse_config() {
+	local scenario="$1" mountpoint="$2" file
+	file="$TMP_DIR/fuse-config-$scenario.toml"
+	cat >"$file" <<EOF
+backend = "fuse"
+
+[fuse]
+mountpoint = "$mountpoint"
+EOF
+	chmod 0644 "$file"
+	printf '%s\n' "$file"
+}
+
 # host_mount_released reports whether the propagated FUSE mount under mount is
 # gone and its directory is empty again.
 host_mount_released() {
@@ -417,7 +436,7 @@ printf 'docker smoke: web seed serving the fixture on 127.0.0.1:%s\n' "$WEBSEED_
 mkdir -p "$TORRENT_HOST_DIR/.stats"
 printf 'legacy\n' > "$TORRENT_HOST_DIR/.stats/leftover.txt"
 
-if [[ -n "${TORRENTFS_SMOKE_IMAGE:-}" ]]; then
+if [[ -n "${TF_SMOKE_IMAGE:-}" ]]; then
 	probe "inspect prebuilt FUSE test image" docker image inspect "$IMAGE" >/dev/null
 else
 	printf 'docker smoke: building %s\n' "$IMAGE"
@@ -439,6 +458,7 @@ fi
 HOST_OBSERVER_STARTED=1
 
 printf 'docker smoke: starting runtime-configured real FUSE mount (uid=%s gid=%s)\n' "$RUNTIME_UID" "$RUNTIME_GID"
+FUSE_CONFIG="$(write_fuse_config positive /mnt)"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the runtime-configured FUSE container" docker run --detach --name "$CONTAINER" \
 	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
@@ -451,7 +471,8 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the runtime-configured FUSE container" 
 	--env TORRENTFS_HTTP_LISTEN_ADDR= \
 	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$MOUNT_HOST_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
+	--mount "type=bind,src=$FUSE_CONFIG,dst=/etc/torrentfs/fuse.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/fuse.toml /torrents >/dev/null; then
 	fail "could not start the FUSE container; check /dev/fuse, SYS_ADMIN, and AppArmor permissions"
 fi
 POSITIVE_STARTED=1
@@ -462,12 +483,12 @@ printf 'docker smoke: /mnt bind propagation verified (rshared)\n'
 
 PROCESS_CREDENTIALS="$(wait_process_identity "$CONTAINER" torrentfs)" || \
 	fail "could not read the FUSE torrentfs process credentials"
-IFS=' ' read -r TORRENTFS_PID TORRENTFS_UIDS TORRENTFS_GIDS <<<"$PROCESS_CREDENTIALS"
-[[ "$TORRENTFS_UIDS" == "$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID" ]] || \
-	fail "FUSE torrentfs UID credentials are $TORRENTFS_UIDS, expected $RUNTIME_UID in every field"
-[[ "$TORRENTFS_GIDS" == "$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID" ]] || \
-	fail "FUSE torrentfs GID credentials are $TORRENTFS_GIDS, expected $RUNTIME_GID in every field"
-printf 'docker smoke: torrentfs process %s runs as %s:%s\n' "$TORRENTFS_PID" "$RUNTIME_UID" "$RUNTIME_GID"
+IFS=' ' read -r TF_PID TF_UIDS TF_GIDS <<<"$PROCESS_CREDENTIALS"
+[[ "$TF_UIDS" == "$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID:$RUNTIME_UID" ]] || \
+	fail "FUSE torrentfs UID credentials are $TF_UIDS, expected $RUNTIME_UID in every field"
+[[ "$TF_GIDS" == "$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID:$RUNTIME_GID" ]] || \
+	fail "FUSE torrentfs GID credentials are $TF_GIDS, expected $RUNTIME_GID in every field"
+printf 'docker smoke: torrentfs process %s runs as %s:%s\n' "$TF_PID" "$RUNTIME_UID" "$RUNTIME_GID"
 
 mount_deadline=$((SECONDS + 30))
 while ((SECONDS < mount_deadline)); do
@@ -604,6 +625,7 @@ printf 'docker smoke: FUSE container stopped and host mount disappeared cleanly\
 printf 'docker smoke: starting blocked-read shutdown scenario\n'
 BLOCKED_MOUNT_DIR="$TMP_DIR/blocked-mnt"
 mkdir -p "$BLOCKED_MOUNT_DIR"
+BLOCKED_FUSE_CONFIG="$(write_fuse_config blocked /mnt)"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run --detach --name "$BLOCKED_READ_CONTAINER" \
 	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
@@ -614,7 +636,8 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the blocked-read container" docker run 
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$BLOCKED_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
+	--mount "type=bind,src=$BLOCKED_FUSE_CONFIG,dst=/etc/torrentfs/fuse.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/fuse.toml /torrents >/dev/null; then
 	fail "could not start the blocked-read container"
 fi
 BLOCKED_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$BLOCKED_READ_CONTAINER" 2>/dev/null || true)"
@@ -751,6 +774,7 @@ fi
 # The peer daemon is fed by the web seed so a read cannot block on a missing
 # piece; the outstanding-request cause belongs to the blocked-read scenario,
 # not this one.
+PEER_FUSE_CONFIG="$(write_fuse_config peer /mnt)"
 if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker run --detach --name "$PEER_DAEMON_CONTAINER" \
 	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
@@ -763,7 +787,8 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the peer-namespace container" docker ru
 	--env TORRENTFS_HTTP_LISTEN_ADDR= \
 	--mount "type=bind,src=$SEEDED_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$PEER_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
-	"$IMAGE" -mountpoint /mnt /torrents >/dev/null; then
+	--mount "type=bind,src=$PEER_FUSE_CONFIG,dst=/etc/torrentfs/fuse.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/fuse.toml /torrents >/dev/null; then
 	fail "could not start the peer-namespace container"
 fi
 PEER_PROPAGATION="$(probe "read /mnt propagation" docker inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt"}}{{.Propagation}}{{end}}{{end}}' "$PEER_DAEMON_CONTAINER" 2>/dev/null || true)"
@@ -859,6 +884,7 @@ printf 'docker smoke: checking rejected single-file input\n'
 FILE_INPUT_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
+NEGATIVE_FUSE_CONFIG="$(write_fuse_config file-input /mnt)"
 if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --name "$FILE_INPUT_CONTAINER" \
 	--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
@@ -869,7 +895,8 @@ if NEGATIVE_OUTPUT="$(bounded 15 "run the single-file input check" docker run --
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt /torrents/example.torrent 2>&1)"; then
+	--mount "type=bind,src=$NEGATIVE_FUSE_CONFIG,dst=/etc/torrentfs/fuse.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/fuse.toml /torrents/example.torrent 2>&1)"; then
 	NEGATIVE_STATUS=0
 else
 	NEGATIVE_STATUS=$?
@@ -886,6 +913,7 @@ printf 'docker smoke: checking missing torrent directory failure\n'
 MISSING_DIR_CREATED=1
 NEGATIVE_STATUS=0
 NEGATIVE_OUTPUT=""
+MISSING_FUSE_CONFIG="$(write_fuse_config missing-dir /mnt)"
 if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --name "$MISSING_DIR_CONTAINER" \
 		--user "$RUNTIME_UID:$RUNTIME_GID" \
 	--env "PUID=$RUNTIME_UID" \
@@ -896,7 +924,8 @@ if NEGATIVE_OUTPUT="$(bounded 15 "run the missing-directory check" docker run --
 	--security-opt apparmor=unconfined \
 	--mount "type=bind,src=$TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$NEGATIVE_MOUNT_DIR,dst=/mnt" \
-	"$IMAGE" -mountpoint /mnt /torrents/missing 2>&1)"; then
+	--mount "type=bind,src=$MISSING_FUSE_CONFIG,dst=/etc/torrentfs/fuse.toml,readonly" \
+	"$IMAGE" -config /etc/torrentfs/fuse.toml /torrents/missing 2>&1)"; then
 	NEGATIVE_STATUS=0
 else
 	NEGATIVE_STATUS=$?
@@ -953,14 +982,18 @@ SUBTITLE_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.
 SUBTITLE_BASE="http://127.0.0.1:$SUBTITLE_PORT"
 mkdir -p "$TMP_DIR/subtitle-config"
 cat >"$TMP_DIR/subtitle-config/torrentfs.toml" <<EOF
+backend = "fuse"
+password = "$SUBTITLE_PASSWORD"
+
 [http]
 listen_addr = "127.0.0.1:$SUBTITLE_PORT"
 
 [http.auth]
 enabled = true
-username = "alice"
-password_hash = "$SUBTITLE_PASSWORD_HASH"
 token_ttl = "10m"
+
+[fuse]
+mountpoint = "/mnt"
 EOF
 chmod 0644 "$TMP_DIR/subtitle-config/torrentfs.toml"
 
@@ -984,7 +1017,7 @@ if ! bounded "$DOCKER_OP_TIMEOUT" "start the managed subtitle container" docker 
 	--mount "type=bind,src=$SUBTITLE_TORRENT_HOST_DIR,dst=/torrents" \
 	--mount "type=bind,src=$SUBTITLE_MOUNT_DIR,dst=/mnt,bind-propagation=rshared" \
 	--mount "type=bind,src=$TMP_DIR/subtitle-config/torrentfs.toml,dst=/etc/torrentfs/subtitle.toml,readonly" \
-	"$IMAGE" -config /etc/torrentfs/subtitle.toml -mountpoint /mnt /torrents >/dev/null; then
+	"$IMAGE" -config /etc/torrentfs/subtitle.toml /torrents >/dev/null; then
 	fail "could not start the managed subtitle container"
 fi
 

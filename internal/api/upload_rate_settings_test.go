@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -273,8 +274,8 @@ func TestPutUploadRateSettingsRejectsOversizedBody(t *testing.T) {
 func TestUploadRateSettingsRequiresAuthentication(t *testing.T) {
 	srv := newTestServer(t, &fakeBackend{}, func(cfg *config.Config) {
 		cfg.HTTP.Auth.Enabled = true
-		cfg.HTTP.Auth.Username = "alice"
-		cfg.HTTP.Auth.PasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+		cfg.HTTP.Auth.TokenTTL = config.Duration(time.Minute)
+		cfg.Password = "a-password"
 	})
 
 	for _, method := range []string{http.MethodGet, http.MethodPut} {

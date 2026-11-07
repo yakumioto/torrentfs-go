@@ -66,7 +66,7 @@ func labSettingsPath(metadataDir string) string {
 }
 
 // WithLabExperiment enables the experimental upload-statistics harness. The
-// settings are validated by the caller (lab.LoadSettings). The session opens
+// settings are validated by the caller (lab.SettingsFrom). The session opens
 // the optional announce log, restores any persisted runtime settings, and
 // routes tracker announces through the reporter; the Web UI can then change the
 // runtime settings through SetLabSettings.

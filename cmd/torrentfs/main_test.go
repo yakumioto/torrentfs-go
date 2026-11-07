@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,13 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
+
+// runCLI runs the command line for a test that does not look at standard
+// output, and discards it. A test that asserts which stream carries the
+// result uses runCLICapture instead.
+func runCLI(args []string, stderr io.Writer) int {
+	return run(args, io.Discard, stderr)
+}
 
 // shutdownRecorder records the order in which the shutdown stages ran and the
 // errors each stage reports. A blocking Unmount stage records from its own
@@ -508,8 +517,7 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")
 	var stderr bytes.Buffer
 
-	code := run([]string{
-		"-mountpoint", t.TempDir(),
+	code := runCLI([]string{
 		"-config", missing,
 		t.TempDir(),
 	}, &stderr)
@@ -521,6 +529,76 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable covers the
+// configuration file entry: a deployment can point at its configuration file
+// with an environment variable instead of a command-line argument.
+func TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	configPath := filepath.Join(t.TempDir(), "torrentfs.toml")
+	if err := os.WriteFile(configPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", configPath)
+	var stderr bytes.Buffer
+
+	code := runCLI([]string{t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), configPath) {
+		t.Fatalf("stderr = %q, want the configuration file path", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the environment named", stderr.String())
+	}
+}
+
+// TestRunPrefersTheConfigFlagOverTheEnvironmentVariable covers the
+// precedence: the command-line argument wins over the environment variable.
+func TestRunPrefersTheConfigFlagOverTheEnvironmentVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	work := t.TempDir()
+	flagPath := filepath.Join(work, "flag.toml")
+	if err := os.WriteFile(flagPath, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	environmentPath := filepath.Join(work, "environment.toml")
+	if err := os.WriteFile(environmentPath, []byte("[cache]\ncapacity = \"1B\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TORRENTFS_CONFIG", environmentPath)
+	var stderr bytes.Buffer
+
+	code := runCLI([]string{"-config", flagPath, t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connections.listen_port") {
+		t.Fatalf("stderr = %q, want the error of the file the argument named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), environmentPath) {
+		t.Fatalf("stderr = %q, must not report the file the environment named", stderr.String())
+	}
+}
+
+// TestRunWithoutAConfigurationFileUsesTheDefaults covers the third step of
+// the precedence: with neither an argument nor the environment variable, the
+// program loads no configuration file and starts on the built-in defaults.
+func TestRunWithoutAConfigurationFileUsesTheDefaults(t *testing.T) {
+	unsetConfigEnvironment(t)
+	var stderr bytes.Buffer
+
+	// The process starts and then fails for another reason, so the assertion
+	// is that no configuration file was reported.
+	code := runCLI([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "config: open") {
+		t.Fatalf("stderr = %q, want no configuration file to be loaded", stderr.String())
+	}
+}
+
 func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.toml")
 	if err := os.WriteFile(path, []byte("[connections]\nlisten_port = -1\n"), 0o644); err != nil {
@@ -528,8 +606,7 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	code := run([]string{
-		"-mountpoint", t.TempDir(),
+	code := runCLI([]string{
 		"-config", path,
 		t.TempDir(),
 	}, &stderr)
@@ -547,7 +624,7 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 	work := t.TempDir()
 	configPath := filepath.Join(work, "config.toml")
 	configBody := "[http]\nlisten_addr = \"127.0.0.1:8080\"\n\n" +
-		"[http.auth]\nenabled = true\nusername = \"alice\"\npassword_hash = \"not-a-bcrypt-hash\"\n"
+		"[http.auth]\nenabled = true\n"
 	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -556,18 +633,18 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	var stderr bytes.Buffer
-	code := run([]string{"-config", configPath, torrentsDir}, &stderr)
+	code := runCLI([]string{"-config", configPath, torrentsDir}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "password_hash") {
-		t.Fatalf("stderr = %q, want password_hash error", stderr.String())
+	if !strings.Contains(stderr.String(), "password") {
+		t.Fatalf("stderr = %q, want password error", stderr.String())
 	}
 }
 
 func TestRunRejectsRemovedDataDirFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	code := run([]string{"-data-dir", t.TempDir(), "-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	code := runCLI([]string{"-data-dir", t.TempDir(), t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -596,8 +673,8 @@ func TestRunRequiresExactlyOneTorrentsDirectory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			args := append([]string{"-mountpoint", t.TempDir()}, tt.args...)
-			if code := run(args, &stderr); code != 2 {
+			args := tt.args
+			if code := runCLI(args, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.want) {
@@ -614,7 +691,7 @@ func TestRunRejectsNonDirectoryTorrentInput(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), file}, &stderr)
+	code := runCLI([]string{file}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -629,7 +706,7 @@ func TestRunRejectsMissingTorrentDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing-torrents")
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), missing}, &stderr)
+	code := runCLI([]string{missing}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -645,7 +722,7 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
 	var stderr bytes.Buffer
 
-	code := run([]string{"-mountpoint", t.TempDir(), t.TempDir()}, &stderr)
+	code := runCLI([]string{t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -659,41 +736,65 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	}
 }
 
+// TestRunRejectsUnknownConfigurationVariable covers the strictness of the
+// configuration namespace at the command-line entry: a misspelled variable is
+// named at startup instead of ignored.
+func TestRunRejectsUnknownConfigurationVariable(t *testing.T) {
+	unsetConfigEnvironment(t)
+	t.Setenv("TORRENTFS_HTTP_LISEN_ADDR", "0.0.0.0:8080")
+	var stderr bytes.Buffer
+
+	code := runCLI([]string{t.TempDir()}, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"TORRENTFS_HTTP_LISEN_ADDR", "not a known configuration item"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestRunIgnoresVariablesOutsideTheConfigurationNamespace checks that a
+// variable of another namespace does not stop the process: only the
+// configuration namespace is strict.
+func TestRunIgnoresVariablesOutsideTheConfigurationNamespace(t *testing.T) {
+	unsetConfigEnvironment(t)
+	t.Setenv("TF_FUSE_REQUIRED", "1")
+	var stderr bytes.Buffer
+
+	// The process starts and then fails on the missing torrents directory or
+	// on the HTTP listener, so the assertion is that the unknown-variable
+	// report is absent rather than that the process succeeded.
+	code := runCLI([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	if strings.Contains(stderr.String(), "not a known configuration item") {
+		t.Fatalf("stderr = %q, want no unknown-variable report", stderr.String())
+	}
+	if code != 2 {
+		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+}
+
+// unsetConfigEnvironment clears every environment variable that configures
+// torrentfs, so a test observes the configuration it sets itself.
+//
+// The whole configuration namespace is cleared, not only the names the schema
+// derives: the loader rejects an unknown variable, so a variable the
+// environment of the test runner happens to carry would fail the test for the
+// wrong reason.
 func unsetConfigEnvironment(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{
-		"TORRENTFS_PATHS_PAYLOAD_DIR",
-		"TORRENTFS_CONNECTIONS_LISTEN_HOST",
-		"TORRENTFS_CONNECTIONS_LISTEN_PORT",
-		"TORRENTFS_MOUNT_ALLOW_OTHER",
-		"TORRENTFS_MOUNT_READ_TIMEOUT",
-		"TORRENTFS_FILESYSTEM_BACKEND",
-		"TORRENTFS_FILESYSTEM_READ_TIMEOUT",
-		"TORRENTFS_FUSE_MOUNTPOINT",
-		"TORRENTFS_FUSE_STRM_MOUNTPOINT",
-		"TORRENTFS_FUSE_ALLOW_OTHER",
-		"TORRENTFS_SMB_ENABLED",
-		"TORRENTFS_SMB_LISTEN_ADDR",
-		"TORRENTFS_SMB_USERNAME",
-		"TORRENTFS_SMB_PASSWORD_FILE",
-		"TORRENTFS_SMB_STRM_ENABLED",
-		"TORRENTFS_STRM_ENABLED",
-		"TORRENTFS_PROXY_SOCKS5_URL",
-		"TORRENTFS_CACHE_CAPACITY",
-		"TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
-		"TORRENTFS_IDENTITY_PEER_ID_PREFIX",
-		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION",
-		"TORRENTFS_HTTP_LISTEN_ADDR",
-		"TORRENTFS_STRM_BASE_URL",
-		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE",
-		"TORRENTFS_HTTP_AUTH_ENABLED",
-		"TORRENTFS_USERNAME",
-		"TORRENTFS_PASSWORD",
-		"TORRENTFS_HTTP_AUTH_TOKEN_TTL",
-		"TORRENTFS_LOG_LEVEL",
-		"TORRENTFS_LOG_FORMAT",
-		"TORRENTFS_LOG_ADD_SOURCE",
-	} {
+	var names []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "TORRENTFS_") {
+			names = append(names, name)
+		}
+	}
+	for _, key := range config.Schema() {
+		names = append(names, key.Environment)
+	}
+	for _, name := range names {
 		name := name
 		previous, wasSet := os.LookupEnv(name)
 		if err := os.Unsetenv(name); err != nil {
@@ -827,12 +928,16 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 			t.Setenv("TORRENTFS_HTTP_LISTEN_ADDR", tt.httpAddr)
 			torrents := t.TempDir()
 			strm := t.TempDir()
-			args := []string{"-strm-mountpoint", strm}
+			body := "backend = \"fuse\"\n[fuse]\nstrm_mountpoint = " + strconv.Quote(strm) + "\n"
 			if tt.overlap {
-				args = append(args, "-mountpoint", strm)
+				body += "mountpoint = " + strconv.Quote(strm) + "\n"
+			}
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
 			}
 			var stderr bytes.Buffer
-			if code := run(append(args, torrents), &stderr); code != 2 {
+			if code := runCLI([]string{"-config", configPath, torrents}, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			output := stderr.String()
@@ -849,21 +954,36 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 	}
 }
 
-func TestRunRecognizesSTRMMountpointFlagForms(t *testing.T) {
-	for _, flagName := range []string{"-strm-mountpoint", "--strm-mountpoint", "-strm-mountpoint=", "--strm-mountpoint="} {
-		t.Run(flagName, func(t *testing.T) {
+// TestRunRejectsRemovedMountpointFlags checks that the removed command-line
+// mountpoint flags are refused with the configuration key that replaces them.
+func TestRunRejectsRemovedMountpointFlags(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		wantRemoved string
+		wantNew     string
+	}{
+		{name: "mountpoint", args: []string{"-mountpoint", "/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+		{name: "strm mountpoint", args: []string{"-strm-mountpoint", "/srv/strm"}, wantRemoved: "-strm-mountpoint", wantNew: "fuse.strm_mountpoint"},
+		{name: "double dash", args: []string{"--mountpoint", "/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+		{name: "with value", args: []string{"-mountpoint=/srv/mnt"}, wantRemoved: "-mountpoint", wantNew: "fuse.mountpoint"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			unsetConfigEnvironment(t)
-			mountpoint := t.TempDir()
-			args := []string{flagName, mountpoint}
-			if strings.HasSuffix(flagName, "=") {
-				args = []string{flagName + mountpoint}
-			}
 			var stderr bytes.Buffer
-			if code := run(append(args, t.TempDir()), &stderr); code != 2 {
+			code := runCLI(append(tt.args, t.TempDir()), &stderr)
+			if code != 2 {
 				t.Fatalf("run exit code = %d, want 2", code)
 			}
-			if !strings.Contains(stderr.String(), "strm.base_url") {
-				t.Fatalf("stderr = %q, want recognized STRM flag and missing base URL", stderr.String())
+			output := stderr.String()
+			if !strings.Contains(output, tt.wantRemoved) {
+				t.Fatalf("stderr = %q, want the removed flag %q", output, tt.wantRemoved)
+			}
+			if !strings.Contains(output, tt.wantNew) {
+				t.Fatalf("stderr = %q, want the replacement %q", output, tt.wantNew)
+			}
+			if strings.Contains(output, "torrentfs starting") {
+				t.Fatalf("the removed flag reached startup: %q", output)
 			}
 		})
 	}
@@ -886,7 +1006,7 @@ func TestUsageDescribesAPIOnlyTorrentManagement(t *testing.T) {
 	if strings.Contains(usageText, "scanned "+"at startup") || strings.Contains(usageText, "while "+"running") {
 		t.Fatalf("usage still describes directory scanning: %q", usageText)
 	}
-	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "-strm-mountpoint", "strm.base_url", "mounted alone", "native SMB", "HTTP-only default", "SMB can run without HTTP", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
+	for _, want := range []string{"HTTP API", "root .torrent files", "ignored", "Canonical metainfo", "<torrents-dir>/<infohash>.torrent", ".metadata directory", "fuse.mountpoint", "strm.base_url", "mounted alone", "native SMB", "HTTP-only default", "SMB can run without HTTP", "symbolic-link aliases", "no metadata/ or stats/ control directory"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage = %q, want %q", usageText, want)
 		}

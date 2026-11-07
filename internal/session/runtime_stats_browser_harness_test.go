@@ -16,12 +16,12 @@ import (
 // of a local browser. It holds a real peer-backed API/UI session open while a
 // browser refreshes the embedded Dashboard.
 func TestRuntimeStatsBrowserHarness(t *testing.T) {
-	if os.Getenv("TORRENTFS_RUNTIME_STATS_BROWSER_HARNESS") != "1" {
-		t.Skip("set TORRENTFS_RUNTIME_STATS_BROWSER_HARNESS=1 for browser acceptance")
+	if os.Getenv("TF_RUNTIME_STATS_BROWSER_HARNESS") != "1" {
+		t.Skip("set TF_RUNTIME_STATS_BROWSER_HARNESS=1 for browser acceptance")
 	}
-	donePath := os.Getenv("TORRENTFS_RUNTIME_STATS_BROWSER_DONE")
+	donePath := os.Getenv("TF_RUNTIME_STATS_BROWSER_DONE")
 	if donePath == "" {
-		t.Fatal("TORRENTFS_RUNTIME_STATS_BROWSER_DONE is required")
+		t.Fatal("TF_RUNTIME_STATS_BROWSER_DONE is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

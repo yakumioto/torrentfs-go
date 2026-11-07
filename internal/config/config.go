@@ -12,41 +12,45 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 var (
 	// ErrInvalid identifies a configuration value that violates its contract.
 	ErrInvalid = errors.New("invalid configuration")
 
-	errRequired             = errors.New("value is required")
-	errPortRange            = errors.New("must be between 0 and 65535")
-	errCapacityRange        = errors.New("must be between 1 and the cache watermark safety limit")
-	errProxyURL             = errors.New("must be a valid URL")
-	errProxyScheme          = errors.New("must use socks5:// or socks5h://")
-	errProxyHost            = errors.New("must include a proxy host")
-	errProxyPort            = errors.New("proxy port must be between 1 and 65535")
-	errPeerIDPrefixSize     = errors.New("must be at most 20 bytes")
-	errTrackerUserAgent     = errors.New("must not contain carriage return or line feed")
-	errListenAddr           = errors.New("must be a host:port address")
-	errPositive             = errors.New("must be positive")
-	errAddressFamilies      = errors.New("must not disable IPv4 and IPv6 at the same time")
-	errBootstrapNode        = errors.New("must be a host:port address with a port between 1 and 65535")
-	errAuthUsernameRequired = errors.New("must not be empty when authentication is enabled")
-	errAuthUsernameControl  = errors.New("must not contain control characters")
-	errAuthHashRequired     = errors.New("exactly one password hash source is required when authentication is enabled")
-	errAuthCredentialsSet   = errors.New("authentication credentials must be empty when authentication is disabled")
-	errAuthTokenTTLMax      = errors.New("must not exceed 24 hours")
-	errExposedNoAuth        = errors.New("exposing a non-loopback address requires enabled http.auth")
-	errLogLevel             = errors.New("must be one of debug, info, warn, error")
-	errLogFormat            = errors.New("must be one of text, json")
+	errRequired         = errors.New("value is required")
+	errPortRange        = errors.New("must be between 0 and 65535")
+	errCapacityRange    = errors.New("must be between 1 and the cache watermark safety limit")
+	errProxyURL         = errors.New("must be a valid URL")
+	errProxyScheme      = errors.New("must use socks5:// or socks5h://")
+	errProxyHost        = errors.New("must include a proxy host")
+	errProxyPort        = errors.New("proxy port must be between 1 and 65535")
+	errPeerIDPrefixSize = errors.New("must be at most 20 bytes")
+	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
+	errListenAddr       = errors.New("must be a host:port address")
+	errPositive         = errors.New("must be positive")
+	errAddressFamilies  = errors.New("must not disable IPv4 and IPv6 at the same time")
+	errBootstrapNode    = errors.New("must be a host:port address with a port between 1 and 65535")
+	errAuthTokenTTLMax  = errors.New("must not exceed 24 hours")
+	errExposedNoAuth    = errors.New("exposing a non-loopback address requires enabled http.auth")
+	errLogLevel         = errors.New("must be one of debug, info, warn, error")
+	errLogFormat        = errors.New("must be one of text, json")
+	errNoOutput         = errors.New("at least one output must be enabled: set http.listen_addr, or set backend to fuse or smb")
 )
 
 const (
 	defaultCacheCapacityBytes int64 = 2 << 30
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
+	defaultSMBListenAddr            = "0.0.0.0:1445"
 	defaultMaxUploadBytes     int64 = 10 << 20
 	defaultLogLevel                 = "info"
 	defaultLogFormat                = "text"
+
+	// maxPasswordBytes is the longest password bcrypt accepts. A longer
+	// password is truncated by bcrypt, so the configuration rejects it
+	// instead of silently accepting a weaker password than the user wrote.
+	maxPasswordBytes = 72
 )
 
 // ValidationError identifies the configuration field that failed validation.
@@ -89,19 +93,72 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 
 // Config holds torrentfs runtime settings.
 type Config struct {
-	Connections     Connections `toml:"connections"`
-	Proxy           Proxy       `toml:"proxy"`
-	Cache           Cache       `toml:"cache"`
-	Identity        Identity    `toml:"identity"`
-	HTTP            HTTP        `toml:"http"`
-	STRM            STRM        `toml:"strm"`
-	Log             Log         `toml:"log"`
-	Mount           Mount       `toml:"-"` // deprecated in-process compatibility
-	Filesystem      Filesystem  `toml:"filesystem"`
-	FUSE            FUSE        `toml:"fuse"`
-	SMB             SMB         `toml:"smb"`
-	backendExplicit bool
-	outputError     error
+	// Backend selects the output backend: none, fuse, or smb.
+	Backend Backend `toml:"backend" enum:"none,fuse,smb"`
+	// Username is the login name the SMB output accepts. The HTTP login does
+	// not check a user name, so the key is only required for the SMB output.
+	Username string `toml:"username"`
+	// Password is the plaintext password shared by the SMB output and the
+	// HTTP login. It is required for the SMB output and for enabled HTTP
+	// authentication, and it has no default.
+	Password string `toml:"password" secret:"true"`
+	// Connections groups the network settings of the torrent session.
+	Connections Connections `toml:"connections"`
+	// Proxy groups the optional outbound proxy settings.
+	Proxy Proxy `toml:"proxy"`
+	// Cache groups the in-memory piece cache settings.
+	Cache Cache `toml:"cache"`
+	// Identity groups the client identity values.
+	Identity Identity `toml:"identity"`
+	// HTTP groups the optional torrent-management HTTP service settings.
+	HTTP HTTP `toml:"http"`
+	// STRM groups the optional signed HTTP streaming settings.
+	STRM STRM `toml:"strm"`
+	// Log groups the process log settings.
+	Log Log `toml:"log"`
+	// Filesystem groups the settings that describe the file output as a whole.
+	Filesystem Filesystem `toml:"filesystem"`
+	// FUSE groups the settings of the read-only FUSE file output.
+	FUSE FUSE `toml:"fuse"`
+	// SMB groups the settings of the built-in read-only SMB file output.
+	SMB SMB `toml:"smb"`
+	// Lab groups the settings of the upload statistics experiment.
+	Lab Lab `toml:"lab"`
+}
+
+// Lab groups the settings of the upload statistics experiment.
+//
+// The experiment rewrites the upload counter reported to trackers so that the
+// anomaly detection of a tracker can be exercised. It is off unless a mode is
+// configured, and it belongs to a tracker the operator runs: pointing it at a
+// third-party tracker misreports that tracker's statistics.
+//
+// The rules that relate one setting to another live in the experiment
+// package. The configuration holds the values and checks their shape.
+type Lab struct {
+	// UploadMode selects the reporting model: baseline, inject, or amplify.
+	// Empty infers the mode from the other settings.
+	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify"`
+	// UploadRate is the average synthetic growth of the reported upload in
+	// inject mode.
+	UploadRate ByteRate `toml:"upload_rate"`
+	// UploadMultiplier grows the reported upload by this factor of the real
+	// payload bytes in amplify mode.
+	UploadMultiplier Ratio `toml:"upload_multiplier"`
+	// UploadJitter is the per-announce deviation from the nominal increment,
+	// in percent.
+	UploadJitter Percent `toml:"upload_jitter"`
+	// UploadCap is the per-torrent ceiling on the cumulative reported upload.
+	UploadCap OptionalByteQuantity `toml:"upload_cap"`
+	// UploadSeed fixes the random jitter sequence for reproducible runs. Zero
+	// lets the process choose one.
+	UploadSeed int64 `toml:"upload_seed"`
+	// AnnounceLog is the JSON Lines file that receives one record per tracker
+	// announce. Empty disables it.
+	AnnounceLog string `toml:"announce_log"`
+	// PeerSampleInterval is how often peer activity is sampled into the
+	// announce log.
+	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
@@ -113,7 +170,7 @@ type HTTP struct {
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
-	MaxUploadBytes int64 `toml:"max_upload_size"`
+	MaxUploadBytes ByteQuantity `toml:"max_upload_size"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
@@ -125,18 +182,14 @@ type STRM struct {
 
 // Log groups the process log settings.
 type Log struct {
-	Level     string `toml:"level"`
-	Format    string `toml:"format"`
-	AddSource bool   `toml:"add_source"`
-}
-
-// Mount groups FUSE mount behaviour that is not derived from the process identity.
-type Mount struct {
-	// AllowOther passes allow_other to the kernel, lifting FUSE's default
-	// restriction that only the mounting user may access the mount.
-	// It defaults to false.
-	AllowOther  bool     `toml:"allow_other"`
-	ReadTimeout Duration `toml:"read_timeout"`
+	// Level is the minimum level of a log record: debug, info, warn, or
+	// error. Debug is disabled by default.
+	Level string `toml:"level"`
+	// Format is the shape of a log record: text for humans or json for log
+	// collectors.
+	Format string `toml:"format"`
+	// AddSource adds the source file and line to every log record.
+	AddSource bool `toml:"add_source"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -158,12 +211,17 @@ func (d Duration) String() string {
 }
 
 // Auth configures single-user password login and in-memory Bearer tokens.
+//
+// The credentials live in the top-level username and password keys: the
+// login checks the password only, so the authentication service needs no
+// user name of its own.
 type Auth struct {
-	Enabled          bool     `toml:"enabled"`
-	Username         string   `toml:"username"`
-	PasswordHash     string   `toml:"password_hash"`
-	PasswordHashFile string   `toml:"password_hash_file"`
-	TokenTTL         Duration `toml:"token_ttl"`
+	// Enabled turns on the HTTP login. It is required for a listener that is
+	// not bound to the loopback address.
+	Enabled bool `toml:"enabled"`
+	// TokenTTL is the inactivity window of a login token. A valid request
+	// slides the window; the tokens live in memory and die with the process.
+	TokenTTL Duration `toml:"token_ttl"`
 }
 
 // Connections groups network settings of the torrent session.
@@ -199,7 +257,7 @@ type Proxy struct {
 // Cache groups in-memory piece cache settings.
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
-	CapacityBytes int64 `toml:"capacity"`
+	CapacityBytes ByteQuantity `toml:"capacity"`
 }
 
 // Identity groups the client identity values sent to trackers and peers.
@@ -215,22 +273,27 @@ type Identity struct {
 // Default returns the default configuration: an ephemeral listen port, an
 // empty proxy, qBittorrent 4.4.0 identity values, owner-only FUSE access, and
 // a 2 GiB in-memory piece cache sized for a host with about 4 GB of RAM.
+//
+// This is the only place where configuration defaults are defined. A TOML
+// document is decoded directly onto this value, so a configuration file that
+// omits a key keeps the same default whether or not a file was loaded.
 func Default() Config {
 	return Config{
+		Backend: BackendNone,
 		Connections: Connections{
 			ListenHost:       "",
 			ListenPort:       0,
 			NoPortForwarding: true,
 		},
 		Cache: Cache{
-			CapacityBytes: defaultCacheCapacityBytes,
+			CapacityBytes: ByteQuantity(defaultCacheCapacityBytes),
 		},
 		HTTP: HTTP{
 			ListenAddr: defaultHTTPListenAddr,
 			Auth: Auth{
 				TokenTTL: Duration(30 * time.Minute),
 			},
-			MaxUploadBytes: defaultMaxUploadBytes,
+			MaxUploadBytes: ByteQuantity(defaultMaxUploadBytes),
 		},
 		Identity: Identity{
 			TrackerUserAgent:               "qBittorrent/4.4.0",
@@ -241,72 +304,171 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Mount:      Mount{ReadTimeout: defaultReadTimeout},
-		Filesystem: Filesystem{Backend: BackendNone, ReadTimeout: defaultReadTimeout},
-		SMB:        SMB{ListenAddr: "0.0.0.0:1445"},
+		Filesystem: Filesystem{ReadTimeout: defaultReadTimeout},
+		FUSE:       FUSE{AllowOther: false},
+		SMB:        SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
 	}
 }
 
 // Validate checks values that must be valid before starting a session.
+//
+// Every invalid value is reported, not just the first one: a user who changed
+// several values learns about all of them in one run.
+//
+// The rules that belong to the process rather than to a value (that at least
+// one output is enabled) live in ValidateOutput: a start and the check apply
+// both, and an audit reads the values alone.
+//
+// The checks split in two kinds. A syntax check rejects a value that can never
+// work, wherever it stands, so it runs for every configuration key even when
+// the key belongs to an output that is not selected. A requirement check
+// rejects a configuration that is incomplete for the selected output, so it
+// runs only when that output needs the key. Keeping both groups lets a user
+// keep the settings of two outputs and switch between them by changing one
+// value.
 func (c Config) Validate() error {
-	if err := c.validateFilesystem(); err != nil {
-		return err
+	collector := &validationCollector{}
+	c.validateSyntax(collector)
+	c.validateRequirements(collector)
+	return collector.err()
+}
+
+// validateSyntax checks the values that can never work. A malformed value is
+// a mistake wherever it stands, so these checks do not depend on the selected
+// output.
+func (c Config) validateSyntax(collector *validationCollector) {
+	collector.add(validateEnum(backendPath, string(c.Backend)))
+	collector.add(validateEnum(smbSTRMPath, string(c.SMB.STRM)))
+	collector.add(validateEnum(labUploadModePath, strings.ToLower(strings.TrimSpace(c.Lab.UploadMode))))
+	if c.Filesystem.ReadTimeout <= 0 {
+		collector.add(invalid("filesystem.read_timeout", errPositive))
 	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
-		return invalid("connections.listen_port", errPortRange)
+		collector.add(invalid("connections.listen_port", errPortRange))
 	}
 	if c.Connections.DisableIPv4 && c.Connections.DisableIPv6 {
-		return invalid("connections.disable_ipv4", errAddressFamilies)
+		collector.add(invalid("connections.disable_ipv4", errAddressFamilies))
 	}
 	for _, node := range c.Connections.BootstrapNodes {
 		if err := validateBootstrapNode(node); err != nil {
-			return invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err))
+			collector.add(invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err)))
 		}
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
-		return invalid("cache.capacity", errCapacityRange)
-	}
-	if c.Mount.ReadTimeout <= 0 {
-		return invalid("mount.read_timeout", errPositive)
+		collector.add(invalid("cache.capacity", errCapacityRange))
 	}
 	if err := validateProxyURL(c.Proxy.Socks5URL); err != nil {
-		return invalid("proxy.socks5_url", err)
+		collector.add(invalid("proxy.socks5_url", err))
 	}
 	if len(c.Identity.PeerIDPrefix) > 20 {
-		return invalid("identity.peer_id_prefix", errPeerIDPrefixSize)
+		collector.add(invalid("identity.peer_id_prefix", errPeerIDPrefixSize))
 	}
 	if strings.ContainsAny(c.Identity.TrackerUserAgent, "\r\n") {
-		return invalid("identity.tracker_user_agent", errTrackerUserAgent)
+		collector.add(invalid("identity.tracker_user_agent", errTrackerUserAgent))
 	}
 	if c.HTTP.ListenAddr != "" {
-		if err := validateAuth(c.HTTP.Auth); err != nil {
-			return err
-		}
-	}
-	if c.HTTP.ListenAddr != "" {
-		host, _, err := net.SplitHostPort(c.HTTP.ListenAddr)
-		if err != nil {
-			return invalid("http.listen_addr", errListenAddr)
-		}
-		if !c.HTTP.Auth.Enabled && !isLoopbackHost(host) {
-			return invalid("http.listen_addr", errExposedNoAuth)
+		if host, _, err := net.SplitHostPort(c.HTTP.ListenAddr); err != nil {
+			collector.add(invalid("http.listen_addr", errListenAddr))
+		} else if !c.HTTP.Auth.Enabled && !isLoopbackHost(host) {
+			collector.add(invalid("http.listen_addr", errExposedNoAuth))
 		}
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
-		return invalid("http.max_upload_size", errPositive)
+		collector.add(invalid("http.max_upload_size", errPositive))
 	}
+	collector.add(validateAuth(c.HTTP.Auth))
 	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {
-		return invalid("strm.base_url", err)
+		collector.add(invalid("strm.base_url", err))
 	}
 	if _, err := ParseLogLevel(c.Log.Level); err != nil {
-		return invalid("log.level", errLogLevel)
+		collector.add(invalid("log.level", errLogLevel))
 	}
 	if rawFormat := strings.TrimSpace(c.Log.Format); rawFormat != "" {
 		switch strings.ToLower(rawFormat) {
 		case "text", "json":
 		default:
-			return invalid("log.format", errLogFormat)
+			collector.add(invalid("log.format", errLogFormat))
 		}
+	}
+	collector.add(c.validateCredentialShape())
+	collector.add(c.validateSMBShape())
+	collector.add(c.validateLabShape())
+}
+
+// validateLabShape checks the shape of the upload statistics experiment
+// settings.
+//
+// The rules that relate one setting to another live in the experiment
+// package: they decide what a set of settings means, not whether a value is
+// usable on its own.
+func (c Config) validateLabShape() error {
+	if c.Lab.UploadRate < 0 {
+		return invalid("lab.upload_rate", errPositive)
+	}
+	if c.Lab.UploadJitter < 0 || c.Lab.UploadJitter > 100 {
+		return invalid("lab.upload_jitter", errors.New("must be between 0 and 100 percent"))
+	}
+	if c.Lab.UploadMultiplier != 0 && c.Lab.UploadMultiplier <= 1 {
+		return invalid("lab.upload_multiplier", errors.New("must be greater than 1"))
+	}
+	if c.Lab.PeerSampleInterval < 0 {
+		return invalid("lab.peer_sample_interval", errPositive)
+	}
+	return nil
+}
+
+// ValidateOutput checks that the configuration enables at least one output.
+//
+// The rule belongs to the process, not to the values: a configuration file may
+// describe a service that is switched off, and an audit that prints the
+// effective values must still be able to read it. A start and the check apply
+// the rule, and they report it together with the other problems so one run
+// names every mistake.
+func (c Config) ValidateOutput() error {
+	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
+		return invalid("backend", errNoOutput)
+	}
+	return nil
+}
+
+// validateRequirements checks the configuration that has to be complete for
+// the selected output.
+func (c Config) validateRequirements(collector *validationCollector) {
+	switch c.Backend {
+	case BackendFUSE:
+		if c.FUSE.Mountpoint == "" && c.FUSE.STRMMountpoint == "" {
+			collector.add(invalid("fuse.mountpoint", errors.New("at least one FUSE mountpoint is required")))
+		}
+		if c.FUSE.STRMMountpoint != "" && c.STRM.BaseURL == "" {
+			collector.add(invalid("fuse.strm_mountpoint", errors.New("requires strm.base_url and HTTP")))
+		}
+	case BackendSMB:
+		if c.Username == "" {
+			collector.add(invalid("username", errRequired))
+		}
+	}
+	if c.Backend == BackendSMB || c.HTTP.Auth.Enabled {
+		if c.Password == "" {
+			collector.add(invalid("password", errRequired))
+		}
+	}
+	if c.Backend == BackendSMB && c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
+		collector.add(invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener")))
+	}
+}
+
+// validateSMBShape checks the shape of the SMB settings. The settings of an
+// unselected output are kept so switching only the output is sufficient, but
+// a value that can never work is still a mistake: an invalid listen address
+// would bind an unexpected port the moment the SMB output is selected.
+func (c Config) validateSMBShape() error {
+	_, port, err := net.SplitHostPort(c.SMB.ListenAddr)
+	if err != nil || port == "" {
+		return invalid("smb.listen_addr", errListenAddr)
+	}
+	value, err := parseEnvInt(port)
+	if err != nil || value < 1 || value > 65535 {
+		return invalid("smb.listen_addr", errListenAddr)
 	}
 	return nil
 }
@@ -318,29 +480,32 @@ func validateAuth(auth Auth) error {
 	if time.Duration(auth.TokenTTL) > 24*time.Hour {
 		return invalid("http.auth.token_ttl", errAuthTokenTTLMax)
 	}
+	return nil
+}
 
-	hasPasswordHash := auth.PasswordHash != ""
-	hasPasswordHashFile := auth.PasswordHashFile != ""
-	if !auth.Enabled {
-		switch {
-		case auth.Username != "":
-			return invalid("http.auth.username", errAuthCredentialsSet)
-		case hasPasswordHash:
-			return invalid("http.auth.password_hash", errAuthCredentialsSet)
-		case hasPasswordHashFile:
-			return invalid("http.auth.password_hash_file", errAuthCredentialsSet)
-		default:
-			return nil
+// validateCredentialShape checks the shape of the credentials.
+//
+// The shape is always checked, even when no output needs a credential yet: the
+// credentials are shared by every output, so a malformed one is a mistake
+// wherever it stands.
+func (c Config) validateCredentialShape() error {
+	if c.Username != "" && strings.IndexFunc(c.Username, unicode.IsControl) >= 0 {
+		return invalid("username", errors.New("must not contain control characters"))
+	}
+	if c.Password != "" {
+		if !utf8.ValidString(c.Password) {
+			return invalid("password", errors.New("must be valid UTF-8"))
+		}
+		if strings.ContainsAny(c.Password, "\r\n\x00") {
+			return invalid("password", errors.New("must be a single line without null bytes"))
 		}
 	}
-	if auth.Username == "" {
-		return invalid("http.auth.username", errAuthUsernameRequired)
-	}
-	if strings.IndexFunc(auth.Username, unicode.IsControl) >= 0 {
-		return invalid("http.auth.username", errAuthUsernameControl)
-	}
-	if hasPasswordHash == hasPasswordHashFile {
-		return invalid("http.auth.password_hash", errAuthHashRequired)
+	if c.HTTP.Auth.Enabled && len([]byte(c.Password)) > maxPasswordBytes {
+		// The HTTP login hashes the password with bcrypt, which ignores
+		// everything past the 72nd byte. A longer password would reach
+		// the SMB output in full and the HTTP login truncated, so the
+		// configuration rejects it instead.
+		return invalid("password", fmt.Errorf("must be at most %d bytes", maxPasswordBytes))
 	}
 	return nil
 }

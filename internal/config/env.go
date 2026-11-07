@@ -2,292 +2,61 @@ package config
 
 import (
 	"errors"
+	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-type envLookup func(string) (string, bool)
-
-type envBinding struct {
-	name  string
-	field string
-	apply func(*Config, string) error
+// Environment reads configuration values from a set of environment variables.
+// It also enumerates the variables that are set, so a stage can reject
+// unknown configuration variables without a second environment source.
+type Environment interface {
+	// Lookup returns the value of one variable and reports whether it is set.
+	Lookup(name string) (string, bool)
+	// Names returns the names of every variable that is set.
+	Names() []string
 }
 
-const (
-	httpUsernameEnvironment = "TORRENTFS_USERNAME"
-	httpPasswordEnvironment = "TORRENTFS_PASSWORD"
-)
+// envLookup reads configuration values from the process environment.
+//
+// The name is the short form used inside the package; Environment is the
+// exported form a caller supplies.
+type envLookup = Environment
 
-var environmentBindings = []envBinding{
-	{
-		name:  "TORRENTFS_CONNECTIONS_LISTEN_HOST",
-		field: "connections.listen_host",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Connections.ListenHost = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CONNECTIONS_LISTEN_PORT",
-		field: "connections.listen_port",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvInt(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.ListenPort = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV4",
-		field: "connections.disable_ipv4",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.DisableIPv4 = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CONNECTIONS_DISABLE_IPV6",
-		field: "connections.disable_ipv6",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.DisableIPv6 = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING",
-		field: "connections.no_port_forwarding",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Connections.NoPortForwarding = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES",
-		field: "connections.bootstrap_nodes",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Connections.BootstrapNodes = parseEnvList(raw)
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_MOUNT_ALLOW_OTHER",
-		field: "mount.allow_other",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Mount.AllowOther = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_MOUNT_READ_TIMEOUT",
-		field: "mount.read_timeout",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvDuration(raw)
-			if err != nil {
-				return err
-			}
-			if value <= 0 {
-				return errPositive
-			}
-			cfg.Mount.ReadTimeout = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_PROXY_SOCKS5_URL",
-		field: "proxy.socks5_url",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Proxy.Socks5URL = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_CACHE_CAPACITY",
-		field: "cache.capacity",
-		apply: func(cfg *Config, raw string) error {
-			value, err := ParseByteQuantity(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Cache.CapacityBytes = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_TRACKER_USER_AGENT",
-		field: "identity.tracker_user_agent",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.TrackerUserAgent = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_PEER_ID_PREFIX",
-		field: "identity.peer_id_prefix",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.PeerIDPrefix = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION",
-		field: "identity.extended_handshake_client_version",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Identity.ExtendedHandshakeClientVersion = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_LISTEN_ADDR",
-		field: "http.listen_addr",
-		apply: func(cfg *Config, raw string) error {
-			cfg.HTTP.ListenAddr = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_MAX_UPLOAD_SIZE",
-		field: "http.max_upload_size",
-		apply: func(cfg *Config, raw string) error {
-			value, err := ParseByteQuantity(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.MaxUploadBytes = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_ENABLED",
-		field: "http.auth.enabled",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.Auth.Enabled = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_HTTP_AUTH_TOKEN_TTL",
-		field: "http.auth.token_ttl",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvDuration(raw)
-			if err != nil {
-				return err
-			}
-			cfg.HTTP.Auth.TokenTTL = value
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_STRM_BASE_URL",
-		field: "strm.base_url",
-		apply: func(cfg *Config, raw string) error {
-			cfg.STRM.BaseURL = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_LEVEL",
-		field: "log.level",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Log.Level = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_FORMAT",
-		field: "log.format",
-		apply: func(cfg *Config, raw string) error {
-			cfg.Log.Format = raw
-			return nil
-		},
-	},
-	{
-		name:  "TORRENTFS_LOG_ADD_SOURCE",
-		field: "log.add_source",
-		apply: func(cfg *Config, raw string) error {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return err
-			}
-			cfg.Log.AddSource = value
-			return nil
-		},
-	},
-}
+// osEnvironment reads the process environment.
+type osEnvironment struct{}
 
-func applyEnvironment(cfg *Config, lookup envLookup) error {
-	for _, binding := range environmentBindings {
-		raw, ok := lookup(binding.name)
-		if !ok {
-			continue
-		}
-		if err := binding.apply(cfg, raw); err != nil {
-			return invalid(binding.field, errors.New("environment variable "+binding.name+": "+err.Error()))
+// Lookup returns the value of one environment variable.
+func (osEnvironment) Lookup(name string) (string, bool) { return os.LookupEnv(name) }
+
+// Names returns the names of every environment variable that is set.
+func (osEnvironment) Names() []string {
+	names := os.Environ()
+	result := make([]string, 0, len(names))
+	for _, entry := range names {
+		if index := strings.IndexByte(entry, '='); index > 0 {
+			result = append(result, entry[:index])
 		}
 	}
-	if err := applyFilesystemEnvironment(cfg, lookup); err != nil {
+	return result
+}
+
+// applyEnvironment overlays the environment onto the configuration.
+//
+// The environment variable of a configuration key is derived from its path, so
+// a configuration key needs no registration to become overridable. The
+// applied values are recorded in sources, so a caller can tell which input
+// won for every configuration key.
+func applyEnvironment(cfg *Config, lookup envLookup, sources Sources) error {
+	applied, err := applySchema(configSchema, reflect.ValueOf(cfg).Elem(), lookup)
+	if err != nil {
 		return err
 	}
-	return applyHTTPAuthenticationEnvironment(cfg, lookup)
-}
-
-func applyHTTPAuthenticationEnvironment(cfg *Config, lookup envLookup) error {
-	if !cfg.HTTP.Auth.Enabled || cfg.HTTP.ListenAddr == "" {
-		return nil
+	for path := range applied {
+		sources[path] = SourceEnvironment
 	}
-
-	username, usernameSet := lookup(httpUsernameEnvironment)
-	password, passwordSet := lookup(httpPasswordEnvironment)
-	if !usernameSet && !passwordSet {
-		return nil
-	}
-	if !usernameSet || !passwordSet {
-		return invalid("http.auth", errors.New("environment variables TORRENTFS_USERNAME and TORRENTFS_PASSWORD must be set together"))
-	}
-	if username == "" {
-		return invalid("http.auth.username", errors.New("environment variable TORRENTFS_USERNAME must not be empty"))
-	}
-	if password == "" {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must not be empty"))
-	}
-	if len([]byte(password)) > 72 {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD must be at most 72 bytes"))
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return invalid("http.auth.password", errors.New("environment variable TORRENTFS_PASSWORD could not be hashed"))
-	}
-	auth := cfg.HTTP.Auth
-	auth.Username = username
-	auth.PasswordHash = string(hash)
-	auth.PasswordHashFile = ""
-	cfg.HTTP.Auth = auth
 	return nil
 }
 

@@ -97,12 +97,18 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	s := &Server{
 		backend:       backend,
 		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
-		maxUpload:     cfg.HTTP.MaxUploadBytes,
+		maxUpload:     cfg.HTTP.MaxUploadBytes.Int64(),
 		logger:        logger,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	if cfg.HTTP.Auth.Enabled {
-		service, err := auth.New(cfg.HTTP.Auth)
+		hash, err := cfg.PasswordHash()
+		if err != nil {
+			err = fmt.Errorf("api: initialize authentication: %w", err)
+			s.logger.Error("http auth initialization failed", "stage", "authentication", "err", err)
+			return nil, err
+		}
+		service, err := auth.New(cfg.HTTP.Auth, hash)
 		if err != nil {
 			err = fmt.Errorf("api: initialize authentication: %w", err)
 			s.logger.Error("http auth initialization failed", "stage", "authentication", "err", err)
