@@ -21,8 +21,9 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
 
-// runCLI runs the command line and discards standard output. The tests that
-// assert the printed configuration call run directly and keep both streams.
+// runCLI runs the command line for a test that does not look at standard
+// output, and discards it. A test that asserts which stream carries the
+// result uses runCLICapture instead.
 func runCLI(args []string, stderr io.Writer) int {
 	return run(args, io.Discard, stderr)
 }

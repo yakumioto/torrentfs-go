@@ -36,8 +36,8 @@ Usage:
   torrentfs config print [--config <file>] [--format toml|json] [--sources]
 
 Commands:
-  config check   Validate the configuration and report every problem. It
-                 needs no torrents directory.
+  config check   Validate the configuration and report every problem on
+                 standard error. It needs no torrents directory.
   config print   Print the effective configuration to standard output. A
                  password is printed as <redacted>; the output is a report,
                  not a configuration file.

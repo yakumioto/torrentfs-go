@@ -17,8 +17,9 @@ Usage:
   torrentfs config print [--config <file>] [--format toml|json] [--sources]
 
 Commands:
-  check   Validate the configuration and report every problem. It prints
-          nothing when the configuration is usable and exits with 2 otherwise.
+  check   Validate the configuration and report every problem on standard
+          error. It prints nothing when the configuration is usable and exits
+          with 2 otherwise.
   print   Print the effective configuration to standard output. A secret value
           is printed as <redacted>; the output is a report, not a
           configuration file.

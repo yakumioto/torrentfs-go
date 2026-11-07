@@ -42,14 +42,16 @@ func TestConfigCheckAcceptsAUsableConfiguration(t *testing.T) {
 // changed several values learns about all of them at once.
 func TestConfigCheckReportsEveryProblem(t *testing.T) {
 	body := "backend = \"fuse\"\n[cache]\ncapacity = \"0B\"\n[log]\nlevel = \"nonsense\"\n"
-	var stderr strings.Builder
-	code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 	if code != 2 {
-		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("the check wrote a report to standard output: %s", stdout)
 	}
 	for _, field := range []string{"cache.capacity", "log.level", "fuse.mountpoint"} {
-		if !strings.Contains(stderr.String(), field) {
-			t.Errorf("the report does not name %q: %s", field, stderr.String())
+		if !strings.Contains(stderr, field) {
+			t.Errorf("the report does not name %q: %s", field, stderr)
 		}
 	}
 }
@@ -60,23 +62,44 @@ func TestConfigCheckReportsEveryProblem(t *testing.T) {
 // usable.
 func TestConfigCheckCoversTheExperiment(t *testing.T) {
 	body := "[lab]\nupload_mode = \"baseline\"\nupload_rate = \"1MiB/s\"\n"
-	var stderr strings.Builder
-	code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 	if code != 2 {
-		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(stderr.String(), "upload_rate") {
-		t.Errorf("the report does not name the experiment setting: %s", stderr.String())
+	if stdout != "" {
+		t.Errorf("the check wrote a report to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "upload_rate") {
+		t.Errorf("the report does not name the experiment setting: %s", stderr)
+	}
+}
+
+// TestConfigCheckRejectsAConfigurationThatEnablesNoOutput covers the contract
+// that the "at least one output" rule belongs to the check and not only to a
+// start.
+func TestConfigCheckRejectsAConfigurationThatEnablesNoOutput(t *testing.T) {
+	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n"
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("the check wrote a report to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "backend") {
+		t.Errorf("the report does not name the output backend: %s", stderr)
 	}
 }
 
 // TestConfigCheckNeedsNoTorrentsDirectory covers the contract that the
 // configuration commands work on the configuration alone.
 func TestConfigCheckNeedsNoTorrentsDirectory(t *testing.T) {
-	var stderr strings.Builder
-	code := runCLI([]string{"config", "check"}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "check"})
 	if code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
 	}
 }
 
@@ -161,37 +184,63 @@ func TestConfigPrintJSON(t *testing.T) {
 }
 
 // TestConfigPrintRejectsAnUnknownFormat covers the contract that an unknown
-// output format is reported instead of guessed.
+// output format is reported instead of guessed, and that a rejected command
+// writes no report at all.
 func TestConfigPrintRejectsAnUnknownFormat(t *testing.T) {
-	var stderr strings.Builder
-	code := runCLI([]string{"config", "print", "--format", "yaml"}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "print", "--format", "yaml"})
 	if code != 2 {
-		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(stderr.String(), "yaml") {
-		t.Errorf("the report does not name the format: %s", stderr.String())
+	if stdout != "" {
+		t.Errorf("the rejected command wrote a report to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "yaml") {
+		t.Errorf("the report does not name the format: %s", stderr)
+	}
+}
+
+// TestConfigPrintReportsALoadError covers the contract that a command that
+// cannot load the configuration writes the diagnosis to standard error and
+// nothing to standard output.
+func TestConfigPrintReportsALoadError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+
+	code, stdout, stderr := runCLICapture([]string{"config", "print", "--config", missing})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("the failed command wrote a report to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "missing.toml") {
+		t.Errorf("the diagnosis does not name the file: %s", stderr)
 	}
 }
 
 // TestConfigCommandNeedsNoTorrentsDirectory covers the contract that the
 // configuration commands do not take a torrents directory.
 func TestConfigCommandNeedsNoTorrentsDirectory(t *testing.T) {
-	var stderr strings.Builder
-	if code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")}, &stderr); code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")})
+	if code != 0 {
+		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
 	}
 }
 
 // TestConfigCommandRejectsAnUnknownCommand covers the contract that an
 // unknown configuration command is reported.
 func TestConfigCommandRejectsAnUnknownCommand(t *testing.T) {
-	var stderr strings.Builder
-	code := runCLI([]string{"config", "explain"}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "explain"})
 	if code != 2 {
-		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(stderr.String(), "explain") {
-		t.Errorf("the report does not name the command: %s", stderr.String())
+	if stdout != "" {
+		t.Errorf("the rejected command wrote a report to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "explain") {
+		t.Errorf("the report does not name the command: %s", stderr)
 	}
 }
 
@@ -199,12 +248,14 @@ func TestConfigCommandRejectsAnUnknownCommand(t *testing.T) {
 // configuration commands did not change how a start works: a start still
 // needs exactly one torrents directory.
 func TestStartupStillNeedsATorrentsDirectory(t *testing.T) {
-	var stderr strings.Builder
-	code := runCLI([]string{}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{})
 	if code != 2 {
-		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(stderr.String(), "torrents directory") {
-		t.Errorf("the report does not ask for a torrents directory: %s", stderr.String())
+	if stdout != "" {
+		t.Errorf("the usage error wrote to standard output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "torrents directory") {
+		t.Errorf("the report does not ask for a torrents directory: %s", stderr)
 	}
 }
