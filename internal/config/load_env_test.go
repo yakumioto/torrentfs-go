@@ -603,3 +603,22 @@ func writeConfigFile(t *testing.T, body string) string {
 func lookupEnvironment(values map[string]string) envLookup {
 	return mapEnvironment(values)
 }
+
+// TestLoadReportsARemovedEnvironmentNameWithTheValueErrors covers the contract
+// that one run reports every problem: a removed environment name is not
+// hidden behind an invalid value.
+func TestLoadReportsARemovedEnvironmentNameWithTheValueErrors(t *testing.T) {
+	path := writeConfigFile(t, "[cache]\ncapacity = \"0B\"\n")
+
+	_, err := load(path, lookupEnvironment(map[string]string{
+		"TORRENTFS_SMB_ENABLED": "true",
+	}))
+	if err == nil {
+		t.Fatal("load accepted a removed environment variable and an invalid value")
+	}
+	for _, want := range []string{"TORRENTFS_SMB_ENABLED", "cache.capacity"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("load error %q does not name %q", err, want)
+		}
+	}
+}

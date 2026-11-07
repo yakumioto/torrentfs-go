@@ -105,12 +105,13 @@ func checkConfig(path string) error {
 // apart in which rules they apply.
 func loadAndCheck(path string) (config.Config, config.Sources, error) {
 	cfg, sources, err := config.LoadWithSources(path)
+	problems := []error{err, cfg.ValidateOutput()}
 	if err != nil && configurationNamesExperiment(err) {
 		// A rejected experiment value is one problem. The cross-field rules
 		// would restate it in other words, so they wait for the next run.
-		return cfg, sources, err
+		return cfg, sources, errors.Join(problems...)
 	}
-	return cfg, sources, errors.Join(err, checkExperiment(cfg))
+	return cfg, sources, errors.Join(append(problems, checkExperiment(cfg))...)
 }
 
 // configurationNamesExperiment reports whether the configuration already

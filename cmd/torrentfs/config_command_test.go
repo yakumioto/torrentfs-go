@@ -272,6 +272,18 @@ func TestConfigPrintRejectsAnUnknownFormat(t *testing.T) {
 	}
 }
 
+// TestConfigPrintAuditsASwitchedOffConfiguration covers the contract that the
+// audit still reads the effective values of a configuration that is not meant
+// to run: the rule of an enabled output belongs to a start, not to the audit.
+func TestConfigPrintAuditsASwitchedOffConfiguration(t *testing.T) {
+	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n"
+
+	output := printConfig(t, "--config", writeConfigFile(t, body))
+	if !strings.Contains(output, `backend = "none"`) {
+		t.Errorf("the report does not show the effective backend: %s", output)
+	}
+}
+
 // TestConfigPrintReportsALoadError covers the contract that a command that
 // cannot load the configuration writes the diagnosis to standard error and
 // nothing to standard output.

@@ -28,9 +28,9 @@ func TestLoadDistinguishesExplicitZeroValuesFromOmittedKeys(t *testing.T) {
 		},
 		{
 			name:        "an explicit empty listen address overrides the default",
-			body:        "backend = \"fuse\"\n[fuse]\nmountpoint = \"/mnt/torrentfs\"\n[http]\nlisten_addr = \"\"\n",
+			body:        "[http]\nlisten_addr = \"\"\n",
 			wantListen:  "",
-			wantMount:   "/mnt/torrentfs",
+			wantMount:   "",
 			wantTimeout: config.Duration(30 * 1e9),
 		},
 		{

@@ -674,13 +674,10 @@ func TestValidateAcceptsExposedAddressWithAuth(t *testing.T) {
 		t.Fatalf("Validate exposed address with auth: %v", err)
 	}
 
-	// HTTP may be switched off while another output serves the process.
 	cfg = config.Default()
-	cfg.Backend = config.BackendFUSE
-	cfg.FUSE.Mountpoint = "/mnt/torrentfs"
-	cfg.HTTP.ListenAddr = ""
+	cfg.HTTP.ListenAddr = "" // HTTP disabled
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate disabled HTTP with the FUSE output: %v", err)
+		t.Fatalf("Validate disabled HTTP: %v", err)
 	}
 }
 

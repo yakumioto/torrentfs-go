@@ -413,6 +413,20 @@ func (c Config) validateLabShape() error {
 	return nil
 }
 
+// ValidateOutput checks that the configuration enables at least one output.
+//
+// The rule belongs to the process, not to the values: a configuration file may
+// describe a service that is switched off, and an audit that prints the
+// effective values must still be able to read it. A start and the check apply
+// the rule, and they report it together with the other problems so one run
+// names every mistake.
+func (c Config) ValidateOutput() error {
+	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
+		return invalid("backend", errNoOutput)
+	}
+	return nil
+}
+
 // validateRequirements checks the configuration that has to be complete for
 // the selected output.
 func (c Config) validateRequirements(collector *validationCollector) {
@@ -436,12 +450,6 @@ func (c Config) validateRequirements(collector *validationCollector) {
 	}
 	if c.Backend == BackendSMB && c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
 		collector.add(invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener")))
-	}
-	// The process needs something to serve: a configuration that enables no
-	// output is incomplete, and it is reported with the other problems so a
-	// user learns about it in the same run.
-	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
-		collector.add(invalid("backend", errNoOutput))
 	}
 }
 

@@ -53,7 +53,11 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	// A removed name is reported before anything else is read, and the names
 	// of every input are collected together: a user who renamed a key in the
 	// file and in the environment learns about both at once.
-	removed := removedEnvironmentNames(lookup)
+	// A removed key in the file has to stop the load before the strict
+	// decoder runs, because the decoder would report it as unknown. A removed
+	// environment name does not: it is reported with the other problems, so a
+	// user who also has a bad value learns about both at once.
+	envRemoved := removedEnvironmentNames(lookup)
 	if path != "" {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -63,9 +67,8 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 		if err != nil {
 			return Config{}, nil, err
 		}
-		removed = append(removed, removedTOMLNames(document)...)
-		if len(removed) > 0 {
-			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: removed})
+		if fileRemoved := removedTOMLNames(document); len(fileRemoved) > 0 {
+			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: append(envRemoved, fileRemoved...)})
 		}
 		set, err := decodeFile(content, path, &cfg)
 		if err != nil {
@@ -74,8 +77,6 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 		for key := range documentKeys(set) {
 			sources[key] = SourceFile
 		}
-	} else if len(removed) > 0 {
-		return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: removed})
 	}
 	// The environment and the values are both checked, and both sets of
 	// errors are reported together: a malformed environment value and an
@@ -87,15 +88,25 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 		collector.add(err)
 	}
 	collector.add(cfg.Validate())
-	if err := collector.err(); err != nil {
-		// The loaded values travel with the error so a caller can run the
-		// checks that live outside this package (the rules of the upload
-		// statistics experiment) and report every problem at once. A failed
-		// decode leaves the zero value: there are no values to check then.
+	// The loaded values travel with the error so a caller can run the checks
+	// that live outside this package (the output rule and the rules of the
+	// upload statistics experiment) and report every problem at once. A
+	// failed decode leaves the zero value: there are no values to check then.
+	validateErr := collector.err()
+	if validateErr != nil {
 		if path == "" {
-			return cfg, sources, fmt.Errorf("config: validate: %w", err)
+			validateErr = fmt.Errorf("config: validate: %w", validateErr)
+		} else {
+			validateErr = fmt.Errorf("config: validate %q: %w", path, validateErr)
 		}
-		return cfg, sources, fmt.Errorf("config: validate %q: %w", path, err)
+	}
+	switch {
+	case len(envRemoved) > 0 && validateErr != nil:
+		return cfg, sources, fmt.Errorf("config: %w\n%w", &RemovedError{Names: envRemoved}, validateErr)
+	case len(envRemoved) > 0:
+		return cfg, sources, fmt.Errorf("config: %w", &RemovedError{Names: envRemoved})
+	case validateErr != nil:
+		return cfg, sources, validateErr
 	}
 	return cfg, sources, nil
 }
