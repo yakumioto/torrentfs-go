@@ -31,9 +31,14 @@ import (
 	"crypto/cipher"
 	"crypto/subtle"
 	"fmt"
+	"sync"
 )
 
 type ccm struct {
+	// mu serializes Seal and Open. Every call resets and writes the shared
+	// CBC-MAC state, so one AEAD value is safe for concurrent use only when
+	// the calls take turns.
+	mu        sync.Mutex
 	c         cipher.Block
 	mac       *mac
 	nonceSize int
@@ -85,6 +90,9 @@ func (ccm *ccm) Overhead() int {
 }
 
 func (ccm *ccm) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
+	ccm.mu.Lock()
+	defer ccm.mu.Unlock()
+
 	/* In generation-encryption, cipher block chaining is applied to the payload, the associated data, and the nonce to
 	   generate a message authentication code (MAC) then, counter mode encryption is applied to the MAC and the payload
 	   to transform them into an unreadable form, called the ciphertext.
@@ -171,6 +179,8 @@ func (ccm *ccm) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 }
 
 func (s *ccm) Open(dst, nonce, ciphertext, additionalData []byte) (result []byte, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	/*
 	   The algorithm for decryption:

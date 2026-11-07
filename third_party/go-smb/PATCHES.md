@@ -56,6 +56,12 @@ fork, release, or upstream contribution is implied by this directory.
   mutex-protected: concurrent context cancellations issue signed CANCELs outside
   its ordinary send queue. This is exercised by the real-client cancellation
   regressions; it is not a new application authentication mechanism.
+- **Concurrent CCM use.** The CCM AEAD keeps one CBC-MAC state per value. The
+  server encrypts outbound PDUs from the receive loop and from concurrent read
+  workers on one session, so `Seal` and `Open` now take turns behind a mutex.
+  Without it the race detector reports overlapping `(*mac).Reset` and
+  `(*mac).Write` calls, and a tag can be computed over another packet's state.
+  Exercised by `TestConcurrentCCMUse` in `internal/smb`.
 - **Short NTLM NEGOTIATE decoding.** Accept the 32-byte NEGOTIATE layout when a
   client omits the optional Version field instead of unconditionally requiring
   40 bytes. An observed Infuse request used this layout and previously received
