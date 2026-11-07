@@ -19,8 +19,9 @@ Usage:
 Commands:
   check   Validate the configuration and report every problem. It prints
           nothing when the configuration is usable and exits with 2 otherwise.
-  print   Print the effective configuration. A secret value is printed as
-          <redacted>; the output is a report, not a configuration file.
+  print   Print the effective configuration to standard output. A secret value
+          is printed as <redacted>; the output is a report, not a
+          configuration file.
 
 Flags:
   --config <file>  TOML configuration file; the TORRENTFS_CONFIG variable is
@@ -37,8 +38,10 @@ experiment.
 // runConfigCommand runs the configuration commands.
 //
 // The commands report on the configuration rather than starting a service, so
-// they need no torrents directory and never open a listener.
-func runConfigCommand(args []string, stderr io.Writer) int {
+// they need no torrents directory and never open a listener. A successful
+// report is data, so it goes to standard output; the diagnostics go to
+// standard error.
+func runConfigCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stderr, configUsageText)
 		return 2
@@ -47,7 +50,7 @@ func runConfigCommand(args []string, stderr io.Writer) int {
 	case "check":
 		return runConfigCheck(args[1:], stderr)
 	case "print":
-		return runConfigPrint(args[1:], stderr)
+		return runConfigPrint(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		_, _ = io.WriteString(stderr, configUsageText)
 		return 0
@@ -98,7 +101,11 @@ func checkConfig(path string) error {
 }
 
 // runConfigPrint prints the effective configuration.
-func runConfigPrint(args []string, stderr io.Writer) int {
+//
+// The report is the result of the command, so it goes to standard output and
+// can be redirected or piped. The command never prints a secret: the printed
+// value of a secret key is the redacted placeholder.
+func runConfigPrint(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("torrentfs config print", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "TOML configuration file")
@@ -123,14 +130,14 @@ func runConfigPrint(args []string, stderr io.Writer) int {
 	}
 	switch *format {
 	case "toml":
-		_, _ = io.WriteString(stderr, printed.TOML())
+		_, _ = io.WriteString(stdout, printed.TOML())
 	case "json":
 		document, marshalErr := printed.JSON()
 		if marshalErr != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", marshalErr)
 			return 2
 		}
-		_, _ = fmt.Fprintf(stderr, "%s\n", document)
+		_, _ = fmt.Fprintf(stdout, "%s\n", document)
 	default:
 		_, _ = fmt.Fprintf(stderr, "torrentfs config print: unknown format %q (want toml or json)\n", *format)
 		return 2

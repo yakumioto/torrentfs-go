@@ -14,22 +14,6 @@ import (
 // the program prints.
 const redactedValue = "<redacted>"
 
-// Check loads the configuration and reports whether it is usable.
-//
-// The check covers everything a start would cover: the configuration file,
-// the environment, the unknown variables, the value rules, and the rules that
-// relate one key to another. It reports the errors of every rule at once.
-//
-// The check covers the upload statistics experiment too, because its rules
-// relate one setting to another and live in the experiment package.
-func Check(path string) error {
-	_, _, err := LoadWithSources(path)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 // PrintOptions selects the form of the printed configuration.
 type PrintOptions struct {
 	// Sources asks for the source of every value alongside the value.

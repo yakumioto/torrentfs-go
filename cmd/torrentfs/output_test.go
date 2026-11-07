@@ -70,7 +70,7 @@ bootstrap_nodes = ["127.0.0.1:1"]
 	t.Setenv("TORRENTFS_USERNAME", "SMB-login-is-not-a-Unix-user")
 	t.Setenv("TORRENTFS_PASSWORD", "test-only-output-password")
 	var stderr bytes.Buffer
-	if code := run([]string{"-config", file, dir}, &stderr); code != 1 {
+	if code := runCLI([]string{"-config", file, dir}, &stderr); code != 1 {
 		t.Fatalf("exit=%d stderr=%s", code, &stderr)
 	}
 	if !strings.Contains(stderr.String(), "smb listen:") {
@@ -86,7 +86,7 @@ func TestRunExplicitNoneRejectsAllOutputsDisabled(t *testing.T) {
 	t.Setenv("TORRENTFS_BACKEND", "none")
 	t.Setenv("TORRENTFS_HTTP_LISTEN_ADDR", "")
 	var stderr bytes.Buffer
-	if code := run([]string{t.TempDir()}, &stderr); code != 2 {
+	if code := runCLI([]string{t.TempDir()}, &stderr); code != 2 {
 		t.Fatalf("exit=%d stderr=%s", code, &stderr)
 	}
 }
@@ -101,7 +101,7 @@ func TestRunRejectsFUSEWithoutAMountpoint(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	var stderr bytes.Buffer
-	if code := run([]string{"-config", configPath, t.TempDir()}, &stderr); code != 2 {
+	if code := runCLI([]string{"-config", configPath, t.TempDir()}, &stderr); code != 2 {
 		t.Fatalf("exit=%d stderr=%s", code, &stderr)
 	}
 	if !strings.Contains(stderr.String(), "fuse.mountpoint") {

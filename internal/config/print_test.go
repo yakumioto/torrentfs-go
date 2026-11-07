@@ -145,25 +145,3 @@ func TestSummaryRedactsTheSecret(t *testing.T) {
 		t.Errorf("the log does not name the configuration keys: %s", buffer.String())
 	}
 }
-
-// TestCheckReportsEveryProblem covers the contract that the check reports
-// every problem at once.
-func TestCheckReportsEveryProblem(t *testing.T) {
-	err := config.Check(writeConfig(t, "backend = \"fuse\"\n[cache]\ncapacity = \"0B\"\n[log]\nlevel = \"nonsense\"\n"))
-	if err == nil {
-		t.Fatal("Check succeeded")
-	}
-	for _, field := range []string{"cache.capacity", "log.level", "fuse.mountpoint"} {
-		if !strings.Contains(err.Error(), field) {
-			t.Errorf("the report does not name %q: %v", field, err)
-		}
-	}
-}
-
-// TestCheckAcceptsAUsableConfiguration covers the contract that the check
-// says nothing when the configuration is usable.
-func TestCheckAcceptsAUsableConfiguration(t *testing.T) {
-	if err := config.Check(writeConfig(t, "backend = \"none\"\n")); err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-}

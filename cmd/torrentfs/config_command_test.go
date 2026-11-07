@@ -18,16 +18,23 @@ func writeConfigFile(t *testing.T, body string) string {
 	return path
 }
 
+// runCLICapture runs the command line and captures standard output and
+// standard error separately, so a test can assert which stream carried what.
+func runCLICapture(args []string) (code int, stdout, stderr string) {
+	var out, errOut strings.Builder
+	code = run(args, &out, &errOut)
+	return code, out.String(), errOut.String()
+}
+
 // TestConfigCheckAcceptsAUsableConfiguration covers the contract that the
 // check says nothing when the configuration is usable.
 func TestConfigCheckAcceptsAUsableConfiguration(t *testing.T) {
-	var stderr strings.Builder
-	code := run([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")}, &stderr)
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")})
 	if code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
+		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
 	}
-	if stderr.String() != "" {
-		t.Fatalf("run printed %q, want nothing", stderr.String())
+	if stdout != "" || stderr != "" {
+		t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
 	}
 }
 
@@ -36,7 +43,7 @@ func TestConfigCheckAcceptsAUsableConfiguration(t *testing.T) {
 func TestConfigCheckReportsEveryProblem(t *testing.T) {
 	body := "backend = \"fuse\"\n[cache]\ncapacity = \"0B\"\n[log]\nlevel = \"nonsense\"\n"
 	var stderr strings.Builder
-	code := run([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
+	code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
 	}
@@ -54,7 +61,7 @@ func TestConfigCheckReportsEveryProblem(t *testing.T) {
 func TestConfigCheckCoversTheExperiment(t *testing.T) {
 	body := "[lab]\nupload_mode = \"baseline\"\nupload_rate = \"1MiB/s\"\n"
 	var stderr strings.Builder
-	code := run([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
+	code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, body)}, &stderr)
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
 	}
@@ -67,30 +74,45 @@ func TestConfigCheckCoversTheExperiment(t *testing.T) {
 // configuration commands work on the configuration alone.
 func TestConfigCheckNeedsNoTorrentsDirectory(t *testing.T) {
 	var stderr strings.Builder
-	code := run([]string{"config", "check"}, &stderr)
+	code := runCLI([]string{"config", "check"}, &stderr)
 	if code != 0 {
 		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
 	}
+}
+
+// printConfig runs `config print` and returns its standard output.
+//
+// The report is the result of the command, so it belongs on standard output:
+// the helper fails the test when the command exits with a non-zero code, when
+// it writes diagnostics, or when it writes nothing at all.
+func printConfig(t *testing.T, args ...string) string {
+	t.Helper()
+	code, stdout, stderr := runCLICapture(append([]string{"config", "print"}, args...))
+	if code != 0 {
+		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("the report went to standard error: %s", stderr)
+	}
+	if stdout == "" {
+		t.Fatal("the report did not go to standard output")
+	}
+	return stdout
 }
 
 // TestConfigPrintRedactsTheSecret covers the contract that the printed
 // configuration never discloses a password.
 func TestConfigPrintRedactsTheSecret(t *testing.T) {
 	const secret = "a-password-that-must-not-leak"
-	body := "username = \"reader\"\npassword = \"" + secret + "\"\n"
-	path := writeConfigFile(t, body)
+	path := writeConfigFile(t, "username = \"reader\"\npassword = \""+secret+"\"\n")
 
 	for _, format := range []string{"toml", "json"} {
-		var stderr strings.Builder
-		code := run([]string{"config", "print", "--config", path, "--format", format}, &stderr)
-		if code != 0 {
-			t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
+		output := printConfig(t, "--config", path, "--format", format)
+		if strings.Contains(output, secret) {
+			t.Errorf("the %s output disclosed the password: %s", format, output)
 		}
-		if strings.Contains(stderr.String(), secret) {
-			t.Errorf("the %s output disclosed the password: %s", format, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), "<redacted>") {
-			t.Errorf("the %s output does not mark the redacted value: %s", format, stderr.String())
+		if !strings.Contains(output, "<redacted>") {
+			t.Errorf("the %s output does not mark the redacted value: %s", format, output)
 		}
 	}
 }
@@ -100,27 +122,21 @@ func TestConfigPrintRedactsTheSecret(t *testing.T) {
 func TestConfigPrintNamesTheSource(t *testing.T) {
 	path := writeConfigFile(t, "backend = \"none\"\n[connections]\nlisten_port = 12345\n")
 
-	var stderr strings.Builder
-	if code := run([]string{"config", "print", "--config", path, "--sources"}, &stderr); code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
+	output := printConfig(t, "--config", path, "--sources")
+	if !strings.Contains(output, "source: file") {
+		t.Errorf("the output does not name the file as the source: %s", output)
 	}
-	if !strings.Contains(stderr.String(), "source: file") {
-		t.Errorf("the output does not name the file as the source: %s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "source: default") {
-		t.Errorf("the output does not name the default as the source: %s", stderr.String())
+	if !strings.Contains(output, "source: default") {
+		t.Errorf("the output does not name the default as the source: %s", output)
 	}
 }
 
 // TestConfigPrintWithoutSources covers the contract that the source of a
 // value is printed only when it is asked for.
 func TestConfigPrintWithoutSources(t *testing.T) {
-	var stderr strings.Builder
-	if code := run([]string{"config", "print"}, &stderr); code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	if strings.Contains(stderr.String(), "source:") {
-		t.Errorf("the output names the sources without being asked: %s", stderr.String())
+	output := printConfig(t)
+	if strings.Contains(output, "source:") {
+		t.Errorf("the output names the sources without being asked: %s", output)
 	}
 }
 
@@ -129,15 +145,12 @@ func TestConfigPrintWithoutSources(t *testing.T) {
 func TestConfigPrintJSON(t *testing.T) {
 	path := writeConfigFile(t, "backend = \"none\"\n[connections]\nlisten_port = 12345\n")
 
-	var stderr strings.Builder
-	if code := run([]string{"config", "print", "--config", path, "--format", "json"}, &stderr); code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
-	}
+	output := printConfig(t, "--config", path, "--format", "json")
 	var document struct {
 		Values map[string]string `json:"values"`
 	}
-	if err := json.Unmarshal([]byte(stderr.String()), &document); err != nil {
-		t.Fatalf("the output is not JSON: %v; output: %s", err, stderr.String())
+	if err := json.Unmarshal([]byte(output), &document); err != nil {
+		t.Fatalf("the output is not JSON: %v; output: %s", err, output)
 	}
 	if document.Values["backend"] != "none" {
 		t.Errorf("backend = %q, want none", document.Values["backend"])
@@ -151,7 +164,7 @@ func TestConfigPrintJSON(t *testing.T) {
 // output format is reported instead of guessed.
 func TestConfigPrintRejectsAnUnknownFormat(t *testing.T) {
 	var stderr strings.Builder
-	code := run([]string{"config", "print", "--format", "yaml"}, &stderr)
+	code := runCLI([]string{"config", "print", "--format", "yaml"}, &stderr)
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
 	}
@@ -164,7 +177,7 @@ func TestConfigPrintRejectsAnUnknownFormat(t *testing.T) {
 // configuration commands do not take a torrents directory.
 func TestConfigCommandNeedsNoTorrentsDirectory(t *testing.T) {
 	var stderr strings.Builder
-	if code := run([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")}, &stderr); code != 0 {
+	if code := runCLI([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")}, &stderr); code != 0 {
 		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr.String())
 	}
 }
@@ -173,7 +186,7 @@ func TestConfigCommandNeedsNoTorrentsDirectory(t *testing.T) {
 // unknown configuration command is reported.
 func TestConfigCommandRejectsAnUnknownCommand(t *testing.T) {
 	var stderr strings.Builder
-	code := run([]string{"config", "explain"}, &stderr)
+	code := runCLI([]string{"config", "explain"}, &stderr)
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
 	}
@@ -187,7 +200,7 @@ func TestConfigCommandRejectsAnUnknownCommand(t *testing.T) {
 // needs exactly one torrents directory.
 func TestStartupStillNeedsATorrentsDirectory(t *testing.T) {
 	var stderr strings.Builder
-	code := run([]string{}, &stderr)
+	code := runCLI([]string{}, &stderr)
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr.String())
 	}

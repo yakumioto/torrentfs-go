@@ -38,8 +38,9 @@ Usage:
 Commands:
   config check   Validate the configuration and report every problem. It
                  needs no torrents directory.
-  config print   Print the effective configuration. A password is printed as
-                 <redacted>; the output is a report, not a configuration file.
+  config print   Print the effective configuration to standard output. A
+                 password is printed as <redacted>; the output is a report,
+                 not a configuration file.
 
 Configuration:
   backend = "fuse", "smb", or "none" (HTTP-only default)
@@ -84,12 +85,12 @@ bounded shutdown.
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run executes the CLI and returns the process exit code: 0 on success, 1 on
 // runtime errors, 2 on usage or configuration errors.
-func run(args []string, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
 	if err := config.RemovedFlagError(args); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
@@ -97,7 +98,7 @@ func run(args []string, stderr io.Writer) int {
 	// The configuration commands work on the configuration alone, so they
 	// come before the arguments of a start: they need no torrents directory.
 	if len(args) > 0 && args[0] == "config" {
-		return runConfigCommand(args[1:], stderr)
+		return runConfigCommand(args[1:], stdout, stderr)
 	}
 	flags := flag.NewFlagSet("torrentfs", flag.ContinueOnError)
 	flags.SetOutput(stderr)

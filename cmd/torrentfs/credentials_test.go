@@ -40,7 +40,7 @@ func TestRunWarnsAboutAPasswordFromTheConfigurationFile(t *testing.T) {
 	const secret = "a-file-password-that-must-not-be-logged"
 
 	var stderr bytes.Buffer
-	if code := run([]string{"-config", busyAddressConfig(t, secret), t.TempDir()}, &stderr); code != 1 {
+	if code := runCLI([]string{"-config", busyAddressConfig(t, secret), t.TempDir()}, &stderr); code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "password") {
@@ -60,7 +60,7 @@ func TestRunDoesNotWarnAboutAPasswordFromTheEnvironment(t *testing.T) {
 	t.Setenv("TORRENTFS_PASSWORD", secret)
 
 	var stderr bytes.Buffer
-	if code := run([]string{"-config", busyAddressConfig(t, ""), t.TempDir()}, &stderr); code != 1 {
+	if code := runCLI([]string{"-config", busyAddressConfig(t, ""), t.TempDir()}, &stderr); code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stderr = %q", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "readable on disk") {
@@ -77,7 +77,7 @@ func TestRunDoesNotWarnWithoutAPassword(t *testing.T) {
 	unsetConfigEnvironment(t)
 
 	var stderr bytes.Buffer
-	if code := run([]string{"-config", busyAddressConfig(t, ""), t.TempDir()}, &stderr); code != 1 {
+	if code := runCLI([]string{"-config", busyAddressConfig(t, ""), t.TempDir()}, &stderr); code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stderr = %q", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "readable on disk") {

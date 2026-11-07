@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,12 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
+
+// runCLI runs the command line and discards standard output. The tests that
+// assert the printed configuration call run directly and keep both streams.
+func runCLI(args []string, stderr io.Writer) int {
+	return run(args, io.Discard, stderr)
+}
 
 // shutdownRecorder records the order in which the shutdown stages ran and the
 // errors each stage reports. A blocking Unmount stage records from its own
@@ -509,7 +516,7 @@ func TestRunMissingConfigReturnsConfigurationExitCode(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")
 	var stderr bytes.Buffer
 
-	code := run([]string{
+	code := runCLI([]string{
 		"-config", missing,
 		t.TempDir(),
 	}, &stderr)
@@ -533,7 +540,7 @@ func TestRunLoadsTheConfigurationFileNamedByTheEnvironmentVariable(t *testing.T)
 	t.Setenv("TORRENTFS_CONFIG", configPath)
 	var stderr bytes.Buffer
 
-	code := run([]string{t.TempDir()}, &stderr)
+	code := runCLI([]string{t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
@@ -561,7 +568,7 @@ func TestRunPrefersTheConfigFlagOverTheEnvironmentVariable(t *testing.T) {
 	t.Setenv("TORRENTFS_CONFIG", environmentPath)
 	var stderr bytes.Buffer
 
-	code := run([]string{"-config", flagPath, t.TempDir()}, &stderr)
+	code := runCLI([]string{"-config", flagPath, t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
@@ -582,7 +589,7 @@ func TestRunWithoutAConfigurationFileUsesTheDefaults(t *testing.T) {
 
 	// The process starts and then fails for another reason, so the assertion
 	// is that no configuration file was reported.
-	code := run([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	code := runCLI([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
@@ -598,7 +605,7 @@ func TestRunInvalidConfigReturnsConfigurationExitCode(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	code := run([]string{
+	code := runCLI([]string{
 		"-config", path,
 		t.TempDir(),
 	}, &stderr)
@@ -625,7 +632,7 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	var stderr bytes.Buffer
-	code := run([]string{"-config", configPath, torrentsDir}, &stderr)
+	code := runCLI([]string{"-config", configPath, torrentsDir}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
@@ -636,7 +643,7 @@ func TestRunRejectsInvalidAuthenticationMaterialBeforeMount(t *testing.T) {
 
 func TestRunRejectsRemovedDataDirFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	code := run([]string{"-data-dir", t.TempDir(), t.TempDir()}, &stderr)
+	code := runCLI([]string{"-data-dir", t.TempDir(), t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -666,7 +673,7 @@ func TestRunRequiresExactlyOneTorrentsDirectory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var stderr bytes.Buffer
 			args := tt.args
-			if code := run(args, &stderr); code != 2 {
+			if code := runCLI(args, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.want) {
@@ -683,7 +690,7 @@ func TestRunRejectsNonDirectoryTorrentInput(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	code := run([]string{file}, &stderr)
+	code := runCLI([]string{file}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -698,7 +705,7 @@ func TestRunRejectsMissingTorrentDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing-torrents")
 	var stderr bytes.Buffer
 
-	code := run([]string{missing}, &stderr)
+	code := runCLI([]string{missing}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -714,7 +721,7 @@ func TestRunInvalidEnvironmentReturnsConfigurationExitCode(t *testing.T) {
 	t.Setenv("TORRENTFS_CONNECTIONS_LISTEN_PORT", "invalid-run-port")
 	var stderr bytes.Buffer
 
-	code := run([]string{t.TempDir()}, &stderr)
+	code := runCLI([]string{t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2", code)
 	}
@@ -736,7 +743,7 @@ func TestRunRejectsUnknownConfigurationVariable(t *testing.T) {
 	t.Setenv("TORRENTFS_HTTP_LISEN_ADDR", "0.0.0.0:8080")
 	var stderr bytes.Buffer
 
-	code := run([]string{t.TempDir()}, &stderr)
+	code := runCLI([]string{t.TempDir()}, &stderr)
 	if code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 	}
@@ -758,7 +765,7 @@ func TestRunIgnoresVariablesOutsideTheConfigurationNamespace(t *testing.T) {
 	// The process starts and then fails on the missing torrents directory or
 	// on the HTTP listener, so the assertion is that the unknown-variable
 	// report is absent rather than that the process succeeded.
-	code := run([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
+	code := runCLI([]string{filepath.Join(t.TempDir(), "missing")}, &stderr)
 	if strings.Contains(stderr.String(), "not a known configuration item") {
 		t.Fatalf("stderr = %q, want no unknown-variable report", stderr.String())
 	}
@@ -929,7 +936,7 @@ func TestRunRejectsSTRMConfigurationBeforeStartup(t *testing.T) {
 				t.Fatalf("write config: %v", err)
 			}
 			var stderr bytes.Buffer
-			if code := run([]string{"-config", configPath, torrents}, &stderr); code != 2 {
+			if code := runCLI([]string{"-config", configPath, torrents}, &stderr); code != 2 {
 				t.Fatalf("run exit code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			output := stderr.String()
@@ -963,7 +970,7 @@ func TestRunRejectsRemovedMountpointFlags(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			unsetConfigEnvironment(t)
 			var stderr bytes.Buffer
-			code := run(append(tt.args, t.TempDir()), &stderr)
+			code := runCLI(append(tt.args, t.TempDir()), &stderr)
 			if code != 2 {
 				t.Fatalf("run exit code = %d, want 2", code)
 			}

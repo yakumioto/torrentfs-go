@@ -138,7 +138,7 @@ strm = "off"
 ## 配置
 
 - 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
-- 完整字段与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
+- 完整配置项与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
 - **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
@@ -149,7 +149,7 @@ strm = "off"
 
 ### 配置项速查
 
-下表由配置 schema 生成，与 [torrentfs.example.toml](torrentfs.example.toml) 同源；字段的完整注释见该文件。
+下表由配置 schema 生成，与 [torrentfs.example.toml](torrentfs.example.toml) 同源；各配置项的完整注释见该文件。
 
 <!-- BEGIN generated:readme-reference -->
 | 配置项 | 环境变量 | 默认值 | 说明 |
@@ -202,10 +202,12 @@ torrentfs config check --config ./torrentfs.toml
 
 # 查看生效配置；口令一律显示为 <redacted>
 torrentfs config print --config ./torrentfs.toml
-torrentfs config print --format json --sources   # 附带每个值的来源
+torrentfs config print --format json --sources   # 附带每个值的配置来源
 ```
 
 `--sources` 会标出每个值来自**内置默认值**、**配置文件**还是**环境变量**，用来排查"为什么没生效"。打印结果是**报告**，不是配置文件——脱敏后的占位符无法回灌。
+
+`config print` 把报告写到标准输出，`config check` 的诊断写到标准错误，所以 `torrentfs config print --format json | jq` 可以直接管道处理。
 
 正常启动时日志里也会记录一份脱敏的生效配置摘要（`effective configuration`）。
 
