@@ -147,6 +147,51 @@ strm = "off"
 - 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
 
+### 配置项速查
+
+下表由配置 schema 生成，与 [torrentfs.example.toml](torrentfs.example.toml) 同源；字段的完整注释见该文件。
+
+<!-- BEGIN generated:readme-reference -->
+| 配置项 | 环境变量 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `backend` | `TORRENTFS_BACKEND` | `none` | Backend selects the output backend: none, fuse, or smb. |
+| `username` | `TORRENTFS_USERNAME` | `` | Username is the login name the SMB output accepts. The HTTP login does not check a user name, so the key is only required for the SMB output. |
+| `password` | `TORRENTFS_PASSWORD` | `` | Password is the plaintext password shared by the SMB output and the HTTP login. It is required for the SMB output and for enabled HTTP authentication, and it has no default. |
+| `connections.listen_host` | `TORRENTFS_CONNECTIONS_LISTEN_HOST` | `` | ListenHost is the address the session listens on for peer connections. Empty lets the client pick its default. |
+| `connections.listen_port` | `TORRENTFS_CONNECTIONS_LISTEN_PORT` | `0` | ListenPort is the TCP/UDP port for incoming peer connections. 0 selects a random free port. |
+| `connections.disable_ipv4` | `TORRENTFS_CONNECTIONS_DISABLE_IPV4` | `false` | DisableIPv4 turns off every IPv4 listener, dialer, and DHT server. |
+| `connections.disable_ipv6` | `TORRENTFS_CONNECTIONS_DISABLE_IPV6` | `false` | DisableIPv6 turns off every IPv6 listener, dialer, and DHT server. Only one family may be disabled: disabling both leaves no transport. |
+| `connections.no_port_forwarding` | `TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING` | `true` | NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true so a deployment with no UPnP device behaves the same as one that has a device but no mapping rule. |
+| `connections.bootstrap_nodes` | `TORRENTFS_CONNECTIONS_BOOTSTRAP_NODES` | `[]` | BootstrapNodes overrides the default DHT bootstrap hosts with explicit host:port entries. Entries are resolved per address family and filtered to the family of the socket that asks for them. Empty uses the client's built-in bootstrap list. |
+| `proxy.socks5_url` | `TORRENTFS_PROXY_SOCKS5_URL` | `` | Socks5URL is an optional SOCKS5 or SOCKS5H endpoint. |
+| `cache.capacity` | `TORRENTFS_CACHE_CAPACITY` | `2GiB` | CapacityBytes is the maximum number of bytes retained in memory. |
+| `identity.tracker_user_agent` | `TORRENTFS_IDENTITY_TRACKER_USER_AGENT` | `qBittorrent/4.4.0` | TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces. |
+| `identity.peer_id_prefix` | `TORRENTFS_IDENTITY_PEER_ID_PREFIX` | `-qB4400-` | PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID. |
+| `identity.extended_handshake_client_version` | `TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION` | `qBittorrent/4.4.0` | ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field. |
+| `http.listen_addr` | `TORRENTFS_HTTP_LISTEN_ADDR` | `127.0.0.1:8080` | ListenAddr is the address the HTTP service binds. Empty disables the service. The default binds loopback only. |
+| `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | `false` | Enabled turns on the HTTP login. It is required for a listener that is not bound to the loopback address. |
+| `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `30m0s` | TokenTTL is the inactivity window of a login token. A valid request slides the window; the tokens live in memory and die with the process. |
+| `http.max_upload_size` | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `10MiB` | MaxUploadBytes caps any uploaded request body: a .torrent upload or a managed subtitle file. |
+| `strm.base_url` | `TORRENTFS_STRM_BASE_URL` | `` | BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse proxy path prefix. Empty disables signed streaming links. |
+| `log.level` | `TORRENTFS_LOG_LEVEL` | `info` | Level is the minimum level of a log record: debug, info, warn, or error. Debug is disabled by default. |
+| `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |
+| `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | `false` | AddSource adds the source file and line to every log record. |
+| `filesystem.read_timeout` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `30s` | ReadTimeout bounds a single read of a piece from the torrent. |
+| `fuse.mountpoint` | `TORRENTFS_FUSE_MOUNTPOINT` | `` | Mountpoint is the directory the file tree is mounted on. |
+| `fuse.strm_mountpoint` | `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `` | STRMMountpoint is the directory the signed-streaming view is mounted on. |
+| `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
+| `smb.listen_addr` | `TORRENTFS_SMB_LISTEN_ADDR` | `0.0.0.0:1445` | ListenAddr is the address the SMB service binds. |
+| `smb.strm` | `TORRENTFS_SMB_STRM` | `auto` | STRM switches the STRM share of the SMB output: auto, on, or off. |
+| `lab.upload_mode` | `TORRENTFS_LAB_UPLOAD_MODE` | `` | UploadMode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
+| `lab.upload_rate` | `TORRENTFS_LAB_UPLOAD_RATE` | `` | UploadRate is the average synthetic growth of the reported upload in inject mode. |
+| `lab.upload_multiplier` | `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | `0` | UploadMultiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
+| `lab.upload_jitter` | `TORRENTFS_LAB_UPLOAD_JITTER` | `0` | UploadJitter is the per-announce deviation from the nominal increment, in percent. |
+| `lab.upload_cap` | `TORRENTFS_LAB_UPLOAD_CAP` | `0B` | UploadCap is the per-torrent ceiling on the cumulative reported upload. |
+| `lab.upload_seed` | `TORRENTFS_LAB_UPLOAD_SEED` | `0` | UploadSeed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
+| `lab.announce_log` | `TORRENTFS_LAB_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |
+| `lab.peer_sample_interval` | `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. |
+<!-- END generated:readme-reference -->
+
 ### 迁移对照表
 
 已删除的名称在启动时会报错并给出替代写法，不会被静默忽略。

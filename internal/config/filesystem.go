@@ -81,3 +81,9 @@ func validateEnum(path, value string) error {
 	}
 	return nil
 }
+
+// String returns the name of the output backend.
+func (b Backend) String() string { return string(b) }
+
+// String returns the name of the STRM switch.
+func (s STRMSwitch) String() string { return string(s) }

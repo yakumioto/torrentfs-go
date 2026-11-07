@@ -9,25 +9,69 @@
 // Usage:
 //
 //	go run ./internal/config/cmd/config-doc migration-table
+//	go run ./internal/config/cmd/config-doc example-toml
+//	go run ./internal/config/cmd/config-doc image-overlay
+//	go run ./internal/config/cmd/config-doc readme-reference
+//	go run ./internal/config/cmd/config-doc write-readme-reference <readme>
 package main
 
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: config-doc migration-table")
+	if len(os.Args) < 2 {
+		usage()
 		os.Exit(2)
 	}
-	switch os.Args[1] {
-	case "migration-table":
+	fragment := os.Args[1]
+	if fragment == "write-readme-reference" {
+		if len(os.Args) != 3 {
+			usage()
+			os.Exit(2)
+		}
+		if err := config.WriteReadmeReference(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "config-doc: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if fragment == "migration-table" {
 		fmt.Println(config.MigrationTable())
+		return
+	}
+	generator, err := config.NewGenerator()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config-doc: %v\n", err)
+		os.Exit(1)
+	}
+	var document string
+	switch fragment {
+	case "example-toml":
+		document, err = generator.ExampleTOML()
+	case "image-overlay":
+		document, err = generator.ImageOverlayTOML()
+	case "readme-reference":
+		document = generator.ReferenceTable()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown fragment %q\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "config-doc: unknown fragment %q\n", fragment)
 		os.Exit(2)
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config-doc: %v\n", err)
+		os.Exit(1)
+	}
+	if !strings.HasSuffix(document, "\n") {
+		document += "\n"
+	}
+	fmt.Print(document)
+}
+
+// usage reports the fragments the command writes.
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: config-doc <migration-table|example-toml|image-overlay|readme-reference|write-readme-reference>")
 }

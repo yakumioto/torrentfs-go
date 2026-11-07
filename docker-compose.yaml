@@ -44,6 +44,8 @@ services:
       TORRENTFS_PASSWORD: "${TORRENTFS_PASSWORD:?set a strong shared HTTP/SMB password}"
       # Optional STRM share; the URL must be reachable from the player.
       # TORRENTFS_STRM_BASE_URL: "http://192.168.1.10:8080"
-      TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
-      TORRENTFS_CACHE_CAPACITY: "2GiB"
-      TORRENTFS_FILESYSTEM_READ_TIMEOUT: "30s"
+      # The peer port and the cache capacity keep their image defaults; set
+      # them here only to change them.
+      # TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
+      # TORRENTFS_CACHE_CAPACITY: "2GiB"
+      # TORRENTFS_FILESYSTEM_READ_TIMEOUT: "30s"

@@ -162,3 +162,25 @@ func (d *OptionalDuration) UnmarshalText(text []byte) error {
 
 // String returns the duration in Go's standard duration format.
 func (d OptionalDuration) String() string { return time.Duration(d).String() }
+
+// formatByteRate renders a byte rate the way a configuration file writes it.
+func formatByteRate(value float64) string {
+	if value == 0 {
+		return "0"
+	}
+	return formatByteQuantity(int64(value)) + "/s"
+}
+
+// formatPercent renders a percentage the way a configuration file writes it.
+func formatPercent(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// formatRatio renders a ratio the way a configuration file writes it.
+func formatRatio(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// String returns the quantity with a byte unit, the way a configuration file
+// writes it.
+func (q OptionalByteQuantity) String() string { return formatByteQuantity(int64(q)) }

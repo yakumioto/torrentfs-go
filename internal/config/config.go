@@ -182,9 +182,14 @@ type STRM struct {
 
 // Log groups the process log settings.
 type Log struct {
-	Level     string `toml:"level"`
-	Format    string `toml:"format"`
-	AddSource bool   `toml:"add_source"`
+	// Level is the minimum level of a log record: debug, info, warn, or
+	// error. Debug is disabled by default.
+	Level string `toml:"level"`
+	// Format is the shape of a log record: text for humans or json for log
+	// collectors.
+	Format string `toml:"format"`
+	// AddSource adds the source file and line to every log record.
+	AddSource bool `toml:"add_source"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -211,7 +216,11 @@ func (d Duration) String() string {
 // login checks the password only, so the authentication service needs no
 // user name of its own.
 type Auth struct {
-	Enabled  bool     `toml:"enabled"`
+	// Enabled turns on the HTTP login. It is required for a listener that is
+	// not bound to the loopback address.
+	Enabled bool `toml:"enabled"`
+	// TokenTTL is the inactivity window of a login token. A valid request
+	// slides the window; the tokens live in memory and die with the process.
 	TokenTTL Duration `toml:"token_ttl"`
 }
 

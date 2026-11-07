@@ -1,70 +1,16 @@
-# Default configuration for the Docker image.
-# Every configuration key has an environment variable, derived from its path:
-# the path in upper case, with the dots replaced by underscores, under the
-# TORRENTFS_ prefix. The image names this file with -config; TORRENTFS_CONFIG
-# names it too, and the argument wins over the variable.
-
-# Default: none (HTTP-only). Explicitly select with TORRENTFS_BACKEND or a
-# custom TOML. A configured mountpoint does not select the FUSE output.
-backend = "none"
-
-# The credentials shared by the SMB output and the HTTP login. The image sets
-# neither: supply them with TORRENTFS_USERNAME and TORRENTFS_PASSWORD, or set
-# them in a custom TOML. A password in a TOML stays readable on disk and earns
-# a startup warning.
-username = ""
-password = ""
-
-[http]
-listen_addr = "127.0.0.1:8080"
-max_upload_size = "10MiB"
-
-[http.auth]
-enabled = false
-token_ttl = "30m"
-
-[strm]
-# Empty disables signed HTTP streaming. Override with TORRENTFS_STRM_BASE_URL
-# using a player-reachable HTTP(S) URL; http.listen_addr must be enabled.
-base_url = ""
+# torrentfs.toml — the configuration of the Docker image.
+#
+# The image holds the settings that differ from the built-in defaults.
+# Everything else keeps its built-in value; this is not a complete
+# configuration. The complete one is torrentfs.example.toml.
+#
+# Override a value with the environment variable of its path, or with a
+# configuration file of your own mounted over this one.
 
 [connections]
-listen_host = ""
-# A fixed peer port so it can be published with -p 6881:6881/tcp -p 6881:6881/udp.
-# Inbound peers are unreachable from a bridge network without that mapping.
+# ListenPort is the TCP/UDP port for incoming peer connections.
+# 0 selects a random free port.
 listen_port = 6881
-# Image default: no IPv6 in the container network.
+# DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
+# Only one family may be disabled: disabling both leaves no transport.
 disable_ipv6 = true
-# No automatic UPnP/NAT-PMP mapping; publish the port yourself when needed.
-no_port_forwarding = true
-bootstrap_nodes = []
-
-[proxy]
-socks5_url = ""
-
-[cache]
-# 2GiB suits a host with about 4 GB of RAM. Override for smaller containers:
-# use an integer with an SI or IEC byte unit, roughly 50-60% of the container memory limit.
-capacity = "2GiB"
-
-[identity]
-tracker_user_agent = "qBittorrent/4.4.0"
-peer_id_prefix = "-qB4400-"
-extended_handshake_client_version = "qBittorrent/4.4.0"
-
-[log]
-level = "info"
-format = "text"
-add_source = false
-
-[filesystem]
-read_timeout = "30s"
-
-[fuse]
-mountpoint = ""
-strm_mountpoint = ""
-allow_other = false
-
-[smb]
-listen_addr = "0.0.0.0:1445"
-strm = "auto"

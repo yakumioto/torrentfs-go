@@ -71,6 +71,20 @@ jobs:
       - name: Lint
         run: $(go env GOPATH)/bin/golangci-lint run ./...
 
+  # The example configuration, the image configuration and the reference in
+  # the README are generated from the configuration schema. A hand edit to one
+  # of them is a change the generator does not know about.
+  config-docs:
+    name: Configuration documentation is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Check the generated configuration files
+        run: ./scripts/config-docs-check.sh
+
   # Real-mount job. It sets TF_FUSE_REQUIRED=1, so a runner without
   # /dev/fuse, fusermount, or mount permission fails instead of silently
   # skipping every real-mount test. The runner executes jobs in a container,
