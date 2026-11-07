@@ -32,6 +32,14 @@ and serves a torrent management HTTP API.
 
 Usage:
   torrentfs [-config <file>] <torrents-dir>
+  torrentfs config check [--config <file>]
+  torrentfs config print [--config <file>] [--format toml|json] [--sources]
+
+Commands:
+  config check   Validate the configuration and report every problem. It
+                 needs no torrents directory.
+  config print   Print the effective configuration. A password is printed as
+                 <redacted>; the output is a report, not a configuration file.
 
 Configuration:
   backend = "fuse", "smb", or "none" (HTTP-only default)
@@ -85,6 +93,11 @@ func run(args []string, stderr io.Writer) int {
 	if err := config.RemovedFlagError(args); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
+	}
+	// The configuration commands work on the configuration alone, so they
+	// come before the arguments of a start: they need no torrents directory.
+	if len(args) > 0 && args[0] == "config" {
+		return runConfigCommand(args[1:], stderr)
 	}
 	flags := flag.NewFlagSet("torrentfs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -163,6 +176,7 @@ func run(args []string, stderr io.Writer) int {
 		"log_format", logFormat,
 	)
 	warnPlaintextPassword(logger, cfg, sources)
+	logEffectiveConfig(logger, cfg, sources)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -544,6 +558,16 @@ func warnPlaintextPassword(logger *slog.Logger, cfg config.Config, sources confi
 	}
 	logger.Warn("the password comes from the configuration file and is readable on disk; " +
 		"prefer the TORRENTFS_PASSWORD environment variable")
+}
+
+// logEffectiveConfig records the effective configuration.
+//
+// The record names every configuration key, its effective value and the
+// input the value came from, so a user who asks why a setting did not take
+// effect reads the answer out of the log instead of guessing. The secret
+// values are redacted.
+func logEffectiveConfig(logger *slog.Logger, cfg config.Config, sources config.Sources) {
+	logger.Info("effective configuration", config.Summary(cfg, sources))
 }
 
 // loadConfig loads the configuration and reports where every effective value
