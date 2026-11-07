@@ -15,24 +15,9 @@ var errUnknownEnvironment = errors.New("unknown environment variable in the " + 
 
 // environmentException is a variable in the configuration namespace that the
 // program accepts even though no configuration key derives it.
-//
-// An exception covers either one variable or one family of variables, never
-// both: a name covers a single variable, a prefix covers the variables that
-// belong together.
 type environmentException struct {
-	// Name is the variable name. It is used when Prefix is empty.
+	// Name is the variable name.
 	Name string
-	// Prefix matches every variable that starts with it. It is used when
-	// Name is empty.
-	Prefix string
-}
-
-// matches reports whether the exception covers the given variable name.
-func (e environmentException) matches(name string) bool {
-	if e.Prefix != "" {
-		return strings.HasPrefix(name, e.Prefix)
-	}
-	return name == e.Name
 }
 
 // environmentExceptions lists the variables in the configuration namespace
@@ -90,7 +75,7 @@ func unknownEnvironmentNames(lookup envLookup) []string {
 // given variable name.
 func isEnvironmentException(name string) bool {
 	for _, exception := range environmentExceptions {
-		if exception.matches(name) {
+		if name == exception.Name {
 			return true
 		}
 	}

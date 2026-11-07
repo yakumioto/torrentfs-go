@@ -88,26 +88,16 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	}
 	collector.add(cfg.Validate())
 	if err := collector.err(); err != nil {
+		// The loaded values travel with the error so a caller can run the
+		// checks that live outside this package (the rules of the upload
+		// statistics experiment) and report every problem at once. A failed
+		// decode leaves the zero value: there are no values to check then.
 		if path == "" {
-			return Config{}, nil, fmt.Errorf("config: validate: %w", err)
+			return cfg, sources, fmt.Errorf("config: validate: %w", err)
 		}
-		return Config{}, nil, fmt.Errorf("config: validate %q: %w", path, err)
+		return cfg, sources, fmt.Errorf("config: validate %q: %w", path, err)
 	}
 	return cfg, sources, nil
-}
-
-// ValidateOutput checks that the configuration enables at least one output.
-//
-// The check belongs to the process, not to a configuration value: a
-// configuration file may describe a service that is switched off, but the
-// process itself needs something to serve. The command calls it while
-// starting, so a configuration that enables nothing is reported with the
-// other configuration errors.
-func (c Config) ValidateOutput() error {
-	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
-		return invalid("backend", errNoOutput)
-	}
-	return nil
 }
 
 // decodeDocument decodes a configuration file into a generic tree.

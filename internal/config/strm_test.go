@@ -63,7 +63,7 @@ func TestLoadSTRMEnvironmentPrecedence(t *testing.T) {
 		{name: "explicit empty disables", file: "https://file.example", listen: ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			path := writeConfigFile(t, "[strm]\nbase_url = "+strconv.Quote(tt.file)+"\n")
+			path := writeConfigFile(t, "backend = \"fuse\"\n[fuse]\nmountpoint = \"/mnt/torrentfs\"\n[strm]\nbase_url = "+strconv.Quote(tt.file)+"\n")
 			cfg, err := load(path, lookupEnvironment(map[string]string{
 				"TORRENTFS_STRM_BASE_URL":    tt.env,
 				"TORRENTFS_HTTP_LISTEN_ADDR": tt.listen,
@@ -168,6 +168,9 @@ func TestLoadRejectsInvalidSTRMURLs(t *testing.T) {
 
 func TestValidateSTRMRequiresHTTPListener(t *testing.T) {
 	cfg := Default()
+	// The FUSE output keeps the configuration usable while HTTP is off.
+	cfg.Backend = BackendFUSE
+	cfg.FUSE.Mountpoint = "/mnt/torrentfs"
 	cfg.HTTP.ListenAddr = ""
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate disabled STRM and HTTP: %v", err)

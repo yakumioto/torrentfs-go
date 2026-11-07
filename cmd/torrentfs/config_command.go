@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/lab"
@@ -89,16 +90,55 @@ func runConfigCheck(args []string, stderr io.Writer) int {
 //
 // The upload statistics experiment is checked too: its rules relate one
 // setting to another, so a configuration that names the experiment wrongly
-// is not usable even when every value has the right shape.
+// is not usable even when every value has the right shape. The experiment
+// error joins the configuration error instead of replacing it, so one run
+// reports every problem.
 func checkConfig(path string) error {
-	cfg, _, err := config.LoadWithSources(path)
-	if err != nil {
-		return err
+	_, _, err := loadAndCheck(path)
+	return err
+}
+
+// loadAndCheck loads the configuration and reports the experiment rules with
+// the configuration problems, so one run names every mistake.
+//
+// A start and the check both go through this function, so they cannot drift
+// apart in which rules they apply.
+func loadAndCheck(path string) (config.Config, config.Sources, error) {
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil && configurationNamesExperiment(err) {
+		// A rejected experiment value is one problem. The cross-field rules
+		// would restate it in other words, so they wait for the next run.
+		return cfg, sources, err
 	}
+	return cfg, sources, errors.Join(err, checkExperiment(cfg))
+}
+
+// configurationNamesExperiment reports whether the configuration already
+// rejected an experiment setting.
+func configurationNamesExperiment(err error) bool {
+	var validationErrs *config.ValidationErrors
+	if !errors.As(err, &validationErrs) {
+		return false
+	}
+	for _, field := range validationErrs.Fields() {
+		if strings.HasPrefix(field, "lab.") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkExperiment reports the rules of the upload statistics experiment that
+// relate one setting to another.
+//
+// The rules live in the experiment package, because they decide what a set of
+// settings means. The configuration package cannot import it without a cycle,
+// so the command adds the check to the report.
+func checkExperiment(cfg config.Config) error {
 	if _, _, err := lab.SettingsFrom(cfg.Lab); err != nil {
 		return fmt.Errorf("config: lab experiment: %w", err)
 	}
-	return cfg.ValidateOutput()
+	return nil
 }
 
 // runConfigPrint prints the effective configuration.

@@ -106,29 +106,13 @@ func TestRemovedEnvironmentVariableIsNotReportedAsUnknown(t *testing.T) {
 // that shadows a configuration key would hide a real setting.
 func TestEnvironmentExceptionsCoverTheirVariables(t *testing.T) {
 	for _, exception := range environmentExceptions {
-		if exception.Name == "" && exception.Prefix == "" {
-			t.Fatal("an environment exception names neither a variable nor a prefix")
+		if exception.Name == "" {
+			t.Fatal("an environment exception names no variable")
 		}
-		if exception.Name != "" && exception.Prefix != "" {
-			t.Fatalf("the environment exception %q names both a variable and a prefix", exception.Name)
-		}
-		if exception.Name != "" {
-			for _, item := range configSchema {
-				if item.environment == exception.Name {
-					t.Fatalf("the environment exception %q shadows a configuration key", exception.Name)
-				}
+		for _, item := range configSchema {
+			if item.environment == exception.Name {
+				t.Fatalf("the environment exception %q shadows a configuration key", exception.Name)
 			}
-		}
-	}
-}
-
-// TestEnvironmentExceptionsDoNotCoverTheConfigurationNamespace checks that an
-// exception never covers the whole configuration namespace, which would turn
-// the unknown-variable rule off.
-func TestEnvironmentExceptionsDoNotCoverTheConfigurationNamespace(t *testing.T) {
-	for _, exception := range environmentExceptions {
-		if exception.Prefix == environmentPrefix {
-			t.Fatalf("the environment exception %q covers the whole configuration namespace", exception.Prefix)
 		}
 	}
 }
@@ -147,7 +131,7 @@ func TestEnvironmentExceptionsHoldOnlyTheConfigFileEntry(t *testing.T) {
 	want := []string{ConfigPathEnvironment}
 	var got []string
 	for _, exception := range environmentExceptions {
-		got = append(got, exception.Prefix+exception.Name)
+		got = append(got, exception.Name)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("environment exceptions = %v, want %v", got, want)

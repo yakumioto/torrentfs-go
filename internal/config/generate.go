@@ -225,17 +225,6 @@ func (g *Generator) ImageOverlayTOML() (string, error) {
 	return builder.String(), nil
 }
 
-// schemaKeyFor returns the schema entry of the configuration key with the
-// given path.
-func schemaKeyFor(path string) (SchemaKey, bool) {
-	for _, key := range Schema() {
-		if key.Path == path {
-			return key, true
-		}
-	}
-	return SchemaKey{}, false
-}
-
 // ReferenceTable writes the configuration reference of the README.
 //
 // The table names every configuration key, its environment variable, its

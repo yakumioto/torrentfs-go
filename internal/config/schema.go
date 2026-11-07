@@ -399,15 +399,5 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 			return value.Interface(), nil
 		}, "string", true
 	}
-	if fieldType.Kind() == reflect.Pointer && fieldType.Elem().Kind() == reflect.Bool {
-		// A pointer to a boolean tells an unset value from false.
-		return func(raw string) (any, error) {
-			value, err := parseEnvBool(raw)
-			if err != nil {
-				return nil, err
-			}
-			return &value, nil
-		}, "bool", true
-	}
 	return nil, "", false
 }

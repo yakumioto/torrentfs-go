@@ -3,40 +3,42 @@ package lab
 import (
 	"testing"
 	"time"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
-func getenvFunc(env map[string]string) func(string) string {
-	return func(key string) string { return env[key] }
-}
-
-func TestLoadSettingsDisabled(t *testing.T) {
-	settings, enabled, err := LoadSettings(getenvFunc(nil))
+// TestSettingsFromDisabled covers the contract that an unconfigured
+// experiment is off and changes nothing.
+func TestSettingsFromDisabled(t *testing.T) {
+	settings, enabled, err := SettingsFrom(config.Lab{})
 	if err != nil {
-		t.Fatalf("LoadSettings: %v", err)
+		t.Fatalf("SettingsFrom: %v", err)
 	}
 	if enabled {
-		t.Fatal("experiment is enabled without any environment variable")
+		t.Fatal("experiment is enabled without any configuration")
 	}
 	if settings != (Settings{}) {
 		t.Fatalf("settings = %+v, want the zero value", settings)
 	}
 }
 
-func TestLoadSettingsInfersMode(t *testing.T) {
+// TestSettingsFromInfersMode covers the contract that an experiment mode is
+// inferred from the settings when it is not named.
+func TestSettingsFromInfersMode(t *testing.T) {
 	cases := []struct {
 		name string
-		env  map[string]string
+		cfg  config.Lab
 		want Mode
 	}{
-		{name: "rate implies inject", env: map[string]string{EnvRate: "2MiB/s"}, want: ModeInject},
-		{name: "multiplier implies amplify", env: map[string]string{EnvMultiplier: "5x"}, want: ModeAmplify},
-		{name: "log implies baseline", env: map[string]string{EnvAnnounceLog: "announces.jsonl"}, want: ModeBaseline},
+		{name: "rate implies inject", cfg: config.Lab{UploadRate: config.ByteRate(2 << 20)}, want: ModeInject},
+		{name: "multiplier implies amplify", cfg: config.Lab{UploadMultiplier: config.Ratio(5)}, want: ModeAmplify},
+		{name: "log implies baseline", cfg: config.Lab{AnnounceLog: "announces.jsonl"}, want: ModeBaseline},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			settings, enabled, err := LoadSettings(getenvFunc(tc.env))
+			settings, enabled, err := SettingsFrom(tc.cfg)
 			if err != nil {
-				t.Fatalf("LoadSettings: %v", err)
+				t.Fatalf("SettingsFrom: %v", err)
 			}
 			if !enabled {
 				t.Fatal("experiment is disabled although it is configured")
@@ -48,18 +50,20 @@ func TestLoadSettingsInfersMode(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsFullConfiguration(t *testing.T) {
-	settings, enabled, err := LoadSettings(getenvFunc(map[string]string{
-		EnvMode:               "inject",
-		EnvRate:               "2MiB/s",
-		EnvJitter:             "25%",
-		EnvCap:                "3TiB",
-		EnvSeed:               "42",
-		EnvAnnounceLog:        "/tmp/announces.jsonl",
-		EnvPeerSampleInterval: "2s",
-	}))
+// TestSettingsFromFullConfiguration covers the contract that every configured
+// value reaches the settings.
+func TestSettingsFromFullConfiguration(t *testing.T) {
+	settings, enabled, err := SettingsFrom(config.Lab{
+		UploadMode:         "inject",
+		UploadRate:         config.ByteRate(2 << 20),
+		UploadJitter:       config.Percent(25),
+		UploadCap:          config.OptionalByteQuantity(3 << 40),
+		UploadSeed:         42,
+		AnnounceLog:        "/tmp/announces.jsonl",
+		PeerSampleInterval: config.OptionalDuration(2 * time.Second),
+	})
 	if err != nil {
-		t.Fatalf("LoadSettings: %v", err)
+		t.Fatalf("SettingsFrom: %v", err)
 	}
 	if !enabled {
 		t.Fatal("experiment is disabled although it is configured")
@@ -87,10 +91,12 @@ func TestLoadSettingsFullConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsDefaults(t *testing.T) {
-	settings, enabled, err := LoadSettings(getenvFunc(map[string]string{EnvRate: "1MiB"}))
+// TestSettingsFromDefaults covers the contract that the unset knobs fall back
+// to the defaults of the experiment.
+func TestSettingsFromDefaults(t *testing.T) {
+	settings, enabled, err := SettingsFrom(config.Lab{UploadRate: config.ByteRate(1 << 20)})
 	if err != nil {
-		t.Fatalf("LoadSettings: %v", err)
+		t.Fatalf("SettingsFrom: %v", err)
 	}
 	if !enabled {
 		t.Fatal("experiment is disabled although a rate is configured")
@@ -109,41 +115,38 @@ func TestLoadSettingsDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsRejectsInvalidConfiguration(t *testing.T) {
-	cases := map[string]map[string]string{
-		"unknown mode":              {EnvMode: "turbo"},
-		"inject without rate":       {EnvMode: "inject"},
-		"amplify without factor":    {EnvMode: "amplify"},
-		"baseline with rate":        {EnvMode: "baseline", EnvRate: "1MiB"},
-		"baseline with multiplier":  {EnvMode: "baseline", EnvMultiplier: "2"},
-		"inject with multiplier":    {EnvMode: "inject", EnvRate: "1MiB", EnvMultiplier: "2"},
-		"amplify with rate":         {EnvMode: "amplify", EnvMultiplier: "2", EnvRate: "1MiB"},
-		"jitter without experiment": {EnvJitter: "10"},
-		"cap without experiment":    {EnvCap: "1TiB"},
-		"seed without experiment":   {EnvSeed: "7"},
-		"interval without mode":     {EnvPeerSampleInterval: "1s"},
-		"interval without log":      {EnvMode: "baseline", EnvPeerSampleInterval: "1s"},
-		"rate without unit":         {EnvRate: "2"},
-		"rate zero":                 {EnvRate: "0MiB"},
-		"multiplier at one":         {EnvMultiplier: "1"},
-		"multiplier below one":      {EnvMultiplier: "0.5"},
-		"multiplier not a number":   {EnvMultiplier: "many"},
-		"jitter above 100":          {EnvRate: "1MiB", EnvJitter: "101"},
-		"jitter not a number":       {EnvRate: "1MiB", EnvJitter: "lots"},
-		"cap without unit":          {EnvRate: "1MiB", EnvCap: "1024"},
-		"seed not an integer":       {EnvRate: "1MiB", EnvSeed: "later"},
-		"interval zero":             {EnvMode: "baseline", EnvAnnounceLog: "x.jsonl", EnvPeerSampleInterval: "0s"},
-		"interval not a duration":   {EnvMode: "baseline", EnvAnnounceLog: "x.jsonl", EnvPeerSampleInterval: "soon"},
+// TestSettingsFromRejectsInvalidConfiguration covers the contract that a
+// partially configured setup is rejected instead of falling back to the real
+// counters.
+func TestSettingsFromRejectsInvalidConfiguration(t *testing.T) {
+	second := config.OptionalDuration(time.Second)
+	cases := map[string]config.Lab{
+		"unknown mode":                {UploadMode: "turbo"},
+		"inject without rate":         {UploadMode: "inject"},
+		"amplify without factor":      {UploadMode: "amplify"},
+		"baseline with rate":          {UploadMode: "baseline", UploadRate: config.ByteRate(1 << 20)},
+		"baseline with multiplier":    {UploadMode: "baseline", UploadMultiplier: config.Ratio(2)},
+		"inject with multiplier":      {UploadMode: "inject", UploadRate: config.ByteRate(1 << 20), UploadMultiplier: config.Ratio(2)},
+		"amplify with rate":           {UploadMode: "amplify", UploadMultiplier: config.Ratio(2), UploadRate: config.ByteRate(1 << 20)},
+		"amplify with multiplier one": {UploadMode: "amplify", UploadMultiplier: config.Ratio(1)},
+		"jitter without experiment":   {UploadJitter: config.Percent(10)},
+		"cap without experiment":      {UploadCap: config.OptionalByteQuantity(1 << 40)},
+		"seed without experiment":     {UploadSeed: 7},
+		"interval without mode":       {PeerSampleInterval: second},
+		"interval without log":        {UploadMode: "baseline", PeerSampleInterval: second},
+		"jitter above one hundred":    {UploadRate: config.ByteRate(1 << 20), UploadJitter: config.Percent(101)},
 	}
-	for name, env := range cases {
+	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := LoadSettings(getenvFunc(env)); err == nil {
-				t.Fatalf("LoadSettings(%v) = nil error, want rejection", env)
+			if _, _, err := SettingsFrom(cfg); err == nil {
+				t.Fatalf("SettingsFrom(%+v) = nil error, want rejection", cfg)
 			}
 		})
 	}
 }
 
+// TestNormalizeRuntimeSettings covers the contract that the runtime settings
+// are consistent with the mode before they reach the reporter.
 func TestNormalizeRuntimeSettings(t *testing.T) {
 	cases := []struct {
 		name    string

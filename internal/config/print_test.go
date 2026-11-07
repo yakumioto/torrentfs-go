@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
@@ -80,18 +82,63 @@ func TestPrintNamesTheSource(t *testing.T) {
 	}
 }
 
-// TestPrintTOMLIsReadable covers the contract that the printed configuration
-// has a TOML form that keeps the shape of the values.
-func TestPrintTOMLIsReadable(t *testing.T) {
-	printed, err := config.Print(writeConfig(t, "backend = \"none\"\n[connections]\nlisten_port = 12345\n"), config.PrintOptions{})
+// TestPrintTOMLIsAValidDocument covers the contract that the TOML form of the
+// report is a document a TOML parser accepts: a section is declared once,
+// wherever its keys sit in the schema.
+func TestPrintTOMLIsAValidDocument(t *testing.T) {
+	printed, err := config.Print(writeConfig(t, "backend = \"none\"\n[connections]\nlisten_port = 12345\n"), config.PrintOptions{Sources: true})
 	if err != nil {
 		t.Fatalf("Print: %v", err)
 	}
 	document := printed.TOML()
-	for _, want := range []string{`backend = "none"`, "listen_port = 12345", "[connections]"} {
-		if !strings.Contains(document, want) {
-			t.Errorf("the printed configuration does not hold %q:\n%s", want, document)
-		}
+
+	var decoded map[string]any
+	if err := toml.Unmarshal([]byte(document), &decoded); err != nil {
+		t.Fatalf("the report is not a TOML document: %v\n%s", err, document)
+	}
+	if decoded["backend"] != "none" {
+		t.Errorf("backend = %v, want none", decoded["backend"])
+	}
+	httpSection, ok := decoded["http"].(map[string]any)
+	if !ok {
+		t.Fatalf("the report has no [http] table:\n%s", document)
+	}
+	if _, ok := httpSection["max_upload_size"]; !ok {
+		t.Errorf("the [http] table does not hold max_upload_size:\n%s", document)
+	}
+	// The nested table proves both halves of the bug: the section of a
+	// parent key arrives after its child table in the schema, so the parent
+	// must not be declared twice.
+	authSection, ok := httpSection["auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("the [http] table does not hold [http.auth]:\n%s", document)
+	}
+	if _, ok := authSection["token_ttl"]; !ok {
+		t.Errorf("[http.auth] does not hold token_ttl:\n%s", document)
+	}
+}
+
+// TestTOMLKeepsTheRootKeysFirst covers the contract that a root key stays
+// parseable wherever it sits in the report: TOML forbids a top-level key
+// after a table header.
+func TestTOMLKeepsTheRootKeysFirst(t *testing.T) {
+	printed := config.PrintedConfig{Keys: []config.PrintedKey{
+		{Path: "connections.listen_port", Environment: "TORRENTFS_CONNECTIONS_LISTEN_PORT", Value: "12345", Kind: "int"},
+		{Path: "backend", Environment: "TORRENTFS_BACKEND", Value: "none", Kind: "string"},
+		{Path: "http.listen_addr", Environment: "TORRENTFS_HTTP_LISTEN_ADDR", Value: "127.0.0.1:8080", Kind: "string"},
+	}}
+
+	document := printed.TOML()
+	var decoded map[string]any
+	if err := toml.Unmarshal([]byte(document), &decoded); err != nil {
+		t.Fatalf("the report is not a TOML document: %v\n%s", err, document)
+	}
+	if decoded["backend"] != "none" {
+		t.Errorf("backend = %v, want none\n%s", decoded["backend"], document)
+	}
+	connections, ok := decoded["connections"].(map[string]any)
+	if !ok || connections["listen_port"] != int64(12345) {
+		t.Errorf("[connections] lost listen_port:\n%s", document)
 	}
 }
 

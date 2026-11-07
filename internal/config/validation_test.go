@@ -211,38 +211,49 @@ func TestLoadReportsEveryInvalidEnvironmentValue(t *testing.T) {
 	}
 }
 
-// TestValidateOutputRequiresAnOutput covers the contract that the process
-// needs something to serve: a configuration that enables no output is
-// reported.
-func TestValidateOutputRequiresAnOutput(t *testing.T) {
+// TestValidateRequiresAnOutput covers the contract that the process needs
+// something to serve: a configuration that enables no output is incomplete,
+// and the rule belongs to the validation of the values.
+func TestValidateRequiresAnOutput(t *testing.T) {
 	cfg := config.Default()
 	cfg.Backend = config.BackendNone
 	cfg.HTTP.ListenAddr = ""
 
-	err := cfg.ValidateOutput()
+	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("ValidateOutput succeeded")
+		t.Fatal("Validate accepted a configuration that enables nothing")
 	}
 	if !errors.Is(err, config.ErrInvalid) {
-		t.Fatalf("ValidateOutput error = %v, want config.ErrInvalid", err)
+		t.Fatalf("Validate error = %v, want config.ErrInvalid", err)
+	}
+	var validationErrs *config.ValidationErrors
+	if !errors.As(err, &validationErrs) || !validationErrs.HasField("backend") {
+		t.Fatalf("Validate error %v does not name the output backend", err)
 	}
 
 	cfg.HTTP.ListenAddr = "127.0.0.1:8080"
-	if err := cfg.ValidateOutput(); err != nil {
-		t.Fatalf("ValidateOutput with the HTTP output: %v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate with the HTTP output: %v", err)
 	}
 }
 
-// TestValidateOutputIsNotPartOfValidate covers the contract that a
-// configuration file may describe a service that is switched off: the
-// requirement of an enabled output belongs to the process, not to the values.
-func TestValidateOutputIsNotPartOfValidate(t *testing.T) {
+// TestValidateReportsTheOutputRuleWithTheValueRules covers the contract that
+// one run reports every problem: the missing output is not hidden behind the
+// invalid value.
+func TestValidateReportsTheOutputRuleWithTheValueRules(t *testing.T) {
 	cfg := config.Default()
 	cfg.Backend = config.BackendNone
 	cfg.HTTP.ListenAddr = ""
+	cfg.Cache.CapacityBytes = 0
 
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate a configuration that enables nothing: %v", err)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted an invalid configuration")
+	}
+	for _, field := range []string{"backend", "cache.capacity"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("Validate error %q does not name %q", err, field)
+		}
 	}
 }
 

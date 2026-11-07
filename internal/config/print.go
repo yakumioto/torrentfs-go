@@ -112,23 +112,58 @@ func Print(path string, options PrintOptions) (PrintedConfig, error) {
 // The source of a value is a comment, because TOML has no place for it. The
 // redacted values are placeholders: the document is a report, not a
 // configuration file.
+//
+// A table is declared once and holds every key that belongs to it. The schema
+// lists the keys of a table in the order of the configuration structure, so a
+// key of a table can follow a nested table: declaring the table again at that
+// point would make the document invalid TOML.
 func (p PrintedConfig) TOML() string {
-	var builder strings.Builder
-	section := ""
+	type table struct {
+		name string
+		keys []PrintedKey
+	}
+	// The tables keep the order of their first key, so the report follows
+	// the schema.
+	var tables []*table
+	byName := map[string]*table{}
 	for _, key := range p.Keys {
-		name := lastSegment(key.Path)
-		if parent := parentPath(key.Path); parent != section {
-			section = parent
-			if section != "" {
-				if builder.Len() > 0 {
-					builder.WriteString("\n")
-				}
-				builder.WriteString("[" + section + "]\n")
-			}
+		name := parentPath(key.Path)
+		current, ok := byName[name]
+		if !ok {
+			current = &table{name: name}
+			byName[name] = current
+			tables = append(tables, current)
 		}
-		builder.WriteString(fmt.Sprintf("%s = %s\n", name, tomlValue(key)))
-		if p.Sources {
-			builder.WriteString(fmt.Sprintf("# source: %s\n", key.Source))
+		current.keys = append(current.keys, key)
+	}
+	// The keys at the root of the document come before every table, which
+	// TOML requires: a top-level key may not follow a table header.
+	if root := byName[""]; root != nil {
+		for index, current := range tables {
+			if current != root {
+				continue
+			}
+			// Move the root table to the front and keep the order of the
+			// tables it passes.
+			copy(tables[1:index+1], tables[:index])
+			tables[0] = root
+			break
+		}
+	}
+
+	var builder strings.Builder
+	for _, current := range tables {
+		if current.name != "" {
+			if builder.Len() > 0 {
+				builder.WriteString("\n")
+			}
+			builder.WriteString("[" + current.name + "]\n")
+		}
+		for _, key := range current.keys {
+			builder.WriteString(fmt.Sprintf("%s = %s\n", lastSegment(key.Path), tomlValue(key)))
+			if p.Sources {
+				builder.WriteString(fmt.Sprintf("# source: %s\n", key.Source))
+			}
 		}
 	}
 	return builder.String()

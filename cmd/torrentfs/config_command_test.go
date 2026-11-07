@@ -91,6 +91,79 @@ func TestConfigCheckRejectsAConfigurationThatEnablesNoOutput(t *testing.T) {
 	}
 }
 
+// TestConfigCheckReportsTheExperimentWithTheValueErrors covers the contract
+// that one run names every problem: the experiment rules are reported with
+// the configuration values, not instead of them.
+func TestConfigCheckReportsTheExperimentWithTheValueErrors(t *testing.T) {
+	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[lab]\nupload_mode = \"inject\"\n"
+	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("the check wrote a report to standard output: %s", stdout)
+	}
+	for _, want := range []string{"cache.capacity", "upload_rate"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the report does not name %q: %s", want, stderr)
+		}
+	}
+}
+
+// TestConfigCheckReportsTheOutputRuleWithTheValueErrors covers the contract
+// that the missing output is reported in the same run as the invalid value.
+func TestConfigCheckReportsTheOutputRuleWithTheValueErrors(t *testing.T) {
+	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n[cache]\ncapacity = \"0B\"\n"
+	code, _, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"cache.capacity", "at least one output must be enabled"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the report does not name %q: %s", want, stderr)
+		}
+	}
+}
+
+// TestConfigCheckReportsARejectedExperimentValueOnce covers the contract that
+// one problem is one diagnosis: a value the configuration already rejected is
+// not restated by the cross-field rules of the experiment.
+func TestConfigCheckReportsARejectedExperimentValueOnce(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown mode":        "[lab]\nupload_mode = \"turbo\"\n",
+		"jitter out of range": "[lab]\nupload_jitter = \"101\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, _, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
+			if code != 2 {
+				t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+			}
+			if strings.Contains(stderr, "lab experiment") {
+				t.Errorf("the report restates the problem as an experiment rule: %s", stderr)
+			}
+			if !strings.Contains(stderr, "lab.") {
+				t.Errorf("the report does not name the experiment setting: %s", stderr)
+			}
+		})
+	}
+}
+
+// TestRunReportsTheExperimentWithTheValueErrors covers the contract that the
+// start reports every problem of a configuration that cannot run, not just
+// the first one.
+func TestRunReportsTheExperimentWithTheValueErrors(t *testing.T) {
+	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[lab]\nupload_mode = \"inject\"\n"
+	code, _, stderr := runCLICapture([]string{"-config", writeConfigFile(t, body), t.TempDir()})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"cache.capacity", "upload_rate"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the report does not name %q: %s", want, stderr)
+		}
+	}
+}
+
 // TestConfigCheckNeedsNoTorrentsDirectory covers the contract that the
 // configuration commands work on the configuration alone.
 func TestConfigCheckNeedsNoTorrentsDirectory(t *testing.T) {

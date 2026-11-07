@@ -15,7 +15,7 @@ HTTP 登录只校验密码（`username` 在认证服务里保存但登录时不�
 
 ## 实现要点
 
-- **认证服务的输入是哈希，不是明文**：`auth.New(cfg config.Auth, passwordHash []byte)`。`config` 包负责一次性生成 bcrypt（`bcrypt.DefaultCost`），认证服务因此永远看不到明文、也不再需要读文件。哈希文件权限、bcrypt cost 下限等校验保留在服务里，但"从哪读"这一层消失了。
+- **认证服务的输入是哈希，不是明文**：`auth.New(cfg config.Auth, passwordHash []byte)`。`config` 包负责一次性生成 bcrypt（`bcrypt.DefaultCost`），认证服务因此永远看不到明文、也不再需要读文件。bcrypt cost 下限的校验保留在服务里；哈希文件已不存在，围绕文件权限的校验随读取逻辑一起消失。
 - **口令长度上限 72 bytes**（bcrypt 的限制）由 `config` 包校验：bcrypt 会静默截断更长的口令，与其让 HTTP 登录与 SMB 使用两个不同的口令，不如在配置阶段报错。
 - **配置来源是加载器的一等概念**：加载器返回 `Sources`（记录每个配置项来自哪一类配置来源：`default` / `file` / `environment`），明文口令告警据此判断"口令是否来自配置文件"。同一份记录可直接支撑 #75 的 `config print --sources`，无需重复实现合并逻辑。
 - **敏感项由 `secret:"true"` 结构体标签声明**，schema 派生为 `SchemaKey.Secret`，供 #75 脱敏与 #76 的生成器提示使用。

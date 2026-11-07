@@ -143,10 +143,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
-	if err := cfg.ValidateOutput(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
-		return 2
-	}
 
 	logger, _, err := logging.New(cfg.Log, stderr)
 	if err != nil {
@@ -574,12 +570,12 @@ func logEffectiveConfig(logger *slog.Logger, cfg config.Config, sources config.S
 // loadConfig loads the configuration and reports where every effective value
 // came from.
 func loadConfig(path string) (config.Config, config.Sources, error) {
-	cfg, sources, err := config.LoadWithSources(path)
+	cfg, sources, err := loadAndCheck(path)
 	if err != nil {
 		if path == "" {
-			return config.Config{}, nil, fmt.Errorf("load config: %w", err)
+			return cfg, sources, fmt.Errorf("load config: %w", err)
 		}
-		return config.Config{}, nil, fmt.Errorf("load config %q: %w", path, err)
+		return cfg, sources, fmt.Errorf("load config %q: %w", path, err)
 	}
 	return cfg, sources, nil
 }

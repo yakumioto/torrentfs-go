@@ -437,6 +437,12 @@ func (c Config) validateRequirements(collector *validationCollector) {
 	if c.Backend == BackendSMB && c.SMB.STRM == STRMOn && c.STRM.BaseURL == "" {
 		collector.add(invalid(smbSTRMPath, errors.New("requires strm.base_url and the HTTP listener")))
 	}
+	// The process needs something to serve: a configuration that enables no
+	// output is incomplete, and it is reported with the other problems so a
+	// user learns about it in the same run.
+	if c.Backend == BackendNone && c.HTTP.ListenAddr == "" {
+		collector.add(invalid("backend", errNoOutput))
+	}
 }
 
 // validateSMBShape checks the shape of the SMB settings. The settings of an

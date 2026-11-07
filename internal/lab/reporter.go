@@ -60,7 +60,7 @@ type ReportedState struct {
 }
 
 // NewReporter builds a mode-aware reporter. The caller validates settings with
-// LoadSettings first. recorder may be nil.
+// SettingsFrom first. recorder may be nil.
 func NewReporter(settings Settings, recorder *Recorder) *Reporter {
 	return &Reporter{
 		recorder: recorder,
