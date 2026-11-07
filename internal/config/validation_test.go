@@ -10,26 +10,6 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
-// testEnvironment is an environment the configuration can read. The
-// configuration takes its environment as a parameter, so a test can supply
-// exactly the variables it cares about.
-type testEnvironment map[string]string
-
-// Lookup returns the value of one environment variable.
-func (e testEnvironment) Lookup(name string) (string, bool) {
-	value, ok := e[name]
-	return value, ok
-}
-
-// Names returns the names of every variable that is set.
-func (e testEnvironment) Names() []string {
-	names := make([]string, 0, len(e))
-	for name := range e {
-		names = append(names, name)
-	}
-	return names
-}
-
 // TestValidateReportsEveryInvalidValue covers the contract that a user who
 // changed several values learns about all of them in one run: the validation
 // reports every invalid configuration key, not just the first one.

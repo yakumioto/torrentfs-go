@@ -125,6 +125,19 @@ expect_failure() {
 	fi
 }
 
+# The Compose template names the settings the program reads. A template that
+# names a removed setting fails at the first start, so the names are checked
+# before anything is started.
+compose_config="$(timeout 30 docker compose -f "$ROOT_DIR/docker-compose.yaml" config 2>&1)" ||
+	fail "the Compose template is not valid: $compose_config"
+for expected in 'TORRENTFS_BACKEND' 'TORRENTFS_USERNAME' 'TORRENTFS_PASSWORD'; do
+	[[ "$compose_config" == *"$expected"* ]] || fail "the Compose template does not set $expected"
+done
+for removed in 'TORRENTFS_FILESYSTEM_BACKEND' 'TORRENTFS_SMB_USERNAME' 'TORRENTFS_SMB_PASSWORD_FILE' 'TORRENTFS_MOUNT_READ_TIMEOUT'; do
+	[[ "$compose_config" != *"$removed"* ]] || fail "the Compose template names the removed variable $removed"
+done
+printf 'docker config smoke: the Compose template names the current settings\n'
+
 start "${PREFIX}-default"
 assert_identity "${PREFIX}-default" 1000 1000
 stop_clean "${PREFIX}-default"
@@ -159,7 +172,43 @@ expect_failure 'removed SMB password file variable' 'TORRENTFS_PASSWORD' --env T
 expect_failure 'STRM requires HTTP' 'strm.base_url' --env TORRENTFS_BACKEND=smb \
 	--env TORRENTFS_USERNAME=reader --env "TORRENTFS_PASSWORD=$SECRET" \
 	--env TORRENTFS_HTTP_LISTEN_ADDR= --env TORRENTFS_STRM_BASE_URL=http://player.example:8080
-printf 'docker config smoke: identity, selector, credential, removed name, and STRM failures passed\n'
+expect_failure 'unknown environment variable' 'not a known configuration item' --env TORRENTFS_HTTP_LISEN_ADDR=127.0.0.1:8080
+expect_failure 'unknown environment variable is named' 'TORRENTFS_HTTP_LISEN_ADDR' --env TORRENTFS_HTTP_LISEN_ADDR=127.0.0.1:8080
+printf 'docker config smoke: identity, selector, credential, removed name, unknown name, and STRM failures passed\n'
+
+# The configuration commands work inside the image: they check the
+# configuration of the image and print it without disclosing a password.
+container="${PREFIX}-check"
+containers+=("$container")
+timeout 30 docker run --rm --name "$container" --cap-drop ALL --security-opt no-new-privileges:true \
+	--entrypoint /usr/local/bin/torrentfs "$IMAGE" config check >/dev/null 2>&1 ||
+	fail 'the configuration of the image does not pass the check'
+timeout 30 docker run --rm --name "$container" --cap-drop ALL --security-opt no-new-privileges:true \
+	--entrypoint /usr/local/bin/torrentfs "$IMAGE" config print >"$work_dir/printed.toml" 2>&1 ||
+	fail 'the configuration of the image cannot be printed'
+grep -q 'password = "<redacted>"' "$work_dir/printed.toml" ||
+	fail 'the printed configuration does not redact the password'
+! grep -q "$SECRET" "$work_dir/printed.toml" ||
+	fail 'the printed configuration disclosed a password'
+printf 'docker config smoke: the configuration commands work inside the image\n'
+
+# A configuration with several mistakes reports all of them at once.
+cat >"$work_dir/broken.toml" <<EOF
+backend = "fuse"
+[cache]
+capacity = "0B"
+[log]
+level = "nonsense"
+EOF
+chmod 0444 "$work_dir/broken.toml"
+output="$(timeout 30 docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
+	--mount "type=bind,src=$work_dir/broken.toml,dst=/config.toml,readonly" \
+	--entrypoint /usr/local/bin/torrentfs "$IMAGE" config check --config /config.toml 2>&1)" &&
+	fail 'a broken configuration passed the check'
+for expected in 'cache.capacity' 'log.level' 'fuse.mountpoint'; do
+	[[ "$output" == *"$expected"* ]] || fail "the check did not report $expected: $output"
+done
+printf 'docker config smoke: the check reports every mistake at once\n'
 
 mkdir -p "$work_dir/blocked"
 chmod 000 "$work_dir/blocked"

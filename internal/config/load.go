@@ -32,7 +32,7 @@ func LoadWithSources(path string) (Config, Sources, error) {
 // The environment is a parameter so a caller can supply the variables it
 // knows about instead of the whole process environment. The configuration
 // reads the same variables either way.
-func LoadWithEnvironment(path string, lookup envLookup) (Config, error) {
+func LoadWithEnvironment(path string, lookup Environment) (Config, error) {
 	cfg, _, err := loadWithSources(path, lookup)
 	return cfg, err
 }
