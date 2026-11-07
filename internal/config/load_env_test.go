@@ -568,15 +568,9 @@ func TestLoadEnvironmentAuthenticationPasswordLength(t *testing.T) {
 	}
 }
 
-// lookupEnvironment injects a fixed set of environment variables. It is the
-// seam every configuration test drives the loader through.
-func lookupEnvironment(values map[string]string) envLookup {
-	return mapEnvironment(values)
-}
-
-// mapEnvironment adapts a map of environment variables to the envLookup seam.
-// The map is the source of truth for both lookup and enumeration, so a test
-// that adds a variable sees it in both.
+// mapEnvironment adapts a map of environment variables to the environment
+// seam. The map is the source of truth for both lookup and enumeration, so a
+// test that adds a variable sees it in both.
 type mapEnvironment map[string]string
 
 // Lookup returns the value of one environment variable.
@@ -602,4 +596,10 @@ func writeConfigFile(t *testing.T, body string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+// lookupEnvironment injects a fixed set of environment variables. It is the
+// seam the configuration tests drive the loader through.
+func lookupEnvironment(values map[string]string) envLookup {
+	return mapEnvironment(values)
 }

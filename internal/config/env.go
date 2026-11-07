@@ -9,15 +9,21 @@ import (
 	"time"
 )
 
-// envLookup reads configuration values from the process environment. It also
-// enumerates the variables that are set, so a later stage can reject unknown
-// configuration variables without a second environment source.
-type envLookup interface {
+// Environment reads configuration values from a set of environment variables.
+// It also enumerates the variables that are set, so a stage can reject
+// unknown configuration variables without a second environment source.
+type Environment interface {
 	// Lookup returns the value of one variable and reports whether it is set.
 	Lookup(name string) (string, bool)
 	// Names returns the names of every variable that is set.
 	Names() []string
 }
+
+// envLookup reads configuration values from the process environment.
+//
+// The name is the short form used inside the package; Environment is the
+// exported form a caller supplies.
+type envLookup = Environment
 
 // osEnvironment reads the process environment.
 type osEnvironment struct{}
