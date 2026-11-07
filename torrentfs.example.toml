@@ -1,164 +1,134 @@
-# torrentfs.example.toml — copy and adjust for a torrentfs startup.
+# torrentfs.example.toml — the complete configuration of torrentfs.
 #
-# One existing torrents directory remains a required command-line input.
-# Select backend = "fuse", "smb", or "none" (HTTP-only).
-# FUSE mountpoints and the native SMB listener are configured independently.
-# Configuration is loaded on every startup. Every configuration key has an
-# environment variable, derived from its path: the path in upper case, with the
-# dots replaced by underscores, under the TORRENTFS_ prefix. For example,
-# http.auth.token_ttl becomes TORRENTFS_HTTP_AUTH_TOKEN_TTL and cache.capacity
-# becomes TORRENTFS_CACHE_CAPACITY. The precedence is environment variables,
-# this file, then built-in defaults.
+# Every configuration key is listed here with its built-in default and its
+# documentation. The environment variable of a key is derived from its path:
+# the path in upper case, the dots replaced by underscores, under the
+# TORRENTFS_ prefix. For example http.auth.token_ttl is
+# TORRENTFS_HTTP_AUTH_TOKEN_TTL.
 #
-# This file is the one the -config argument names. TORRENTFS_CONFIG names it
-# too, for a deployment that cannot change the command line; the argument
-# wins over the variable. There is no implicit search path.
-#
-# Both FUSE and SMB expose only the same read-only virtual data tree. Management
-# (add, delete, status) happens over HTTP; internal metadata is never shared.
-#
-# Piece data is cached in memory only and is never written to disk. Restarting
-# torrentfs starts from an empty cache: no piece completion is persisted and no
-# piece is recovered from disk.
-
-# Exactly one file output: fuse, smb, or none. HTTP management is independent.
-# Changing the backend does not require deleting the unselected backend's
-# settings. A configured mountpoint does not select the FUSE output: write
-# backend = "fuse" to use it.
+# The precedence is the environment variables, then this file, then the
+# built-in defaults. A configuration file is optional: without one the
+# built-in defaults apply.
+# Backend selects the output backend: none, fuse, or smb.
 backend = "none"
-
-# The credentials shared by the SMB output and the HTTP login.
-#
-# username is the SMB login name. The HTTP login checks the password only, so
-# the Web UI asks for a password and nothing else.
-#
-# password is required when backend = "smb" or http.auth.enabled = true.
-# username is required when backend = "smb".
-#
-# Prefer the environment variables TORRENTFS_USERNAME and TORRENTFS_PASSWORD:
-# a password written here stays readable on disk and earns a startup warning.
-# Environment override: TORRENTFS_USERNAME, TORRENTFS_PASSWORD.
+# Username is the login name the SMB output accepts. The HTTP login does
+# not check a user name, so the key is only required for the SMB output.
 username = ""
+# Password is the plaintext password shared by the SMB output and the
+# HTTP login. It is required for the SMB output and for enabled HTTP
+# authentication, and it has no default.
+# A secret value: prefer the environment variable TORRENTFS_PASSWORD.
 password = ""
 
-[http]
-# The listener serves both the embedded Web UI and the management API. Empty
-# disables both. The default binds loopback only; non-loopback listeners require
-# http.auth. Static UI files are public; /api/ remains protected when auth is on.
-listen_addr = "127.0.0.1:8080"
-# Maximum size of an uploaded request body (10MiB default). It caps both a
-# .torrent upload and a managed subtitle upload. Use B/KB/MB/GB/TB or KiB/MiB/GiB/TiB.
-max_upload_size = "10MiB"
-
-[http.auth]
-# Login returns an in-memory opaque Bearer token when enabled. The login checks
-# the password only; the user name is not part of it.
-enabled = false
-# A valid token request slides this inactivity window (30 minutes by default).
-token_ttl = "30m"
-
-[strm]
-# Empty disables signed HTTP streaming. Set a player-reachable HTTP(S) URL;
-# http.listen_addr must be enabled. Optional reverse proxy prefixes are supported.
-# Environment override: TORRENTFS_STRM_BASE_URL.
-base_url = ""
-
-[connections]
-# Empty listens on all suitable local interfaces.
-listen_host = ""
-# 0 selects an available port. It is reported at startup as
-# effective_listen_port and is what the tracker announce carries. To accept
-# inbound peers, set a fixed port and publish it for both TCP and UDP.
-listen_port = 0
-# Disable one address family for listeners, dialers, and DHT. Disabling both is
-# rejected at startup.
-disable_ipv4 = false
-disable_ipv6 = false
-# UPnP/NAT-PMP port mapping. Left off so a host with no UPnP device behaves the
-# same as one with a device and no mapping rule. Outbound connections do not
-# need it.
-no_port_forwarding = true
-# Replaces the built-in DHT bootstrap hosts. Entries are host:port and are
-# resolved per address family; empty uses the built-in list. Useful when the
-# default resolver returns no address of the family a socket needs.
-bootstrap_nodes = []
-
-[proxy]
-# Empty disables SOCKS5. Use socks5:// or socks5h://, optionally with auth.
-socks5_url = ""
-
 [cache]
-# Hard upper bound on the in-memory piece cache. The default is 2GiB, which
-# suits a host with about 4 GB of RAM; size it at roughly 50-60% of a
-# container's memory limit. Use an integer with an SI or IEC byte unit. This is
-# a cap, not a reservation: the cache fills lazily, so a small workload never reaches it.
-# Eviction starts at 7/8 of this value and reclaims down to 3/4, so a read
-# window always has headroom. Zero or negative is rejected at startup.
+# CapacityBytes is the maximum number of bytes retained in memory.
 capacity = "2GiB"
 
-[identity]
-# User-Agent for HTTP tracker announces. Explicit empty values use the anacrolix default.
-tracker_user_agent = "qBittorrent/4.4.0"
-# Prefix of the generated 20-byte peer ID, measured in bytes.
-# The remaining bytes are random for each session.
-peer_id_prefix = "-qB4400-"
-# BEP 10 extended handshake v value.
-extended_handshake_client_version = "qBittorrent/4.4.0"
-
-[log]
-# Minimum level: debug, info, warn, or error. Debug is disabled by default.
-level = "info"
-# Output format: text for humans or json for log collectors.
-format = "text"
-# Include the source file and line for each record.
-add_source = false
+[connections]
+# ListenHost is the address the session listens on for peer
+# connections. Empty lets the client pick its default.
+listen_host = ""
+# ListenPort is the TCP/UDP port for incoming peer connections.
+# 0 selects a random free port.
+listen_port = 0
+# DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
+disable_ipv4 = false
+# DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
+# Only one family may be disabled: disabling both leaves no transport.
+disable_ipv6 = false
+# NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true
+# so a deployment with no UPnP device behaves the same as one that has a
+# device but no mapping rule.
+no_port_forwarding = true
+# BootstrapNodes overrides the default DHT bootstrap hosts with explicit
+# host:port entries. Entries are resolved per address family and filtered
+# to the family of the socket that asks for them. Empty uses the
+# client's built-in bootstrap list.
+bootstrap_nodes = []
 
 [filesystem]
-# Bounds a single read of a piece from the torrent. Both file outputs use it.
+# ReadTimeout bounds a single read of a piece from the torrent.
 read_timeout = "30s"
 
 [fuse]
-# Required when backend = "fuse". The directory must exist.
+# Mountpoint is the directory the file tree is mounted on.
 mountpoint = ""
-# Optional STRM mount; requires strm.base_url and the HTTP listener.
+# STRMMountpoint is the directory the signed-streaming view is mounted on.
 strm_mountpoint = ""
-# Wider access also requires user_allow_other in /etc/fuse.conf.
+# AllowOther passes allow_other to the kernel, lifting FUSE's default
+# restriction that only the mounting user may access the mount.
 allow_other = false
 
-[smb]
-# Native SMB needs no FUSE mount, Samba, or host filesystem export.
-# In Docker publish host 445 to container 1445 rather than granting low-port caps.
-listen_addr = "0.0.0.0:1445"
-# The STRM share of the SMB output: auto provides it when strm.base_url is
-# configured, on forces it, and off forbids it.
-strm = "auto"
+[http]
+# ListenAddr is the address the HTTP service binds. Empty disables the
+# service. The default binds loopback only.
+listen_addr = "127.0.0.1:8080"
+# MaxUploadBytes caps any uploaded request body: a .torrent upload or a
+# managed subtitle file.
+max_upload_size = "10MiB"
+
+[http.auth]
+# Enabled turns on the HTTP login. It is required for a listener that is
+# not bound to the loopback address.
+enabled = false
+# TokenTTL is the inactivity window of a login token. A valid request
+# slides the window; the tokens live in memory and die with the process.
+token_ttl = "30m0s"
+
+[identity]
+# TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.
+tracker_user_agent = "qBittorrent/4.4.0"
+# PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.
+peer_id_prefix = "-qB4400-"
+# ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
+extended_handshake_client_version = "qBittorrent/4.4.0"
 
 [lab]
-# The upload statistics experiment rewrites the upload counter reported to
-# trackers so that the anomaly detection of a tracker can be exercised. It is
-# off unless a mode is configured, and it belongs to a tracker you operate:
-# pointing it at a third-party tracker misreports that tracker's statistics.
-#
-# The reporting model: baseline reports the real counters, inject replaces the
-# reported upload with a synthetic counter, and amplify grows the reported
-# upload by a factor of the real payload bytes. Empty infers the model from
-# the other settings.
+# UploadMode selects the reporting model: baseline, inject, or amplify.
+# Empty infers the mode from the other settings.
 upload_mode = ""
-# The average synthetic growth of the reported upload in inject mode.
-# A byte quantity with an optional "/s" suffix.
+# UploadRate is the average synthetic growth of the reported upload in
+# inject mode.
 upload_rate = ""
-# The reported-to-real factor of the upload in amplify mode; greater than 1.
-upload_multiplier = ""
-# The per-announce deviation from the nominal increment, in percent (0-100).
-upload_jitter = ""
-# The per-torrent ceiling on the cumulative reported upload. Zero is uncapped.
-upload_cap = ""
-# Fixes the random jitter sequence for reproducible runs. Zero lets the
-# process choose one.
+# UploadMultiplier grows the reported upload by this factor of the real
+# payload bytes in amplify mode.
+upload_multiplier = "0"
+# UploadJitter is the per-announce deviation from the nominal increment,
+# in percent.
+upload_jitter = "0"
+# UploadCap is the per-torrent ceiling on the cumulative reported upload.
+upload_cap = "0B"
+# UploadSeed fixes the random jitter sequence for reproducible runs. Zero
+# lets the process choose one.
 upload_seed = 0
-# The JSON Lines file that receives one record per tracker announce plus
-# periodic peer-activity samples. Empty disables it.
+# AnnounceLog is the JSON Lines file that receives one record per tracker
+# announce. Empty disables it.
 announce_log = ""
-# How often peer gauges and real payload counters are sampled into the
-# announce log. It requires announce_log.
-peer_sample_interval = ""
+# PeerSampleInterval is how often peer activity is sampled into the
+# announce log.
+peer_sample_interval = "0s"
+
+[log]
+# Level is the minimum level of a log record: debug, info, warn, or
+# error. Debug is disabled by default.
+level = "info"
+# Format is the shape of a log record: text for humans or json for log
+# collectors.
+format = "text"
+# AddSource adds the source file and line to every log record.
+add_source = false
+
+[proxy]
+# Socks5URL is an optional SOCKS5 or SOCKS5H endpoint.
+socks5_url = ""
+
+[smb]
+# ListenAddr is the address the SMB service binds.
+listen_addr = "0.0.0.0:1445"
+# STRM switches the STRM share of the SMB output: auto, on, or off.
+strm = "auto"
+
+[strm]
+# BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
+# proxy path prefix. Empty disables signed streaming links.
+base_url = ""
