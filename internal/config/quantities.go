@@ -112,3 +112,7 @@ func (q *ByteQuantity) UnmarshalText(text []byte) error {
 
 // Int64 returns the quantity as a plain byte count.
 func (q ByteQuantity) Int64() int64 { return int64(q) }
+
+// String returns the quantity with a byte unit, the way a configuration file
+// writes it.
+func (q ByteQuantity) String() string { return formatByteQuantity(int64(q)) }

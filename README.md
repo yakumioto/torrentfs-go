@@ -147,6 +147,23 @@ strm = "off"
 - 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
 - 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
 
+### 检查与查看配置
+
+两个子命令只处理配置，不需要 torrents 目录：
+
+```sh
+# 部署前校验：配置正确时静默退出 0，有问题时打印全部错误并退出 2
+torrentfs config check --config ./torrentfs.toml
+
+# 查看生效配置；口令一律显示为 <redacted>
+torrentfs config print --config ./torrentfs.toml
+torrentfs config print --format json --sources   # 附带每个值的来源
+```
+
+`--sources` 会标出每个值来自**内置默认值**、**配置文件**还是**环境变量**，用来排查"为什么没生效"。打印结果是**报告**，不是配置文件——脱敏后的占位符无法回灌。
+
+正常启动时日志里也会记录一份脱敏的生效配置摘要（`effective configuration`）。
+
 ### 迁移对照表
 
 已删除的名称在启动时会报错并给出替代写法，不会被静默忽略。
