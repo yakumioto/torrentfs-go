@@ -36,7 +36,7 @@ var (
 	errExposedNoAuth    = errors.New("exposing a non-loopback address requires enabled http.auth")
 	errLogLevel         = errors.New("must be one of debug, info, warn, error")
 	errLogFormat        = errors.New("must be one of text, json")
-	errNoOutput         = errors.New("at least one output must be enabled")
+	errNoOutput         = errors.New("at least one output must be enabled: set http.listen_addr, or set backend to fuse or smb")
 )
 
 const (

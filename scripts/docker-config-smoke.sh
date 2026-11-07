@@ -7,20 +7,41 @@ readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-config-smoke:${BASHPID}}"
 readonly PREFIX="torrentfs-config-${BASHPID}"
 readonly SECRET="config-smoke-${BASHPID}-test-only-password"
+# The image reference the Compose template names. It is a placeholder the user
+# replaces with a published tag, so the image built for this run stands in for
+# it when the template is started.
+readonly COMPOSE_IMAGE_TAG='ghcr.io/yakumioto/torrentfs-go:REPLACE_WITH_PUBLISHED_TAG'
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/torrentfs-config.XXXXXX")"
 image_built=0
 containers=()
+compose_dir=""
+compose_project=""
+compose_tagged=0
 
 fail() { printf 'docker config smoke: %s\n' "$*" >&2; exit 1; }
+# compose runs the shipped template from a private project directory.
+compose() {
+	local timeout_seconds="$1"
+	shift
+	timeout "$timeout_seconds" docker compose --project-directory "$compose_dir" \
+		--project-name "$compose_project" -f "$ROOT_DIR/docker-compose.yaml" "$@"
+}
+refuse_secret() {
+	[[ "$1" != *"$SECRET"* ]] || fail "$2"
+}
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM
+	if [[ -n "$compose_project" ]]; then
+		compose 60 down --remove-orphans >/dev/null 2>&1 || true
+	fi
 	for container in "${containers[@]}"; do timeout 30 docker rm -f "$container" >/dev/null 2>&1 || true; done
 	# Only the private mktemp tree is mounted into this root cleanup helper.
 	timeout 30 docker run --rm --user 0:0 --entrypoint /bin/sh \
 		--mount "type=bind,src=$work_dir,dst=/scratch" "$IMAGE" \
 		-c 'rm -rf /scratch/* /scratch/..?* /scratch/.[!.]*' >/dev/null 2>&1 || true
 	rm -rf -- "$work_dir"
+	if (( compose_tagged )); then timeout 30 docker image rm "$COMPOSE_IMAGE_TAG" >/dev/null 2>&1 || true; fi
 	if (( image_built )); then timeout 60 docker image rm "$IMAGE" >/dev/null 2>&1 || true; fi
 	exit "$status"
 }
@@ -69,7 +90,9 @@ wait_running() {
 		if [[ "$state" == running ]] && process_identity "$container" >/dev/null 2>&1 &&
 			timeout 10 docker exec "$container" /bin/sh -c 'grep -Eq ":(1F90|05A5)[[:space:]].*[[:space:]]0A[[:space:]]" /proc/net/tcp /proc/net/tcp6'; then return 0; fi
 		if [[ "$state" == exited || "$state" == dead ]]; then
-			docker logs "$container" >&2 || true
+			local output
+			output="$(timeout 10 docker logs "$container" 2>&1)" || true
+			printf '%s\n' "${output//"$SECRET"/[REDACTED]}" >&2
 			fail "$container exited before readiness"
 		fi
 		sleep 0.1
@@ -103,7 +126,7 @@ stop_clean() {
 	local output
 	output="$(timeout 10 docker logs "$1" 2>&1)"
 	[[ "$status" == 0 ]] || fail "shutdown returned $status: ${output//"$SECRET"/[REDACTED]}"
-	[[ "$output" != *"$SECRET"* ]] || fail 'startup/shutdown logs disclosed a password'
+	refuse_secret "$output" 'startup/shutdown logs disclosed a password'
 }
 expect_failure() {
 	local name="$1" expected="$2" output status=0
@@ -117,7 +140,7 @@ expect_failure() {
 		"${docker_args[@]}" "$IMAGE" "${go_args[@]}" 2>&1)" || status=$?
 	[[ "$status" != 0 && "$status" != 124 ]] || fail "$name started or timed out"
 	[[ "$output" == *"$expected"* ]] || fail "$name lacked $expected: $output"
-	[[ "$output" != *"$SECRET"* ]] || fail "$name disclosed its password"
+	refuse_secret "$output" "$name disclosed its password"
 	# Filesystem permission failures occur inside Session.New; configuration
 	# and identity failures must be rejected before the session is initialized.
 	if [[ "$name" != 'inaccessible data' ]]; then
@@ -127,9 +150,20 @@ expect_failure() {
 
 # The Compose template names the settings the program reads. A template that
 # names a removed setting fails at the first start, so the names are checked
-# before anything is started.
-compose_config="$(timeout 30 docker compose -f "$ROOT_DIR/docker-compose.yaml" config 2>&1)" ||
-	fail "the Compose template is not valid: $compose_config"
+# before anything is started. The project directory supplies the .env the
+# template reads its password from, exactly as a deployment would.
+compose_dir="$work_dir/compose"
+compose_project="${PREFIX}-compose"
+compose_container="${compose_project}-torrentfs"
+mkdir -p "$compose_dir/torrents"
+chmod 0755 "$compose_dir"
+# The template runs the container as 1000:1000, while the directory belongs to
+# whoever runs the smoke: the data directory must be writable by the container
+# user.
+chmod 0777 "$compose_dir/torrents"
+printf 'TORRENTFS_PASSWORD=%s\n' "$SECRET" >"$compose_dir/.env"
+compose_config="$(compose 30 config 2>&1)" ||
+	fail "the Compose template is not valid: ${compose_config//"$SECRET"/[REDACTED]}"
 for expected in 'TORRENTFS_BACKEND' 'TORRENTFS_USERNAME' 'TORRENTFS_PASSWORD'; do
 	[[ "$compose_config" == *"$expected"* ]] || fail "the Compose template does not set $expected"
 done
@@ -137,6 +171,29 @@ for removed in 'TORRENTFS_FILESYSTEM_BACKEND' 'TORRENTFS_SMB_USERNAME' 'TORRENTF
 	[[ "$compose_config" != *"$removed"* ]] || fail "the Compose template names the removed variable $removed"
 done
 printf 'docker config smoke: the Compose template names the current settings\n'
+
+# A template that names the right settings still has to start. The service is
+# started through `compose run`, which keeps the service definition (image,
+# user, environment, volumes, capabilities) but publishes no host ports, so the
+# check does not depend on the host's 445 and 8080 being free.
+timeout 30 docker tag "$IMAGE" "$COMPOSE_IMAGE_TAG"
+compose_tagged=1
+containers+=("$compose_container")
+compose 60 run --detach --no-deps --name "$compose_container" torrentfs >/dev/null 2>&1
+wait_running "$compose_container"
+compose_output="$(timeout 10 docker logs "$compose_container" 2>&1)"
+refuse_secret "$compose_output" 'the Compose start disclosed the password'
+[[ "$compose_output" == *'torrentfs starting'* ]] || fail 'the Compose template did not reach a start'
+[[ "$compose_output" == *'backend=smb'* ]] || fail 'the Compose template did not start the SMB output'
+# The template's user and capabilities reached the process, and the session got
+# far enough to create its metadata directory in the mounted torrents volume.
+assert_identity "$compose_container" 1000 1000
+[[ -d "$compose_dir/torrents/.metadata" ]] || fail 'the Compose start did not write to the mounted torrents directory'
+stop_clean "$compose_container"
+compose 60 down --remove-orphans >/dev/null 2>&1
+timeout 30 docker image rm "$COMPOSE_IMAGE_TAG" >/dev/null 2>&1 || true
+compose_tagged=0
+printf 'docker config smoke: the Compose template starts\n'
 
 start "${PREFIX}-default"
 assert_identity "${PREFIX}-default" 1000 1000
@@ -160,7 +217,7 @@ expect_failure 'unknown backend' 'backend' --env TORRENTFS_BACKEND=invalid
 expect_failure 'no output' 'at least one output must be enabled' --env TORRENTFS_BACKEND=none --env TORRENTFS_HTTP_LISTEN_ADDR=
 expect_failure 'missing SMB password' 'password' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader
 expect_failure 'missing SMB user name' 'username' --env TORRENTFS_BACKEND=smb --env "TORRENTFS_PASSWORD=$SECRET"
-expect_failure 'empty SMB password' 'password is required' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
+expect_failure 'empty SMB password' 'password: value is required' --env TORRENTFS_BACKEND=smb --env TORRENTFS_USERNAME=reader --env TORRENTFS_PASSWORD=
 expect_failure 'removed mountpoint flag' 'fuse.mountpoint' -- \
 	-mountpoint /share -config /etc/torrentfs/torrentfs.toml /torrents
 expect_failure 'removed SMB selector' 'TORRENTFS_BACKEND' --env TORRENTFS_SMB_ENABLED=true

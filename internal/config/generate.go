@@ -89,11 +89,12 @@ func orderedKeys() []SchemaKey {
 	return keys
 }
 
-// sectionOrder returns the position of a key in the order of the sections.
+// sectionOrder returns the sort position of a key by section.
 //
 // The position is the path of the section with the separator that sorts
-// before any character, so a section comes before the sections below it and
-// the sections keep the order of the schema among themselves.
+// before any character, so the keys of one section stay together, a section
+// comes before the sections nested below it, and the sections themselves are
+// in a stable alphabetical order.
 func sectionOrder(path string) string {
 	parent := parentPath(path)
 	if parent == "" {

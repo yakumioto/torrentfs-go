@@ -163,10 +163,12 @@ type metadataFetch struct {
 	retry  bool
 }
 
-// New creates a session and its anacrolix client. The torrents directory must
-// already exist; the session creates only its .metadata directory. The client
-// is configured to seed, registry-backed tasks are restored, and persisted
-// layout checks complete before the session is returned.
+// New creates a session and its anacrolix client. The configuration must come
+// from the loaders, which are the one place that validates it. The torrents
+// directory must already exist; the session creates only its .metadata
+// directory. The client is configured to seed, registry-backed tasks are
+// restored, and persisted layout checks complete before the session is
+// returned.
 func New(cfg config.Config, torrentsDir string, opts ...Option) (*Session, error) {
 	return newWithClientConfig(cfg, torrentsDir, nil, opts...)
 }
@@ -187,10 +189,6 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logger.Error("session init failed", "stage", stage, "err", err)
 	}
 
-	if err := cfg.Validate(); err != nil {
-		logInitFailure("validate-config", err)
-		return nil, fmt.Errorf("session: validate config: %w", err)
-	}
 	var err error
 	torrentsDir, err = validateTorrentDir(torrentsDir)
 	if err != nil {

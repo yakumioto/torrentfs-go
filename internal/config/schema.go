@@ -32,8 +32,8 @@ type SchemaKey struct {
 	// Overridable reports whether the environment may override the
 	// configuration key.
 	Overridable bool
-	// Kind names the type of the value: string, bool, int, duration, byte
-	// quantity, list, or enum.
+	// Kind names the type of the value: string, bool, int, int64, duration,
+	// byte quantity, byte rate, percent, ratio, list, or enum.
 	Kind string
 	// Values lists the accepted values of an enumerated configuration key.
 	// It is empty for every other kind.

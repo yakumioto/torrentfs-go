@@ -190,8 +190,8 @@ func (p PrintedConfig) JSON() ([]byte, error) {
 	}
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
-	// The escaped form of the redacted placeholder hides it from a reader:
-	// "<redacted>" reads as a marker, "redacted" reads as noise.
+	// HTML escaping would turn the placeholder into \u003credacted\u003e,
+	// which a reader cannot recognize. The document is not HTML.
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(document); err != nil {

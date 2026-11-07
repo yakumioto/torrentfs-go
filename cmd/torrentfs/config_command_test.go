@@ -180,15 +180,24 @@ func TestConfigCheckReportsTheOutputRuleWithTheExperiment(t *testing.T) {
 	}
 }
 
-// TestConfigCheckNeedsNoTorrentsDirectory covers the contract that the
-// configuration commands work on the configuration alone.
-func TestConfigCheckNeedsNoTorrentsDirectory(t *testing.T) {
-	code, stdout, stderr := runCLICapture([]string{"config", "check"})
-	if code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+// TestConfigCommandsNeedNoTorrentsDirectory covers the contract that the
+// configuration commands work on the configuration alone: no torrents
+// directory is required, with or without a configuration file.
+func TestConfigCommandsNeedNoTorrentsDirectory(t *testing.T) {
+	cases := map[string][]string{
+		"built-in defaults":  {"config", "check"},
+		"configuration file": {"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")},
 	}
-	if stdout != "" || stderr != "" {
-		t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			code, stdout, stderr := runCLICapture(args)
+			if code != 0 {
+				t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+			}
+			if stdout != "" || stderr != "" {
+				t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
+			}
+		})
 	}
 }
 
@@ -317,18 +326,6 @@ func TestConfigPrintReportsALoadError(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "missing.toml") {
 		t.Errorf("the diagnosis does not name the file: %s", stderr)
-	}
-}
-
-// TestConfigCommandNeedsNoTorrentsDirectory covers the contract that the
-// configuration commands do not take a torrents directory.
-func TestConfigCommandNeedsNoTorrentsDirectory(t *testing.T) {
-	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, "backend = \"none\"\n")})
-	if code != 0 {
-		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
-	}
-	if stdout != "" || stderr != "" {
-		t.Fatalf("run printed stdout %q and stderr %q, want nothing", stdout, stderr)
 	}
 }
 
