@@ -105,13 +105,16 @@ func checkConfig(path string) error {
 // apart in which rules they apply.
 func loadAndCheck(path string) (config.Config, config.Sources, error) {
 	cfg, sources, err := config.LoadWithSources(path)
+	// A failed decode leaves the zero configuration: it selects no backend,
+	// so the process rule passes and nothing is claimed about values that
+	// were never read. A validation error travels with the loaded values.
 	problems := []error{err, cfg.ValidateOutput()}
-	if err != nil && configurationNamesExperiment(err) {
-		// A rejected experiment value is one problem. The cross-field rules
-		// would restate it in other words, so they wait for the next run.
-		return cfg, sources, errors.Join(problems...)
+	// A rejected experiment value is one problem. The cross-field rules would
+	// restate it in other words, so they wait for the next run.
+	if err == nil || !configurationNamesExperiment(err) {
+		problems = append(problems, checkExperiment(cfg))
 	}
-	return cfg, sources, errors.Join(append(problems, checkExperiment(cfg))...)
+	return cfg, sources, errors.Join(problems...)
 }
 
 // configurationNamesExperiment reports whether the configuration already

@@ -50,9 +50,6 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	for _, item := range configSchema {
 		sources[item.path] = SourceDefault
 	}
-	// A removed name is reported before anything else is read, and the names
-	// of every input are collected together: a user who renamed a key in the
-	// file and in the environment learns about both at once.
 	// A removed key in the file has to stop the load before the strict
 	// decoder runs, because the decoder would report it as unknown. A removed
 	// environment name does not: it is reported with the other problems, so a
@@ -100,12 +97,14 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 			validateErr = fmt.Errorf("config: validate %q: %w", path, validateErr)
 		}
 	}
-	switch {
-	case len(envRemoved) > 0 && validateErr != nil:
-		return cfg, sources, fmt.Errorf("config: %w\n%w", &RemovedError{Names: envRemoved}, validateErr)
-	case len(envRemoved) > 0:
-		return cfg, sources, fmt.Errorf("config: %w", &RemovedError{Names: envRemoved})
-	case validateErr != nil:
+	if len(envRemoved) > 0 {
+		removedErr := fmt.Errorf("config: %w", &RemovedError{Names: envRemoved})
+		if validateErr == nil {
+			return cfg, sources, removedErr
+		}
+		return cfg, sources, errors.Join(removedErr, validateErr)
+	}
+	if validateErr != nil {
 		return cfg, sources, validateErr
 	}
 	return cfg, sources, nil

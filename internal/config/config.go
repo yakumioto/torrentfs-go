@@ -315,6 +315,10 @@ func Default() Config {
 // Every invalid value is reported, not just the first one: a user who changed
 // several values learns about all of them in one run.
 //
+// The rules that belong to the process rather than to a value (that at least
+// one output is enabled) live in ValidateOutput: a start and the check apply
+// both, and an audit reads the values alone.
+//
 // The checks split in two kinds. A syntax check rejects a value that can never
 // work, wherever it stands, so it runs for every configuration key even when
 // the key belongs to an output that is not selected. A requirement check

@@ -74,11 +74,15 @@ func Summary(cfg Config, sources Sources) slog.Attr {
 	return slog.Group("config", attributes...)
 }
 
-// Print returns the effective configuration in a printable form.
+// Print returns the merged configuration and the source of every value.
 //
 // The values of the secret keys are redacted, so the result never discloses a
 // password. The result is a report, not a configuration file: the redacted
 // values are placeholders, so it is not meant to be read back.
+//
+// A configuration that enables no output is still printable: this is the
+// audit entry, and the rule of an enabled output belongs to a start and to
+// the check.
 func Print(path string, options PrintOptions) (PrintedConfig, error) {
 	cfg, sources, err := LoadWithSources(path)
 	if err != nil {

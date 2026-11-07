@@ -164,6 +164,22 @@ func TestRunReportsTheExperimentWithTheValueErrors(t *testing.T) {
 	}
 }
 
+// TestConfigCheckReportsTheOutputRuleWithTheExperiment covers the contract
+// that the process rule and the experiment rules arrive in one report.
+func TestConfigCheckReportsTheOutputRuleWithTheExperiment(t *testing.T) {
+	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n[lab]\nupload_mode = \"inject\"\n"
+
+	code, _, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"at least one output must be enabled", "upload_rate"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the report does not name %q: %s", want, stderr)
+		}
+	}
+}
+
 // TestConfigCheckNeedsNoTorrentsDirectory covers the contract that the
 // configuration commands work on the configuration alone.
 func TestConfigCheckNeedsNoTorrentsDirectory(t *testing.T) {
@@ -279,8 +295,10 @@ func TestConfigPrintAuditsASwitchedOffConfiguration(t *testing.T) {
 	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n"
 
 	output := printConfig(t, "--config", writeConfigFile(t, body))
-	if !strings.Contains(output, `backend = "none"`) {
-		t.Errorf("the report does not show the effective backend: %s", output)
+	for _, want := range []string{`backend = "none"`, `listen_addr = ""`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("the report does not show %q: %s", want, output)
+		}
 	}
 }
 

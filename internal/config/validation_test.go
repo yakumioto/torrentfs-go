@@ -226,6 +226,10 @@ func TestValidateOutputRequiresAnOutput(t *testing.T) {
 	if !errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("ValidateOutput error = %v, want config.ErrInvalid", err)
 	}
+	var validationErr *config.ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "backend" {
+		t.Fatalf("ValidateOutput error %v does not name the output backend", err)
+	}
 
 	cfg.HTTP.ListenAddr = "127.0.0.1:8080"
 	if err := cfg.ValidateOutput(); err != nil {
@@ -233,17 +237,21 @@ func TestValidateOutputRequiresAnOutput(t *testing.T) {
 	}
 }
 
-// TestValidateLeavesTheOutputRuleToTheCommands covers the contract that the
-// values of a switched-off configuration are still readable: the rule of an
-// enabled output belongs to the process, so an audit can print the effective
-// values of a configuration that is not meant to run.
-func TestValidateLeavesTheOutputRuleToTheCommands(t *testing.T) {
+// TestValidateReadsTheValuesOfAConfigurationThatEnablesNothing covers the
+// contract that the values of a switched-off configuration are still
+// readable: the rule of an enabled output belongs to the process, so an audit
+// can read a configuration that is not meant to run.
+func TestValidateReadsTheValuesOfAConfigurationThatEnablesNothing(t *testing.T) {
 	cfg := config.Default()
 	cfg.Backend = config.BackendNone
 	cfg.HTTP.ListenAddr = ""
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate a configuration that enables nothing: %v", err)
+	}
+	// The rule itself still exists; it is the process that applies it.
+	if err := cfg.ValidateOutput(); err == nil {
+		t.Fatal("ValidateOutput accepted a configuration that enables nothing")
 	}
 }
 
