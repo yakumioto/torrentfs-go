@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +26,7 @@ func TestConfigApplierAppliesReadingAllowance(t *testing.T) {
 	cfg.Connections.ReadingConns = 3
 	cfg.Connections.ReadGrace = config.Duration(time.Minute)
 	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
-	advance := fakeConnectionClock(t, sess)
+	_, advance := fakeConnectionClock(t, sess)
 
 	content := bytes.Repeat([]byte{11}, testPieceLength)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
@@ -112,12 +111,7 @@ func TestConfigApplierAppliesUploadingAllowance(t *testing.T) {
 	cfg.Connections.UploadingConns = 2
 	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
 
-	var clock atomic.Int64
-	clock.Store(time.Now().UnixNano())
-	restore := session.SetConnectionAllocatorClockForTest(sess, func() time.Time {
-		return time.Unix(0, clock.Load())
-	})
-	t.Cleanup(restore)
+	now, advance := fakeConnectionClock(t, sess)
 
 	content := bytes.Repeat([]byte{12}, testPieceLength)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
@@ -133,8 +127,8 @@ func TestConfigApplierAppliesUploadingAllowance(t *testing.T) {
 
 	// Nothing is reading the torrent, so the observed upload is what makes it
 	// eligible for the uploading allowance.
-	session.MarkUploadActivityForTest(st, time.Unix(0, clock.Load()))
-	clock.Add(int64(2 * time.Minute))
+	session.MarkUploadActivityForTest(st, now())
+	advance(2 * time.Minute)
 	session.AllocateConnectionsForTest(sess)
 	if got := session.ConnectionStateForTest(st); got != "uploading" {
 		t.Fatalf("cached torrent with a recent upload is in state %q, want uploading", got)
@@ -255,7 +249,7 @@ capacity = "1GiB"
 		t.Fatalf("load configuration: %v", err)
 	}
 	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
-	advance := fakeConnectionClock(t, sess)
+	_, advance := fakeConnectionClock(t, sess)
 
 	content := bytes.Repeat([]byte{14}, testPieceLength)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)

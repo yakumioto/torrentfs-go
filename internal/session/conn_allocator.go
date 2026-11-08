@@ -109,8 +109,15 @@ type connectionAllocatorTiming struct {
 // The mutex guards the clock and the timing windows so a test can replace the
 // clock while the allocator goroutine is running; the decision state itself
 // lives in atomics on the torrent.
+//
+// passMu serializes whole allocation passes. The background goroutine and a
+// test that drives a pass by hand both go through it, and a test changes the
+// clock between passes rather than in the middle of one. Without the
+// serialization a pass that read the previous time could write its plan after
+// a pass that read the new time, leaving a stale state behind.
 type connectionAllocator struct {
 	mu     sync.RWMutex
+	passMu sync.Mutex
 	kick   chan struct{}
 	now    func() time.Time
 	timing connectionAllocatorTiming
@@ -326,6 +333,11 @@ func (s *Session) allocatorNow() time.Time {
 // drops the connections that no longer fit, which is how excess inbound
 // connections are reclaimed.
 func (s *Session) allocateConnections() {
+	// One pass at a time: the clock and the current configuration are read
+	// inside the pass, so a concurrent pass cannot combine an older clock or
+	// configuration with a later write.
+	s.connAlloc.passMu.Lock()
+	defer s.connAlloc.passMu.Unlock()
 	now := s.connAlloc.clock()
 	timing := s.connAlloc.windows()
 	conn := s.config.load().Connections

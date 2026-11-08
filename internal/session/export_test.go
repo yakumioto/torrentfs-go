@@ -280,6 +280,16 @@ func AllocateConnectionsForTest(s *Session) {
 	s.allocateConnections()
 }
 
+// WithConnectionAllocatorPassLockForTest runs fn while no allocation pass can
+// run. A test changes the fake clock through it, so every pass sees either the
+// whole change or none of it and a stale plan cannot land after a newer one.
+// Test-only.
+func WithConnectionAllocatorPassLockForTest(s *Session, fn func()) {
+	s.connAlloc.passMu.Lock()
+	defer s.connAlloc.passMu.Unlock()
+	fn()
+}
+
 // SetConnectionAllocatorClockForTest replaces the allocator clock so a test can
 // walk the read grace, probe rotation and metadata windows without sleeping.
 // Test-only.

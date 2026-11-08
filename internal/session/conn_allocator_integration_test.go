@@ -39,17 +39,21 @@ func seederFor(t *testing.T, ctx context.Context, dir string, torrentBytes []byt
 }
 
 // fakeConnectionClock installs a mutable allocator clock on the session and
-// returns an advance function, so grace and rotation windows can be walked
-// without sleeping.
-func fakeConnectionClock(t *testing.T, sess *session.Session) (advance func(time.Duration)) {
+// returns the clock and an advance function, so grace and rotation windows can
+// be walked without sleeping. The advance function changes the clock between
+// allocator passes, so a pass that read the old time cannot overwrite the state
+// a later pass computed from the new one.
+func fakeConnectionClock(t *testing.T, sess *session.Session) (now func() time.Time, advance func(time.Duration)) {
 	t.Helper()
 	var nanoseconds atomic.Int64
 	nanoseconds.Store(time.Now().UnixNano())
-	restore := session.SetConnectionAllocatorClockForTest(sess, func() time.Time {
-		return time.Unix(0, nanoseconds.Load())
-	})
+	now = func() time.Time { return time.Unix(0, nanoseconds.Load()) }
+	restore := session.SetConnectionAllocatorClockForTest(sess, now)
 	t.Cleanup(restore)
-	return func(d time.Duration) { nanoseconds.Add(int64(d)) }
+	advance = func(d time.Duration) {
+		session.WithConnectionAllocatorPassLockForTest(sess, func() { nanoseconds.Add(int64(d)) })
+	}
+	return now, advance
 }
 
 // TestConnectionAllocatorFollowsReadActivity is the end-to-end contract of the
@@ -78,7 +82,7 @@ func TestConnectionAllocatorFollowsReadActivity(t *testing.T) {
 	cfg := testConfig()
 	leecher := newLoopbackSessionWithCustomize(t, cfg, filepath.Join(work, "leecher"),
 		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
-	advance := fakeConnectionClock(t, leecher)
+	_, advance := fakeConnectionClock(t, leecher)
 	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("leecher AddTorrent: %v", err)
 	}
