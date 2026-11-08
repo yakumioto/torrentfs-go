@@ -1,4 +1,5 @@
 import { ApiError } from '../api/errors';
+import type { ConfigFieldError, ConfigSaveFailure } from '../types/api';
 
 const STATUS_MESSAGES: Record<number, string> = {
   400: '请求内容无效，请检查输入后重试。',
@@ -98,4 +99,78 @@ export function userFacingOperationCode(code: string | undefined, fallback = '�
     return '字幕文件清理失败。修复存储权限或空间后，可以再次删除同一任务完成重试。';
   }
   return fallback;
+}
+
+/**
+ * Configuration save failures are mapped by stable code. The durability case is
+ * not a plain failure: the new values are already in force, only the
+ * restart-recovery guarantee is unproven.
+ */
+const CONFIG_SAVE_CODE_MESSAGES: Record<string, string> = {
+  invalid: '配置校验失败，请修正标记的配置项后重试。',
+  conflict: '配置文件已被外部修改，请重新读取页面后再保存。',
+  read_only: '配置为只读，无法保存；请检查环境变量覆盖与配置文件权限。',
+  not_configured: '后台服务没有加载配置文件，无法保存。',
+  persistence_unavailable: '配置未能写入，文件与当前运行值均未改变；请检查磁盘空间和目录权限。',
+  durability_unconfirmed: '新配置已生效，但无法确认重启后仍能保留。',
+};
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+function fieldErrorList(value: unknown): ConfigFieldError[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const fields: ConfigFieldError[] = [];
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.path === 'string' && typeof record.message === 'string') {
+      fields.push({ path: record.path, message: record.message });
+    }
+  }
+  return fields;
+}
+
+/**
+ * Returns the structured failure body of a rejected configuration save, or
+ * undefined when the error is not one. The page uses the per-key errors and the
+ * applied keys, so a display message alone is not enough.
+ */
+export function configSaveFailure(error: unknown): ConfigSaveFailure | undefined {
+  if (!(error instanceof ApiError) || typeof error.payload !== 'object' || error.payload === null) {
+    return undefined;
+  }
+  const record = error.payload as Record<string, unknown>;
+  if (typeof record.code !== 'string') {
+    return undefined;
+  }
+  return {
+    error: typeof record.error === 'string' ? record.error : error.serverMessage,
+    code: record.code,
+    field_errors: fieldErrorList(record.field_errors),
+    applied: stringList(record.applied),
+    restart_required: stringList(record.restart_required),
+    persisted: record.persisted === true,
+  };
+}
+
+export function userFacingConfigSaveError(error: unknown, fallback = '配置保存失败，请稍后重试。'): string {
+  const failure = configSaveFailure(error);
+  if (failure === undefined) {
+    return fallback;
+  }
+  return CONFIG_SAVE_CODE_MESSAGES[failure.code] ?? fallback;
+}
+
+/** True when the daemon already applied the new configuration despite the error. */
+export function configSaveDurabilityUnconfirmed(error: unknown): boolean {
+  return configSaveFailure(error)?.code === 'durability_unconfirmed';
 }

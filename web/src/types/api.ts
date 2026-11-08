@@ -241,8 +241,57 @@ export interface ConfigOperationStatus {
 export interface ConfigView {
   /** The configuration file the process loaded; empty when it started without one. */
   config_file: string;
+  /**
+   * Digest of the configuration file the view was rendered from. A save sends
+   * it back; a file another writer changed has a different digest, so the save
+   * is refused instead of overwriting the change. Empty without a file.
+   */
+  baseline: string;
   read_only_reason: ConfigPageReadOnlyReason | '';
   keys: ConfigKey[];
   last_save: ConfigOperationStatus;
   last_reload: ConfigOperationStatus;
+}
+
+/** A sparse save: changed configuration keys by path, and the file baseline. */
+export interface ConfigSaveRequest {
+  baseline: string;
+  patch: Record<string, string>;
+}
+
+/** The changed keys that took effect and those that wait for a restart. */
+export interface ConfigSaveResult {
+  applied: string[];
+  restart_required: string[];
+  /** Whether the new file is confirmed to survive a crash. */
+  persisted: boolean;
+}
+
+/** One rejected configuration key of a save. */
+export interface ConfigFieldError {
+  path: string;
+  message: string;
+}
+
+/** Stable machine-readable reasons a configuration save was rejected. */
+export type ConfigSaveErrorCode =
+  | 'invalid'
+  | 'conflict'
+  | 'read_only'
+  | 'not_configured'
+  | 'persistence_unavailable'
+  | 'durability_unconfirmed';
+
+/**
+ * The failure body of a rejected save. `applied` is non-empty for a durability
+ * failure: the new values are already in force, only the restart-recovery
+ * guarantee is unproven.
+ */
+export interface ConfigSaveFailure {
+  error: string;
+  code: ConfigSaveErrorCode | string;
+  field_errors: ConfigFieldError[];
+  applied: string[];
+  restart_required: string[];
+  persisted: boolean;
 }

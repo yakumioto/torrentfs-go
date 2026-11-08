@@ -3,6 +3,8 @@ import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
 import type {
   Category,
+  ConfigSaveRequest,
+  ConfigSaveResult,
   ConfigView,
   LabSettingsUpdate,
   LabView,
@@ -77,6 +79,22 @@ export function useConfig(api: ApiClient, enabled: boolean) {
     enabled,
     retry: shouldRetry,
     retryDelay,
+  });
+}
+
+/**
+ * Saves a sparse configuration patch and refreshes the view on success, so
+ * the next save sends the new baseline. A conflict deliberately does not
+ * refresh: the page keeps the baseline it edited from until the user reloads,
+ * instead of silently rebasing local edits onto a file it never read.
+ */
+export function useSaveConfig(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation<ConfigSaveResult, Error, ConfigSaveRequest>({
+    mutationFn: (request) => api.saveConfig(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.config });
+    },
   });
 }
 

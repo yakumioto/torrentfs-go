@@ -1,5 +1,7 @@
 import type {
   Category,
+  ConfigSaveRequest,
+  ConfigSaveResult,
   ConfigView,
   LabSettingsUpdate,
   LabView,
@@ -88,6 +90,14 @@ export class ApiClient {
 
   getConfig(signal?: AbortSignal): Promise<ConfigView> {
     return this.request<ConfigView>('/config', { signal });
+  }
+
+  saveConfig(request: ConfigSaveRequest, signal?: AbortSignal): Promise<ConfigSaveResult> {
+    return this.request<ConfigSaveResult>('/config', {
+      method: 'PUT',
+      body: JSON.stringify(request),
+      signal,
+    });
   }
 
   getTorrent(id: string, signal?: AbortSignal): Promise<Torrent> {
