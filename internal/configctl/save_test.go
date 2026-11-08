@@ -13,6 +13,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/configctl"
+	"github.com/yakumioto/torrentfs-go/internal/logging"
 )
 
 // recordingApplier is a component applier that records the configurations it
@@ -124,6 +125,14 @@ format = "text"
 	}
 	if strings.Contains(written, `level = "info"`) {
 		t.Errorf("the written configuration still holds the old level:\n%s", written)
+	}
+
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("stat the configuration file: %v", statErr)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("configuration file mode = %o, want the original 600", info.Mode().Perm())
 	}
 
 	backup, err := os.ReadFile(config.WriteBackBackupPath(path))
@@ -694,5 +703,35 @@ func TestConcurrentSavesApplyOnlyOneEdit(t *testing.T) {
 	}
 	if level.EffectiveValue != "info" {
 		t.Errorf("running log.level = %q, want the unchanged info: no applier is registered", level.EffectiveValue)
+	}
+}
+
+// TestSaveReachesTheRunningLogger covers the first hot-apply item end to end:
+// the log level the page saves reaches the handler of the logger the process
+// already runs, without rebuilding it.
+func TestSaveReachesTheRunningLogger(t *testing.T) {
+	var output bytes.Buffer
+	logger, level, err := logging.New(config.Log{Level: "info", Format: "text"}, &output)
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	path := writeConfigFile(t, "[log]\nlevel = \"info\"\n")
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	controller := configctl.New(path, cfg, sources, configctl.WithLogger(logger))
+	registerApplier(t, controller, logging.NewLevelApplier(level))
+
+	if _, err := controller.Save(context.Background(), configctl.SaveRequest{
+		Baseline: baselineOf(t, controller),
+		Patch:    map[string]string{"log.level": "debug"},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	logger.Debug("visible-after-save")
+	if !strings.Contains(output.String(), "msg=visible-after-save") {
+		t.Errorf("the saved log level did not reach the running logger: %q", output.String())
 	}
 }
