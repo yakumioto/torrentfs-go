@@ -546,7 +546,7 @@ describe('ConfigPage unsaved changes', () => {
     expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 1 项');
     expect(beforeUnloadEvent().defaultPrevented).toBe(true);
 
-    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    fireEvent.click(screen.getByRole('link', { name: '上传实验监控' }));
     const stayDialog = await screen.findByRole('dialog');
     expect(stayDialog).toHaveTextContent('离开配置页面');
     expect(stayDialog).toHaveTextContent('1 项未保存的改动');
@@ -556,11 +556,11 @@ describe('ConfigPage unsaved changes', () => {
     expect(screen.getByRole('article', { name: 'cache.capacity' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
 
-    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    fireEvent.click(screen.getByRole('link', { name: '上传实验监控' }));
     const leaveDialog = await screen.findByRole('dialog');
     fireEvent.click(within(leaveDialog).getByRole('button', { name: '放弃改动并离开' }));
 
-    await screen.findByRole('heading', { name: '上传实验设置' });
+    await screen.findByRole('heading', { name: '上传实验监控' });
     expect(screen.queryByRole('article', { name: 'cache.capacity' })).not.toBeInTheDocument();
   });
 
