@@ -18,7 +18,7 @@ import (
 // it names exactly the runtime keys, and applying them changes the reporting of
 // later announces without touching the restart-only settings.
 func TestExperimentApplierHotAppliesRuntimeSettings(t *testing.T) {
-	sess := newLabSession(t, t.TempDir(), experiments.Settings{
+	sess := newExperimentSession(t, t.TempDir(), experiments.Settings{
 		RuntimeSettings:    experiments.RuntimeSettings{Mode: experiments.ModeBaseline, JitterFraction: 0.2},
 		Seed:               7,
 		AnnounceLogPath:    "",
@@ -51,7 +51,7 @@ func TestExperimentApplierHotAppliesRuntimeSettings(t *testing.T) {
 	if err := applier.Apply(cfg); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	status := sess.LabStatus()
+	status := sess.ExperimentStatus()
 	if status.Settings.Mode != experiments.ModeInject || status.Settings.RateBytesPerSecond != 2<<20 {
 		t.Fatalf("settings = %+v, want inject at 2MiB/s", status.Settings)
 	}
@@ -104,7 +104,7 @@ rate = "1MiB/s"
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true
 		cc.NoDefaultPortForwarding = true
-	}, session.WithLabExperiment(settings))
+	}, session.WithExperiment(settings))
 	if err != nil {
 		t.Fatalf("NewWithClientConfig: %v", err)
 	}
@@ -144,7 +144,7 @@ rate = "1MiB/s"
 			t.Fatalf("Applied = %v, want %q", result.Applied, key)
 		}
 	}
-	status := sess.LabStatus()
+	status := sess.ExperimentStatus()
 	if status.Settings.Mode != experiments.ModeAmplify || status.Settings.Multiplier != 3 {
 		t.Fatalf("running settings = %+v, want amplify x3", status.Settings)
 	}
@@ -189,7 +189,7 @@ rate = "1MiB/s"
 	if len(result.Applied) != 0 {
 		t.Fatalf("Applied = %v, want no hot-applied key", result.Applied)
 	}
-	status = sess.LabStatus()
+	status = sess.ExperimentStatus()
 	if status.Seed != seedBefore || status.AnnounceLogPath != logBefore || status.PeerSampleInterval != intervalBefore {
 		t.Fatalf("restart-only settings changed at runtime: before %d/%q/%v, after %d/%q/%v",
 			seedBefore, logBefore, intervalBefore, status.Seed, status.AnnounceLogPath, status.PeerSampleInterval)

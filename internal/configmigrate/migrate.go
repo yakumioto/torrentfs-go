@@ -235,11 +235,22 @@ func fallbackToLegacy(options Options, result Result, settings session.UploadRat
 // applyLegacyRuntime overlays the sidecar value onto the runtime configuration.
 //
 // Every upload-rate key is overwritten unless the environment supplies it: the
-// sidecar is a complete value, and an empty window must clear a window the file
-// carries. The configuration page keeps reporting the file values, and it is
-// read-only in every deployment that reaches this path.
+// environment is a configuration source and wins over the retired sidecar, so
+// a read-only deployment must keep the value it already runs with. The source
+// record follows the value, so the configuration page reports the same values
+// and sources the session uses.
+//
+// A runtime value that came from the retired sidecar is recorded as a file
+// value: the source model has only default, file, and environment, and the
+// sidecar is a persisted file the operator supplied. No configuration file is
+// writable in a deployment that takes this path, so the page is read-only and
+// names the real file it loaded; the upgraded file replaces that source on the
+// next writable start.
 func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) error {
 	patch := legacyRuntimePatch(settings)
+	if result.Sources == nil {
+		result.Sources = config.Sources{}
+	}
 	for _, path := range uploadRateKeys {
 		if result.Sources.SourceOf(path) == config.SourceEnvironment {
 			continue
@@ -247,6 +258,7 @@ func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) err
 		if err := config.SetText(&result.Config, path, patch[path]); err != nil {
 			return fmt.Errorf("configmigrate: apply the retired value of %s: %w", path, err)
 		}
+		result.Sources[path] = config.SourceFile
 	}
 	return nil
 }

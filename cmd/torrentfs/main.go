@@ -186,6 +186,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	cfg, sources = uploadRateMigration.Config, uploadRateMigration.Sources
+	// A read-only deployment keeps the retired experiment sidecar as its
+	// runtime values. Overlay them on the same configuration the HTTP
+	// controller receives (the environment keeps its precedence), so the page
+	// reports the effective values and sources the session actually runs.
+	sources = applyLegacyExperimentRuntime(&cfg, sources, experimentSidecar.Runtime)
 	logLevel := cfg.Log.Level
 	if logLevel == "" {
 		logLevel = "info"
@@ -218,14 +223,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(cfg, experimentSidecar.Runtime, logger)
-	if labErr != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
+	experimentOptions, experimentErr := experimentSessionOptions(cfg, logger)
+	if experimentErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", experimentErr)
 		return 2
 	}
 
 	sess, err := session.New(cfg, torrentsDir,
-		append([]session.Option{session.WithLogger(logger)}, labOptions...)...)
+		append([]session.Option{session.WithLogger(logger)}, experimentOptions...)...)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {

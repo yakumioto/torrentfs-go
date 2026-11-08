@@ -365,7 +365,7 @@ type TorrentPeerActivity struct {
 }
 
 // TorrentPeerActivities returns the peer gauges and real payload counters of
-// every registered torrent, sorted by info hash. The lab experiment sampler
+// every registered torrent, sorted by info hash. The experiment sampler
 // uses it to correlate tracker announce statistics with actual peer activity;
 // unlike TorrentStatusFor it does not build piece or file snapshots.
 func (s *Session) TorrentPeerActivities() []TorrentPeerActivity {

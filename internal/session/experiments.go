@@ -17,38 +17,38 @@ import (
 // migration imports a retired .metadata/lab_settings.json sidecar.
 
 var (
-	// ErrInvalidLabSettings reports a value that violates the experiment
+	// ErrInvalidExperimentSettings reports a value that violates the experiment
 	// contract. The wrapped cause names the offending field.
-	ErrInvalidLabSettings = errors.New("session: invalid lab settings")
+	ErrInvalidExperimentSettings = errors.New("session: invalid experiment settings")
 )
 
-// LabSettings is the runtime-tunable part of the experiment, exposed by the
+// ExperimentSettings is the runtime-tunable part of the experiment, exposed by the
 // management API and applied by the configuration page.
-type LabSettings = experiments.RuntimeSettings
+type ExperimentSettings = experiments.RuntimeSettings
 
-// labState is the session-owned experiment. It is always present.
-type labState struct {
+// experimentState is the session-owned experiment. It is always present.
+type experimentState struct {
 	// settings holds the values that are fixed for this process.
 	settings experiments.Settings
 	reporter *experiments.Reporter
 	recorder *experiments.Recorder
 }
 
-// WithLabExperiment sets the experiment settings the session starts with. The
+// WithExperiment sets the experiment settings the session starts with. The
 // experiment itself is always on; without the option the session starts in the
 // baseline arm.
-func WithLabExperiment(settings experiments.Settings) Option {
+func WithExperiment(settings experiments.Settings) Option {
 	return func(options *sessionOptions) {
 		settings := settings
-		options.labSettings = &settings
+		options.experimentSettings = &settings
 	}
 }
 
-// startLabSampler records peer activity and real payload counters into the
+// startExperimentSampler records peer activity and real payload counters into the
 // announce log. It joins the session's background lifecycle, so Close cancels
 // it and waits before the recorder is closed. A session whose configuration
 // names no announce log has no recorder and starts no sampler.
-func (s *Session) startLabSampler(state *labState) {
+func (s *Session) startExperimentSampler(state *experimentState) {
 	if state == nil || state.recorder == nil {
 		return
 	}
@@ -77,10 +77,10 @@ func (s *Session) startLabSampler(state *labState) {
 	}()
 }
 
-// LabTorrentStatus is one torrent's live real counter, the value the same
+// ExperimentTorrentStatus is one torrent's live real counter, the value the same
 // counter had when the last announce was sent, and the tracker-reported value.
 // Only torrents that have announced at least once in this process appear.
-type LabTorrentStatus struct {
+type ExperimentTorrentStatus struct {
 	InfoHash          string
 	RealUploadedBytes int64
 	// RealUploadedAtLastAnnounceBytes is the real payload counter at the time the
@@ -92,27 +92,27 @@ type LabTorrentStatus struct {
 	LastAnnounceAt                  time.Time
 }
 
-// LabStatus is the management API's view of the experiment.
-type LabStatus struct {
+// ExperimentStatus is the management API's view of the experiment.
+type ExperimentStatus struct {
 	Settings           experiments.RuntimeSettings
 	Seed               int64
 	AnnounceLogPath    string
 	PeerSampleInterval time.Duration
-	Torrents           []LabTorrentStatus
+	Torrents           []ExperimentTorrentStatus
 }
 
-// LabStatus returns the experiment configuration and the per-torrent real and
+// ExperimentStatus returns the experiment configuration and the per-torrent real and
 // reported upload counters. The experiment is always on, so a session always
 // reports its settings.
-func (s *Session) LabStatus() LabStatus {
+func (s *Session) ExperimentStatus() ExperimentStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	state := s.lab
+	state := s.experiment
 	if state == nil {
-		return LabStatus{Torrents: []LabTorrentStatus{}}
+		return ExperimentStatus{Torrents: []ExperimentTorrentStatus{}}
 	}
 	states := state.reporter.ReportedStates()
-	torrents := make([]LabTorrentStatus, 0, len(s.torrents))
+	torrents := make([]ExperimentTorrentStatus, 0, len(s.torrents))
 	for hash, handle := range s.torrents {
 		reported, ok := states[hash.HexString()]
 		if !ok {
@@ -123,7 +123,7 @@ func (s *Session) LabStatus() LabStatus {
 			stats := handle.tor.Stats()
 			realBytes = stats.ConnStats.BytesWrittenData.Int64()
 		}
-		torrents = append(torrents, LabTorrentStatus{
+		torrents = append(torrents, ExperimentTorrentStatus{
 			InfoHash:                        hash.HexString(),
 			RealUploadedBytes:               realBytes,
 			RealUploadedAtLastAnnounceBytes: reported.RealUploadedAtAnnounce,
@@ -132,7 +132,7 @@ func (s *Session) LabStatus() LabStatus {
 		})
 	}
 	sort.Slice(torrents, func(i, j int) bool { return torrents[i].InfoHash < torrents[j].InfoHash })
-	return LabStatus{
+	return ExperimentStatus{
 		Settings:           state.reporter.RuntimeSettings(),
 		Seed:               state.settings.Seed,
 		AnnounceLogPath:    state.settings.AnnounceLogPath,
@@ -141,14 +141,14 @@ func (s *Session) LabStatus() LabStatus {
 	}
 }
 
-// SetLabSettings validates and applies runtime experiment settings and returns
+// SetExperimentSettings validates and applies runtime experiment settings and returns
 // the normalized value. It changes only the running reporter: the configuration
 // file is the sole persistence, written by the configuration save path.
 //
 // The caller must already have validated the mode/rate combination through
 // NormalizeRuntimeSettings; this method validates again so a caller cannot
 // bypass it.
-func (s *Session) SetLabSettings(ctx context.Context, settings experiments.RuntimeSettings) (experiments.RuntimeSettings, error) {
+func (s *Session) SetExperimentSettings(ctx context.Context, settings experiments.RuntimeSettings) (experiments.RuntimeSettings, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -157,7 +157,7 @@ func (s *Session) SetLabSettings(ctx context.Context, settings experiments.Runti
 	}
 	normalized, err := experiments.NormalizeRuntimeSettings(settings)
 	if err != nil {
-		return experiments.RuntimeSettings{}, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
+		return experiments.RuntimeSettings{}, fmt.Errorf("%w: %v", ErrInvalidExperimentSettings, err)
 	}
 
 	s.mu.Lock()
@@ -165,9 +165,9 @@ func (s *Session) SetLabSettings(ctx context.Context, settings experiments.Runti
 	if err := s.ensureActiveLocked(); err != nil {
 		return experiments.RuntimeSettings{}, err
 	}
-	state := s.lab
+	state := s.experiment
 	if state == nil {
-		return experiments.RuntimeSettings{}, ErrInvalidLabSettings
+		return experiments.RuntimeSettings{}, ErrInvalidExperimentSettings
 	}
 	if err := ctx.Err(); err != nil {
 		return experiments.RuntimeSettings{}, err
@@ -212,6 +212,6 @@ func (a *ExperimentApplier) Apply(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.session.SetLabSettings(context.Background(), settings.RuntimeSettings)
+	_, err = a.session.SetExperimentSettings(context.Background(), settings.RuntimeSettings)
 	return err
 }

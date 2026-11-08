@@ -55,7 +55,7 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	}
 	sidecar := experiments.LegacySettingsPath(metadataDir)
 	fallback := func(reason string, cause error) (experimentMigration, error) {
-		logger.Warn("legacy lab settings are not migrated; the running process uses them until the configuration file can be written",
+		logger.Warn("legacy experiment settings are not migrated; the running process uses them until the configuration file can be written",
 			"sidecar", sidecar, "reason", reason, "err", cause)
 		runtime := settings
 		return experimentMigration{Runtime: &runtime}, nil
@@ -65,7 +65,7 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	}
 	exists, writable, err := config.WriteBackAvailable(configPath)
 	if err != nil {
-		return experimentMigration{}, fmt.Errorf("migrate lab settings: %w", err)
+		return experimentMigration{}, fmt.Errorf("migrate experiment settings: %w", err)
 	}
 	if !exists {
 		return fallback("no configuration file", nil)
@@ -75,7 +75,7 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	}
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		return experimentMigration{}, fmt.Errorf("migrate lab settings: read %q: %w", configPath, err)
+		return experimentMigration{}, fmt.Errorf("migrate experiment settings: read %q: %w", configPath, err)
 	}
 	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, configPath, migrationEnvironment{})
 	if err != nil {
@@ -113,7 +113,7 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	if len(changed) > 0 {
 		document, err := (config.WriteBack{File: candidate, Sources: fileSources, Changed: changed}).TOML()
 		if err != nil {
-			return experimentMigration{}, fmt.Errorf("migrate lab settings: %w", err)
+			return experimentMigration{}, fmt.Errorf("migrate experiment settings: %w", err)
 		}
 		if _, _, err := configcheck.LoadContent(document, configPath); err != nil {
 			return fallback("the merged configuration is invalid", err)
@@ -123,16 +123,16 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 			return fallback("the configuration file could not be written", writeErr)
 		}
 		if writeErr != nil {
-			logger.Warn("legacy lab settings were written without confirmed durability", "err", writeErr)
+			logger.Warn("legacy experiment settings were written without confirmed durability", "err", writeErr)
 		}
 	}
 
 	archived, err := experiments.ArchiveLegacySettings(metadataDir)
 	if err != nil {
-		logger.Warn("legacy lab settings were migrated but could not be archived", "err", err)
+		logger.Warn("legacy experiment settings were migrated but could not be archived", "err", err)
 		return experimentMigration{Migrated: true}, nil
 	}
-	logger.Info("legacy lab settings migrated into the configuration file",
+	logger.Info("legacy experiment settings migrated into the configuration file",
 		"keys", strings.Join(changed, ","), "archived", archived)
 	return experimentMigration{Migrated: true, ArchivedPath: archived}, nil
 }

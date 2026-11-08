@@ -70,7 +70,7 @@ type fakeBackend struct {
 	runtimeStats session.RuntimeStatsView
 	ops          map[string]session.Operation
 
-	labStatus session.LabStatus
+	experimentStatus session.ExperimentStatus
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -192,10 +192,10 @@ func (f *fakeBackend) RuntimeStats() session.RuntimeStatsView {
 	return f.runtimeStats
 }
 
-func (f *fakeBackend) LabStatus() session.LabStatus {
+func (f *fakeBackend) ExperimentStatus() session.ExperimentStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.labStatus
+	return f.experimentStatus
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {

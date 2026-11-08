@@ -427,6 +427,46 @@ describe('ConfigPage', () => {
     });
   });
 
+  it('labels the byte quantity and byte rate kinds the schema reports', async () => {
+    const view = configView({
+      keys: [
+        configKey({
+          path: 'cache.capacity',
+          section: 'cache',
+          kind: 'byte_quantity',
+          default: '2GiB',
+          file_value: '2GiB',
+          effective_value: '2GiB',
+          source: 'file',
+          component: 'cache',
+          documentation: 'CapacityBytes is the maximum size of the in-memory piece cache.',
+        }),
+        configKey({
+          path: 'upload_rate.limit',
+          section: 'upload_rate',
+          kind: 'byte_rate',
+          default: '',
+          file_value: '1MiB/s',
+          effective_value: '1MiB/s',
+          source: 'file',
+          component: 'session',
+          hot_apply: true,
+          documentation: 'Limit is the aggregate payload upload rate across every torrent and peer.',
+        }),
+      ],
+    });
+    renderPage(vi.fn(() => Promise.resolve(jsonResponse(view))), view);
+
+    const capacity = await screen.findByRole('article', { name: 'cache.capacity' });
+    expect(within(capacity).getByText('字节量')).toBeInTheDocument();
+    const limit = screen.getByRole('article', { name: 'upload_rate.limit' });
+    expect(within(limit).getByText('速率')).toBeInTheDocument();
+    // The canonical schema kinds reach the page: a different spelling would
+    // fall back to the raw kind text and render it in English.
+    expect(screen.queryByText('byte_quantity')).not.toBeInTheDocument();
+    expect(screen.queryByText('byte_rate')).not.toBeInTheDocument();
+  });
+
   it('groups the upload experiment keys under an experiments category with a deep-link anchor', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
     renderPage(fetchMock);

@@ -225,8 +225,8 @@ func TestUploadRateSchemaMetadata(t *testing.T) {
 		if !key.HotApply {
 			t.Errorf("the configuration key %q is not hot-applied", key.Path)
 		}
-		if key.Kind != "byte rate" && key.Kind != "string" {
-			t.Errorf("the kind of %q = %q, want byte rate or string", key.Path, key.Kind)
+		if key.Kind != "byte_rate" && key.Kind != "string" {
+			t.Errorf("the kind of %q = %q, want byte_rate or string", key.Path, key.Kind)
 		}
 	}
 	for path := range want {

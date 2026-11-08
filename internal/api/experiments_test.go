@@ -11,8 +11,8 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-func TestGetLabAlwaysReturnsData(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{
+func TestGetExperimentAlwaysReturnsData(t *testing.T) {
+	backend := &fakeBackend{experimentStatus: session.ExperimentStatus{
 		Settings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline, JitterFraction: 0.2},
 		Seed:     42,
 	}}
@@ -41,9 +41,9 @@ func TestGetLabAlwaysReturnsData(t *testing.T) {
 	}
 }
 
-func TestGetLabReturnsTheLiveComparison(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{
-		Settings: session.LabSettings{
+func TestGetExperimentReturnsTheLiveComparison(t *testing.T) {
+	backend := &fakeBackend{experimentStatus: session.ExperimentStatus{
+		Settings: session.ExperimentSettings{
 			Mode:               experiments.ModeInject,
 			RateBytesPerSecond: 2 << 20,
 			JitterFraction:     0.2,
@@ -51,7 +51,7 @@ func TestGetLabReturnsTheLiveComparison(t *testing.T) {
 		Seed:               42,
 		AnnounceLogPath:    "/tmp/lab.jsonl",
 		PeerSampleInterval: 5 * time.Second,
-		Torrents: []session.LabTorrentStatus{
+		Torrents: []session.ExperimentTorrentStatus{
 			{
 				InfoHash:                        "aaaa",
 				RealUploadedBytes:               100,
