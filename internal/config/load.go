@@ -52,15 +52,26 @@ func LoadContentWithEnvironment(content []byte, name string, lookup Environment)
 	return cfg, err
 }
 
-// LoadContentWithSourcesFromEnvironment loads a configuration document held in
-// memory from a given environment and reports where every effective value came
-// from.
+// LoadContentFileLayer loads only the file configuration layer of a document:
+// the built-in defaults overlaid with the document, without the environment and
+// without the value or requirement rules.
 //
-// The write-back loads the file configuration layer through this function with
-// an empty environment: it needs the value and the source of every key the
-// file carries, and the environment is not part of a configuration file.
-func LoadContentWithSourcesFromEnvironment(content []byte, name string, lookup Environment) (Config, Sources, error) {
-	return loadContentWithSources(content, name, lookup)
+// The layer is what the write-back renderer, the retired-sidecar migrations,
+// and the configuration page read. It is deliberately not validated here: a
+// requirement can hold only for the effective configuration (for example the
+// SMB credentials may come from the environment), so the rules must run on the
+// document rendered through the real environment, not on the file alone.
+func LoadContentFileLayer(content []byte, name string) (Config, Sources, error) {
+	cfg := Default()
+	sources := fileSources()
+	removed, err := decodeContentLayer(content, name, &cfg, sources)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	if len(removed) > 0 {
+		return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: removed})
+	}
+	return cfg, sources, nil
 }
 
 func load(path string, lookup envLookup) (Config, error) {
@@ -87,32 +98,18 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 // messages; an empty name means no document at all.
 func loadContentWithSources(content []byte, name string, lookup envLookup) (Config, Sources, error) {
 	cfg := Default()
-	sources := Sources{}
-	// Every configuration key starts at its built-in default, so the record
-	// names a source for every key even when no input touched it.
-	for _, item := range configSchema {
-		sources[item.path] = SourceDefault
-	}
+	sources := fileSources()
 	// A removed key in the file has to stop the load before the strict
 	// decoder runs, because the decoder would report it as unknown. A removed
 	// environment name does not: it is reported with the other problems, so a
 	// user who also has a bad value learns about both at once.
 	envRemoved := removedEnvironmentNames(lookup)
-	if name != "" {
-		document, err := decodeDocument(content, name)
-		if err != nil {
-			return Config{}, nil, err
-		}
-		if fileRemoved := removedTOMLNames(document); len(fileRemoved) > 0 {
-			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: append(envRemoved, fileRemoved...)})
-		}
-		set, err := decodeFile(content, name, &cfg)
-		if err != nil {
-			return Config{}, nil, err
-		}
-		for key := range documentKeys(set) {
-			sources[key] = SourceFile
-		}
+	fileRemoved, err := decodeContentLayer(content, name, &cfg, sources)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	if len(fileRemoved) > 0 {
+		return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: append(envRemoved, fileRemoved...)})
 	}
 	// The environment and the values are both checked, and both sets of
 	// errors are reported together: a malformed environment value and an
@@ -147,6 +144,42 @@ func loadContentWithSources(content []byte, name string, lookup envLookup) (Conf
 		return cfg, sources, validateErr
 	}
 	return cfg, sources, nil
+}
+
+// fileSources returns the source record of the file configuration layer before
+// any input is read: every configuration key starts at its built-in default.
+func fileSources() Sources {
+	sources := Sources{}
+	for _, item := range configSchema {
+		sources[item.path] = SourceDefault
+	}
+	return sources
+}
+
+// decodeContentLayer decodes the file layer of a document onto cfg and reports
+// the removed configuration names the document carries.
+//
+// The removed names are reported before the strict decoder runs, because the
+// decoder would report a removed key as unknown without naming its replacement.
+func decodeContentLayer(content []byte, name string, cfg *Config, sources Sources) ([]RemovedName, error) {
+	if name == "" {
+		return nil, nil
+	}
+	document, err := decodeDocument(content, name)
+	if err != nil {
+		return nil, err
+	}
+	if removed := removedTOMLNames(document); len(removed) > 0 {
+		return removed, nil
+	}
+	set, err := decodeFile(content, name, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for key := range documentKeys(set) {
+		sources[key] = SourceFile
+	}
+	return nil, nil
 }
 
 // decodeDocument decodes a configuration file into a generic tree.

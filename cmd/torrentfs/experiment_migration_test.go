@@ -9,9 +9,18 @@ import (
 	"testing"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 	"github.com/yakumioto/torrentfs-go/internal/experiments"
 )
+
+// emptyEnvironment is an environment with no variable set. The migration tests
+// reload the migrated file layer without the process configuration.
+type emptyEnvironment struct{}
+
+// Lookup reports that no environment variable is set.
+func (emptyEnvironment) Lookup(string) (string, bool) { return "", false }
+
+// Names reports no environment variable.
+func (emptyEnvironment) Names() []string { return nil }
 
 // writeLegacyExperimentSidecar writes the retired .metadata/lab_settings.json
 // record for a migration test.
@@ -75,7 +84,7 @@ jitter = "30"
 		t.Fatalf("archived sidecar = %s", archived)
 	}
 
-	loaded, err := config.LoadWithEnvironment(configPath, configwrite.Environment{})
+	loaded, err := config.LoadWithEnvironment(configPath, emptyEnvironment{})
 	if err != nil {
 		t.Fatalf("reload migrated configuration: %v", err)
 	}
@@ -121,7 +130,7 @@ func TestMigrateLegacyExperimentSettingsKeepsAZeroJitter(t *testing.T) {
 	if !result.Migrated {
 		t.Fatalf("migration did not merge; logs:\n%s", logs.String())
 	}
-	loaded, err := config.LoadWithEnvironment(configPath, configwrite.Environment{})
+	loaded, err := config.LoadWithEnvironment(configPath, emptyEnvironment{})
 	if err != nil {
 		t.Fatalf("reload migrated configuration: %v", err)
 	}

@@ -16,20 +16,6 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/configcheck"
 )
 
-// Environment is an environment with no variable set.
-//
-// The file configuration layer is the built-in defaults overlaid with the
-// configuration file, so it is loaded through the same loader a start uses with
-// the environment left out. The environment is not part of a configuration
-// file.
-type Environment struct{}
-
-// Lookup reports that no environment variable is set.
-func (Environment) Lookup(string) (string, bool) { return "", false }
-
-// Names reports no environment variable.
-func (Environment) Names() []string { return nil }
-
 // File is the file configuration layer of one document: the values the file
 // carries over the built-in defaults, and the source of every value.
 type File struct {
@@ -39,8 +25,14 @@ type File struct {
 
 // Load reads the file configuration layer of content. name identifies the
 // document in error messages, so a problem names the file the user edits.
+//
+// The layer is loaded without the environment and without the value or
+// requirement rules: a requirement can hold only for the effective
+// configuration (for example the SMB credentials may come from the
+// environment), so the rules run on the document rendered through the real
+// environment instead.
 func Load(content []byte, name string) (File, error) {
-	cfg, sources, err := config.LoadContentWithSourcesFromEnvironment(content, name, Environment{})
+	cfg, sources, err := config.LoadContentFileLayer(content, name)
 	if err != nil {
 		return File{}, err
 	}
