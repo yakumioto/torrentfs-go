@@ -757,7 +757,12 @@ describe('ConfigPage client-side value checks', () => {
   }
 
   it('rejects a malformed byte quantity before the save request', async () => {
-    const fetchMock = vi.fn((_url: string, _init?: RequestInit) => Promise.resolve(jsonResponse(unitView())));
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        throw new Error('the page must not save an invalid value');
+      }
+      return Promise.resolve(jsonResponse(unitView()));
+    });
     renderPage(fetchMock, unitView());
 
     await screen.findByRole('article', { name: 'cache.capacity' });
