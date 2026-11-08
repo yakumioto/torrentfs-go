@@ -236,12 +236,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err := registerAppliers(
 			logging.NewLevelApplier(logLevelVar),
 			session.NewConfigApplier(sess),
+			session.NewExperimentApplier(sess),
 		); err != nil {
-			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
-			sequence.run()
-			return 1
-		}
-		if err := configController.RegisterApplier(session.NewExperimentApplier(sess)); err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 			sequence.run()
 			return 1
