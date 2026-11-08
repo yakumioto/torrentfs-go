@@ -218,6 +218,13 @@ func TestIdentityReachesTrackerAndPeerHandshake(t *testing.T) {
 	if err := transmission.AddTorrent(ctx, session.Source{MetainfoPath: torrentPath}); err != nil {
 		t.Fatalf("Transmission AddTorrent: %v", err)
 	}
+	// The connection allocator only accepts inbound peer connections for a
+	// torrent that is in use; the handshake under test needs a connection.
+	transmissionTorrent, ok := transmission.Torrent(hash)
+	if !ok {
+		t.Fatal("Transmission did not register the torrent")
+	}
+	defer session.MarkReadingForTest(transmissionTorrent)()
 
 	hashHex := hash.HexString()
 	if err := waitFor(ctx, func() bool { return tracker.announceCount(hashHex) >= 2 }); err != nil {

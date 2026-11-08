@@ -450,6 +450,7 @@ var _ io.Closer = (*raFile)(nil)
 type openedFile struct {
 	file        *raFile
 	readTimeout time.Duration
+	onClose     func()
 	once        sync.Once
 }
 
@@ -475,7 +476,12 @@ func (f *openedFile) ReadAtContext(ctx context.Context, p []byte, off int64) (in
 }
 
 func (f *openedFile) Close() error {
-	f.once.Do(func() { f.file.releaseHandle() })
+	f.once.Do(func() {
+		f.file.releaseHandle()
+		if f.onClose != nil {
+			f.onClose()
+		}
+	})
 	return nil
 }
 

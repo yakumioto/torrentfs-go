@@ -170,7 +170,19 @@ func TestBEP27PrivateTorrentDoesNotAnnounceToDHT(t *testing.T) {
 	addMetainfoBytes(t, ctx, sess, privateBytes)
 
 	// A seeding torrent only wants connections once it has a piece, and the
-	// DHT announcer waits on the same condition.
+	// DHT announcer waits on the same condition. The connection allocator only
+	// grants connections to a torrent that is in use, so mark both as read and
+	// wait for the allowance before seeding: the piece completion change is
+	// what wakes the DHT announcer, and it must observe the allowance.
+	for _, hash := range []metainfo.Hash{publicHash, privateHash} {
+		defer session.MarkReadingForTest(requireTorrent(t, sess, hash))()
+	}
+	if err := waitFor(ctx, func() bool {
+		return session.ConnectionAllowanceForTest(requireTorrent(t, sess, publicHash)) >= 1 &&
+			session.ConnectionAllowanceForTest(requireTorrent(t, sess, privateHash)) >= 1
+	}); err != nil {
+		t.Fatalf("the connection allocator never granted the reading allowance: %v", err)
+	}
 	seedPieces(t, sess, publicHash, content)
 	seedPieces(t, sess, privateHash, content)
 
@@ -259,6 +271,26 @@ func TestBEP27PrivateTorrentDoesNotExchangePEX(t *testing.T) {
 	leecher := newLoopbackSession(t, testConfig(), leecherDir)
 	addMetainfoBytes(t, ctx, leecher, publicBytes)
 	addMetainfoBytes(t, ctx, leecher, privateBytes)
+	// The connection allocator only opens connections for a torrent that is in
+	// use; a read is what exercises PEX on the wire here. Both sides must have
+	// their allowance installed before the dial, because this swarm has no
+	// tracker to re-offer a peer whose first connection was refused.
+	for _, hash := range []metainfo.Hash{publicHash, privateHash} {
+		defer session.MarkReadingForTest(requireTorrent(t, leecher, hash))()
+	}
+	if err := waitFor(ctx, func() bool {
+		for _, hash := range []metainfo.Hash{publicHash, privateHash} {
+			if session.ConnectionAllowanceForTest(requireTorrent(t, seeder, hash)) < 1 {
+				return false
+			}
+			if session.ConnectionAllowanceForTest(requireTorrent(t, leecher, hash)) < 1 {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("the connection allocator never granted the test allowances: %v", err)
+	}
 
 	seederAddr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(seeder.EffectiveListenPort()))
 	for _, hash := range []metainfo.Hash{publicHash, privateHash} {

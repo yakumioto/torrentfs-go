@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
@@ -25,10 +26,26 @@ func TestDefaultDisablesPortForwarding(t *testing.T) {
 	}
 }
 
+func TestDefaultConnectionAllowances(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Connections.ReadingConns != 50 {
+		t.Fatalf("Default reading_conns = %d, want 50", cfg.Connections.ReadingConns)
+	}
+	if cfg.Connections.UploadingConns != 10 {
+		t.Fatalf("Default uploading_conns = %d, want 10", cfg.Connections.UploadingConns)
+	}
+	if got := time.Duration(cfg.Connections.ReadGrace); got != 2*time.Minute {
+		t.Fatalf("Default read_grace = %v, want 2m", got)
+	}
+}
+
 func TestLoadReadsConnectionSection(t *testing.T) {
 	path := writeConfig(t, `[connections]
 listen_host = "127.0.0.1"
 listen_port = 6881
+reading_conns = 24
+uploading_conns = 4
+read_grace = "5m"
 disable_ipv4 = false
 disable_ipv6 = true
 no_port_forwarding = false
@@ -42,6 +59,9 @@ bootstrap_nodes = ["router.example:6881", "192.0.2.10:6881"]
 	want := config.Connections{
 		ListenHost:       "127.0.0.1",
 		ListenPort:       6881,
+		ReadingConns:     24,
+		UploadingConns:   4,
+		ReadGrace:        config.Duration(5 * time.Minute),
 		DisableIPv6:      true,
 		NoPortForwarding: false,
 		BootstrapNodes:   []string{"router.example:6881", "192.0.2.10:6881"},
@@ -137,6 +157,27 @@ func TestValidateRejectsInvalidConnections(t *testing.T) {
 				cfg.Connections.BootstrapNodes = []string{"router.example:65536"}
 			},
 			field: "connections.bootstrap_nodes",
+		},
+		{
+			name: "zero reading connections",
+			setup: func(cfg *config.Config) {
+				cfg.Connections.ReadingConns = 0
+			},
+			field: "connections.reading_conns",
+		},
+		{
+			name: "negative uploading connections",
+			setup: func(cfg *config.Config) {
+				cfg.Connections.UploadingConns = -1
+			},
+			field: "connections.uploading_conns",
+		},
+		{
+			name: "zero read grace",
+			setup: func(cfg *config.Config) {
+				cfg.Connections.ReadGrace = 0
+			},
+			field: "connections.read_grace",
 		},
 	}
 

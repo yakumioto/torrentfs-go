@@ -41,6 +41,29 @@ type Torrent struct {
 	loader      pieceSource
 	coordinator *prefetchCoordinator
 
+	// Connection activity read by the session connection allocator. The
+	// counters are atomics because readers update them without the torrent
+	// lock and the allocator snapshots them without it.
+	readersOpen      atomic.Int32
+	lastReadAt       atomic.Int64
+	lastUploadAt     atomic.Int64
+	uploadedSeen     atomic.Int64
+	connAllowance    atomic.Int32
+	connState        atomic.Int32
+	probeSince       atomic.Int64
+	probePausedUntil atomic.Int64
+
+	// Metadata-stage bookkeeping: a magnet without metadata rotates its peers
+	// so a peer that cannot serve metadata cannot hold the allowance forever.
+	metadataRotatedAt   atomic.Int64
+	metadataPausedUntil atomic.Int64
+	metadataRotations   atomic.Int32
+
+	// addedAt is when this process registered the torrent. The metadata stage
+	// uses it to bound the wider metadata allowance; a restart starts a fresh
+	// fast window.
+	addedAt time.Time
+
 	// payloadMu is independent of mu: readerFor already holds mu when it looks
 	// up a file. Initialization must not acquire it again, or Session.mu.
 	payloadMu     sync.Mutex
@@ -203,7 +226,13 @@ func (s *Session) prepareTorrentSpecLocked(ctx context.Context, spec *torrent.To
 		}
 		return existing, false, nil
 	}
-	return &Torrent{tor: t, session: s, readers: make(map[string]*raFile), cache: s.pieceCache}, true, nil
+	st := &Torrent{tor: t, session: s, readers: make(map[string]*raFile), cache: s.pieceCache, addedAt: s.allocatorNow()}
+	// A torrent opens no peer connections until something uses it: the
+	// connection allocator grants the reading allowance when a reader arrives
+	// and a probe slot once the torrent has cached pieces worth uploading.
+	// Accepting connections earlier would only hoard idle inbound peers.
+	t.SetMaxEstablishedConns(0)
+	return st, true, nil
 }
 
 func (s *Session) publishTorrentLocked(hash metainfo.Hash, st *Torrent) {
@@ -293,7 +322,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		if !r.acquireHandle() {
 			return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)
 		}
-		return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.Filesystem.ReadTimeout)}, nil
+		return t.openReaderHandle(r), nil
 	}
 	f := t.fileByPath(displayPath)
 	if f == nil {
@@ -324,7 +353,25 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)
 	}
 	t.readers[displayPath] = r
-	return &openedFile{file: r, readTimeout: time.Duration(t.session.cfg.Filesystem.ReadTimeout)}, nil
+	return t.openReaderHandle(r), nil
+}
+
+// openReaderHandle wraps a shared reader for one caller and records the read
+// activity that keeps the torrent's connection allowance high while the handle
+// is open. Closing the handle records the activity that starts the grace
+// window before the allowance drops.
+func (t *Torrent) openReaderHandle(r *raFile) *openedFile {
+	t.readersOpen.Add(1)
+	t.noteReadActivity()
+	readTimeout := time.Duration(t.session.cfg.Filesystem.ReadTimeout)
+	return &openedFile{
+		file:        r,
+		readTimeout: readTimeout,
+		onClose: func() {
+			t.readersOpen.Add(-1)
+			t.noteReadActivity()
+		},
+	}
 }
 
 // close releases every open reader handle for this torrent.
