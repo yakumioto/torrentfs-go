@@ -15,7 +15,10 @@
 - **只读文件树**：单文件种子直接呈现为文件，多文件种子保留原目录结构。
 - **三种输出**：FUSE 挂载、原生 SMB 共享，或只保留 HTTP（`none`）。
 - **原生 SMB**：不依赖 FUSE、Samba、`/dev/fuse` 或宿主挂载传播。
-- **Web UI / REST API**：添加磁力或 `.torrent`，管理任务、分类、收藏、批量清理、字幕，并在配置页面调整上传限速。
+- **Web UI / REST API**：添加磁力或 `.torrent`，管理任务、分类、收藏、批量清理、字幕；`/config` 配置页面管理全部配置项，`/experiments` 只读监控上传统计实验。
+- **配置页面**：按分类查看与编辑全部配置项，显示文件值、生效值、来源、类型、默认值与说明，并标注「立即生效」或「重启生效」；一次保存完成整体校验、写回与热应用，支持搜索、改动预览、危险项二次确认与外部修改冲突保护。
+- **配置热重载**：进程轮询配置文件摘要，手工编辑或 ConfigMap 更新会走与保存相同的「加载 → 校验 → 应用」路径；非法内容保留当前生效配置并显示失败原因。
+- **上传统计实验**：常驻运行、默认 baseline，可在配置页面「实验」分类切换 inject / amplify 并调整参数；`/experiments` 展示真实与上报对照。
 - **可选 STRM**：在原文件共享之外生成 `.strm` 文件，内容是一行签名 HTTP 直链，支持 Range / HEAD。
 - **单二进制**：Web UI 内嵌；Docker 镜像以非 root（`1000:1000`）运行。
 
@@ -69,13 +72,14 @@ docker run --detach --name torrentfs \
 
 HTTP/SMB 只向本机发布，peer 端口发布 TCP/UDP 以接受入站连接。LAN 播放请改为绑定可信 LAN 地址并配置防火墙。也可使用仓库里的 [Compose 模板](docker-compose.yaml)，按注释填写镜像 tag 和密码后运行 `docker compose up -d`。
 
-镜像内 `/etc/torrentfs/torrentfs.toml` 及其目录归运行用户（`1000:1000`）所有，因此配置页面可以把改动直接写回该文件；写回会在同目录创建临时文件并保留一份 `.bak`。Compose 模板用命名卷 `torrentfs-config` 持久化这个目录，容器重建后改动仍在，执行 `docker compose down -v` 可删除卷、回到镜像默认配置。若以自定义 TOML 启动，请把运行用户可写的文件或目录挂载到 `/etc/torrentfs`，否则配置页面会降级为只读并显示原因。
+镜像内 `/etc/torrentfs/torrentfs.toml` 及其目录归 `1000:1000` 所有，配置文件权限为 `0644`。以默认身份（`1000:1000`）运行时，配置页面可以把改动直接写回该文件；写回会在同目录创建临时文件并保留一份 `.bak`。使用自定义 `--user PUID:PGID` 时，需先把该目录（或挂载卷）chown 到同一身份，否则配置页面会降级为只读。Compose 模板用命名卷 `torrentfs-config` 持久化这个目录，容器重建后改动仍在，执行 `docker compose down -v` 可删除卷、回到镜像默认配置。若以自定义 TOML 启动，请把运行用户可写的文件或目录挂载到 `/etc/torrentfs`，否则配置页面会降级为只读并显示原因。
 
 ### 4. 添加任务并读取
 
 1. 打开 `http://127.0.0.1:8080/`，输入密码登录。
 2. 在 Web UI 上传 `.torrent`，或添加有可用来源的磁力链接。
 3. 用支持 SMB 的文件管理器或播放器打开 `smb://127.0.0.1/torrentfs`，用户名 `torrentfs`、密码同上；Windows 路径为 `\\127.0.0.1\torrentfs`。
+4. 需要调整配置或查看实验数据时，打开 `http://127.0.0.1:8080/config`（实验配置在 `/config#experiments`）或 `http://127.0.0.1:8080/experiments`（只读监控）。
 
 ```sh
 smbclient //127.0.0.1/torrentfs -U torrentfs -m SMB3
@@ -139,16 +143,28 @@ strm = "off"
 
 ## 配置
 
-- 配置优先级：**环境变量 > TOML 文件 > 内置默认值**；启动时读取，修改后需重启。
+- 配置优先级：**环境变量 > TOML 文件 > 内置默认值**。环境变量在进程生命周期内固定；配置文件可以在运行中更新（见下面的热应用与热重载）。
 - 完整配置项与注释见 [torrentfs.example.toml](torrentfs.example.toml)；容器默认配置见 [docker/torrentfs.toml](docker/torrentfs.toml)。
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
 - **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
-- **配置页面写回需要可写配置文件**：进程必须对配置文件及其所在目录都有写权限，原子写回会在同目录创建临时文件并保留 `.bak`。镜像默认把 `/etc/torrentfs` 交给运行用户，Compose 模板用命名卷持久化；只读挂载、只读根文件系统，或卷属主与自定义 `PUID/PGID` 不一致时，页面降级为只读并显示原因（`file_not_writable`），保存不会写入，进程继续使用当前配置。环境变量覆盖项与口令 `password` 同样始终只读。
+- **热应用与热重载**：配置文件加载后即生效。配置页面（`/config`）保存时依次完成整体校验、原子写回与热应用；进程另外每约 2 秒检查配置文件摘要，外部编辑或 ConfigMap 更新会走同一条「加载 → 校验 → 应用」路径。可热应用的配置项立即作用于运行中进程，其余写回后标记「重启生效」。
+- 可热应用的是 14 个配置项：`log.level`、`http.max_upload_size`、`http.auth.token_ttl`、`connections.reading_conns`、`connections.uploading_conns`、`connections.read_grace`、`[upload_rate]` 的 `limit` / `schedule_start` / `schedule_end`，以及 `[experiments.upload]` 的 `mode` / `rate` / `multiplier` / `jitter` / `cap`。其余配置项重启生效；`password` 不热应用，因为 HTTP 与 SMB 共用同一个口令，热改会让两个输出不一致。
+- 外部编辑未通过校验时，进程保留最近一次成功加载的配置，页面显示最近一次自动重载的时间与失败原因；页面自己写回不会触发重载。环境变量在热重载时不会重新读取，重载只是「同一环境 + 新文件」的重新合并。
+- **配置页面写回需要可写配置文件**：进程必须对配置文件及其所在目录都有写权限；原子写回会在同目录创建临时文件、保留上一份 `.bak`，并沿用原文件权限。镜像默认把 `/etc/torrentfs` 交给运行用户（`1000:1000`），Compose 模板用命名卷 `torrentfs-config` 持久化；只读挂载、只读根文件系统，或卷属主与自定义 `PUID/PGID` 不一致时，页面降级为只读并显示原因（`file_not_writable`），保存不会写入，进程继续使用当前配置。
+- **只读原因**：整页或单个配置项不可编辑时以稳定的机器可读 code 区分——环境变量覆盖（`environment_override`，键级）、口令（`secret`，键级；值从不显示、不可编辑，保存其他配置时原样保留）、未加载配置文件（`not_configured`，整页）与配置文件不可写（`file_not_writable`，整页）。没有配置文件启动时，上传限速与实验设置也只能在带配置文件启动后管理。
+- **保存语义**：保存只提交改动键（稀疏 patch）并附带页面渲染时的文件基线摘要，写回只包含配置文件原本承载的键与本次改动的键，注释与顺序由 schema 生成器重写；若文件已被其他写入者改动，基线不一致返回 `409` 冲突，页面不会静默覆盖。写盘失败返回 `persistence_unavailable`（HTTP 503），文件与运行值都不变；若重命名已提交但目录同步失败，返回 `durability_unconfirmed`（HTTP 503），新值已经生效但无法确认持久化，页面提示「重启后可能无法保留」。页面不提供重启按钮。
+- **生成物**：`torrentfs.example.toml`、`docker/torrentfs.toml`、本页配置速查表与内嵌 schema 文档都由配置 schema 生成；`./scripts/config-docs-check.sh` 逐字节校验，CI 的 `config-docs` job 会在漂移时失败。
 - **未知变量会报错**：`TORRENTFS_` 前缀下拼错的名字在启动时会被点名，不会被静默忽略后按默认值启动。`TF_` 前缀是给测试开关、CI 冒烟与 Compose 插值用的，不属于配置命名空间。
 - **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
-- 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
-- 上传限速由 `[upload_rate]` 配置（`limit`、`schedule_start`、`schedule_end`），可在配置页面、配置文件或环境变量中设置；保存后立即生效，时间窗使用严格 24 小时 `HH:MM` 且必须在同一自然日内。旧的 `.metadata/upload_rate.json` 会在启动时并入配置文件并归档为 `.migrated`；配置文件不可写或未加载时，以旧侧车值只读运行并打印告警，下一次成功写回后的启动完成归档。
+- 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。配置页面与其他管理接口使用同一认证边界；未启用认证时仅 loopback 可达。
+- 上传限速由 `[upload_rate]` 配置（`limit`、`schedule_start`、`schedule_end`），可在配置页面、配置文件或环境变量中设置；保存后立即生效，时间窗使用严格 24 小时 `HH:MM` 且必须在同一自然日内。旧的 `.metadata/upload_rate.json` 会在启动时并入配置文件并归档为 `.migrated`；配置文件不可写或未加载时，以旧侧车值只读运行并打印告警，下一次成功写回后的启动完成归档。迁移细节见[升级与破坏性变更](#升级与破坏性变更)。
+
+### 配置页面与实验监控
+
+- `/config` 配置页面按分类展示全部配置项，支持搜索、改动预览、脏状态离开提醒与危险项二次确认；保存后按「已生效 / 重启后生效」分组展示结果，并显示最近一次保存与自动重载的状态。
+- 实验配置集中在「实验」分类，可从 `/config#experiments` 深链直达。`/experiments` 是只读监控页，展示当前实验参数与真实/上报上传的实时对照；仪表盘实验摘要卡、种子详情页对照与导航入口都指向这两个页面。
+- 不可编辑的配置项与只读部署会在页面上给出具体原因（环境变量覆盖、`password`、没有配置文件、配置文件不可写）；外部修改导致的保存冲突以 `409` 提示并要求重新读取，不会覆盖磁盘上的改动。页面没有重启按钮，需要重启的改动会在保存结果中单独列出。
 
 ### 配置项速查
 
@@ -267,9 +283,37 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 | `TORRENTFS_LAB_ANNOUNCE_LOG` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` |
 | `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` |
 
+## 升级与破坏性变更
+
+本次发布启用配置页面与热重载，并把上传限速、上传统计实验两组运行时设置并入配置 schema。升级前请按下面的说明处理；已删除的名称不会被静默忽略。
+
+### 配置键与环境变量
+
+- 删除 `[lab]` 节，改名 `[experiments.upload]`：`lab.upload_mode` → `experiments.upload.mode`、`lab.upload_rate` → `experiments.upload.rate`、`lab.upload_multiplier` → `experiments.upload.multiplier`、`lab.upload_jitter` → `experiments.upload.jitter`、`lab.upload_cap` → `experiments.upload.cap`、`lab.upload_seed` → `experiments.upload.seed`、`lab.announce_log` → `experiments.upload.announce_log`、`lab.peer_sample_interval` → `experiments.upload.peer_sample_interval`；`TORRENTFS_LAB_*` 环境变量同步改为 `TORRENTFS_EXPERIMENTS_UPLOAD_*`。旧键、旧环境变量与旧命令行参数在启动时报错并指出新名字，完整对照见上面的[迁移对照表](#迁移对照表)。
+- **实验常驻**：不再有启用/禁用开关，也没有「实验未启用」错误；默认 `experiments.upload.mode = "baseline"`（只观测、不改写）。模式不再推断：旧配置只写 `rate` 或 `multiplier`、不写 `mode` 时启动报错，并提示补 `mode = "inject"` 或 `mode = "amplify"`。
+- **上传限速成为配置项**：`[upload_rate]` 的 `limit`、`schedule_start`、`schedule_end` 及派生的环境变量（如 `TORRENTFS_UPLOAD_RATE_LIMIT`）；时间窗要求正限额、`start < end` 且在同一自然日内。以前「上传限速只能在 Web UI 设置、不通过 TOML / 环境变量」的行为已取消。
+- `seed`、`announce_log`、`peer_sample_interval` 在启动时读取，配置页面保存后标记「重启生效」；`mode`、`rate`、`multiplier`、`jitter`、`cap` 保存后立即生效。
+
+### 旧侧车迁移
+
+- `.metadata/upload_rate.json` 与 `.metadata/lab_settings.json` 两个侧车退役，配置 schema 成为唯一持久化位置。启动时若配置文件可写，侧车值只补配置文件缺失的键（手写值优先），随后把侧车归档为 `<原文件名>.migrated`。
+- 配置文件不可写或没有配置文件时，以侧车值作为本次运行的启动值继续工作并打印告警，侧车保留；文件恢复可写后的下一次启动会再次尝试迁移，配置页面成功写回过也不会跳过仍缺失的键。没有配置文件启动时页面始终只读，上传限速与实验设置也只能在带配置文件启动后管理。
+
+### 下线的旧接口与旧入口
+
+- 实验监控接口 `/api/v1/lab` 改名为 `/api/v1/experiments/upload`。以下旧接口删除并返回 `404`：`/api/v1/lab`、`/api/v1/lab/settings`、`/api/v1/experiments/upload/settings`、`/api/v1/settings/upload-rate*`。
+- Web UI 删除上传限速对话框与实验页的设置表单；`/lab` 页面路由改为 `/experiments`，只读展示实验参数与真实/上报对照。仪表盘实验摘要卡与种子详情页对照保留，入口分别指向 `/experiments` 与 `/config#experiments`。
+- 配置页面是唯一写配置文件的地方；不提供进程重启或退出按钮。
+
+### 容器部署变化
+
+- 镜像内 `/etc/torrentfs` 及其中的 `torrentfs.toml` 现在归运行用户 `1000:1000` 所有，配置文件权限固定为 `0644`（不受构建上下文 umask 影响），因此配置页面可以直接写回。Compose 模板用命名卷 `torrentfs-config` 挂载 `/etc/torrentfs` 持久化改动；`docker compose down -v` 删除卷并回到镜像默认配置。
+- 升级已有部署时，旧的 bind mount 或命名卷不会因新镜像改变属主：自定义 `PUID/PGID` 需要一次性 `chown` 该目录，或者接受配置页面降级为只读；只读挂载、只读根文件系统同样会让页面只读。自定义 TOML 部署请把运行用户可写的文件或目录挂载到 `/etc/torrentfs`。
+
 ## 数据与状态
 
 - `<torrents-dir>/<infohash>.torrent` 保存 canonical metainfo，`<torrents-dir>/.metadata/` 保存任务、分类、字幕和 STRM 密钥；`.metadata` 不会出现在 FUSE/SMB 中。
+- 迁移后的旧侧车以 `.migrated` 后缀留在 `.metadata` 中，仅用于审计，程序不再读取。
 - 任务只能通过 Web UI/API 添加，手工复制 `.torrent` 到目录不会自动导入。
 - 内容缓存（piece 数据、完成状态、传输计数）只在内存中，重启清空；管理状态会恢复。
 - 同一个 `torrents-dir` 同一时刻只允许一个进程管理。
@@ -297,6 +341,9 @@ go build ./...
 go vet ./...
 go test ./...
 go test -race ./...
+
+# 生成物与内嵌 schema 文档的逐字节校验
+./scripts/config-docs-check.sh
 ```
 
 CI 会执行上述检查，并额外运行 golangci-lint、Docker 配置/SMB 冒烟和真实 FUSE 挂载测试。
