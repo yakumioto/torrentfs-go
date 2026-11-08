@@ -151,3 +151,33 @@ func TestOpenFileUsesReplacedReadTimeout(t *testing.T) {
 		t.Fatal("peerless read did not use the replaced timeout")
 	}
 }
+
+// TestTorrentAddUsesReplacedProxyConfig checks that adding a torrent consults
+// the current snapshot: a proxy installed after startup filters UDP trackers
+// out of the new torrent.
+func TestTorrentAddUsesReplacedProxyConfig(t *testing.T) {
+	cfg := testConfig()
+	cfg.Connections.ListenHost = "127.0.0.1"
+	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
+
+	next := cfg
+	next.Proxy.Socks5URL = "socks5://127.0.0.1:1080"
+	sess.SetConfig(next)
+
+	trackers := [][]string{{"udp://127.0.0.1:1", "http://127.0.0.1:1/announce"}}
+	content := bytes.Repeat([]byte{3}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, trackers)
+	if err := sess.AddTorrent(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	mi := session.UnderlyingTorrentForTest(st).Metainfo()
+	got := [][]string(mi.UpvertedAnnounceList())
+	want := [][]string{{"http://127.0.0.1:1/announce"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("announce list = %v, want %v without the UDP tracker", got, want)
+	}
+}

@@ -204,7 +204,7 @@ func (s *Session) prepareTorrentSpecLocked(ctx context.Context, spec *torrent.To
 	if s.deletionPendingLocked(spec.InfoHash) {
 		return nil, false, fmt.Errorf("%w: %s", ErrDeleting, spec.InfoHash)
 	}
-	if s.cfg.Proxy.Socks5URL != "" {
+	if s.config.load().Proxy.Socks5URL != "" {
 		spec.Trackers = filterProxyTrackers(spec.Trackers)
 	}
 
