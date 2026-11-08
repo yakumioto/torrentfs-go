@@ -61,6 +61,11 @@ type SchemaKey struct {
 	// the running process without a restart. A key that does not report it
 	// takes effect at the next start.
 	HotApply bool
+	// Documentation is the documentation of the configuration key, as written
+	// above its field in the configuration structure. It comes from the
+	// artifact embedded in the binary, so a deployment without the source
+	// code can show the same documentation as the source tree.
+	Documentation string
 }
 
 // Schema returns the configuration schema: every configuration key of the
@@ -72,14 +77,15 @@ func Schema() []SchemaKey {
 	keys := make([]SchemaKey, 0, len(configSchema))
 	for _, item := range configSchema {
 		keys = append(keys, SchemaKey{
-			Path:        item.path,
-			Environment: item.environment,
-			Overridable: item.overridable,
-			Kind:        item.kind,
-			Values:      item.values,
-			Secret:      item.secret,
-			Component:   item.component,
-			HotApply:    item.hotApply,
+			Path:          item.path,
+			Environment:   item.environment,
+			Overridable:   item.overridable,
+			Kind:          item.kind,
+			Values:        item.values,
+			Secret:        item.secret,
+			Component:     item.component,
+			HotApply:      item.hotApply,
+			Documentation: schemaDocumentation[item.path],
 		})
 	}
 	return keys
