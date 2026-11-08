@@ -216,10 +216,14 @@ function reloadKeyLabel(configKey: ConfigKey | undefined): string {
  * Shows how the running process last reacted to an external edit of the
  * configuration file: a successful automatic reload, a rejected edit that
  * left the previous configuration in force, or the file error that currently
- * prevents a load. The reread action refreshes the view after the operator
- * changed the file again.
+ * prevents a load. The reread action applies the disk values to the form; the
+ * caller asks first when that would discard unsaved drafts.
  */
-function ReloadStatus({ view, onReread }: { view: ConfigView; onReread: () => void }) {
+function ReloadStatus({ view, onReread, rereadDisabled }: {
+  view: ConfigView;
+  onReread: () => void;
+  rereadDisabled: boolean;
+}) {
   const reload = view.last_reload;
   const reread = (
     <Button
@@ -228,6 +232,7 @@ function ReloadStatus({ view, onReread }: { view: ConfigView; onReread: () => vo
       size="compact-sm"
       leftSection={<IconRefresh size={14} />}
       onClick={onReread}
+      disabled={rereadDisabled}
       data-testid="config-reload-reread"
     >
       重新读取
@@ -568,6 +573,15 @@ export function ConfigPage() {
   const [saveMessage, setSaveMessage] = useState('');
   const [dangerOpen, setDangerOpen] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [rereadConfirmOpen, setRereadConfirmOpen] = useState(false);
+  // The baseline of the view the drafts were seeded from. Saving against this
+  // baseline instead of whatever the view holds now turns an external edit
+  // that landed after the seed into a conflict, instead of silently rebasing
+  // stale drafts onto a file the page never showed.
+  const [seededBaseline, setSeededBaseline] = useState('');
+  // The baseline sent with the save whose refreshed view has not been adopted
+  // yet; it lets the post-save refetch move the seeded baseline forward.
+  const pendingSaveBaseline = useRef<string | null>(null);
   const durabilityRefetched = useRef<unknown>(null);
 
   const view = query.data;
@@ -580,11 +594,14 @@ export function ConfigPage() {
     }
     setDrafts(values);
     setSaved(values);
+    setSeededBaseline(next.baseline);
     setSeeded(true);
     setFieldErrors({});
     setSaveOutcome(null);
     setSaveMessage('');
     setDangerOpen(false);
+    setRereadConfirmOpen(false);
+    pendingSaveBaseline.current = null;
   }, []);
 
   // Seed the form from the file layer once. A background refetch must not
@@ -611,6 +628,23 @@ export function ConfigPage() {
     setFieldErrors({});
   }, [save.isSuccess, save.data, save.variables]);
 
+  // The refreshed view after a successful save carries the digest of the bytes
+  // the process just wrote. Adopt it as soon as it lands, so the next save is
+  // not rejected against our own write. This is the only refetch allowed to
+  // move the seeded baseline: an external edit found by another refetch leaves
+  // it where it is, and the next save then conflicts instead of silently
+  // dropping the notice.
+  useEffect(() => {
+    if (view === undefined || pendingSaveBaseline.current === null) {
+      return;
+    }
+    if (view.baseline === pendingSaveBaseline.current) {
+      return;
+    }
+    pendingSaveBaseline.current = null;
+    setSeededBaseline(view.baseline);
+  }, [view]);
+
   useEffect(() => {
     if (!save.isError || save.error === null) {
       return;
@@ -619,6 +653,7 @@ export function ConfigPage() {
     setSaveMessage(userFacingConfigSaveError(save.error));
     setSaveOutcome(null);
     if (failure === undefined || view === undefined) {
+      pendingSaveBaseline.current = null;
       setFieldErrors({});
       return;
     }
@@ -657,6 +692,10 @@ export function ConfigPage() {
         durabilityRefetched.current = save.error;
         void refetch();
       }
+    } else {
+      // The save was rejected before it could rewrite the file, so the
+      // baseline the form holds is still the one the file has.
+      pendingSaveBaseline.current = null;
     }
   }, [save.isError, save.error, save.variables, view, refetch]);
 
@@ -689,7 +728,11 @@ export function ConfigPage() {
     setSaveMessage('');
     setFieldErrors({});
     save.reset();
-    save.mutate({ baseline: view.baseline, patch });
+    // The seeded baseline, not the possibly newer view baseline: a stale draft
+    // must conflict with an external edit the page never reseeded. The
+    // baseline the write produces is adopted when its refetch lands.
+    pendingSaveBaseline.current = seededBaseline;
+    save.mutate({ baseline: seededBaseline, patch });
   };
 
   const requestSave = () => {
@@ -715,6 +758,7 @@ export function ConfigPage() {
     setSaveOutcome(null);
     setFieldErrors({});
     setDangerOpen(false);
+    setRereadConfirmOpen(false);
     try {
       const result = await refetch();
       if (result.data !== undefined) {
@@ -725,6 +769,20 @@ export function ConfigPage() {
     } finally {
       setReloading(false);
     }
+  };
+
+  // Every entry that applies the disk values goes through the same reseed. An
+  // explicit reread with unsaved drafts asks first: the drafts are the user's
+  // work and reloading discards them, exactly like the conflict reload.
+  const requestReloadFromDisk = () => {
+    if (reloading) {
+      return;
+    }
+    if (dirtyCount > 0) {
+      setRereadConfirmOpen(true);
+      return;
+    }
+    void reloadFromDisk();
   };
 
   const conflict = save.isError && configSaveFailure(save.error)?.code === 'conflict';
@@ -774,7 +832,11 @@ export function ConfigPage() {
           <ReadOnlyBanner view={view} />
 
           {view.config_file !== '' && (
-            <ReloadStatus view={view} onReread={() => void refetch()} />
+            <ReloadStatus
+              view={view}
+              onReread={requestReloadFromDisk}
+              rereadDisabled={save.isPending || reloading}
+            />
           )}
 
           {saveOutcome !== null && (
@@ -924,6 +986,24 @@ export function ConfigPage() {
             onCancel={() => setDangerOpen(false)}
             onConfirm={performSave}
           />
+
+          <Modal
+            opened={rereadConfirmOpen}
+            onClose={() => setRereadConfirmOpen(false)}
+            title="重新读取配置？"
+            centered
+            closeButtonProps={{ 'aria-label': '关闭弹窗' }}
+          >
+            <Stack gap="sm">
+              <p className={styles.modalText}>
+                有 {dirtyCount} 项未保存的改动。重新读取会放弃这些改动，并读取磁盘上的最新配置。
+              </p>
+              <Group justify="flex-end" gap="sm">
+                <Button variant="default" onClick={() => setRereadConfirmOpen(false)}>留在此页</Button>
+                <Button color="yellow" onClick={() => void reloadFromDisk()}>放弃改动并重新读取</Button>
+              </Group>
+            </Stack>
+          </Modal>
 
           <Modal
             opened={guard.pendingHref !== null}

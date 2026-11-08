@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -765,5 +765,186 @@ describe('ConfigPage external reload status', () => {
     expect(screen.getByTestId('config-reload-status')).toHaveTextContent('最近一次自动重载失败');
     expect(screen.getByTestId('config-reload-error')).toHaveTextContent('inject needs a rate');
     expect(screen.queryByTestId('config-file-error')).not.toBeInTheDocument();
+  });
+});
+
+describe('ConfigPage reread reseeding', () => {
+  function rereadViews() {
+    const localView = configView();
+    const remoteView = configView({
+      baseline: 'remote-baseline',
+      keys: localView.keys.map((key) => (key.path === 'cache.capacity'
+        ? { ...key, file_value: '3GiB', effective_value: '3GiB', source: 'file' }
+        : key)),
+    });
+    return { localView, remoteView };
+  }
+
+  it('applies the disk values from the reload status and saves against their baseline', async () => {
+    const { localView, remoteView } = rereadViews();
+    let configGets = 0;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: [],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : remoteView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('2GiB');
+
+    // The reread lives in the reload status; it must seed the form, not just
+    // refresh the view behind a form that keeps showing the old file values.
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('3GiB'));
+    expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '4GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'remote-baseline',
+      patch: { 'cache.capacity': '4GiB' },
+    });
+  });
+
+  it('asks before discarding unsaved drafts and keeps them when the reread is cancelled', async () => {
+    const { localView, remoteView } = rereadViews();
+    let configGets = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url !== '/api/v1/config') {
+        throw new Error(`Unexpected request: ${url}`);
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : remoteView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('重新读取配置');
+    expect(dialog).toHaveTextContent('1 项未保存的改动');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '留在此页' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+    expect(configGets).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }));
+    const confirm = await screen.findByRole('dialog');
+    fireEvent.click(within(confirm).getByRole('button', { name: '放弃改动并重新读取' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('3GiB'));
+    expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument();
+    expect(configGets).toBe(2);
+  });
+
+  it('keeps the seeded baseline when a background refetch sees an external edit', async () => {
+    const { localView, remoteView } = rereadViews();
+    let configGets = 0;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          error: '配置文件已被外部修改',
+          code: 'conflict',
+          field_errors: [],
+          applied: [],
+          restart_required: [],
+          persisted: false,
+        }, 409));
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : remoteView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    // Leaving the tab and coming back refetches the view without the user
+    // asking for the disk values. The draft belongs to the baseline it was
+    // typed against, so a later save must conflict instead of rebasing it.
+    const visibility = vi
+      .spyOn(Document.prototype, 'visibilityState', 'get')
+      .mockReturnValue('hidden');
+    await act(async () => {
+      window.dispatchEvent(new Event('visibilitychange'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    visibility.mockReturnValue('visible');
+    await act(async () => {
+      window.dispatchEvent(new Event('visibilitychange'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    await waitFor(() => expect(configGets).toBeGreaterThanOrEqual(2));
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+    expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 1 项');
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存未完成');
+    expect(screen.getByText(/配置文件已被外部修改/)).toBeInTheDocument();
+
+    const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: { 'cache.capacity': '1GiB' },
+    });
+  });
+
+  it('adopts the baseline of the view refreshed by a successful save', async () => {
+    const localView = configView();
+    const writtenView = configView({
+      baseline: 'written-baseline',
+      keys: localView.keys.map((key) => (key.path === 'cache.capacity'
+        ? { ...key, file_value: '1GiB', source: 'file' }
+        : key)),
+    });
+    let configGets = 0;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: [],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : writtenView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    // The renderer reports the bytes it wrote; the next save must use that
+    // baseline instead of conflicting with our own write.
+    await waitFor(() => expect(
+      within(screen.getByRole('article', { name: 'cache.capacity' })).getByTestId('config-file-value'),
+    ).toHaveTextContent('1GiB'));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(
+      fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT'),
+    ).toHaveLength(2));
+    const puts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+
+    expect(JSON.parse((puts[1]?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'written-baseline',
+      patch: { 'cache.capacity': '2GiB' },
+    });
   });
 });
