@@ -1,10 +1,13 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -225,4 +228,79 @@ func TestConfigAppliersConcurrentWithRequests(t *testing.T) {
 		}
 	}()
 	group.Wait()
+}
+
+// TestSaveAppliesUploadCapAndTokenTTL is the acceptance path of the ticket: a
+// save through the configuration controller raises the running upload cap and
+// the running token lifetime, so the next requests observe both new values.
+func TestSaveAppliesUploadCapAndTokenTTL(t *testing.T) {
+	work := t.TempDir()
+	path := filepath.Join(work, "torrentfs.toml")
+	body := `username = "alice"
+password = "password"
+
+[http]
+max_upload_size = "8B"
+
+[http.auth]
+enabled = true
+token_ttl = "1m"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write configuration file: %v", err)
+	}
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	srv, err := api.New(cfg, &fakeBackend{addView: addViewForTest()})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	controller := configctl.New(path, cfg, sources)
+	for _, applier := range []configctl.Applier{
+		api.NewMaxUploadApplier(srv),
+		api.NewTokenTTLApplier(srv),
+	} {
+		if err := controller.RegisterApplier(applier); err != nil {
+			t.Fatalf("RegisterApplier(%v): %v", applier.Keys(), err)
+		}
+	}
+
+	view, err := controller.View()
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	result, err := controller.Save(context.Background(), configctl.SaveRequest{
+		Baseline: view.Baseline,
+		Patch: map[string]string{
+			"http.max_upload_size": "1MB",
+			"http.auth.token_ttl":  "2m",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	applied := map[string]bool{}
+	for _, key := range result.Applied {
+		applied[key] = true
+	}
+	for _, key := range []string{"http.max_upload_size", "http.auth.token_ttl"} {
+		if !applied[key] {
+			t.Errorf("applied = %v, want %s", result.Applied, key)
+		}
+	}
+	if len(result.RestartRequired) != 0 {
+		t.Errorf("restart required = %v, want none", result.RestartRequired)
+	}
+
+	token, expiresIn := loginToken(t, srv)
+	if expiresIn != 120 {
+		t.Fatalf("expires_in after the save = %d, want 120", expiresIn)
+	}
+	req := magnetRequest()
+	req.Header.Set("Authorization", "Bearer "+token)
+	if rec := do(t, srv, req); rec.Code != http.StatusCreated {
+		t.Fatalf("upload status after the save = %d, want 201; body %s", rec.Code, rec.Body.String())
+	}
 }
