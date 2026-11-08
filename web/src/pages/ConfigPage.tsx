@@ -352,21 +352,26 @@ function SaveResultGroups({ result }: { result: ConfigSaveResult }) {
       <p className={styles.resultSummary} data-testid="config-save-summary">
         已生效 {result.applied.length} 项，重启后生效 {result.restart_required.length} 项。
       </p>
-      {result.applied.length > 0 && (
-        <div>
-          <strong>已生效</strong>
-          <ul className={styles.resultKeys} data-testid="config-applied-keys">
-            {result.applied.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
-          </ul>
-        </div>
-      )}
-      {result.restart_required.length > 0 && (
-        <div>
-          <strong>重启后生效</strong>
-          <ul className={styles.resultKeys} data-testid="config-restart-keys">
-            {result.restart_required.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
-          </ul>
-        </div>
+      <div className={styles.resultGroup} data-testid="config-applied-group">
+        <strong>已生效（{result.applied.length} 项）</strong>
+        <p className={styles.resultNote}>已应用到运行中的进程。</p>
+        <ul className={styles.resultKeys} data-testid="config-applied-keys">
+          {result.applied.length === 0
+            ? <li className={styles.resultEmpty}>无</li>
+            : result.applied.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+        </ul>
+      </div>
+      <div className={styles.resultGroup} data-testid="config-restart-group">
+        <strong>重启后生效（{result.restart_required.length} 项）</strong>
+        <p className={styles.resultNote}>已写入配置文件，重启服务后才采用新值。</p>
+        <ul className={styles.resultKeys} data-testid="config-restart-keys">
+          {result.restart_required.length === 0
+            ? <li className={styles.resultEmpty}>无</li>
+            : result.restart_required.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+        </ul>
+      </div>
+      {!result.persisted && (
+        <p className={styles.resultWarn}>文件持久化未确认：重启后可能无法保留这些改动。</p>
       )}
     </div>
   );

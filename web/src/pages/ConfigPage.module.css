@@ -344,11 +344,34 @@
   font-weight: 600;
 }
 
+.resultGroup {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.resultNote {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
 .resultKeys {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
-  margin: 0.3rem 0 0;
+  margin: 0.1rem 0 0;
   padding: 0;
   list-style: none;
+}
+
+.resultEmpty {
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+}
+
+.resultWarn {
+  margin: 0;
+  color: var(--mantine-color-yellow-8);
+  font-size: 0.8rem;
+  line-height: 1.6;
 }

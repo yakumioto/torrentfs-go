@@ -583,3 +583,52 @@ describe('ConfigPage unsaved changes', () => {
     expect(beforeUnloadEvent().defaultPrevented).toBe(false);
   });
 });
+
+describe('ConfigPage save result groups', () => {
+  it('separates applied and restart-required keys with counts and explanations', async () => {
+    const view = configView({
+      keys: [
+        ...configView().keys,
+        configKey({
+          path: 'http.max_upload_size',
+          section: 'http',
+          kind: 'byte_quantity',
+          default: '32MiB',
+          file_value: '32MiB',
+          effective_value: '32MiB',
+          component: 'api',
+          hot_apply: true,
+        }),
+      ],
+    });
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: ['http.max_upload_size'],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(view));
+    });
+    renderPage(fetchMock, view);
+
+    await screen.findByRole('article', { name: 'http.max_upload_size' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'http.max_upload_size' }), { target: { value: '64MiB' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    expect(screen.getByTestId('config-save-summary')).toHaveTextContent('已生效 1 项，重启后生效 1 项');
+
+    const applied = screen.getByTestId('config-applied-group');
+    expect(applied).toHaveTextContent('已生效（1 项）');
+    expect(applied).toHaveTextContent('已应用到运行中的进程');
+    expect(within(applied).getByTestId('config-applied-keys')).toHaveTextContent('http.max_upload_size');
+
+    const restart = screen.getByTestId('config-restart-group');
+    expect(restart).toHaveTextContent('重启后生效（1 项）');
+    expect(restart).toHaveTextContent('重启服务后才采用新值');
+    expect(within(restart).getByTestId('config-restart-keys')).toHaveTextContent('cache.capacity');
+  });
+});
