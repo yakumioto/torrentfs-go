@@ -176,6 +176,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 	)
 	warnPlaintextPassword(logger, cfg, sources)
 
+	// The retired experiment sidecar is imported before the session starts, so
+	// the first announce already uses the migrated values. A merge into the
+	// configuration file changes the effective configuration, which is loaded
+	// again; a read-only deployment keeps the sidecar as a runtime fallback.
+	migration, migrationErr := migrateLegacyExperimentSettings(configFile, torrentsDir, logger)
+	if migrationErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", migrationErr)
+		return 2
+	}
+	if migration.Migrated {
+		cfg, sources, err = loadConfig(configFile)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+			return 2
+		}
+	}
 	logEffectiveConfig(logger, cfg, sources)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
@@ -184,7 +200,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(cfg, nil, logger)
+	labOptions, labErr := labSessionOptions(cfg, migration.Runtime, logger)
 	if labErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
 		return 2
