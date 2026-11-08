@@ -3,11 +3,14 @@ package session_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -101,5 +104,50 @@ func TestConnectionAllocatorUsesReplacedConfig(t *testing.T) {
 	session.AllocateConnectionsForTest(sess)
 	if got := session.ConnectionAllowanceForTest(st); got != 9 {
 		t.Fatalf("reading allowance after SetConfig = %d, want 9", got)
+	}
+}
+
+// TestOpenFileUsesReplacedReadTimeout checks that the read timeout is taken
+// from the current snapshot when a file is opened, not from the startup copy.
+func TestOpenFileUsesReplacedReadTimeout(t *testing.T) {
+	cfg := testConfig()
+	cfg.Connections.ListenHost = "127.0.0.1"
+	cfg.Filesystem.ReadTimeout = config.Duration(20 * time.Second)
+	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
+
+	content := bytes.Repeat([]byte{2}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if err := sess.AddTorrent(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	next := cfg
+	next.Filesystem.ReadTimeout = config.Duration(150 * time.Millisecond)
+	sess.SetConfig(next)
+
+	handle, err := sess.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer func() { _ = handle.(io.Closer).Close() }()
+
+	// The torrent has metadata but no source, so the read waits for its
+	// timeout. The startup value (20s) would outlive this test.
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := handle.ReadAt(make([]byte, 64), 0)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("peerless read error = %v, want DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(started); elapsed < 100*time.Millisecond {
+			t.Fatalf("peerless read returned after %s, before the replaced 150ms timeout", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("peerless read did not use the replaced timeout")
 	}
 }

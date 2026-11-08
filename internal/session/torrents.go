@@ -363,7 +363,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 func (t *Torrent) openReaderHandle(r *raFile) *openedFile {
 	t.readersOpen.Add(1)
 	t.noteReadActivity()
-	readTimeout := time.Duration(t.session.cfg.Filesystem.ReadTimeout)
+	readTimeout := time.Duration(t.session.config.load().Filesystem.ReadTimeout)
 	return &openedFile{
 		file:        r,
 		readTimeout: readTimeout,
