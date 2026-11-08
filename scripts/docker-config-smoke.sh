@@ -67,6 +67,10 @@ timeout 30 docker run --rm --cap-drop ALL --security-opt no-new-privileges:true 
 		# must own the file and the directory that holds the temporary file.
 		test -w /etc/torrentfs/torrentfs.toml
 		test -w /etc/torrentfs
+		# The build context mode is not trustworthy: a restrictive host
+		# umask would leave the file at 0600 and a custom --user identity
+		# could not read it, so the Dockerfile pins 0644.
+		test "$(stat -c %a /etc/torrentfs/torrentfs.toml)" = 644
 		test "$(stat -c %u:%g /etc/torrentfs)" = 1000:1000
 		test "$(stat -c %u:%g /etc/torrentfs/torrentfs.toml)" = 1000:1000
 		touch /etc/torrentfs/.write-probe

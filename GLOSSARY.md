@@ -105,5 +105,5 @@ _Avoid_: 账号、用户、共享凭据
 _Avoid_: lab、测试功能、插件
 
 **上传统计实验** (Upload Statistics Experiment)：
-由 `[experiments.upload]` 承载的上报上传量改写实验（baseline / inject / amplify）；默认 baseline，运行中只改模式及其参数，种子与日志设置重启生效。
+由 `[experiments.upload]` 承载的上报上传量改写实验（baseline / inject / amplify）；默认 baseline，运行中只改模式及其参数，种子与日志设置重启生效。页面文案也简称「上传实验」。
 _Avoid_: 伪造上传、刷流、lab
