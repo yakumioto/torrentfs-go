@@ -19,6 +19,8 @@ import (
 const (
 	tokenSize           = 32
 	minimumPasswordCost = 10
+	// tokenTTLMaximum is the longest token lifetime the service accepts.
+	tokenTTLMaximum = 24 * time.Hour
 )
 
 var (
@@ -79,11 +81,8 @@ func New(cfg config.Auth, passwordHash []byte) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, invalidConfig("http.auth.enabled", errors.New("authentication is disabled"))
 	}
-	if cfg.TokenTTL <= 0 {
-		return nil, invalidConfig("http.auth.token_ttl", errors.New("must be positive"))
-	}
-	if time.Duration(cfg.TokenTTL) > 24*time.Hour {
-		return nil, invalidConfig("http.auth.token_ttl", errors.New("must not exceed 24 hours"))
+	if err := validateTokenTTL(time.Duration(cfg.TokenTTL)); err != nil {
+		return nil, err
 	}
 	if len(passwordHash) == 0 {
 		return nil, invalidConfig("password", errors.New("a password hash is required"))
@@ -107,6 +106,40 @@ func New(cfg config.Auth, passwordHash []byte) (*Service, error) {
 
 func invalidConfig(field string, cause error) error {
 	return &ConfigError{Field: field, Cause: cause}
+}
+
+// validateTokenTTL reports whether ttl may be used as a token lifetime. The
+// startup and the hot apply share the rule, so a lifetime the page saved means
+// the same thing to both paths.
+func validateTokenTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return invalidConfig("http.auth.token_ttl", errors.New("must be positive"))
+	}
+	if ttl > tokenTTLMaximum {
+		return invalidConfig("http.auth.token_ttl", errors.New("must not exceed 24 hours"))
+	}
+	return nil
+}
+
+// TokenTTL returns the lifetime a token created or renewed now receives.
+func (s *Service) TokenTTL() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokenTTL
+}
+
+// SetTokenTTL replaces the lifetime given to tokens created or renewed from
+// now on. Tokens already issued keep their expiry until a renewing request
+// slides the window under the new lifetime, so a shorter TTL takes effect
+// without invalidating a session mid-request.
+func (s *Service) SetTokenTTL(ttl time.Duration) error {
+	if err := validateTokenTTL(ttl); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.tokenTTL = ttl
+	s.mu.Unlock()
+	return nil
 }
 
 // Login verifies credentials, creates a random opaque token, and returns its expiry.
