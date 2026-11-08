@@ -103,6 +103,24 @@ function configView(overrides: Partial<ConfigView> = {}): ConfigView {
   };
 }
 
+function disabledLab() {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+    torrents: [],
+  };
+}
+
 function authValue(api: ApiClient): AuthContextValue {
   return {
     api,
@@ -134,6 +152,29 @@ function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = conf
     </QueryClientProvider>,
   );
   return view;
+}
+
+function renderAppAt(fetchMock: ReturnType<typeof vi.fn>, path = '/config') {
+  const api = new ApiClient();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  vi.stubGlobal('fetch', fetchMock);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MantineProvider theme={theme} defaultColorScheme="light">
+        <AuthContext.Provider value={authValue(api)}>
+          <MemoryRouter initialEntries={[path]}>
+            <App />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+}
+
+function beforeUnloadEvent(): Event {
+  const event = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(event);
+  return event;
 }
 
 beforeEach(() => vi.unstubAllGlobals());
@@ -479,5 +520,66 @@ describe('ConfigPage save flow', () => {
     expect(puts).toHaveLength(1);
     const configGets = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method !== 'PUT');
     expect(configGets).toHaveLength(1);
+  });
+});
+
+describe('ConfigPage unsaved changes', () => {
+  it('warns about unsaved changes, blocks navigation and lets the user stay', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/v1/config') {
+        return Promise.resolve(jsonResponse(configView()));
+      }
+      if (url === '/api/v1/experiments/upload') {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderAppAt(fetchMock);
+    await screen.findByRole('article', { name: 'cache.capacity' });
+
+    expect(beforeUnloadEvent().defaultPrevented).toBe(false);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 1 项');
+    expect(beforeUnloadEvent().defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    const stayDialog = await screen.findByRole('dialog');
+    expect(stayDialog).toHaveTextContent('离开配置页面');
+    expect(stayDialog).toHaveTextContent('1 项未保存的改动');
+    fireEvent.click(within(stayDialog).getByRole('button', { name: '留在此页' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('article', { name: 'cache.capacity' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+
+    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    const leaveDialog = await screen.findByRole('dialog');
+    fireEvent.click(within(leaveDialog).getByRole('button', { name: '放弃改动并离开' }));
+
+    await screen.findByRole('heading', { name: '上传实验设置' });
+    expect(screen.queryByRole('article', { name: 'cache.capacity' })).not.toBeInTheDocument();
+  });
+
+  it('clears the unsaved state and unload warning after a successful save', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({ applied: ['cache.capacity'], restart_required: [], persisted: true }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    expect(screen.getByTestId('config-dirty-count')).toBeInTheDocument();
+    expect(beforeUnloadEvent().defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    await waitFor(() => expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+    expect(beforeUnloadEvent().defaultPrevented).toBe(false);
   });
 });

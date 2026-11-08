@@ -141,6 +141,12 @@
   margin-bottom: 0;
 }
 
+.modalText {
+  margin: 0;
+  color: var(--text-primary);
+  line-height: 1.7;
+}
+
 .dangerList {
   display: grid;
   gap: 0.55rem;

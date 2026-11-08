@@ -11,7 +11,6 @@ import {
   NumberInput,
   Stack,
   Switch,
-  Text,
   TextInput,
 } from '@mantine/core';
 import {
@@ -20,10 +19,11 @@ import {
   IconInfoCircle,
   IconSearch,
 } from '@tabler/icons-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../app/auth-context';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
+import { useUnsavedChangesGuard } from '../utils/unsaved-changes';
 import { usePageVisible } from '../utils/visibility';
 import {
   dangerousCategoryLabel,
@@ -428,6 +428,9 @@ export function ConfigPage() {
 
   const [search, setSearch] = useState('');
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // The file values the drafts are compared against. A successful save moves
+  // the edited keys here, so the form is clean without waiting for a refetch.
+  const [saved, setSaved] = useState<Record<string, string>>({});
   const [seeded, setSeeded] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
@@ -438,29 +441,43 @@ export function ConfigPage() {
   const view = query.data;
   const refetch = query.refetch;
 
+  const seedFromView = useCallback((next: ConfigView) => {
+    const values: Record<string, string> = {};
+    for (const key of next.keys) {
+      values[key.path] = key.file_value;
+    }
+    setDrafts(values);
+    setSaved(values);
+    setSeeded(true);
+    setFieldErrors({});
+    setSaveOutcome(null);
+    setSaveMessage('');
+    setDangerOpen(false);
+  }, []);
+
   // Seed the form from the file layer once. A background refetch must not
-  // replace what the user is editing; a save deliberately keeps the draft the
-  // user submitted.
+  // replace what the user is editing; only an explicit reload (and a fresh
+  // save response) may move the comparison baseline.
   useEffect(() => {
     if (view === undefined || seeded) {
       return;
     }
-    const next: Record<string, string> = {};
-    for (const key of view.keys) {
-      next[key.path] = key.file_value;
-    }
-    setDrafts(next);
-    setSeeded(true);
-  }, [view, seeded]);
+    seedFromView(view);
+  }, [view, seeded, seedFromView]);
 
   useEffect(() => {
     if (!save.isSuccess || save.data === undefined) {
       return;
     }
+    // The submitted values are now the file values for these keys, so clear
+    // their dirty state without waiting for the view refetch.
+    if (save.variables !== undefined) {
+      setSaved((previous) => ({ ...previous, ...save.variables?.patch }));
+    }
     setSaveOutcome({ code: '', result: save.data });
     setSaveMessage('');
     setFieldErrors({});
-  }, [save.isSuccess, save.data]);
+  }, [save.isSuccess, save.data, save.variables]);
 
   useEffect(() => {
     if (!save.isError || save.error === null) {
@@ -488,6 +505,11 @@ export function ConfigPage() {
       setSaveMessage(`${userFacingConfigSaveError(save.error)}\n${extra.join('\n')}`);
     }
     if (configSaveDurabilityUnconfirmed(save.error)) {
+      // The values are in force even though durability is unproven, so the
+      // form must be clean; only the restart-recovery warning remains.
+      if (save.variables !== undefined) {
+        setSaved((previous) => ({ ...previous, ...save.variables?.patch }));
+      }
       setSaveOutcome({
         code: failure.code,
         result: {
@@ -504,7 +526,7 @@ export function ConfigPage() {
         void refetch();
       }
     }
-  }, [save.isError, save.error, view, refetch]);
+  }, [save.isError, save.error, save.variables, view, refetch]);
 
   const pageReadOnly = view !== undefined && view.read_only_reason !== '';
   const patch: Record<string, string> = {};
@@ -514,7 +536,8 @@ export function ConfigPage() {
         continue;
       }
       const draft = drafts[key.path];
-      if (draft !== undefined && draft !== key.file_value) {
+      const current = saved[key.path];
+      if (draft !== undefined && current !== undefined && draft !== current) {
         patch[key.path] = draft;
       }
     }
@@ -523,6 +546,7 @@ export function ConfigPage() {
   const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
   const dirtyCount = changes.length;
   const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
+  const guard = useUnsavedChangesGuard(dirtyCount > 0);
 
   const performSave = () => {
     if (view === undefined || !canSave) {
@@ -722,6 +746,24 @@ export function ConfigPage() {
             onCancel={() => setDangerOpen(false)}
             onConfirm={performSave}
           />
+
+          <Modal
+            opened={guard.pendingHref !== null}
+            onClose={guard.stay}
+            title="离开配置页面？"
+            centered
+            closeButtonProps={{ 'aria-label': '关闭弹窗' }}
+          >
+            <Stack gap="sm">
+              <p className={styles.modalText}>
+                有 {dirtyCount} 项未保存的改动，离开后这些改动会丢失。
+              </p>
+              <Group justify="flex-end" gap="sm">
+                <Button variant="default" onClick={guard.stay}>留在此页</Button>
+                <Button color="red" onClick={guard.leave}>放弃改动并离开</Button>
+              </Group>
+            </Stack>
+          </Modal>
         </>
       )}
     </div>
