@@ -551,7 +551,7 @@ export function ConfigPage() {
   const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
   const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
   const dirtyCount = changes.length;
-  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
+  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending && !reloading;
   const guard = useUnsavedChangesGuard(dirtyCount > 0);
 
   const performSave = () => {

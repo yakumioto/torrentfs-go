@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 export interface UnsavedChangesGuard {
   /** The in-app destination the user tried to open while the page was dirty. */
@@ -18,8 +18,14 @@ export interface UnsavedChangesGuard {
  */
 export function useUnsavedChangesGuard(dirty: boolean): UnsavedChangesGuard {
   const navigate = useNavigate();
+  const location = useLocation();
   const dirtyRef = useRef(dirty);
+  const locationRef = useRef(location);
   const [pendingHref, setPendingHref] = useState<string | null>(null);
+
+  useEffect(() => {
+    locationRef.current = location;
+  }, [location]);
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -52,6 +58,10 @@ export function useUnsavedChangesGuard(dirty: boolean): UnsavedChangesGuard {
       }
       const href = anchor.getAttribute('href') ?? '';
       if (!href.startsWith('/') || href.startsWith('//')) {
+        return;
+      }
+      // A link to the page already open is not a navigation worth guarding.
+      if (href === locationRef.current.pathname) {
         return;
       }
       event.preventDefault();
