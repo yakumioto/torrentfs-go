@@ -90,8 +90,11 @@ describe('ExperimentsPage', () => {
     expect(screen.queryByRole('form')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /保存/ })).not.toBeInTheDocument();
-    const configLink = screen.getByRole('link', { name: '配置页面' });
-    expect(configLink).toHaveAttribute('href', '/config');
+
+    const settingsLink = screen.getByRole('link', { name: '修改实验设置' });
+    expect(settingsLink).toHaveAttribute('href', '/config#experiments');
+    const categoryLink = screen.getByRole('link', { name: '配置页面的实验分类' });
+    expect(categoryLink).toHaveAttribute('href', '/config#experiments');
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/experiments/upload/settings'), expect.anything());
   });
 

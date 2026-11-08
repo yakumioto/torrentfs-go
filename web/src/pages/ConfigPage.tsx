@@ -21,6 +21,7 @@ import {
   IconSearch,
 } from '@tabler/icons-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
@@ -60,6 +61,15 @@ const SECTION_LABELS: Record<string, string> = {
   upload_rate: '上传限速',
   experiments: '实验',
   'experiments.upload': '上传实验',
+};
+
+/**
+ * Domain copy for a category whose heading alone does not explain what the
+ * grouped configuration controls.
+ */
+const CATEGORY_DESCRIPTIONS: Record<string, string> = {
+  experiments:
+    '上传统计实验常驻运行，默认基线模式；在这里统一调整实验模式与参数，改动按标记立即生效或等待重启。',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -146,6 +156,13 @@ interface ConfigSection {
   keys: ConfigKey[];
 }
 
+interface ConfigCategory {
+  id: string;
+  label: string;
+  description: string;
+  sections: ConfigSection[];
+}
+
 /**
  * Groups the keys by configuration section, keeping the schema order of the
  * first key of every section.
@@ -164,6 +181,48 @@ function groupConfigKeys(keys: ConfigKey[]): ConfigSection[] {
     section.keys.push(key);
   }
   return sections;
+}
+
+/**
+ * The category of a section: the first path segment of its TOML table. The
+ * `experiments` category therefore collects `[experiments.upload]` and every
+ * later experiment subsection, while a plain section is its own category.
+ */
+function categoryID(sectionID: string): string {
+  if (sectionID === 'root') {
+    return 'root';
+  }
+  return sectionID.split('.')[0] ?? sectionID;
+}
+
+function categoryLabel(id: string): string {
+  return id === 'root' ? '基础' : sectionLabel(id);
+}
+
+/** Groups the sections into the first-level categories of the page. */
+function groupConfigCategories(keys: ConfigKey[]): ConfigCategory[] {
+  const categories: ConfigCategory[] = [];
+  const byID = new Map<string, ConfigCategory>();
+  for (const section of groupConfigKeys(keys)) {
+    const id = categoryID(section.id);
+    let category = byID.get(id);
+    if (category === undefined) {
+      category = {
+        id,
+        label: categoryLabel(id),
+        description: CATEGORY_DESCRIPTIONS[id] ?? '',
+        sections: [],
+      };
+      byID.set(id, category);
+      categories.push(category);
+    }
+    category.sections.push(section);
+  }
+  return categories;
+}
+
+function categoryKeyCount(category: ConfigCategory): number {
+  return category.sections.reduce((count, section) => count + section.keys.length, 0);
 }
 
 function ReadOnlyBanner({ view }: { view: ConfigView }) {
@@ -559,6 +618,7 @@ interface SaveOutcome {
 
 export function ConfigPage() {
   const auth = useAuth();
+  const location = useLocation();
   const visible = usePageVisible();
   const query = useConfig(auth.api, auth.isReady && visible);
   const save = useSaveConfig(auth.api);
@@ -584,6 +644,9 @@ export function ConfigPage() {
   // yet; it lets the post-save refetch move the seeded baseline forward.
   const pendingSaveBaseline = useRef<string | null>(null);
   const durabilityRefetched = useRef<unknown>(null);
+  // The hash the page already scrolled to; a background refetch must not pull
+  // the reader away from wherever they scrolled to after following the link.
+  const scrolledHash = useRef('');
 
   const view = query.data;
   const refetch = query.refetch;
@@ -614,6 +677,30 @@ export function ConfigPage() {
     }
     seedFromView(view);
   }, [view, seeded, seedFromView]);
+
+  // A configuration category is a deep-link target, for example
+  // /config#experiments from the experiments monitor. React Router changes the
+  // URL without scrolling, so the page scrolls the target into view once the
+  // category is actually rendered.
+  useEffect(() => {
+    if (view === undefined) {
+      return;
+    }
+    if (location.hash === '') {
+      scrolledHash.current = '';
+      return;
+    }
+    if (scrolledHash.current === location.hash) {
+      return;
+    }
+    const targetID = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
+    const target = document.getElementById(targetID);
+    if (target === null) {
+      return;
+    }
+    scrolledHash.current = location.hash;
+    target.scrollIntoView?.({ block: 'start' });
+  }, [location.hash, view]);
 
   useEffect(() => {
     if (!save.isSuccess || save.data === undefined) {
@@ -792,7 +879,7 @@ export function ConfigPage() {
   const filtered = term === '' || view === undefined
     ? view?.keys ?? []
     : view.keys.filter((key) => matchesSearch(key, term));
-  const sections = groupConfigKeys(filtered);
+  const categories = groupConfigCategories(filtered);
 
   return (
     <div className={styles.page}>
@@ -952,30 +1039,53 @@ export function ConfigPage() {
           <Accordion
             multiple
             variant="separated"
-            defaultValue={sections.map((section) => section.id)}
+            defaultValue={categories.map((category) => category.id)}
             className={styles.accordion}
           >
-            {sections.map((section) => (
-              <Accordion.Item key={section.id} value={section.id} className={styles.section}>
+            {categories.map((category) => (
+              <Accordion.Item
+                key={category.id}
+                value={category.id}
+                id={category.id}
+                className={styles.section}
+                data-testid={`config-category-${category.id}`}
+              >
                 <Accordion.Control>
                   <Group justify="space-between" pr="md" wrap="nowrap">
-                    <span className={styles.sectionTitle}>{section.label}</span>
-                    <Badge variant="light" color="gray">{section.keys.length} 项</Badge>
+                    <span className={styles.sectionHeading}>
+                      <span className={styles.sectionTitle}>{category.label}</span>
+                      {category.description !== '' && (
+                        <span className={styles.sectionDescription}>{category.description}</span>
+                      )}
+                    </span>
+                    <Badge variant="light" color="gray">{categoryKeyCount(category)} 项</Badge>
                   </Group>
                 </Accordion.Control>
                 <Accordion.Panel>
-                  <div className={styles.keys}>
-                    {section.keys.map((key) => (
-                      <KeyCard
-                        key={key.path}
-                        configKey={key}
-                        draft={drafts[key.path] ?? ''}
-                        editable={!pageReadOnly && key.read_only_reason === ''}
-                        onChange={(value) => setDrafts((previous) => ({ ...previous, [key.path]: value }))}
-                        error={fieldErrors[key.path]}
-                      />
-                    ))}
-                  </div>
+                  {category.sections.map((section) => (
+                    <section
+                      key={section.id}
+                      id={section.id === category.id ? undefined : section.id}
+                      className={styles.subsection}
+                      aria-label={section.label}
+                    >
+                      {section.id !== category.id && (
+                        <h3 className={styles.subsectionTitle}>{section.label}</h3>
+                      )}
+                      <div className={styles.keys}>
+                        {section.keys.map((key) => (
+                          <KeyCard
+                            key={key.path}
+                            configKey={key}
+                            draft={drafts[key.path] ?? ''}
+                            editable={!pageReadOnly && key.read_only_reason === ''}
+                            onChange={(value) => setDrafts((previous) => ({ ...previous, [key.path]: value }))}
+                            error={fieldErrors[key.path]}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  ))}
                 </Accordion.Panel>
               </Accordion.Item>
             ))}

@@ -302,6 +302,8 @@ describe('DashboardPage', () => {
     cleanup();
     renderDashboard([torrent()]);
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
-    expect(screen.getByRole('link', { name: '上传实验：打开上传实验监控' })).toHaveTextContent('基线（真实上报）');
+    const baselineCard = screen.getByRole('link', { name: '上传实验：打开上传实验监控' });
+    expect(baselineCard).toHaveTextContent('基线（真实上报）');
+    expect(baselineCard).toHaveAttribute('href', '/experiments');
   });
 });

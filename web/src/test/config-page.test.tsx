@@ -33,6 +33,105 @@ function configKey(overrides: Partial<ConfigKey> & Pick<ConfigKey, 'path' | 'sec
   };
 }
 
+/** The full `[experiments.upload]` schema as the configuration view reports it. */
+function uploadExperimentKeys(): ConfigKey[] {
+  return [
+    configKey({
+      path: 'experiments.upload.mode',
+      section: 'experiments.upload',
+      kind: 'enum',
+      values: ['baseline', 'inject', 'amplify'],
+      default: 'baseline',
+      file_value: 'inject',
+      effective_value: 'inject',
+      source: 'file',
+      component: 'experiment',
+      hot_apply: true,
+      documentation: 'Mode selects the reporting model: baseline, inject, or amplify.',
+    }),
+    configKey({
+      path: 'experiments.upload.rate',
+      section: 'experiments.upload',
+      kind: 'byte_rate',
+      default: '',
+      file_value: '1MiB/s',
+      effective_value: '1MiB/s',
+      source: 'file',
+      component: 'experiment',
+      hot_apply: true,
+      documentation: 'Rate is the average synthetic growth of the reported upload in inject mode.',
+    }),
+    configKey({
+      path: 'experiments.upload.multiplier',
+      section: 'experiments.upload',
+      kind: 'ratio',
+      default: '',
+      file_value: '2.5',
+      effective_value: '2.5',
+      source: 'file',
+      component: 'experiment',
+      hot_apply: true,
+      documentation: 'Multiplier grows the reported upload in amplify mode.',
+    }),
+    configKey({
+      path: 'experiments.upload.jitter',
+      section: 'experiments.upload',
+      kind: 'percent',
+      default: '20',
+      file_value: '20',
+      effective_value: '20',
+      source: 'default',
+      component: 'experiment',
+      hot_apply: true,
+      documentation: 'Jitter is the per-announce deviation in percent.',
+    }),
+    configKey({
+      path: 'experiments.upload.cap',
+      section: 'experiments.upload',
+      kind: 'byte_quantity',
+      default: '',
+      file_value: '8MiB',
+      effective_value: '8MiB',
+      source: 'file',
+      component: 'experiment',
+      hot_apply: true,
+      documentation: 'Cap is the per-torrent ceiling on the cumulative reported upload.',
+    }),
+    configKey({
+      path: 'experiments.upload.seed',
+      section: 'experiments.upload',
+      kind: 'int',
+      default: '0',
+      file_value: '42',
+      effective_value: '42',
+      source: 'file',
+      component: 'experiment',
+      documentation: 'Seed fixes the random jitter sequence for reproducible runs.',
+    }),
+    configKey({
+      path: 'experiments.upload.announce_log',
+      section: 'experiments.upload',
+      default: '',
+      file_value: '/var/log/torrentfs/announce.jsonl',
+      effective_value: '/var/log/torrentfs/announce.jsonl',
+      source: 'file',
+      component: 'experiment',
+      documentation: 'AnnounceLog is the JSON Lines file that receives one record per announce.',
+    }),
+    configKey({
+      path: 'experiments.upload.peer_sample_interval',
+      section: 'experiments.upload',
+      kind: 'duration',
+      default: '',
+      file_value: '10s',
+      effective_value: '10s',
+      source: 'file',
+      component: 'experiment',
+      documentation: 'PeerSampleInterval is how often peer activity is sampled.',
+    }),
+  ];
+}
+
 function configView(overrides: Partial<ConfigView> = {}): ConfigView {
   return {
     config_file: '/etc/torrentfs/torrentfs.toml',
@@ -137,7 +236,7 @@ function authValue(api: ApiClient): AuthContextValue {
   };
 }
 
-function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = configView()) {
+function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = configView(), path = '/config') {
   const api = new ApiClient();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   vi.stubGlobal('fetch', fetchMock);
@@ -145,7 +244,7 @@ function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = conf
     <QueryClientProvider client={queryClient}>
       <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={authValue(api)}>
-          <MemoryRouter initialEntries={['/config']}>
+          <MemoryRouter initialEntries={[path]}>
             <ConfigPage />
           </MemoryRouter>
         </AuthContext.Provider>
@@ -223,6 +322,109 @@ describe('ConfigPage', () => {
     expect(screen.getByRole('textbox', { name: 'log.level' })).toBeDisabled();
     expect(screen.queryByRole('textbox', { name: 'password' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+  });
+
+  it('groups the upload experiment keys under an experiments category with a deep-link anchor', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'experiments.upload.mode' });
+    const category = screen.getByTestId('config-category-experiments');
+    expect(category).toHaveAttribute('id', 'experiments');
+    expect(within(category).getByText('实验')).toBeInTheDocument();
+    expect(within(category).getByText(/上传统计实验常驻运行/)).toBeInTheDocument();
+    expect(within(category).getByRole('heading', { name: '上传实验' })).toBeInTheDocument();
+    expect(within(category).getByRole('article', { name: 'experiments.upload.mode' })).toBeInTheDocument();
+  });
+
+  it('scrolls the experiments category into view when opened through its anchor', async () => {
+    const originalScrollIntoView = (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+    try {
+      const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+      renderPage(fetchMock, configView(), '/config#experiments');
+
+      const category = await screen.findByTestId('config-category-experiments');
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+      expect(scrollIntoView.mock.instances.at(-1)).toBe(category);
+    } finally {
+      if (originalScrollIntoView === undefined) {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      } else {
+        Object.defineProperty(Element.prototype, 'scrollIntoView', {
+          configurable: true,
+          writable: true,
+          value: originalScrollIntoView,
+        });
+      }
+    }
+  });
+
+  it('lists every upload experiment key and saves hot and restart-required edits', async () => {
+    const view = configView({ keys: uploadExperimentKeys() });
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: ['experiments.upload.mode', 'experiments.upload.rate'],
+          restart_required: ['experiments.upload.seed'],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(view));
+    });
+    renderPage(fetchMock, view);
+
+    await screen.findByRole('article', { name: 'experiments.upload.mode' });
+    const category = screen.getByTestId('config-category-experiments');
+    const paths = [
+      'experiments.upload.mode',
+      'experiments.upload.rate',
+      'experiments.upload.multiplier',
+      'experiments.upload.jitter',
+      'experiments.upload.cap',
+      'experiments.upload.seed',
+      'experiments.upload.announce_log',
+      'experiments.upload.peer_sample_interval',
+    ];
+    for (const path of paths) {
+      const article = within(category).getByRole('article', { name: path });
+      expect(article).toBeInTheDocument();
+      // Every experiment key is editable: the schema kind chooses the control.
+      const role = path === 'experiments.upload.mode' ? 'combobox' : 'textbox';
+      expect(within(article).getByRole(role, { name: path })).toBeEnabled();
+    }
+
+    const hot = ['mode', 'rate', 'multiplier', 'jitter', 'cap'];
+    for (const key of hot) {
+      expect(within(screen.getByRole('article', { name: `experiments.upload.${key}` })).getByText('立即生效')).toBeInTheDocument();
+    }
+    const restart = ['seed', 'announce_log', 'peer_sample_interval'];
+    for (const key of restart) {
+      expect(within(screen.getByRole('article', { name: `experiments.upload.${key}` })).getByText('重启生效')).toBeInTheDocument();
+    }
+
+    const experimentField = (path: string) => within(screen.getByRole('article', { name: path }));
+    fireEvent.change(experimentField('experiments.upload.mode').getByRole('combobox', { name: 'experiments.upload.mode' }), { target: { value: 'amplify' } });
+    fireEvent.change(experimentField('experiments.upload.rate').getByRole('textbox', { name: 'experiments.upload.rate' }), { target: { value: '2MiB/s' } });
+    fireEvent.change(experimentField('experiments.upload.seed').getByRole('textbox', { name: 'experiments.upload.seed' }), { target: { value: '7' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(put).toBeDefined();
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: {
+        'experiments.upload.mode': 'amplify',
+        'experiments.upload.rate': '2MiB/s',
+        'experiments.upload.seed': '7',
+      },
+    });
   });
 
   it('renders the upload rate section from the schema without a hand-written form', async () => {

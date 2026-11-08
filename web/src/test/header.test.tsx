@@ -192,7 +192,7 @@ describe('Header refresh control', () => {
     expect(window.location.pathname).toBe('/torrents/torrent-1');
   });
 
-  it('opens the lab settings page from the header flask link', async () => {
+  it('opens the experiments monitor from the header flask link', async () => {
     const torrent = makeTorrent();
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
