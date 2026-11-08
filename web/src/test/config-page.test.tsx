@@ -1,7 +1,7 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
@@ -236,39 +236,51 @@ function authValue(api: ApiClient): AuthContextValue {
   };
 }
 
-function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = configView(), path = '/config') {
+function renderPage(
+  fetchMock: ReturnType<typeof vi.fn>,
+  view: ConfigView = configView(),
+  path = '/config',
+  entries?: string[],
+  initialIndex?: number,
+) {
   const api = new ApiClient();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   vi.stubGlobal('fetch', fetchMock);
+  // The configuration page guards navigation through the data router blocker,
+  // so the tests render it through a data router like the application does.
+  const router = createMemoryRouter([{ path: '*', element: <ConfigPage /> }], {
+    initialEntries: entries ?? [path],
+    initialIndex,
+  });
   render(
     <QueryClientProvider client={queryClient}>
       <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={authValue(api)}>
-          <MemoryRouter initialEntries={[path]}>
-            <ConfigPage />
-          </MemoryRouter>
+          <RouterProvider router={router} />
         </AuthContext.Provider>
       </MantineProvider>
     </QueryClientProvider>,
   );
-  return view;
+  return { view, router };
 }
 
 function renderAppAt(fetchMock: ReturnType<typeof vi.fn>, path = '/config') {
   const api = new ApiClient();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   vi.stubGlobal('fetch', fetchMock);
+  const router = createMemoryRouter([{ path: '*', element: <App /> }], {
+    initialEntries: [path],
+  });
   render(
     <QueryClientProvider client={queryClient}>
       <MantineProvider theme={theme} defaultColorScheme="light">
         <AuthContext.Provider value={authValue(api)}>
-          <MemoryRouter initialEntries={[path]}>
-            <App />
-          </MemoryRouter>
+          <RouterProvider router={router} />
         </AuthContext.Provider>
       </MantineProvider>
     </QueryClientProvider>,
   );
+  return router;
 }
 
 function beforeUnloadEvent(): Event {
@@ -675,20 +687,7 @@ describe('ConfigPage', () => {
 
   it('is reachable from the application route and exposes a navigation entry', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
-    vi.stubGlobal('fetch', fetchMock);
-    const api = new ApiClient();
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-    render(
-      <QueryClientProvider client={queryClient}>
-        <MantineProvider theme={theme} defaultColorScheme="light">
-          <AuthContext.Provider value={authValue(api)}>
-            <MemoryRouter initialEntries={['/config']}>
-              <App />
-            </MemoryRouter>
-          </AuthContext.Provider>
-        </MantineProvider>
-      </QueryClientProvider>,
-    );
+    renderAppAt(fetchMock, '/config');
 
     await screen.findByRole('article', { name: 'log.level' });
     expect(screen.getByRole('link', { name: '配置' })).toHaveAttribute('href', '/config');
@@ -715,6 +714,103 @@ describe('ConfigPage change preview', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
     expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+  });
+});
+
+describe('ConfigPage client-side value checks', () => {
+  function unitView(): ConfigView {
+    return configView({
+      keys: [
+        configKey({
+          path: 'cache.capacity',
+          section: 'cache',
+          kind: 'byte_quantity',
+          default: '2GiB',
+          file_value: '2GiB',
+          effective_value: '2GiB',
+          source: 'file',
+          component: 'cache',
+        }),
+        configKey({
+          path: 'upload_rate.limit',
+          section: 'upload_rate',
+          kind: 'byte_rate',
+          default: '',
+          file_value: '1MiB/s',
+          effective_value: '1MiB/s',
+          source: 'file',
+          component: 'session',
+          hot_apply: true,
+        }),
+        configKey({
+          path: 'filesystem.read_timeout',
+          section: 'filesystem',
+          kind: 'duration',
+          default: '30s',
+          file_value: '30s',
+          effective_value: '30s',
+          source: 'file',
+          component: 'filesystem',
+        }),
+      ],
+    });
+  }
+
+  it('rejects a malformed byte quantity before the save request', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(unitView())));
+    renderPage(fetchMock, unitView());
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2QB' } });
+
+    const article = screen.getByRole('article', { name: 'cache.capacity' });
+    expect(within(article).getByRole('alert')).toHaveTextContent('仅支持 B、KB、MB');
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '3GiB' } });
+    expect(within(article).queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled();
+  });
+
+  it('rejects a rate without the byte unit and a duration with the wrong syntax', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(unitView())));
+    renderPage(fetchMock, unitView());
+
+    await screen.findByRole('article', { name: 'upload_rate.limit' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'upload_rate.limit' }), { target: { value: '1MiB' } });
+    expect(within(screen.getByRole('article', { name: 'upload_rate.limit' })).getByRole('alert'))
+      .toHaveTextContent('请输入带单位的速率');
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'filesystem.read_timeout' }), { target: { value: '45' } });
+    expect(within(screen.getByRole('article', { name: 'filesystem.read_timeout' })).getByRole('alert'))
+      .toHaveTextContent('请输入合法时长');
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'upload_rate.limit' }), { target: { value: '2MiB/s' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'filesystem.read_timeout' }), { target: { value: '1h30m' } });
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled();
+  });
+
+  it('accepts the Go duration syntax the configuration file accepts', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({ applied: [], restart_required: ['filesystem.read_timeout'], persisted: true }));
+      }
+      return Promise.resolve(jsonResponse(unitView()));
+    });
+    renderPage(fetchMock, unitView());
+
+    await screen.findByRole('article', { name: 'filesystem.read_timeout' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'filesystem.read_timeout' }), { target: { value: '1h30m' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: { 'filesystem.read_timeout': '1h30m' },
+    });
   });
 });
 
@@ -949,6 +1045,36 @@ describe('ConfigPage unsaved changes', () => {
     expect(screen.queryByRole('article', { name: 'cache.capacity' })).not.toBeInTheDocument();
   });
 
+  it('blocks the browser back/forward buttons while dirty', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+    const { router } = renderPage(
+      fetchMock,
+      configView(),
+      '/config?from=2',
+      ['/config', '/config?from=2'],
+      1,
+    );
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    // The history entry before the page is a browser-level navigation; the
+    // data router blocker catches it like a link click.
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('离开配置页面');
+    fireEvent.click(within(dialog).getByRole('button', { name: '留在此页' }));
+    await waitFor(() => expect(router.state.location.search).toBe('?from=2'));
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    const confirm = await screen.findByRole('dialog');
+    fireEvent.click(within(confirm).getByRole('button', { name: '放弃改动并离开' }));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
+  });
+
   it('clears the unsaved state and unload warning after a successful save', async () => {
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/v1/config' && init?.method === 'PUT') {
@@ -1085,6 +1211,78 @@ describe('ConfigPage external modification', () => {
       patch: { 'cache.capacity': '4GiB' },
     });
   });
+});
+
+describe('ConfigPage last save status', () => {
+  it('shows the most recent successful save from the view after a refresh', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({
+      last_save: {
+        at: '2026-11-08T12:00:00Z',
+        ok: true,
+        error: '',
+        keys: ['cache.capacity'],
+      },
+    }))));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    const status = screen.getByTestId('config-save-status');
+    expect(status).toHaveTextContent('最近一次保存成功');
+    expect(status).toHaveTextContent('cache.capacity');
+    expect(within(status).getByTestId('config-save-status-time')).not.toBeEmptyDOMElement();
+  });
+
+  it('shows the most recent failed save and its reason', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({
+      last_save: {
+        at: '2026-11-08T12:00:00Z',
+        ok: false,
+        error: 'config: cache.capacity: must be between 1 and the cache watermark safety limit',
+        keys: [],
+      },
+    }))));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    const status = screen.getByTestId('config-save-status');
+    expect(status).toHaveTextContent('最近一次保存失败');
+    expect(status).toHaveTextContent('must be between 1');
+    expect(within(status).getByTestId('config-save-status-time')).not.toBeEmptyDOMElement();
+  });
+});
+
+describe('ConfigPage automatic refresh', () => {
+  it('polls the view while the page is visible and surfaces an automatic reload', async () => {
+    let configGets = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url !== '/api/v1/config') {
+        throw new Error(`Unexpected request: ${url}`);
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1
+        ? configView()
+        : configView({
+          last_reload: {
+            at: '2026-11-08T12:00:00Z',
+            ok: true,
+            error: '',
+            keys: ['cache.capacity'],
+          },
+        })));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    expect(screen.getByTestId('config-reload-status')).toHaveTextContent('尚未检测到外部修改');
+
+    // The page polls on the same order as the file watcher; wait for the next
+    // tick rather than for a manual refresh.
+    await waitFor(
+      () => expect(screen.getByTestId('config-reload-status')).toHaveTextContent('最近一次自动重载成功'),
+      { timeout: 4000 },
+    );
+    expect(configGets).toBeGreaterThanOrEqual(2);
+  }, 8000);
 });
 
 describe('ConfigPage external reload status', () => {

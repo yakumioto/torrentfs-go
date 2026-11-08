@@ -12,9 +12,13 @@ export interface DangerousConfigKey {
 }
 
 /**
- * The configuration keys whose change needs a second confirmation. The list is
- * fixed here because the API view does not (yet) carry a danger marker; keep it
- * in sync with the keys named in the ticket.
+ * The configuration keys whose change needs a second confirmation.
+ *
+ * The list is fixed here because the API view does not carry a danger marker:
+ * danger is a presentation decision, not a schema value. The source is Story
+ * 33 of the configuration-page spec (#80) and the save-safety ticket (#89);
+ * `src/test/config-safety.test.ts` repeats that list independently, so a key
+ * added to or dropped from this table fails the test.
  */
 const DANGEROUS_CONFIG: Record<string, Omit<DangerousConfigKey, 'path'>> = {
   'http.listen_addr': {
