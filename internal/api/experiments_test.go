@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -41,7 +41,7 @@ func TestGetLabEnabled(t *testing.T) {
 	backend := &fakeBackend{labStatus: session.LabStatus{
 		Enabled: true,
 		Settings: session.LabSettings{
-			Mode:               lab.ModeInject,
+			Mode:               experiments.ModeInject,
 			RateBytesPerSecond: 2 << 20,
 			JitterFraction:     0.2,
 		},
@@ -132,7 +132,7 @@ func TestSetLabSettings(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
-	want := session.LabSettings{Mode: lab.ModeAmplify, Multiplier: 5, JitterFraction: 0.1}
+	want := session.LabSettings{Mode: experiments.ModeAmplify, Multiplier: 5, JitterFraction: 0.1}
 	if backend.setLabSettings != want {
 		t.Fatalf("stored settings = %+v, want %+v", backend.setLabSettings, want)
 	}

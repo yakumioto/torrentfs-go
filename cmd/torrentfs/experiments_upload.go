@@ -5,7 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -19,7 +19,7 @@ import (
 // This is research tooling for exercising anomaly detection on a tracker you
 // operate and must not be pointed at a third-party tracker.
 func labSessionOptions(cfg config.Config, logger *slog.Logger) ([]session.Option, error) {
-	settings, enabled, err := lab.SettingsFrom(cfg.Lab)
+	settings, enabled, err := experiments.SettingsFrom(cfg.Lab)
 	if err != nil {
 		return nil, fmt.Errorf("lab experiment: %w", err)
 	}

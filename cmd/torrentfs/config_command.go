@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 )
 
 const configUsageText = `torrentfs config works on the configuration alone.
@@ -139,7 +139,7 @@ func configurationNamesExperiment(err error) bool {
 // settings means. The configuration package cannot import it without a cycle,
 // so the command adds the check to the report.
 func checkExperiment(cfg config.Config) error {
-	if _, _, err := lab.SettingsFrom(cfg.Lab); err != nil {
+	if _, _, err := experiments.SettingsFrom(cfg.Lab); err != nil {
 		return fmt.Errorf("config: lab experiment: %w", err)
 	}
 	return nil
