@@ -363,6 +363,8 @@ describe('ConfigPage dangerous changes', () => {
     expect(dialog).toHaveTextContent('backend');
     expect(dialog).toHaveTextContent('输出形态变化');
     expect(dialog).toHaveTextContent(/挂载点/);
+    // Only the dangerous keys are listed; safe changes stay in the preview.
+    expect(within(dialog).queryByText('cache.capacity')).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
 
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
