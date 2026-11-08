@@ -466,7 +466,8 @@ export function ConfigPage() {
       }
     }
   }
-  const dirtyCount = Object.keys(patch).length;
+  const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
+  const dirtyCount = changes.length;
   const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
 
   const submit = () => {
@@ -581,6 +582,29 @@ export function ConfigPage() {
               )}
             </Group>
           </div>
+
+          {changes.length > 0 && (
+            <section className={`panel panel--padding ${styles.diff}`} data-testid="config-diff-preview" aria-label="改动预览">
+              <div className={styles.diffHeader}>
+                <div>
+                  <p className={styles.diffTitle}>改动预览</p>
+                  <p className={styles.diffHint}>
+                    保存后只写入以下 {changes.length} 项改动；旧值不会出现在配置文件中。
+                  </p>
+                </div>
+                <Badge variant="light" color="yellow">{changes.length} 项</Badge>
+              </div>
+              <ul className={styles.diffList}>
+                {changes.map((change) => (
+                  <li key={change.path} className={styles.diffItem}>
+                    <code className={styles.code}>{change.path}</code>
+                    <span className={styles.diffArrow} aria-hidden="true">→</span>
+                    <code className={styles.diffValue}>{change.value === '' ? '（空）' : change.value}</code>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {term !== '' && filtered.length === 0 && (
             <div className={`panel panel--padding ${styles.empty}`} role="status">

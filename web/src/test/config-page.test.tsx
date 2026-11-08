@@ -269,6 +269,29 @@ describe('ConfigPage', () => {
   });
 });
 
+describe('ConfigPage change preview', () => {
+  it('shows only the changed keys and their new values before saving', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    const preview = screen.getByTestId('config-diff-preview');
+    expect(within(preview).getByText('cache.capacity')).toBeInTheDocument();
+    expect(within(preview).getByText('1GiB')).toBeInTheDocument();
+    // Unchanged keys and the previous value are deliberately absent.
+    expect(within(preview).queryByText('2GiB')).not.toBeInTheDocument();
+    expect(within(preview).queryByText('backend')).not.toBeInTheDocument();
+    expect(within(preview).queryByText('baseline')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+  });
+});
+
 describe('ConfigPage save flow', () => {
   it('saves a sparse patch with the baseline and groups the applied and restart keys', async () => {
     const view = configView();
