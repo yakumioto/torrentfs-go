@@ -148,9 +148,9 @@ type Experiments struct {
 // UploadExperiment groups the settings of the upload statistics experiment.
 //
 // The experiment is always on. Its baseline mode reports the client's real
-// counters and records ground truth, so the experiment can be disabled only by
-// not using the build. It belongs to a tracker the operator runs: pointing a
-// rewriting mode at a third-party tracker misreports that tracker's
+// counters and records ground truth, so there is no configuration switch that
+// turns the experiment off. It belongs to a tracker the operator runs: pointing
+// a rewriting mode at a third-party tracker misreports that tracker's
 // statistics.
 //
 // The rules that relate one setting to another live in the experiment
@@ -173,13 +173,16 @@ type UploadExperiment struct {
 	// Cap is the per-torrent ceiling on the cumulative reported upload.
 	Cap OptionalByteQuantity `toml:"cap" component:"experiment" hotapply:"true"`
 	// Seed fixes the random jitter sequence for reproducible runs. Zero lets
-	// the process choose one.
+	// the process choose one. The seed is fixed at startup; a new value takes
+	// effect after a restart.
 	Seed int64 `toml:"seed" component:"experiment"`
 	// AnnounceLog is the JSON Lines file that receives one record per tracker
-	// announce. Empty disables it.
+	// announce. Empty disables it. The file is opened at startup; a new value
+	// takes effect after a restart.
 	AnnounceLog string `toml:"announce_log" component:"experiment"`
 	// PeerSampleInterval is how often peer activity is sampled into the
-	// announce log.
+	// announce log. It is read at startup; a new value takes effect after a
+	// restart.
 	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval" component:"experiment"`
 }
 

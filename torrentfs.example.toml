@@ -78,13 +78,16 @@ jitter = "20"
 # Cap is the per-torrent ceiling on the cumulative reported upload.
 cap = "0B"
 # Seed fixes the random jitter sequence for reproducible runs. Zero lets
-# the process choose one.
+# the process choose one. The seed is fixed at startup; a new value takes
+# effect after a restart.
 seed = 0
 # AnnounceLog is the JSON Lines file that receives one record per tracker
-# announce. Empty disables it.
+# announce. Empty disables it. The file is opened at startup; a new value
+# takes effect after a restart.
 announce_log = ""
 # PeerSampleInterval is how often peer activity is sampled into the
-# announce log.
+# announce log. It is read at startup; a new value takes effect after a
+# restart.
 peer_sample_interval = "0s"
 
 [filesystem]
