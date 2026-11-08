@@ -11,6 +11,11 @@ capacity = "1GiB"
 # service. The default binds loopback only.
 listen_addr = "127.0.0.1:9000"
 
+[http.auth]
+# TokenTTL is the inactivity window of a login token. A valid request
+# slides the window; the tokens live in memory and die with the process.
+token_ttl = "45m0s"
+
 [log]
 # Level is the minimum level of a log record: debug, info, warn, or
 # error. Debug is disabled by default.

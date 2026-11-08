@@ -318,6 +318,9 @@ capacity = "1GiB"
 [http]
 listen_addr = "127.0.0.1:9000"
 
+[http.auth]
+token_ttl = "45m"
+
 [log]
 level = "info"
 format = "text"
