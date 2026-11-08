@@ -1,6 +1,7 @@
 package experiments
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 // TestSettingsFromDisabled covers the contract that an unconfigured
 // experiment is off and changes nothing.
 func TestSettingsFromDisabled(t *testing.T) {
-	settings, enabled, err := SettingsFrom(config.Lab{})
+	settings, enabled, err := SettingsFrom(config.UploadExperiment{})
 	if err != nil {
 		t.Fatalf("SettingsFrom: %v", err)
 	}
@@ -27,12 +28,12 @@ func TestSettingsFromDisabled(t *testing.T) {
 func TestSettingsFromInfersMode(t *testing.T) {
 	cases := []struct {
 		name string
-		cfg  config.Lab
+		cfg  config.UploadExperiment
 		want Mode
 	}{
-		{name: "rate implies inject", cfg: config.Lab{UploadRate: config.ByteRate(2 << 20)}, want: ModeInject},
-		{name: "multiplier implies amplify", cfg: config.Lab{UploadMultiplier: config.Ratio(5)}, want: ModeAmplify},
-		{name: "log implies baseline", cfg: config.Lab{AnnounceLog: "announces.jsonl"}, want: ModeBaseline},
+		{name: "rate implies inject", cfg: config.UploadExperiment{Rate: config.ByteRate(2 << 20)}, want: ModeInject},
+		{name: "multiplier implies amplify", cfg: config.UploadExperiment{Multiplier: config.Ratio(5)}, want: ModeAmplify},
+		{name: "log implies baseline", cfg: config.UploadExperiment{AnnounceLog: "announces.jsonl"}, want: ModeBaseline},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,12 +54,12 @@ func TestSettingsFromInfersMode(t *testing.T) {
 // TestSettingsFromFullConfiguration covers the contract that every configured
 // value reaches the settings.
 func TestSettingsFromFullConfiguration(t *testing.T) {
-	settings, enabled, err := SettingsFrom(config.Lab{
-		UploadMode:         "inject",
-		UploadRate:         config.ByteRate(2 << 20),
-		UploadJitter:       config.Percent(25),
-		UploadCap:          config.OptionalByteQuantity(3 << 40),
-		UploadSeed:         42,
+	settings, enabled, err := SettingsFrom(config.UploadExperiment{
+		Mode:               "inject",
+		Rate:               config.ByteRate(2 << 20),
+		Jitter:             config.Percent(25),
+		Cap:                config.OptionalByteQuantity(3 << 40),
+		Seed:               42,
 		AnnounceLog:        "/tmp/announces.jsonl",
 		PeerSampleInterval: config.OptionalDuration(2 * time.Second),
 	})
@@ -94,7 +95,7 @@ func TestSettingsFromFullConfiguration(t *testing.T) {
 // TestSettingsFromDefaults covers the contract that the unset knobs fall back
 // to the defaults of the experiment.
 func TestSettingsFromDefaults(t *testing.T) {
-	settings, enabled, err := SettingsFrom(config.Lab{UploadRate: config.ByteRate(1 << 20)})
+	settings, enabled, err := SettingsFrom(config.UploadExperiment{Rate: config.ByteRate(1 << 20)})
 	if err != nil {
 		t.Fatalf("SettingsFrom: %v", err)
 	}
@@ -120,21 +121,21 @@ func TestSettingsFromDefaults(t *testing.T) {
 // counters.
 func TestSettingsFromRejectsInvalidConfiguration(t *testing.T) {
 	second := config.OptionalDuration(time.Second)
-	cases := map[string]config.Lab{
-		"unknown mode":                {UploadMode: "turbo"},
-		"inject without rate":         {UploadMode: "inject"},
-		"amplify without factor":      {UploadMode: "amplify"},
-		"baseline with rate":          {UploadMode: "baseline", UploadRate: config.ByteRate(1 << 20)},
-		"baseline with multiplier":    {UploadMode: "baseline", UploadMultiplier: config.Ratio(2)},
-		"inject with multiplier":      {UploadMode: "inject", UploadRate: config.ByteRate(1 << 20), UploadMultiplier: config.Ratio(2)},
-		"amplify with rate":           {UploadMode: "amplify", UploadMultiplier: config.Ratio(2), UploadRate: config.ByteRate(1 << 20)},
-		"amplify with multiplier one": {UploadMode: "amplify", UploadMultiplier: config.Ratio(1)},
-		"jitter without experiment":   {UploadJitter: config.Percent(10)},
-		"cap without experiment":      {UploadCap: config.OptionalByteQuantity(1 << 40)},
-		"seed without experiment":     {UploadSeed: 7},
+	cases := map[string]config.UploadExperiment{
+		"unknown mode":                {Mode: "turbo"},
+		"inject without rate":         {Mode: "inject"},
+		"amplify without factor":      {Mode: "amplify"},
+		"baseline with rate":          {Mode: "baseline", Rate: config.ByteRate(1 << 20)},
+		"baseline with multiplier":    {Mode: "baseline", Multiplier: config.Ratio(2)},
+		"inject with multiplier":      {Mode: "inject", Rate: config.ByteRate(1 << 20), Multiplier: config.Ratio(2)},
+		"amplify with rate":           {Mode: "amplify", Multiplier: config.Ratio(2), Rate: config.ByteRate(1 << 20)},
+		"amplify with multiplier one": {Mode: "amplify", Multiplier: config.Ratio(1)},
+		"jitter without experiment":   {Jitter: config.Percent(10)},
+		"cap without experiment":      {Cap: config.OptionalByteQuantity(1 << 40)},
+		"seed without experiment":     {Seed: 7},
 		"interval without mode":       {PeerSampleInterval: second},
-		"interval without log":        {UploadMode: "baseline", PeerSampleInterval: second},
-		"jitter above one hundred":    {UploadRate: config.ByteRate(1 << 20), UploadJitter: config.Percent(101)},
+		"interval without log":        {Mode: "baseline", PeerSampleInterval: second},
+		"jitter above one hundred":    {Rate: config.ByteRate(1 << 20), Jitter: config.Percent(101)},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -191,6 +192,42 @@ func TestNormalizeRuntimeSettings(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("NormalizeRuntimeSettings(%+v) = %+v, want %+v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSettingsFromNamesTheNewConfigurationKeys covers the contract that a
+// rejection names the configuration keys the user now writes, so the message
+// matches the documentation.
+func TestSettingsFromNamesTheNewConfigurationKeys(t *testing.T) {
+	cases := map[string]struct {
+		cfg  config.UploadExperiment
+		want []string
+	}{
+		"unknown mode": {
+			cfg:  config.UploadExperiment{Mode: "turbo"},
+			want: []string{"experiments.upload.mode"},
+		},
+		"jitter without mode": {
+			cfg:  config.UploadExperiment{Jitter: config.Percent(10)},
+			want: []string{"experiments.upload.jitter"},
+		},
+		"interval without log": {
+			cfg:  config.UploadExperiment{Mode: "baseline", PeerSampleInterval: config.OptionalDuration(time.Second)},
+			want: []string{"experiments.upload.peer_sample_interval", "experiments.upload.announce_log"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := SettingsFrom(tc.cfg)
+			if err == nil {
+				t.Fatal("SettingsFrom accepted an invalid configuration")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("SettingsFrom error %q does not name %q", err, want)
+				}
 			}
 		})
 	}

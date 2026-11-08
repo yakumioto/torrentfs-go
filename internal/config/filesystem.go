@@ -38,9 +38,9 @@ const (
 	// smbSTRMPath is the configuration key that switches the STRM share of
 	// the SMB output on or off.
 	smbSTRMPath = "smb.strm"
-	// labUploadModePath is the configuration key that selects the reporting
-	// model of the upload statistics experiment.
-	labUploadModePath = "lab.upload_mode"
+	// experimentsUploadModePath is the configuration key that selects the
+	// reporting model of the upload statistics experiment.
+	experimentsUploadModePath = "experiments.upload.mode"
 )
 
 // Filesystem groups the settings that describe the file output as a whole.

@@ -61,7 +61,7 @@ func TestConfigCheckReportsEveryProblem(t *testing.T) {
 // another, so a configuration that names the experiment wrongly is not
 // usable.
 func TestConfigCheckCoversTheExperiment(t *testing.T) {
-	body := "[lab]\nupload_mode = \"baseline\"\nupload_rate = \"1MiB/s\"\n"
+	body := "[experiments.upload]\nmode = \"baseline\"\nrate = \"1MiB/s\"\n"
 	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
@@ -69,7 +69,7 @@ func TestConfigCheckCoversTheExperiment(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("the check wrote a report to standard output: %s", stdout)
 	}
-	if !strings.Contains(stderr, "upload_rate") {
+	if !strings.Contains(stderr, "experiments.upload.rate") {
 		t.Errorf("the report does not name the experiment setting: %s", stderr)
 	}
 }
@@ -95,7 +95,7 @@ func TestConfigCheckRejectsAConfigurationThatEnablesNoOutput(t *testing.T) {
 // that one run names every problem: the experiment rules are reported with
 // the configuration values, not instead of them.
 func TestConfigCheckReportsTheExperimentWithTheValueErrors(t *testing.T) {
-	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[lab]\nupload_mode = \"inject\"\n"
+	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[experiments.upload]\nmode = \"inject\"\n"
 	code, stdout, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
@@ -103,7 +103,7 @@ func TestConfigCheckReportsTheExperimentWithTheValueErrors(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("the check wrote a report to standard output: %s", stdout)
 	}
-	for _, want := range []string{"cache.capacity", "upload_rate"} {
+	for _, want := range []string{"cache.capacity", "experiments.upload.rate"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the report does not name %q: %s", want, stderr)
 		}
@@ -130,18 +130,18 @@ func TestConfigCheckReportsTheOutputRuleWithTheValueErrors(t *testing.T) {
 // not restated by the cross-field rules of the experiment.
 func TestConfigCheckReportsARejectedExperimentValueOnce(t *testing.T) {
 	for name, body := range map[string]string{
-		"unknown mode":        "[lab]\nupload_mode = \"turbo\"\n",
-		"jitter out of range": "[lab]\nupload_jitter = \"101\"\n",
+		"unknown mode":        "[experiments.upload]\nmode = \"turbo\"\n",
+		"jitter out of range": "[experiments.upload]\njitter = \"101\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, _, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 			if code != 2 {
 				t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 			}
-			if strings.Contains(stderr, "lab experiment") {
+			if strings.Contains(stderr, "experiments.upload experiment") {
 				t.Errorf("the report restates the problem as an experiment rule: %s", stderr)
 			}
-			if !strings.Contains(stderr, "lab.") {
+			if !strings.Contains(stderr, "experiments.upload.") {
 				t.Errorf("the report does not name the experiment setting: %s", stderr)
 			}
 		})
@@ -152,12 +152,12 @@ func TestConfigCheckReportsARejectedExperimentValueOnce(t *testing.T) {
 // start reports every problem of a configuration that cannot run, not just
 // the first one.
 func TestRunReportsTheExperimentWithTheValueErrors(t *testing.T) {
-	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[lab]\nupload_mode = \"inject\"\n"
+	body := "backend = \"none\"\n[cache]\ncapacity = \"0B\"\n[experiments.upload]\nmode = \"inject\"\n"
 	code, _, stderr := runCLICapture([]string{"-config", writeConfigFile(t, body), t.TempDir()})
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	for _, want := range []string{"cache.capacity", "upload_rate"} {
+	for _, want := range []string{"cache.capacity", "experiments.upload.rate"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the report does not name %q: %s", want, stderr)
 		}
@@ -167,13 +167,13 @@ func TestRunReportsTheExperimentWithTheValueErrors(t *testing.T) {
 // TestConfigCheckReportsTheOutputRuleWithTheExperiment covers the contract
 // that the process rule and the experiment rules arrive in one report.
 func TestConfigCheckReportsTheOutputRuleWithTheExperiment(t *testing.T) {
-	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n[lab]\nupload_mode = \"inject\"\n"
+	body := "backend = \"none\"\n[http]\nlisten_addr = \"\"\n[experiments.upload]\nmode = \"inject\"\n"
 
 	code, _, stderr := runCLICapture([]string{"config", "check", "--config", writeConfigFile(t, body)})
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; stderr: %s", code, stderr)
 	}
-	for _, want := range []string{"at least one output must be enabled", "upload_rate"} {
+	for _, want := range []string{"at least one output must be enabled", "experiments.upload.rate"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the report does not name %q: %s", want, stderr)
 		}
