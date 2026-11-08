@@ -70,11 +70,6 @@ type fakeBackend struct {
 	runtimeStats session.RuntimeStatsView
 	ops          map[string]session.Operation
 
-	uploadRateSettings       session.UploadRateSettings
-	setUploadRateSettings    session.UploadRateSettings
-	setUploadRateSettingsErr error
-	uploadRateSettingsCalls  int
-
 	labStatus         session.LabStatus
 	setLabSettings    session.LabSettings
 	setLabSettingsErr error
@@ -198,24 +193,6 @@ func (f *fakeBackend) RuntimeStats() session.RuntimeStatsView {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.runtimeStats
-}
-
-func (f *fakeBackend) UploadRateSettings() session.UploadRateSettings {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.uploadRateSettings
-}
-
-func (f *fakeBackend) SetUploadRateSettings(_ context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.uploadRateSettingsCalls++
-	f.setUploadRateSettings = settings
-	if f.setUploadRateSettingsErr != nil {
-		return session.UploadRateSettings{}, f.setUploadRateSettingsErr
-	}
-	f.uploadRateSettings = settings
-	return settings, nil
 }
 
 func (f *fakeBackend) LabStatus() session.LabStatus {

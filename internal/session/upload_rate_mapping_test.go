@@ -10,6 +10,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"golang.org/x/time/rate"
 
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -18,7 +19,9 @@ func uploadRateTorrentsDir(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "torrents")
 }
 
-// settingsFileExists reports whether the settings sidecar was published.
+// settingsFileExists reports whether the retired settings sidecar exists. The
+// sidecar stopped being written when the upload limit moved into the
+// configuration schema; only the startup migration still reads it.
 func settingsFileExists(t *testing.T, torrentsDir string) bool {
 	t.Helper()
 	_, err := os.Stat(filepath.Join(torrentsDir, ".metadata", "upload_rate.json"))
@@ -26,16 +29,16 @@ func settingsFileExists(t *testing.T, torrentsDir string) bool {
 		return false
 	}
 	if err != nil {
-		t.Fatalf("stat settings sidecar: %v", err)
+		t.Fatalf("stat retired settings sidecar: %v", err)
 	}
 	return true
 }
 
 // TestUploadRateUnconfiguredInstallsPrivateLimiter pins the compatibility
-// contract of the settings-driven design: every session allocates its own
-// limiter (so the UI can enable limiting later without replacing the pointer the
-// client already holds), the client's shared default limiter is never adopted,
-// and no sidecar is created before the first save.
+// contract of the runtime model: every session allocates its own limiter (so a
+// hot apply can enable limiting later without replacing the pointer the client
+// already holds), the client's shared default limiter is never adopted, and no
+// retired sidecar is created.
 func TestUploadRateUnconfiguredInstallsPrivateLimiter(t *testing.T) {
 	torrentsDir := uploadRateTorrentsDir(t)
 	var observed *rate.Limiter
@@ -60,7 +63,29 @@ func TestUploadRateUnconfiguredInstallsPrivateLimiter(t *testing.T) {
 		t.Fatalf("unconfigured settings = %+v, want disabled", got)
 	}
 	if settingsFileExists(t, torrentsDir) {
-		t.Fatal("an unconfigured session created a settings sidecar")
+		t.Fatal("an unconfigured session created the retired settings sidecar")
+	}
+}
+
+// TestUploadRateStartsFromTheConfiguration covers the startup mapping: the
+// configuration is the source of the running limit, not a retired sidecar.
+func TestUploadRateStartsFromTheConfiguration(t *testing.T) {
+	cfg := testConfig()
+	cfg.UploadRate = config.UploadRate{
+		Limit:         config.ByteRate(1 << 20),
+		ScheduleStart: "00:00",
+		ScheduleEnd:   "23:59",
+	}
+	torrentsDir := uploadRateTorrentsDir(t)
+	sess := newLoopbackSession(t, cfg, torrentsDir)
+
+	got := sess.UploadRateSettings()
+	if got.RateLimitBytesPerSecond != 1<<20 || got.Schedule == nil ||
+		got.Schedule.Start != "00:00" || got.Schedule.End != "23:59" {
+		t.Fatalf("settings = %+v, want the configured window", got)
+	}
+	if settingsFileExists(t, torrentsDir) {
+		t.Fatal("startup created the retired settings sidecar")
 	}
 }
 
@@ -90,7 +115,8 @@ func TestUploadRateSessionsDoNotShareLimiter(t *testing.T) {
 }
 
 // TestUploadRateSettingsApplyImmediately covers the three documented shapes
-// through the real settings path.
+// through the runtime settings path and proves the call no longer persists a
+// sidecar: the configuration file owns persistence.
 func TestUploadRateSettingsApplyImmediately(t *testing.T) {
 	ctx := context.Background()
 	torrentsDir := uploadRateTorrentsDir(t)
@@ -133,10 +159,64 @@ func TestUploadRateSettingsApplyImmediately(t *testing.T) {
 			if !sameSettings(stored, tt.settings) {
 				t.Fatalf("stored settings = %+v, want %+v", stored, tt.settings)
 			}
-			if !settingsFileExists(t, torrentsDir) {
-				t.Fatal("save did not publish the settings sidecar")
+			if settingsFileExists(t, torrentsDir) {
+				t.Fatal("SetUploadRateSettings wrote the retired settings sidecar")
 			}
 		})
+	}
+}
+
+// TestUploadRateApplierAppliesImmediately covers the configuration hot apply
+// seam: the whole validated configuration is mapped onto the runtime settings
+// and the limiter follows at once.
+func TestUploadRateApplierAppliesImmediately(t *testing.T) {
+	sess := newLoopbackSession(t, testConfig(), uploadRateTorrentsDir(t))
+	applier := session.NewUploadRateApplier(sess)
+
+	cfg := testConfig()
+	cfg.UploadRate = config.UploadRate{
+		Limit:         config.ByteRate(2 << 20),
+		ScheduleStart: "00:00",
+		ScheduleEnd:   "23:59",
+	}
+	if err := applier.Apply(cfg); err != nil {
+		t.Fatalf("UploadRateApplier.Apply: %v", err)
+	}
+	got := sess.UploadRateSettings()
+	if got.RateLimitBytesPerSecond != 2<<20 || got.Schedule == nil ||
+		got.Schedule.Start != "00:00" || got.Schedule.End != "23:59" {
+		t.Fatalf("settings after apply = %+v, want the configured window", got)
+	}
+	if limit, _ := sess.UploadRateLimitForTest(); limit != rate.Limit(2<<20) {
+		t.Fatalf("limit after apply = %v, want %d", limit, 2<<20)
+	}
+
+	cfg.UploadRate = config.UploadRate{}
+	if err := applier.Apply(cfg); err != nil {
+		t.Fatalf("UploadRateApplier.Apply disabled: %v", err)
+	}
+	if limit, _ := sess.UploadRateLimitForTest(); limit != rate.Inf {
+		t.Fatalf("limit after disabling = %v, want rate.Inf", limit)
+	}
+}
+
+// TestUploadRateConfigKeysMatchTheApplier covers the keys the configuration
+// controller registers: the applier owns every upload-rate key, and no more.
+func TestUploadRateConfigKeysMatchTheApplier(t *testing.T) {
+	want := []string{
+		"upload_rate.limit",
+		"upload_rate.schedule_start",
+		"upload_rate.schedule_end",
+	}
+	sess := newLoopbackSession(t, testConfig(), uploadRateTorrentsDir(t))
+	got := session.NewUploadRateApplier(sess).Keys()
+	if len(got) != len(want) {
+		t.Fatalf("UploadRateApplier.Keys = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("UploadRateApplier.Keys = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -155,11 +235,10 @@ func sameSettings(a, b session.UploadRateSettings) bool {
 }
 
 // TestUploadRateSettingsRejectInvalid covers the validation contract at the
-// session boundary, including that a rejected save changes nothing.
+// session boundary, including that a rejected update changes nothing.
 func TestUploadRateSettingsRejectInvalid(t *testing.T) {
 	ctx := context.Background()
-	torrentsDir := uploadRateTorrentsDir(t)
-	sess := newLoopbackSession(t, testConfig(), torrentsDir)
+	sess := newLoopbackSession(t, testConfig(), uploadRateTorrentsDir(t))
 	if _, err := sess.SetUploadRateSettings(ctx, session.UploadRateSettings{
 		RateLimitBytesPerSecond: 4096,
 	}); err != nil {
@@ -205,53 +284,11 @@ func TestUploadRateSettingsRejectInvalid(t *testing.T) {
 				t.Fatalf("SetUploadRateSettings error = %v, want ErrInvalidUploadRateSettings", err)
 			}
 			if limit, _ := sess.UploadRateLimitForTest(); limit != rate.Limit(4096) {
-				t.Fatalf("limit after a rejected save = %v, want the previous 4096", limit)
+				t.Fatalf("limit after a rejected update = %v, want the previous 4096", limit)
 			}
 			if got := sess.UploadRateSettings(); got.RateLimitBytesPerSecond != 4096 {
-				t.Fatalf("stored settings after a rejected save = %+v, want the previous value", got)
+				t.Fatalf("stored settings after a rejected update = %+v, want the previous value", got)
 			}
 		})
-	}
-}
-
-// TestUploadRateSettingsSurviveRestart proves the sidecar is loaded before the
-// client exists: a fresh session on the same torrents directory restores the
-// saved limit without any API call.
-func TestUploadRateSettingsSurviveRestart(t *testing.T) {
-	ctx := context.Background()
-	torrentsDir := uploadRateTorrentsDir(t)
-
-	first := newLivingSession(t, testConfig(), torrentsDir, nil)
-	if _, err := first.SetUploadRateSettings(ctx, session.UploadRateSettings{
-		RateLimitBytesPerSecond: 32768,
-		Schedule:                &session.UploadRateSchedule{Start: "00:00", End: "23:59"},
-	}); err != nil {
-		t.Fatalf("SetUploadRateSettings: %v", err)
-	}
-	closeSession(t, first)
-
-	restarted := newLivingSession(t, testConfig(), torrentsDir, nil)
-	defer closeSession(t, restarted)
-
-	restored := restarted.UploadRateSettings()
-	if restored.RateLimitBytesPerSecond != 32768 || restored.Schedule == nil ||
-		restored.Schedule.Start != "00:00" || restored.Schedule.End != "23:59" {
-		t.Fatalf("restored settings = %+v, want the saved window", restored)
-	}
-	if limit, _ := restarted.UploadRateLimitForTest(); limit != rate.Limit(32768) {
-		t.Fatalf("restored limit = %v, want 32768", limit)
-	}
-}
-
-// TestUploadRateSettingsDefaultToUnlimitedWithoutSidecar pins the upgrade path.
-func TestUploadRateSettingsDefaultToUnlimitedWithoutSidecar(t *testing.T) {
-	torrentsDir := uploadRateTorrentsDir(t)
-	sess := newLoopbackSession(t, testConfig(), torrentsDir)
-
-	if got := sess.UploadRateSettings(); got.RateLimitBytesPerSecond != 0 || got.Schedule != nil {
-		t.Fatalf("settings without a sidecar = %+v, want disabled", got)
-	}
-	if limit, _ := sess.UploadRateLimitForTest(); limit != rate.Inf {
-		t.Fatalf("limit without a sidecar = %v, want rate.Inf", limit)
 	}
 }
