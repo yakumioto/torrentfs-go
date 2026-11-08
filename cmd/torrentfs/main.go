@@ -200,30 +200,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sequence := shutdownSequence{logger: logger, sess: sess}
+	// The configuration controller is built whether or not HTTP is enabled:
+	// the poll reloads a configuration file in a headless deployment too. The
+	// log level and session appliers are independent of the server, so they are
+	// registered before api.New; an applier that needs a server handle is
+	// registered after New returns, which keeps the construction order one way.
+	configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
+	registerAppliers := func(appliers ...configctl.Applier) error {
+		for _, applier := range appliers {
+			if err := configController.RegisterApplier(applier); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := registerAppliers(
+		logging.NewLevelApplier(logLevelVar),
+		session.NewConfigApplier(sess),
+	); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+		sequence.run()
+		return 1
+	}
 	var apiServer *api.Server
 	if httpEnabled {
-		// The controller is built before the HTTP server, because the server
-		// needs it for its routes. The log level and session appliers are
-		// independent of the server; an applier that needs a server handle is
-		// registered after New returns, which keeps the construction order one
-		// way.
-		configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
-		registerAppliers := func(appliers ...configctl.Applier) error {
-			for _, applier := range appliers {
-				if err := configController.RegisterApplier(applier); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if err := registerAppliers(
-			logging.NewLevelApplier(logLevelVar),
-			session.NewConfigApplier(sess),
-		); err != nil {
-			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
-			sequence.run()
-			return 1
-		}
 		apiServer, err = api.New(cfg, sess,
 			api.WithLogger(logger),
 			api.WithConfigViewer(configController),
@@ -297,12 +297,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 		go func() { serveErr <- unexpectedServeResult("http", apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr)) }()
 	}
 
+	// A deployment that started without a configuration file has nothing to
+	// watch. The poll runs beside the servers, and is stopped before the
+	// shutdown sequence so a reload cannot race a closing component.
+	var stopWatch context.CancelFunc
+	var watchDone chan struct{}
+	if configFile != "" {
+		watchCtx, cancelWatch := context.WithCancel(rootCtx)
+		stopWatch = cancelWatch
+		watchDone = make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			configController.Watch(watchCtx)
+		}()
+	}
+
 	var serveFailure error
 	select {
 	case <-signals:
 	case serveFailure = <-serveErr:
 	}
 
+	if stopWatch != nil {
+		stopWatch()
+		<-watchDone
+	}
 	shutdown := sequence.run()
 	cancel()
 

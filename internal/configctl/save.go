@@ -297,6 +297,13 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	// so the view never reports an effect that did not happen.
 	applied, restartRequired := c.applyLocked(effective, changed)
 	c.cfg, c.sources = runningConfiguration(c.cfg, c.sources, effective, effectiveSources, applied)
+	// The controller wrote these bytes itself: adopt them as the file the
+	// view shows and as the baseline the external poll compares against, so
+	// the next poll neither reloads the save nor logs it again.
+	c.fileConfig = candidate
+	c.baseline = configurationBaseline(document)
+	c.observed = c.baseline
+	c.fileError = ""
 
 	result := SaveResult{Applied: applied, RestartRequired: restartRequired, Persisted: writeErr == nil}
 	now := time.Now().UTC()

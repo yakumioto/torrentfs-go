@@ -381,3 +381,12 @@
   font-size: 0.8rem;
   line-height: 1.6;
 }
+
+.reload {
+  margin-bottom: 1rem;
+}
+
+.reloadText {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
