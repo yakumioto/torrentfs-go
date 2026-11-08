@@ -69,6 +69,8 @@ docker run --detach --name torrentfs \
 
 HTTP/SMB 只向本机发布，peer 端口发布 TCP/UDP 以接受入站连接。LAN 播放请改为绑定可信 LAN 地址并配置防火墙。也可使用仓库里的 [Compose 模板](docker-compose.yaml)，按注释填写镜像 tag 和密码后运行 `docker compose up -d`。
 
+镜像内 `/etc/torrentfs/torrentfs.toml` 及其目录归运行用户（`1000:1000`）所有，因此配置页面可以把改动直接写回该文件；写回会在同目录创建临时文件并保留一份 `.bak`。Compose 模板用命名卷 `torrentfs-config` 持久化这个目录，容器重建后改动仍在，执行 `docker compose down -v` 可删除卷、回到镜像默认配置。若以自定义 TOML 启动，请把运行用户可写的文件或目录挂载到 `/etc/torrentfs`，否则配置页面会降级为只读并显示原因。
+
 ### 4. 添加任务并读取
 
 1. 打开 `http://127.0.0.1:8080/`，输入密码登录。
@@ -142,6 +144,7 @@ strm = "off"
 - 关键默认值：HTTP `127.0.0.1:8080`（认证默认关闭）、`backend=none`、SMB `0.0.0.0:1445`、cache `2GiB`、单次读取超时 `30s`。
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
 - **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
+- **配置页面写回需要可写配置文件**：进程必须对配置文件及其所在目录都有写权限，原子写回会在同目录创建临时文件并保留 `.bak`。镜像默认把 `/etc/torrentfs` 交给运行用户，Compose 模板用命名卷持久化；只读挂载、只读根文件系统，或卷属主与自定义 `PUID/PGID` 不一致时，页面降级为只读并显示原因（`file_not_writable`），保存不会写入，进程继续使用当前配置。环境变量覆盖项与口令 `password` 同样始终只读。
 - **未知变量会报错**：`TORRENTFS_` 前缀下拼错的名字在启动时会被点名，不会被静默忽略后按默认值启动。`TF_` 前缀是给测试开关、CI 冒烟与 Compose 插值用的，不属于配置命名空间。
 - **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
 - 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
