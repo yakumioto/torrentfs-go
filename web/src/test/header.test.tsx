@@ -120,7 +120,7 @@ describe('Header refresh control', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       listRequests += 1;
@@ -165,7 +165,7 @@ describe('Header refresh control', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       if (url.endsWith('/settings/upload-rate')) {
@@ -199,7 +199,7 @@ describe('Header refresh control', () => {
       if (url.endsWith('/status')) {
         return Promise.resolve(jsonResponse(status));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       if (url.endsWith('/torrent-1')) {
@@ -233,7 +233,7 @@ describe('Header refresh control', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       if (url.endsWith('/torrents')) {
@@ -246,7 +246,7 @@ describe('Header refresh control', () => {
     await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
 
     const link = screen.getByRole('link', { name: '上传实验设置' });
-    expect(link).toHaveAttribute('href', '/lab');
+    expect(link).toHaveAttribute('href', '/experiments');
     fireEvent.click(link);
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());

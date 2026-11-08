@@ -17,7 +17,7 @@ import (
 func TestGetLabDisabled(t *testing.T) {
 	backend := &fakeBackend{}
 	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/lab", nil))
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/experiments/upload", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
@@ -65,7 +65,7 @@ func TestGetLabEnabled(t *testing.T) {
 		},
 	}}
 	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/lab", nil))
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/experiments/upload", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
@@ -128,7 +128,7 @@ func TestSetLabSettings(t *testing.T) {
 	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
 	srv := newTestServer(t, backend, nil)
 	body := `{"mode":"amplify","multiplier":5,"jitter_percent":10}`
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(body)))
+	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +158,7 @@ func TestSetLabSettingsDefaults(t *testing.T) {
 	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
 	srv := newTestServer(t, backend, nil)
 	body := `{"mode":"baseline"}`
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(body)))
+	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
@@ -170,7 +170,7 @@ func TestSetLabSettingsDefaults(t *testing.T) {
 func TestSetLabSettingsRejectsMissingMode(t *testing.T) {
 	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
 	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(`{"rate_bytes_per_second":1024}`)))
+	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"rate_bytes_per_second":1024}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
 	}
@@ -198,7 +198,7 @@ func TestSetLabSettingsMapsSessionErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}, setLabSettingsErr: tc.err}
 			srv := newTestServer(t, backend, nil)
-			rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(`{"mode":"baseline"}`)))
+			rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"mode":"baseline"}`)))
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body %s", rec.Code, tc.wantStatus, rec.Body.String())
 			}
@@ -225,5 +225,23 @@ func assertLabFailureCode(t *testing.T, rec *httptest.ResponseRecorder, wantCode
 	}
 	if got.Error == "" {
 		t.Fatal("failure body has an empty error message")
+	}
+}
+
+// TestOldLabRoutesAreGone covers the contract that the monitor and settings
+// routes live under the new path only: a client still calling the removed
+// route learns that it no longer exists instead of reaching the experiment.
+func TestOldLabRoutesAreGone(t *testing.T) {
+	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
+	srv := newTestServer(t, backend, nil)
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/v1/lab", nil),
+		httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(`{"mode":"baseline"}`)),
+	} {
+		rec := do(t, srv, request)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want 404; body %s",
+				request.Method, request.URL.Path, rec.Code, rec.Body.String())
+		}
 	}
 }

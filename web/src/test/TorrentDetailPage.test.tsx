@@ -103,7 +103,7 @@ describe('TorrentDetailPage', () => {
         const snapshot = statusSnapshots[Math.min(statusIndex++, statusSnapshots.length - 1)];
         return Promise.resolve(jsonResponse(snapshot));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(detailTorrent));
@@ -171,7 +171,7 @@ describe('TorrentDetailPage', () => {
       if (url.endsWith('/status')) {
         return Promise.resolve(jsonResponse(status));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(torrent));
@@ -223,7 +223,7 @@ describe('TorrentDetailPage', () => {
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
@@ -253,7 +253,7 @@ describe('TorrentDetailPage', () => {
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
@@ -303,7 +303,7 @@ describe('TorrentDetailPage', () => {
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(enabledLab));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));

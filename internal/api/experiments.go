@@ -60,7 +60,7 @@ type labTotalsBody struct {
 	PendingRealUploadBytes          int64 `json:"pending_real_upload_bytes"`
 }
 
-// labBody is the GET /api/v1/lab response contract.
+// labBody is the GET /api/v1/experiments/upload response contract.
 type labBody struct {
 	Enabled                   bool             `json:"enabled"`
 	Settings                  *labSettingsBody `json:"settings"`
@@ -177,7 +177,7 @@ func (s *Server) writeLabSettingsError(w http.ResponseWriter, err error) {
 			"新设置已生效，但无法确认重启后仍能恢复")
 	case errors.Is(err, session.ErrLabDisabled):
 		writeLabSettingsFailure(w, http.StatusConflict, LabCodeDisabled, false,
-			"上传实验未启用，请设置 TORRENTFS_LAB_* 环境变量后重启")
+			"上传实验未启用，请设置 TORRENTFS_EXPERIMENTS_UPLOAD_* 环境变量后重启")
 	case errors.Is(err, session.ErrLabSettingsStorageUnavailable),
 		errors.Is(err, filesystem.ErrClosed),
 		errors.Is(err, context.Canceled),

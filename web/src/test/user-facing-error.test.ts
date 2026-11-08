@@ -44,7 +44,7 @@ describe('user-facing error mapping', () => {
 
   it('maps lab failures by stable code and never relays server text', () => {
     expect(userFacingLabError(new ApiError(400, 'internal detail', '', 'invalid_lab_settings'))).toContain('实验设置内容无效');
-    expect(userFacingLabError(new ApiError(409, 'disabled', '', 'lab_disabled'))).toContain('TORRENTFS_LAB_UPLOAD_MODE');
+    expect(userFacingLabError(new ApiError(409, 'disabled', '', 'lab_disabled'))).toContain('TORRENTFS_EXPERIMENTS_UPLOAD_MODE');
     expect(userFacingLabError(new ApiError(503, 'storage', '', 'lab_settings_storage_unavailable'))).toContain('.metadata 目录权限');
     expect(userFacingLabError(new ApiError(503, 'internal path /secret', '', 'new_lab_code'))).toBe('上传实验设置保存失败，请稍后重试。');
     expect(userFacingLabError('network down')).toBe('上传实验设置保存失败，请稍后重试。');

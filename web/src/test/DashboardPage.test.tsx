@@ -111,7 +111,7 @@ function renderDashboard(
     if (String(input).endsWith('/stats')) {
       return Promise.resolve(jsonResponse(statsBody, statsStatus));
     }
-    if (String(input).endsWith('/lab')) {
+    if (String(input).endsWith('/experiments/upload')) {
       return Promise.resolve(jsonResponse(labBody));
     }
     const response = listResponses[Math.min(listRequest++, listResponses.length - 1)] ?? [];
@@ -126,7 +126,7 @@ function renderDashboard(
             <Routes>
               <Route element={<AppLayout />}>
                 <Route path="/" element={<DashboardPage />} />
-                <Route path="/lab" element={<LabSettingsPage />} />
+                <Route path="/experiments" element={<LabSettingsPage />} />
               </Route>
             </Routes>
           </MemoryRouter>

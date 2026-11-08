@@ -185,14 +185,14 @@ strm = "off"
 | `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
 | `smb.listen_addr` | `TORRENTFS_SMB_LISTEN_ADDR` | `0.0.0.0:1445` | ListenAddr is the address the SMB service binds. |
 | `smb.strm` | `TORRENTFS_SMB_STRM` | `auto` | STRM switches the STRM share of the SMB output: auto, on, or off. |
-| `lab.upload_mode` | `TORRENTFS_LAB_UPLOAD_MODE` | `` | UploadMode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
-| `lab.upload_rate` | `TORRENTFS_LAB_UPLOAD_RATE` | `` | UploadRate is the average synthetic growth of the reported upload in inject mode. |
-| `lab.upload_multiplier` | `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | `0` | UploadMultiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
-| `lab.upload_jitter` | `TORRENTFS_LAB_UPLOAD_JITTER` | `0` | UploadJitter is the per-announce deviation from the nominal increment, in percent. |
-| `lab.upload_cap` | `TORRENTFS_LAB_UPLOAD_CAP` | `0B` | UploadCap is the per-torrent ceiling on the cumulative reported upload. |
-| `lab.upload_seed` | `TORRENTFS_LAB_UPLOAD_SEED` | `0` | UploadSeed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
-| `lab.announce_log` | `TORRENTFS_LAB_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |
-| `lab.peer_sample_interval` | `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. |
+| `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `` | Mode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
+| `experiments.upload.rate` | `TORRENTFS_EXPERIMENTS_UPLOAD_RATE` | `` | Rate is the average synthetic growth of the reported upload in inject mode. |
+| `experiments.upload.multiplier` | `TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER` | `0` | Multiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
+| `experiments.upload.jitter` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` | `0` | Jitter is the per-announce deviation from the nominal increment, in percent. |
+| `experiments.upload.cap` | `TORRENTFS_EXPERIMENTS_UPLOAD_CAP` | `0B` | Cap is the per-torrent ceiling on the cumulative reported upload. |
+| `experiments.upload.seed` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` | `0` | Seed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
+| `experiments.upload.announce_log` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |
+| `experiments.upload.peer_sample_interval` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. |
 <!-- END generated:readme-reference -->
 
 ### 检查与查看配置
@@ -233,6 +233,15 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 | `http.auth.password_hash_file` | `password` |
 | `smb.username` | `username` |
 | `smb.password_file` | `password` |
+| `lab` | `experiments.upload` |
+| `lab.upload_mode` | `experiments.upload.mode` |
+| `lab.upload_rate` | `experiments.upload.rate` |
+| `lab.upload_multiplier` | `experiments.upload.multiplier` |
+| `lab.upload_jitter` | `experiments.upload.jitter` |
+| `lab.upload_cap` | `experiments.upload.cap` |
+| `lab.upload_seed` | `experiments.upload.seed` |
+| `lab.announce_log` | `experiments.upload.announce_log` |
+| `lab.peer_sample_interval` | `experiments.upload.peer_sample_interval` |
 | `-mountpoint` | `fuse.mountpoint` |
 | `-strm-mountpoint` | `fuse.strm_mountpoint` |
 | `TORRENTFS_MOUNT_READ_TIMEOUT` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` |
@@ -243,6 +252,14 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 | `TORRENTFS_SMB_STRM_ENABLED` | `TORRENTFS_SMB_STRM` |
 | `TORRENTFS_SMB_USERNAME` | `TORRENTFS_USERNAME` |
 | `TORRENTFS_SMB_PASSWORD_FILE` | `TORRENTFS_PASSWORD` |
+| `TORRENTFS_LAB_UPLOAD_MODE` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` |
+| `TORRENTFS_LAB_UPLOAD_RATE` | `TORRENTFS_EXPERIMENTS_UPLOAD_RATE` |
+| `TORRENTFS_LAB_UPLOAD_MULTIPLIER` | `TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER` |
+| `TORRENTFS_LAB_UPLOAD_JITTER` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` |
+| `TORRENTFS_LAB_UPLOAD_CAP` | `TORRENTFS_EXPERIMENTS_UPLOAD_CAP` |
+| `TORRENTFS_LAB_UPLOAD_SEED` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` |
+| `TORRENTFS_LAB_ANNOUNCE_LOG` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` |
+| `TORRENTFS_LAB_PEER_SAMPLE_INTERVAL` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` |
 
 ## 数据与状态
 

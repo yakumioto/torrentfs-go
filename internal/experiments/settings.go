@@ -113,14 +113,14 @@ func (s Settings) Enabled() bool { return s.Mode != "" }
 // settings means. enabled is false with a nil error when nothing is
 // configured. A partially configured setup is an error so a typo cannot
 // silently fall back to normal announce reporting.
-func SettingsFrom(cfg config.Lab) (settings Settings, enabled bool, err error) {
-	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.UploadMode)))
+func SettingsFrom(cfg config.UploadExperiment) (settings Settings, enabled bool, err error) {
+	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.Mode)))
 	switch mode {
 	case "":
 		switch {
-		case cfg.UploadRate != 0:
+		case cfg.Rate != 0:
 			mode = ModeInject
-		case cfg.UploadMultiplier != 0:
+		case cfg.Multiplier != 0:
 			mode = ModeAmplify
 		case cfg.AnnounceLog != "":
 			mode = ModeBaseline
@@ -129,20 +129,20 @@ func SettingsFrom(cfg config.Lab) (settings Settings, enabled bool, err error) {
 				key   string
 				value bool
 			}{
-				{"upload_jitter", cfg.UploadJitter != 0},
-				{"upload_cap", cfg.UploadCap != 0},
-				{"upload_seed", cfg.UploadSeed != 0},
+				{"jitter", cfg.Jitter != 0},
+				{"cap", cfg.Cap != 0},
+				{"seed", cfg.Seed != 0},
 				{"peer_sample_interval", cfg.PeerSampleInterval != 0},
 			} {
 				if knob.value {
-					return Settings{}, false, fmt.Errorf("lab.%s is set but no experiment mode, rate, or announce log is configured", knob.key)
+					return Settings{}, false, fmt.Errorf("experiments.upload.%s is set but no experiment mode, rate, or announce log is configured", knob.key)
 				}
 			}
 			return Settings{}, false, nil
 		}
 	case ModeBaseline, ModeInject, ModeAmplify:
 	default:
-		return Settings{}, false, fmt.Errorf("lab.upload_mode: unknown mode %q (want baseline, inject, or amplify)", cfg.UploadMode)
+		return Settings{}, false, fmt.Errorf("experiments.upload.mode: unknown mode %q (want baseline, inject, or amplify)", cfg.Mode)
 	}
 
 	runtime := RuntimeSettings{
@@ -151,43 +151,43 @@ func SettingsFrom(cfg config.Lab) (settings Settings, enabled bool, err error) {
 	}
 	switch mode {
 	case ModeBaseline:
-		if cfg.UploadRate != 0 || cfg.UploadMultiplier != 0 {
-			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use upload_rate or upload_multiplier", mode)
+		if cfg.Rate != 0 || cfg.Multiplier != 0 {
+			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use experiments.upload.rate or experiments.upload.multiplier", mode)
 		}
 	case ModeInject:
-		if cfg.UploadRate == 0 {
-			return Settings{}, false, fmt.Errorf("mode %q requires upload_rate", mode)
+		if cfg.Rate == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires experiments.upload.rate", mode)
 		}
-		if cfg.UploadMultiplier != 0 {
-			return Settings{}, false, fmt.Errorf("upload_multiplier only applies to mode %q", ModeAmplify)
+		if cfg.Multiplier != 0 {
+			return Settings{}, false, fmt.Errorf("experiments.upload.multiplier only applies to mode %q", ModeAmplify)
 		}
-		runtime.RateBytesPerSecond = float64(cfg.UploadRate)
+		runtime.RateBytesPerSecond = float64(cfg.Rate)
 	case ModeAmplify:
-		if cfg.UploadMultiplier == 0 {
-			return Settings{}, false, fmt.Errorf("mode %q requires upload_multiplier", mode)
+		if cfg.Multiplier == 0 {
+			return Settings{}, false, fmt.Errorf("mode %q requires experiments.upload.multiplier", mode)
 		}
-		if cfg.UploadRate != 0 {
-			return Settings{}, false, fmt.Errorf("upload_rate only applies to mode %q", ModeInject)
+		if cfg.Rate != 0 {
+			return Settings{}, false, fmt.Errorf("experiments.upload.rate only applies to mode %q", ModeInject)
 		}
-		runtime.Multiplier = float64(cfg.UploadMultiplier)
+		runtime.Multiplier = float64(cfg.Multiplier)
 	}
-	if cfg.UploadJitter != 0 {
-		runtime.JitterFraction = float64(cfg.UploadJitter) / 100
+	if cfg.Jitter != 0 {
+		runtime.JitterFraction = float64(cfg.Jitter) / 100
 	}
-	runtime.CapBytes = int64(cfg.UploadCap)
+	runtime.CapBytes = int64(cfg.Cap)
 	runtime, err = NormalizeRuntimeSettings(runtime)
 	if err != nil {
 		return Settings{}, false, err
 	}
 
 	seed := time.Now().UnixNano()
-	if cfg.UploadSeed != 0 {
-		seed = cfg.UploadSeed
+	if cfg.Seed != 0 {
+		seed = cfg.Seed
 	}
 	peerSampleInterval := defaultPeerSampleInterval
 	if cfg.PeerSampleInterval != 0 {
 		if cfg.AnnounceLog == "" {
-			return Settings{}, false, fmt.Errorf("lab.peer_sample_interval requires lab.announce_log")
+			return Settings{}, false, fmt.Errorf("experiments.upload.peer_sample_interval requires experiments.upload.announce_log")
 		}
 		peerSampleInterval = time.Duration(cfg.PeerSampleInterval)
 	}
