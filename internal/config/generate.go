@@ -105,7 +105,26 @@ func sectionOrder(path string) string {
 
 // writeKey writes one configuration key with its documentation and value.
 func (g *Generator) writeKey(builder *strings.Builder, key SchemaKey) {
-	documentation := g.Documentation(key.Path)
+	g.writeDocumentation(builder, key)
+	value, ok := g.defaultValue(key.Path)
+	if !ok {
+		return
+	}
+	writeKeyLine(builder, key.Path, value)
+}
+
+// writeDocumentation writes the documentation comments of one configuration
+// key.
+//
+// The comments are the schema documentation a user reads next to the value,
+// so every writer of a configuration file renders them the same way.
+func (g *Generator) writeDocumentation(builder *strings.Builder, key SchemaKey) {
+	writeKeyDocumentation(builder, key, g.Documentation(key.Path))
+}
+
+// writeKeyDocumentation writes the documentation comments of one configuration
+// key from the documentation of the schema.
+func writeKeyDocumentation(builder *strings.Builder, key SchemaKey, documentation string) {
 	if documentation != "" {
 		for _, line := range strings.Split(documentation, "\n") {
 			builder.WriteString("# " + line + "\n")
@@ -114,11 +133,11 @@ func (g *Generator) writeKey(builder *strings.Builder, key SchemaKey) {
 	if key.Secret {
 		builder.WriteString("# A secret value: prefer the environment variable " + key.Environment + ".\n")
 	}
-	value, ok := g.defaultValue(key.Path)
-	if !ok {
-		return
-	}
-	builder.WriteString(lastSegment(key.Path) + " = " + value + "\n")
+}
+
+// writeKeyLine writes one configuration key with an already rendered value.
+func writeKeyLine(builder *strings.Builder, path, value string) {
+	builder.WriteString(lastSegment(path) + " = " + value + "\n")
 }
 
 // defaultValue renders the built-in default of a configuration key as a TOML
@@ -135,11 +154,14 @@ func (g *Generator) defaultValue(path string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return tomlDefault(item, value)
+	return renderConfigValue(item, value)
 }
 
-// tomlDefault renders a default value as a TOML value.
-func tomlDefault(item schemaItem, value any) (string, bool) {
+// renderConfigValue renders a configuration value as a TOML value.
+//
+// The value keeps the shape the configuration file uses, so the generated
+// example and a write-back render the same value the same way.
+func renderConfigValue(item schemaItem, value any) (string, bool) {
 	switch typed := value.(type) {
 	case string:
 		return fmt.Sprintf("%q", typed), true
