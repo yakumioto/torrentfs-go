@@ -126,7 +126,7 @@ rate = "1MiB/s"
 		Baseline: view.Baseline,
 		Patch: map[string]string{
 			"experiments.upload.mode":       "amplify",
-			"experiments.upload.rate":       "0B/s",
+			"experiments.upload.rate":       "",
 			"experiments.upload.multiplier": "3",
 		},
 	})
