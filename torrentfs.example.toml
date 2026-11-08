@@ -31,6 +31,20 @@ listen_host = ""
 # ListenPort is the TCP/UDP port for incoming peer connections.
 # 0 selects a random free port.
 listen_port = 0
+# ReadingConns is the peer connection allowance for a torrent that is
+# being read: a file handle is open, or one was open within ReadGrace.
+# A torrent whose whole content is already in the piece cache does not use
+# it, because playback is served from the cache. It must be at least 1.
+reading_conns = 50
+# UploadingConns is the peer connection allowance while a torrent is
+# uploading but nobody is reading it. There is no session-wide budget;
+# every torrent's allowance is decided independently. A value of 0 disables
+# the uploading allowance, leaving a cached torrent its probe connection.
+uploading_conns = 10
+# ReadGrace is how long a torrent keeps its reading allowance after its
+# last file handle closes. It covers a seek, a pause or a player reconnect
+# without dropping the peer connections. It must be positive.
+read_grace = "2m0s"
 # DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
 disable_ipv4 = false
 # DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.

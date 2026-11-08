@@ -26,6 +26,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	values := map[string]string{
 		"TORRENTFS_CONNECTIONS_LISTEN_HOST":                    "127.0.0.1",
 		"TORRENTFS_CONNECTIONS_LISTEN_PORT":                    "12345",
+		"TORRENTFS_CONNECTIONS_READING_CONNS":                  "24",
+		"TORRENTFS_CONNECTIONS_UPLOADING_CONNS":                "4",
+		"TORRENTFS_CONNECTIONS_READ_GRACE":                     "5m",
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV4":                   "true",
 		"TORRENTFS_CONNECTIONS_DISABLE_IPV6":                   "false",
 		"TORRENTFS_CONNECTIONS_NO_PORT_FORWARDING":             "false",
@@ -61,6 +64,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	wantConnections := Connections{
 		ListenHost:       "127.0.0.1",
 		ListenPort:       12345,
+		ReadingConns:     24,
+		UploadingConns:   4,
+		ReadGrace:        Duration(5 * time.Minute),
 		DisableIPv4:      true,
 		NoPortForwarding: false,
 		BootstrapNodes:   []string{"router.example:6881"},

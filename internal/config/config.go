@@ -30,6 +30,7 @@ var (
 	errTrackerUserAgent = errors.New("must not contain carriage return or line feed")
 	errListenAddr       = errors.New("must be a host:port address")
 	errPositive         = errors.New("must be positive")
+	errNonNegative      = errors.New("must not be negative")
 	errAddressFamilies  = errors.New("must not disable IPv4 and IPv6 at the same time")
 	errBootstrapNode    = errors.New("must be a host:port address with a port between 1 and 65535")
 	errAuthTokenTTLMax  = errors.New("must not exceed 24 hours")
@@ -46,6 +47,18 @@ const (
 	defaultMaxUploadBytes     int64 = 10 << 20
 	defaultLogLevel                 = "info"
 	defaultLogFormat                = "text"
+	// defaultReadingConns is the connection allowance for a torrent that is
+	// being read. It is generous enough to stream, and is granted per torrent
+	// instead of being taken from a session-wide budget.
+	defaultReadingConns = 50
+	// defaultUploadingConns is the allowance while a torrent is uploading but
+	// nobody is reading it. A popular torrent can serve several peers at once,
+	// while an idle one never enters the uploading state at all.
+	defaultUploadingConns = 10
+	// defaultReadGrace is how long a torrent keeps its reading allowance after
+	// its last file handle closes, so a seek, a pause or a player reconnect
+	// does not tear down and rebuild the peer connections.
+	defaultReadGrace = 2 * time.Minute
 
 	// maxPasswordBytes is the longest password bcrypt accepts. A longer
 	// password is truncated by bcrypt, so the configuration rejects it
@@ -232,6 +245,20 @@ type Connections struct {
 	// ListenPort is the TCP/UDP port for incoming peer connections.
 	// 0 selects a random free port.
 	ListenPort int `toml:"listen_port"`
+	// ReadingConns is the peer connection allowance for a torrent that is
+	// being read: a file handle is open, or one was open within ReadGrace.
+	// A torrent whose whole content is already in the piece cache does not use
+	// it, because playback is served from the cache. It must be at least 1.
+	ReadingConns int `toml:"reading_conns"`
+	// UploadingConns is the peer connection allowance while a torrent is
+	// uploading but nobody is reading it. There is no session-wide budget;
+	// every torrent's allowance is decided independently. A value of 0 disables
+	// the uploading allowance, leaving a cached torrent its probe connection.
+	UploadingConns int `toml:"uploading_conns"`
+	// ReadGrace is how long a torrent keeps its reading allowance after its
+	// last file handle closes. It covers a seek, a pause or a player reconnect
+	// without dropping the peer connections. It must be positive.
+	ReadGrace Duration `toml:"read_grace"`
 	// DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
 	DisableIPv4 bool `toml:"disable_ipv4"`
 	// DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
@@ -283,6 +310,9 @@ func Default() Config {
 		Connections: Connections{
 			ListenHost:       "",
 			ListenPort:       0,
+			ReadingConns:     defaultReadingConns,
+			UploadingConns:   defaultUploadingConns,
+			ReadGrace:        Duration(defaultReadGrace),
 			NoPortForwarding: true,
 		},
 		Cache: Cache{
@@ -345,6 +375,15 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	if c.Connections.ListenPort < 0 || c.Connections.ListenPort > 65535 {
 		collector.add(invalid("connections.listen_port", errPortRange))
+	}
+	if c.Connections.ReadingConns < 1 {
+		collector.add(invalid("connections.reading_conns", errPositive))
+	}
+	if c.Connections.UploadingConns < 0 {
+		collector.add(invalid("connections.uploading_conns", errNonNegative))
+	}
+	if c.Connections.ReadGrace <= 0 {
+		collector.add(invalid("connections.read_grace", errPositive))
 	}
 	if c.Connections.DisableIPv4 && c.Connections.DisableIPv6 {
 		collector.add(invalid("connections.disable_ipv4", errAddressFamilies))

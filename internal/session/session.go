@@ -140,6 +140,12 @@ type Session struct {
 	bgMu     sync.Mutex
 	bgWg     sync.WaitGroup
 
+	// connAlloc gives every torrent the peer connection allowance its activity
+	// calls for. There is no session-wide budget: a torrent that is read gets
+	// the reading allowance, a cached one that is seeding keeps a probe slot,
+	// and an unused torrent gets no connections at all.
+	connAlloc connectionAllocator
+
 	// uploadRate owns the private aggregate upload limiter and the goroutine that
 	// switches it at each window boundary or settings update. uploadRateSettings
 	// is the normalized sidecar state that the settings API reads back. Both are
@@ -304,6 +310,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	cc.ListenHost = func(string) string { return cfg.Connections.ListenHost }
 	cc.ListenPort = cfg.Connections.ListenPort
+	// Per-torrent allowances are installed by the connection allocator after
+	// start-up; the client keeps its library defaults until then and no
+	// session-wide connection cap is configured.
 	cc.DisableIPv4 = cfg.Connections.DisableIPv4
 	cc.DisableIPv6 = cfg.Connections.DisableIPv6
 	cc.NoDefaultPortForwarding = cfg.Connections.NoPortForwarding
@@ -397,6 +406,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		opLocks:         make(map[metainfo.Hash]*sync.Mutex),
 		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
 		uploadRate:      uploadRate,
+		connAlloc:       newConnectionAllocator(),
 
 		uploadRateSettings: uploadSettings,
 	}
@@ -404,6 +414,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// The scheduler joins the existing background lifecycle, so Close cancels it
 	// and waits before the client is torn down.
 	s.uploadRate.start(s.bgCtx, &s.bgMu, &s.bgWg)
+	s.startConnectionAllocator()
 	if labReporter != nil {
 		state := &labState{
 			settings: *options.labSettings,
@@ -452,6 +463,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		"listen_port", cfg.Connections.ListenPort,
 		"effective_listen_port", s.EffectiveListenPort(),
 		"listen_addrs", strings.Join(s.listenAddrs(), ","),
+		"reading_conns", cfg.Connections.ReadingConns,
+		"uploading_conns", cfg.Connections.UploadingConns,
+		"read_grace", time.Duration(cfg.Connections.ReadGrace),
 		"upload_rate_limit_bytes_per_second", uploadSettings.RateLimitBytesPerSecond,
 		"upload_schedule_start", scheduleStartLabel(uploadSettings),
 		"upload_schedule_end", scheduleEndLabel(uploadSettings),

@@ -237,6 +237,79 @@ func SetReadProbe(ch chan ReadProbeEvent) (restore func()) {
 	return func() { readProbe.Store(previous) }
 }
 
+// MarkReadingForTest makes the torrent look like a file is being read, so
+// tests that drive the anacrolix torrent directly instead of through a mounted
+// file still get the reading connection allowance. The returned function ends
+// the activity. Test-only.
+func MarkReadingForTest(st *Torrent) (restore func()) {
+	st.readersOpen.Add(1)
+	st.noteReadActivity()
+	return func() {
+		st.readersOpen.Add(-1)
+		st.noteReadActivity()
+	}
+}
+
+// ConnectionAllowanceForTest reports the peer connection allowance the
+// allocator last applied to the torrent. Test-only.
+func ConnectionAllowanceForTest(st *Torrent) int {
+	return int(st.connAllowance.Load())
+}
+
+// ConnectionStateForTest reports the connection state the allocator last
+// applied to the torrent: idle, probe, uploading, reading or metadata.
+// Test-only.
+func ConnectionStateForTest(st *Torrent) string {
+	return connectionState(st.connState.Load()).String()
+}
+
+// MetadataStageConnectionsForTest reports the compiled-in metadata-stage
+// allowance so a test does not copy the constant. Test-only.
+func MetadataStageConnectionsForTest() int {
+	return metadataConns
+}
+
+// AllocateConnectionsForTest runs one connection allocation pass. Test-only.
+func AllocateConnectionsForTest(s *Session) {
+	s.allocateConnections()
+}
+
+// SetConnectionAllocatorClockForTest replaces the allocator clock so a test can
+// walk the read grace, probe rotation and metadata windows without sleeping.
+// Test-only.
+func SetConnectionAllocatorClockForTest(s *Session, now func() time.Time) (restore func()) {
+	s.connAlloc.mu.Lock()
+	previous := s.connAlloc.now
+	s.connAlloc.now = now
+	s.connAlloc.mu.Unlock()
+	return func() {
+		s.connAlloc.mu.Lock()
+		s.connAlloc.now = previous
+		s.connAlloc.mu.Unlock()
+	}
+}
+
+// OpenTorrentFileForTest opens a file through the same reader path the
+// filesystem uses, so a test can drive read activity without a mount. The
+// returned Closer is the same handle. Test-only.
+func OpenTorrentFileForTest(st *Torrent, displayPath string) (io.ReaderAt, io.Closer, error) {
+	f, err := st.readerFor(displayPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, f, nil
+}
+
+// FirstFilePathForTest returns the display path of the torrent's first file.
+// Test-only.
+func FirstFilePathForTest(st *Torrent) string {
+	payload := st.payloadSnapshot()
+	if payload == nil || len(payload.files) == 0 {
+		return ""
+	}
+	return payload.files[0].Path
+}
+
 // UnderlyingTorrentForTest exposes the anacrolix torrent behind a session
 // handle so discovery tests can drive it directly, for example to inject peer
 // addresses or request every piece. Test-only.
