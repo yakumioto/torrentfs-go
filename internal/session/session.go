@@ -74,8 +74,14 @@ func WithAnnounceRequestDirector(director func(*http.Request) error) Option {
 
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
-	cl        *torrent.Client
-	cfg       config.Config
+	cl *torrent.Client
+	// cfg is the construction-time configuration, still read by the runtime
+	// paths that have not moved to the replaceable snapshot yet.
+	cfg config.Config
+	// config is the current configuration snapshot. Runtime read paths load it
+	// through configSnapshot.load; construction-time consumers keep the
+	// validated configuration New was given. See Config and SetConfig.
+	config    configSnapshot
 	logger    *slog.Logger
 	startedAt time.Time
 	// streamSigner is immutable after startup; nil keeps content streaming off.
@@ -380,6 +386,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	s := &Session{
 		cl:              cl,
 		cfg:             cfg,
+		config:          configSnapshot{cfg: cloneConfig(cfg)},
 		logger:          logger,
 		startedAt:       startedAt,
 		streamSigner:    streamSigner,
