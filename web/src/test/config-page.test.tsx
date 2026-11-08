@@ -676,6 +676,7 @@ describe('ConfigPage external modification', () => {
 
     await screen.findByText('保存未完成');
     expect(screen.getByText(/配置文件已被外部修改/)).toBeInTheDocument();
+    expect(screen.getByText(/重新加载后才能继续保存/)).toBeInTheDocument();
     // The page must not rebase silently before the user chooses to reload.
     expect(configGets).toBe(1);
     expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
