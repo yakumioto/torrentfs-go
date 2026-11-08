@@ -37,5 +37,8 @@
   "smb.listen_addr": "ListenAddr is the address the SMB service binds.",
   "smb.strm": "STRM switches the STRM share of the SMB output: auto, on, or off.",
   "strm.base_url": "BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse\nproxy path prefix. Empty disables signed streaming links.",
+  "upload_rate.limit": "Limit is the aggregate payload upload rate across every torrent and\npeer. The empty value disables upload limiting. A window requires a\npositive limit.",
+  "upload_rate.schedule_end": "ScheduleEnd is the end of the daily window in strict 24-hour HH:MM\n(local time), excluded from the window. Both boundaries empty means the\nlimit applies around the clock.",
+  "upload_rate.schedule_start": "ScheduleStart is the start of the daily window in strict 24-hour HH:MM\n(local time). Both boundaries empty means the limit applies around the\nclock. It must be set together with ScheduleEnd and must be earlier\nthan it.",
   "username": "Username is the login name the SMB output accepts. The HTTP login does\nnot check a user name, so the key is only required for the SMB output."
 }

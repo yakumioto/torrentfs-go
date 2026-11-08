@@ -146,3 +146,18 @@ strm = "auto"
 # BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
 # proxy path prefix. Empty disables signed streaming links.
 base_url = ""
+
+[upload_rate]
+# Limit is the aggregate payload upload rate across every torrent and
+# peer. The empty value disables upload limiting. A window requires a
+# positive limit.
+limit = ""
+# ScheduleStart is the start of the daily window in strict 24-hour HH:MM
+# (local time). Both boundaries empty means the limit applies around the
+# clock. It must be set together with ScheduleEnd and must be earlier
+# than it.
+schedule_start = ""
+# ScheduleEnd is the end of the daily window in strict 24-hour HH:MM
+# (local time), excluded from the window. Both boundaries empty means the
+# limit applies around the clock.
+schedule_end = ""

@@ -15,7 +15,7 @@
 - **只读文件树**：单文件种子直接呈现为文件，多文件种子保留原目录结构。
 - **三种输出**：FUSE 挂载、原生 SMB 共享，或只保留 HTTP（`none`）。
 - **原生 SMB**：不依赖 FUSE、Samba、`/dev/fuse` 或宿主挂载传播。
-- **Web UI / REST API**：添加磁力或 `.torrent`，管理任务、分类、收藏、批量清理、字幕和上传限速。
+- **Web UI / REST API**：添加磁力或 `.torrent`，管理任务、分类、收藏、批量清理、字幕，并在配置页面调整上传限速。
 - **可选 STRM**：在原文件共享之外生成 `.strm` 文件，内容是一行签名 HTTP 直链，支持 Range / HEAD。
 - **单二进制**：Web UI 内嵌；Docker 镜像以非 root（`1000:1000`）运行。
 
@@ -145,7 +145,7 @@ strm = "off"
 - **未知变量会报错**：`TORRENTFS_` 前缀下拼错的名字在启动时会被点名，不会被静默忽略后按默认值启动。`TF_` 前缀是给测试开关、CI 冒烟与 Compose 插值用的，不属于配置命名空间。
 - **凭据**：顶层 `username` / `password` 一对凭据，SMB 登录与 HTTP 登录共用同一个口令。`username` 仅 SMB 登录使用，**Web 登录只校验密码**，不需要用户名。`password` 在 `backend = "smb"` 或 `http.auth.enabled = true` 时必填，`username` 仅在 `backend = "smb"` 时必填。优先用 `TORRENTFS_USERNAME` / `TORRENTFS_PASSWORD` 传入；在 TOML 里写明文口令会在启动时打一条不含口令值的告警。
 - 绑定非 loopback 地址时必须启用认证；Bearer token 只存在内存中，重启失效。
-- 上传限速在 Web UI 中设置并立即生效，不通过 TOML 或环境变量配置。
+- 上传限速由 `[upload_rate]` 配置（`limit`、`schedule_start`、`schedule_end`），可在配置页面、配置文件或环境变量中设置；保存后立即生效，时间窗使用严格 24 小时 `HH:MM` 且必须在同一自然日内。旧的 `.metadata/upload_rate.json` 会在启动时并入配置文件并归档为 `.migrated`；配置文件不可写或未加载时，以旧侧车值只读运行并打印告警，下一次成功写回后的启动完成归档。
 
 ### 配置项速查
 
@@ -185,6 +185,9 @@ strm = "off"
 | `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
 | `smb.listen_addr` | `TORRENTFS_SMB_LISTEN_ADDR` | `0.0.0.0:1445` | ListenAddr is the address the SMB service binds. |
 | `smb.strm` | `TORRENTFS_SMB_STRM` | `auto` | STRM switches the STRM share of the SMB output: auto, on, or off. |
+| `upload_rate.limit` | `TORRENTFS_UPLOAD_RATE_LIMIT` | `` | Limit is the aggregate payload upload rate across every torrent and peer. The empty value disables upload limiting. A window requires a positive limit. |
+| `upload_rate.schedule_start` | `TORRENTFS_UPLOAD_RATE_SCHEDULE_START` | `` | ScheduleStart is the start of the daily window in strict 24-hour HH:MM (local time). Both boundaries empty means the limit applies around the clock. It must be set together with ScheduleEnd and must be earlier than it. |
+| `upload_rate.schedule_end` | `TORRENTFS_UPLOAD_RATE_SCHEDULE_END` | `` | ScheduleEnd is the end of the daily window in strict 24-hour HH:MM (local time), excluded from the window. Both boundaries empty means the limit applies around the clock. |
 | `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `` | Mode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
 | `experiments.upload.rate` | `TORRENTFS_EXPERIMENTS_UPLOAD_RATE` | `` | Rate is the average synthetic growth of the reported upload in inject mode. |
 | `experiments.upload.multiplier` | `TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER` | `0` | Multiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
@@ -263,7 +266,7 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 
 ## 数据与状态
 
-- `<torrents-dir>/<infohash>.torrent` 保存 canonical metainfo，`<torrents-dir>/.metadata/` 保存任务、分类、字幕、限速和 STRM 密钥；`.metadata` 不会出现在 FUSE/SMB 中。
+- `<torrents-dir>/<infohash>.torrent` 保存 canonical metainfo，`<torrents-dir>/.metadata/` 保存任务、分类、字幕和 STRM 密钥；`.metadata` 不会出现在 FUSE/SMB 中。
 - 任务只能通过 Web UI/API 添加，手工复制 `.torrent` 到目录不会自动导入。
 - 内容缓存（piece 数据、完成状态、传输计数）只在内存中，重启清空；管理状态会恢复。
 - 同一个 `torrents-dir` 同一时刻只允许一个进程管理。
