@@ -20,6 +20,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configcheck"
 	"github.com/yakumioto/torrentfs-go/internal/configctl"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
@@ -145,7 +146,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
 
-	logger, _, err := logging.New(cfg.Log, stderr)
+	logger, logLevelVar, err := logging.New(cfg.Log, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize logging: %v\n", err)
 		return 2
@@ -201,9 +202,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	sequence := shutdownSequence{logger: logger, sess: sess}
 	var apiServer *api.Server
 	if httpEnabled {
+		// The controller is built before the HTTP server, because the server
+		// needs it for its routes. The log level applier is independent of the
+		// server; an applier that needs a server handle is registered after
+		// New returns, which keeps the construction order one way.
+		configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
+		if err := configController.RegisterApplier(logging.NewLevelApplier(logLevelVar)); err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+			sequence.run()
+			return 1
+		}
 		apiServer, err = api.New(cfg, sess,
 			api.WithLogger(logger),
-			api.WithConfigViewer(configctl.New(configFile, cfg, sources)),
+			api.WithConfigViewer(configController),
+			api.WithConfigSaver(configController),
 		)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
@@ -574,7 +586,7 @@ func logEffectiveConfig(logger *slog.Logger, cfg config.Config, sources config.S
 // loadConfig loads the configuration and reports where every effective value
 // came from.
 func loadConfig(path string) (config.Config, config.Sources, error) {
-	cfg, sources, err := loadAndCheck(path)
+	cfg, sources, err := configcheck.Load(path)
 	if err != nil {
 		if path == "" {
 			return cfg, sources, fmt.Errorf("load config: %w", err)
