@@ -6,8 +6,10 @@ import {
   Code,
   Group,
   Loader,
+  Modal,
   NativeSelect,
   NumberInput,
+  Stack,
   Switch,
   TextInput,
 } from '@mantine/core';
@@ -17,11 +19,18 @@ import {
   IconInfoCircle,
   IconSearch,
 } from '@tabler/icons-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../app/auth-context';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
+import { useUnsavedChangesGuard } from '../utils/unsaved-changes';
 import { usePageVisible } from '../utils/visibility';
+import {
+  dangerousCategoryLabel,
+  dangerousConfigChanges,
+  dangerousConfigKey,
+  type DangerousConfigKey,
+} from '../utils/config-safety';
 import {
   configSaveDurabilityUnconfirmed,
   configSaveFailure,
@@ -343,23 +352,71 @@ function SaveResultGroups({ result }: { result: ConfigSaveResult }) {
       <p className={styles.resultSummary} data-testid="config-save-summary">
         已生效 {result.applied.length} 项，重启后生效 {result.restart_required.length} 项。
       </p>
-      {result.applied.length > 0 && (
-        <div>
-          <strong>已生效</strong>
-          <ul className={styles.resultKeys} data-testid="config-applied-keys">
-            {result.applied.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
-          </ul>
-        </div>
-      )}
-      {result.restart_required.length > 0 && (
-        <div>
-          <strong>重启后生效</strong>
-          <ul className={styles.resultKeys} data-testid="config-restart-keys">
-            {result.restart_required.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
-          </ul>
-        </div>
+      <div className={styles.resultGroup} data-testid="config-applied-group">
+        <strong>已生效（{result.applied.length} 项）</strong>
+        <p className={styles.resultNote}>已应用到运行中的进程。</p>
+        <ul className={styles.resultKeys} data-testid="config-applied-keys">
+          {result.applied.length === 0
+            ? <li className={styles.resultEmpty}>无</li>
+            : result.applied.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+        </ul>
+      </div>
+      <div className={styles.resultGroup} data-testid="config-restart-group">
+        <strong>重启后生效（{result.restart_required.length} 项）</strong>
+        <p className={styles.resultNote}>已写入配置文件，重启服务后才采用新值。</p>
+        <ul className={styles.resultKeys} data-testid="config-restart-keys">
+          {result.restart_required.length === 0
+            ? <li className={styles.resultEmpty}>无</li>
+            : result.restart_required.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+        </ul>
+      </div>
+      {!result.persisted && (
+        <p className={styles.resultWarn}>文件持久化未确认：重启后可能无法保留这些改动。</p>
       )}
     </div>
+  );
+}
+
+function DangerousSaveDialog({
+  opened,
+  changes,
+  onCancel,
+  onConfirm,
+}: {
+  opened: boolean;
+  changes: DangerousConfigKey[];
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal
+      opened={opened}
+      onClose={onCancel}
+      title="危险配置项确认"
+      centered
+      closeButtonProps={{ 'aria-label': '关闭弹窗' }}
+    >
+      <Stack gap="sm">
+        <Alert color="yellow" icon={<IconAlertTriangle size={16} />} className={styles.modalAlert}>
+          以下改动可能会让服务在重启后失联，或改变输出形态与挂载位置。请确认这是预期行为。
+        </Alert>
+        <ul className={styles.dangerList} data-testid="config-danger-list">
+          {changes.map((change) => (
+            <li key={change.path} className={styles.dangerItem}>
+              <div className={styles.dangerHeader}>
+                <code className={styles.code}>{change.path}</code>
+                <Badge variant="light" color="red">{dangerousCategoryLabel(change.category)}</Badge>
+              </div>
+              <p className={styles.dangerImpact}>{change.impact}</p>
+            </li>
+          ))}
+        </ul>
+        <Group justify="flex-end" gap="sm">
+          <Button variant="default" onClick={onCancel}>取消</Button>
+          <Button color="red" onClick={onConfirm}>仍然保存</Button>
+        </Group>
+      </Stack>
+    </Modal>
   );
 }
 
@@ -376,38 +433,57 @@ export function ConfigPage() {
 
   const [search, setSearch] = useState('');
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // The file values the drafts are compared against. A successful save moves
+  // the edited keys here, so the form is clean without waiting for a refetch.
+  const [saved, setSaved] = useState<Record<string, string>>({});
   const [seeded, setSeeded] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
   const [saveMessage, setSaveMessage] = useState('');
+  const [dangerOpen, setDangerOpen] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const durabilityRefetched = useRef<unknown>(null);
 
   const view = query.data;
   const refetch = query.refetch;
 
+  const seedFromView = useCallback((next: ConfigView) => {
+    const values: Record<string, string> = {};
+    for (const key of next.keys) {
+      values[key.path] = key.file_value;
+    }
+    setDrafts(values);
+    setSaved(values);
+    setSeeded(true);
+    setFieldErrors({});
+    setSaveOutcome(null);
+    setSaveMessage('');
+    setDangerOpen(false);
+  }, []);
+
   // Seed the form from the file layer once. A background refetch must not
-  // replace what the user is editing; a save deliberately keeps the draft the
-  // user submitted.
+  // replace what the user is editing; only an explicit reload (and a fresh
+  // save response) may move the comparison baseline.
   useEffect(() => {
     if (view === undefined || seeded) {
       return;
     }
-    const next: Record<string, string> = {};
-    for (const key of view.keys) {
-      next[key.path] = key.file_value;
-    }
-    setDrafts(next);
-    setSeeded(true);
-  }, [view, seeded]);
+    seedFromView(view);
+  }, [view, seeded, seedFromView]);
 
   useEffect(() => {
     if (!save.isSuccess || save.data === undefined) {
       return;
     }
+    // The submitted values are now the file values for these keys, so clear
+    // their dirty state without waiting for the view refetch.
+    if (save.variables !== undefined) {
+      setSaved((previous) => ({ ...previous, ...save.variables?.patch }));
+    }
     setSaveOutcome({ code: '', result: save.data });
     setSaveMessage('');
     setFieldErrors({});
-  }, [save.isSuccess, save.data]);
+  }, [save.isSuccess, save.data, save.variables]);
 
   useEffect(() => {
     if (!save.isError || save.error === null) {
@@ -435,6 +511,11 @@ export function ConfigPage() {
       setSaveMessage(`${userFacingConfigSaveError(save.error)}\n${extra.join('\n')}`);
     }
     if (configSaveDurabilityUnconfirmed(save.error)) {
+      // The values are in force even though durability is unproven, so the
+      // form must be clean; only the restart-recovery warning remains.
+      if (save.variables !== undefined) {
+        setSaved((previous) => ({ ...previous, ...save.variables?.patch }));
+      }
       setSaveOutcome({
         code: failure.code,
         result: {
@@ -451,7 +532,7 @@ export function ConfigPage() {
         void refetch();
       }
     }
-  }, [save.isError, save.error, view, refetch]);
+  }, [save.isError, save.error, save.variables, view, refetch]);
 
   const pageReadOnly = view !== undefined && view.read_only_reason !== '';
   const patch: Record<string, string> = {};
@@ -461,24 +542,66 @@ export function ConfigPage() {
         continue;
       }
       const draft = drafts[key.path];
-      if (draft !== undefined && draft !== key.file_value) {
+      const current = saved[key.path];
+      if (draft !== undefined && current !== undefined && draft !== current) {
         patch[key.path] = draft;
       }
     }
   }
-  const dirtyCount = Object.keys(patch).length;
-  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
+  const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
+  const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
+  const dirtyCount = changes.length;
+  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending && !reloading;
+  const guard = useUnsavedChangesGuard(dirtyCount > 0);
 
-  const submit = () => {
+  const performSave = () => {
     if (view === undefined || !canSave) {
       return;
     }
+    setDangerOpen(false);
     setSaveOutcome(null);
     setSaveMessage('');
     setFieldErrors({});
     save.reset();
     save.mutate({ baseline: view.baseline, patch });
   };
+
+  const requestSave = () => {
+    if (!canSave) {
+      return;
+    }
+    if (dangerousChanges.length > 0) {
+      setDangerOpen(true);
+      return;
+    }
+    performSave();
+  };
+
+  const reloadFromDisk = async () => {
+    if (reloading) {
+      return;
+    }
+    setReloading(true);
+    // Dropping the failed mutation also clears the conflict notice; the user
+    // chose to replace the local drafts with what is on disk.
+    save.reset();
+    setSaveMessage('');
+    setSaveOutcome(null);
+    setFieldErrors({});
+    setDangerOpen(false);
+    try {
+      const result = await refetch();
+      if (result.data !== undefined) {
+        seedFromView(result.data);
+      } else {
+        setSaveMessage('重新读取配置失败，请稍后重试。');
+      }
+    } finally {
+      setReloading(false);
+    }
+  };
+
+  const conflict = save.isError && configSaveFailure(save.error)?.code === 'conflict';
 
   const term = search.trim().toLowerCase();
   const filtered = term === '' || view === undefined
@@ -541,8 +664,24 @@ export function ConfigPage() {
           )}
 
           {saveMessage !== '' && saveOutcome === null && (
-            <Alert color="red" icon={<IconAlertTriangle size={16} />} title="保存未完成" className={styles.alert}>
+            <Alert color={conflict ? 'yellow' : 'red'} icon={<IconAlertTriangle size={16} />} title="保存未完成" className={styles.alert}>
               <p className={styles.alertText}>{saveMessage}</p>
+              {conflict && (
+                <Group justify="space-between" align="center" gap="sm" mt="sm" wrap="wrap">
+                  <span className={styles.alertHint}>
+                    重新加载会放弃页面上的本地改动，并读取磁盘上的最新配置。
+                  </span>
+                  <Button
+                    variant="light"
+                    color="yellow"
+                    size="compact-sm"
+                    onClick={() => void reloadFromDisk()}
+                    loading={reloading}
+                  >
+                    重新加载配置
+                  </Button>
+                </Group>
+              )}
             </Alert>
           )}
 
@@ -571,7 +710,7 @@ export function ConfigPage() {
                   <Button
                     color="torrent"
                     leftSection={<IconDeviceFloppy size={16} />}
-                    onClick={submit}
+                    onClick={requestSave}
                     loading={save.isPending}
                     disabled={!canSave}
                   >
@@ -581,6 +720,35 @@ export function ConfigPage() {
               )}
             </Group>
           </div>
+
+          {changes.length > 0 && (
+            <section className={`panel panel--padding ${styles.diff}`} data-testid="config-diff-preview" aria-label="改动预览">
+              <div className={styles.diffHeader}>
+                <div>
+                  <p className={styles.diffTitle}>改动预览</p>
+                  <p className={styles.diffHint}>
+                    保存后只写入以下 {changes.length} 项改动；旧值不会出现在配置文件中。
+                  </p>
+                </div>
+                <Badge variant="light" color="yellow">{changes.length} 项</Badge>
+              </div>
+              <ul className={styles.diffList}>
+                {changes.map((change) => {
+                  const dangerous = dangerousConfigKey(change.path);
+                  return (
+                    <li key={change.path} className={styles.diffItem}>
+                      <code className={styles.code}>{change.path}</code>
+                      <span className={styles.diffArrow} aria-hidden="true">→</span>
+                      <code className={styles.diffValue}>{change.value === '' ? '（空）' : change.value}</code>
+                      {dangerous !== undefined && (
+                        <Badge variant="light" color="red">{dangerousCategoryLabel(dangerous.category)}</Badge>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          )}
 
           {term !== '' && filtered.length === 0 && (
             <div className={`panel panel--padding ${styles.empty}`} role="status">
@@ -619,6 +787,31 @@ export function ConfigPage() {
               </Accordion.Item>
             ))}
           </Accordion>
+
+          <DangerousSaveDialog
+            opened={dangerOpen}
+            changes={dangerousChanges}
+            onCancel={() => setDangerOpen(false)}
+            onConfirm={performSave}
+          />
+
+          <Modal
+            opened={guard.pendingHref !== null}
+            onClose={guard.stay}
+            title="离开配置页面？"
+            centered
+            closeButtonProps={{ 'aria-label': '关闭弹窗' }}
+          >
+            <Stack gap="sm">
+              <p className={styles.modalText}>
+                有 {dirtyCount} 项未保存的改动，离开后这些改动会丢失。
+              </p>
+              <Group justify="flex-end" gap="sm">
+                <Button variant="default" onClick={guard.stay}>留在此页</Button>
+                <Button color="red" onClick={guard.leave}>放弃改动并离开</Button>
+              </Group>
+            </Stack>
+          </Modal>
         </>
       )}
     </div>
