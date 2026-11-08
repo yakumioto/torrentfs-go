@@ -23,7 +23,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/piecestore"
 	"github.com/yakumioto/torrentfs-go/internal/stream"
@@ -45,11 +45,11 @@ type sessionOptions struct {
 	logger *slog.Logger
 	// announceRequestDirector, when non-nil, rewrites each HTTP tracker
 	// announce request after the client fills in its parameters. Only the
-	// experimental synthetic-upload harness sets it; see internal/lab.
+	// experimental synthetic-upload harness sets it; see internal/experiments.
 	announceRequestDirector func(*http.Request) error
 	// labSettings, when non-nil, enables the session-owned experiment, which
 	// supersedes announceRequestDirector when both are set.
-	labSettings *lab.Settings
+	labSettings *experiments.Settings
 }
 
 // WithLogger routes session and anacrolix client logs to l.
@@ -62,7 +62,7 @@ func WithLogger(l *slog.Logger) Option {
 // WithAnnounceRequestDirector installs a hook that may rewrite each HTTP(S)
 // tracker announce request after the client fills in uploaded, downloaded,
 // left, event, and the other announce parameters. It exists for the
-// experimental synthetic-upload harness (internal/lab), which fabricates
+// experimental synthetic-upload harness (internal/experiments), which fabricates
 // announce statistics to exercise tracker-side anomaly detection; a normal
 // deployment never sets it. UDP tracker announces and DHT announcements bypass
 // the hook.
@@ -243,10 +243,10 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// so the first announce already uses the persisted mode. A sidecar that
 	// cannot be understood fails startup, like the upload-rate settings.
 	var (
-		labRuntime          lab.RuntimeSettings
+		labRuntime          experiments.RuntimeSettings
 		labRuntimePersisted bool
-		labReporter         *lab.Reporter
-		labRecorder         *lab.Recorder
+		labReporter         *experiments.Reporter
+		labRecorder         *experiments.Recorder
 	)
 	if options.labSettings != nil {
 		labRuntime, labRuntimePersisted, err = loadLabSettings(metadataDir, options.labSettings.RuntimeSettings)
@@ -256,7 +256,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 			return nil, err
 		}
 		if options.labSettings.AnnounceLogPath != "" {
-			labRecorder, err = lab.OpenRecorder(options.labSettings.AnnounceLogPath, logger)
+			labRecorder, err = experiments.OpenRecorder(options.labSettings.AnnounceLogPath, logger)
 			if err != nil {
 				releaseInstanceLock(instanceLock)
 				logInitFailure("open-lab-announce-log", err)
@@ -267,14 +267,14 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 					_ = labRecorder.Close()
 				}
 			}()
-			labRecorder.WriteSettings(lab.Settings{
+			labRecorder.WriteSettings(experiments.Settings{
 				RuntimeSettings:    labRuntime,
 				Seed:               options.labSettings.Seed,
 				AnnounceLogPath:    options.labSettings.AnnounceLogPath,
 				PeerSampleInterval: options.labSettings.PeerSampleInterval,
 			})
 		}
-		labReporter = lab.NewReporter(lab.Settings{
+		labReporter = experiments.NewReporter(experiments.Settings{
 			RuntimeSettings: labRuntime,
 			Seed:            options.labSettings.Seed,
 		}, labRecorder)
@@ -523,7 +523,7 @@ func (s *Session) Close(ctx context.Context) error {
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
 	subtitleStore := s.subtitleStore
-	var labRecorder *lab.Recorder
+	var labRecorder *experiments.Recorder
 	if s.lab != nil {
 		labRecorder = s.lab.recorder
 	}

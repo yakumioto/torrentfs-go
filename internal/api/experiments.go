@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -120,7 +120,7 @@ func newLabBody(status session.LabStatus) labBody {
 }
 
 func (b labSettingsRequest) toSession() session.LabSettings {
-	settings := session.LabSettings{Mode: lab.Mode(*b.Mode)}
+	settings := session.LabSettings{Mode: experiments.Mode(*b.Mode)}
 	if b.RateBytesPerSecond != nil {
 		settings.RateBytesPerSecond = float64(*b.RateBytesPerSecond)
 	}
