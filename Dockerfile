@@ -35,7 +35,10 @@ COPY docker/entrypoint.sh /usr/local/bin/torrentfs-entrypoint
 # creates a temporary file in the configuration directory, so both the file
 # and its directory belong to the runtime user. A read-only mount of either
 # leaves the page read-only instead of making a save fail halfway.
-COPY --chown=torrentfs:torrentfs docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
+# The explicit mode keeps the file readable for a --user identity whose uid
+# differs from the build user: without it the mode is inherited from the build
+# context and a restrictive umask can leave it at 0600.
+COPY --chown=torrentfs:torrentfs --chmod=0644 docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
 COPY LICENSE /usr/share/licenses/torrentfs-go/LICENSE
 COPY third_party/go-smb/LICENSE /usr/share/licenses/torrentfs-go/go-smb.LICENSE
 RUN chmod 0755 /usr/local/bin/torrentfs-entrypoint
