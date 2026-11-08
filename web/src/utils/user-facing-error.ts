@@ -65,7 +65,7 @@ export function uploadRateSettingsApplied(error: unknown): boolean {
  */
 const LAB_CODE_MESSAGES: Record<string, string> = {
   invalid_lab_settings: '实验设置内容无效，请检查模式、速率、倍率和上限后重试。',
-  lab_disabled: '上传实验未启用，需要设置 TORRENTFS_LAB_UPLOAD_MODE 等环境变量并重启后台服务后才能保存。',
+  lab_disabled: '上传实验未启用，需要设置 TORRENTFS_EXPERIMENTS_UPLOAD_MODE 等环境变量并重启后台服务后才能保存。',
   lab_settings_storage_unavailable: '实验设置未能写入，当前配置未改变；请检查 .metadata 目录权限和磁盘空间后重试。',
   lab_settings_durability_unconfirmed: '新实验设置已生效，但无法确认重启后仍能恢复；请重新读取确认当前状态。',
 };

@@ -86,7 +86,7 @@ describe('favorite toggle', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(runtimeStats()));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse({
           enabled: false,
           settings: null,

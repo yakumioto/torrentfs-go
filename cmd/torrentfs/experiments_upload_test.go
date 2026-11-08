@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
@@ -12,14 +13,14 @@ func testLogger() *slog.Logger {
 }
 
 // labConfig returns the configuration of an experiment with the given values.
-func labConfig(lab config.Lab) config.Config {
+func labConfig(upload config.UploadExperiment) config.Config {
 	cfg := config.Default()
-	cfg.Lab = lab
+	cfg.Experiments.Upload = upload
 	return cfg
 }
 
 func TestLabSessionOptionsDisabledByDefault(t *testing.T) {
-	options, err := labSessionOptions(labConfig(config.Lab{}), testLogger())
+	options, err := labSessionOptions(labConfig(config.UploadExperiment{}), testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
 	}
@@ -29,7 +30,7 @@ func TestLabSessionOptionsDisabledByDefault(t *testing.T) {
 }
 
 func TestLabSessionOptionsInjectMode(t *testing.T) {
-	cfg := labConfig(config.Lab{UploadRate: config.ByteRate(1 << 20)})
+	cfg := labConfig(config.UploadExperiment{Rate: config.ByteRate(1 << 20)})
 	options, err := labSessionOptions(cfg, testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
@@ -40,8 +41,8 @@ func TestLabSessionOptionsInjectMode(t *testing.T) {
 }
 
 func TestLabSessionOptionsBaselineMode(t *testing.T) {
-	cfg := labConfig(config.Lab{
-		UploadMode:  "baseline",
+	cfg := labConfig(config.UploadExperiment{
+		Mode:        "baseline",
 		AnnounceLog: "/tmp/lab-test.jsonl",
 	})
 	options, err := labSessionOptions(cfg, testLogger())
@@ -54,7 +55,7 @@ func TestLabSessionOptionsBaselineMode(t *testing.T) {
 }
 
 func TestLabSessionOptionsAmplifyMode(t *testing.T) {
-	cfg := labConfig(config.Lab{UploadMultiplier: config.Ratio(3)})
+	cfg := labConfig(config.UploadExperiment{Multiplier: config.Ratio(3)})
 	options, err := labSessionOptions(cfg, testLogger())
 	if err != nil {
 		t.Fatalf("labSessionOptions: %v", err)
@@ -65,7 +66,7 @@ func TestLabSessionOptionsAmplifyMode(t *testing.T) {
 }
 
 func TestLabSessionOptionsRejectsInvalidConfiguration(t *testing.T) {
-	cfg := labConfig(config.Lab{UploadJitter: config.Percent(10)})
+	cfg := labConfig(config.UploadExperiment{Jitter: config.Percent(10)})
 	options, err := labSessionOptions(cfg, testLogger())
 	if err == nil {
 		t.Fatal("labSessionOptions accepted jitter without a mode or rate")
@@ -76,8 +77,20 @@ func TestLabSessionOptionsRejectsInvalidConfiguration(t *testing.T) {
 }
 
 func TestLabSessionOptionsRejectsRateWithoutInjectMode(t *testing.T) {
-	cfg := labConfig(config.Lab{UploadMode: "baseline", UploadRate: config.ByteRate(1 << 20)})
+	cfg := labConfig(config.UploadExperiment{Mode: "baseline", Rate: config.ByteRate(1 << 20)})
 	if _, err := labSessionOptions(cfg, testLogger()); err == nil {
 		t.Fatal("labSessionOptions accepted a rate in baseline mode")
+	}
+}
+
+// TestLabSessionOptionsNamesTheNewConfigurationKeys covers the contract that
+// a rejected experiment names the configuration keys the user now writes.
+func TestLabSessionOptionsNamesTheNewConfigurationKeys(t *testing.T) {
+	_, err := labSessionOptions(labConfig(config.UploadExperiment{Mode: "turbo"}), testLogger())
+	if err == nil {
+		t.Fatal("labSessionOptions accepted an unknown mode")
+	}
+	if !strings.Contains(err.Error(), "experiments.upload.mode") {
+		t.Errorf("the error %q does not name experiments.upload.mode", err)
 	}
 }

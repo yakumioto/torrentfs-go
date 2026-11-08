@@ -60,6 +60,31 @@ no_port_forwarding = true
 # client's built-in bootstrap list.
 bootstrap_nodes = []
 
+[experiments.upload]
+# Mode selects the reporting model: baseline, inject, or amplify.
+# Empty infers the mode from the other settings.
+mode = ""
+# Rate is the average synthetic growth of the reported upload in inject
+# mode.
+rate = ""
+# Multiplier grows the reported upload by this factor of the real payload
+# bytes in amplify mode.
+multiplier = "0"
+# Jitter is the per-announce deviation from the nominal increment, in
+# percent.
+jitter = "0"
+# Cap is the per-torrent ceiling on the cumulative reported upload.
+cap = "0B"
+# Seed fixes the random jitter sequence for reproducible runs. Zero lets
+# the process choose one.
+seed = 0
+# AnnounceLog is the JSON Lines file that receives one record per tracker
+# announce. Empty disables it.
+announce_log = ""
+# PeerSampleInterval is how often peer activity is sampled into the
+# announce log.
+peer_sample_interval = "0s"
+
 [filesystem]
 # ReadTimeout bounds a single read of a piece from the torrent.
 read_timeout = "30s"
@@ -96,31 +121,6 @@ tracker_user_agent = "qBittorrent/4.4.0"
 peer_id_prefix = "-qB4400-"
 # ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
 extended_handshake_client_version = "qBittorrent/4.4.0"
-
-[lab]
-# UploadMode selects the reporting model: baseline, inject, or amplify.
-# Empty infers the mode from the other settings.
-upload_mode = ""
-# UploadRate is the average synthetic growth of the reported upload in
-# inject mode.
-upload_rate = ""
-# UploadMultiplier grows the reported upload by this factor of the real
-# payload bytes in amplify mode.
-upload_multiplier = "0"
-# UploadJitter is the per-announce deviation from the nominal increment,
-# in percent.
-upload_jitter = "0"
-# UploadCap is the per-torrent ceiling on the cumulative reported upload.
-upload_cap = "0B"
-# UploadSeed fixes the random jitter sequence for reproducible runs. Zero
-# lets the process choose one.
-upload_seed = 0
-# AnnounceLog is the JSON Lines file that receives one record per tracker
-# announce. Empty disables it.
-announce_log = ""
-# PeerSampleInterval is how often peer activity is sampled into the
-# announce log.
-peer_sample_interval = "0s"
 
 [log]
 # Level is the minimum level of a log record: debug, info, warn, or

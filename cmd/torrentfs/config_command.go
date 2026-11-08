@@ -125,7 +125,7 @@ func configurationNamesExperiment(err error) bool {
 		return false
 	}
 	for _, field := range validationErrs.Fields() {
-		if strings.HasPrefix(field, "lab.") {
+		if strings.HasPrefix(field, "experiments.upload.") {
 			return true
 		}
 	}
@@ -139,8 +139,8 @@ func configurationNamesExperiment(err error) bool {
 // settings means. The configuration package cannot import it without a cycle,
 // so the command adds the check to the report.
 func checkExperiment(cfg config.Config) error {
-	if _, _, err := experiments.SettingsFrom(cfg.Lab); err != nil {
-		return fmt.Errorf("config: lab experiment: %w", err)
+	if _, _, err := experiments.SettingsFrom(cfg.Experiments.Upload); err != nil {
+		return fmt.Errorf("config: experiments.upload experiment: %w", err)
 	}
 	return nil
 }

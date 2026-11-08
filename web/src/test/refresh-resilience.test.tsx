@@ -123,7 +123,7 @@ describe('background refresh resilience', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       listRequests += 1;
@@ -156,7 +156,7 @@ describe('background refresh resilience', () => {
         statusRequests += 1;
         return Promise.resolve(statusRequests === 1 ? jsonResponse(makeStatus(torrent)) : failingResponse());
       }
-      if (url.endsWith('/lab')) {
+      if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(disabledLab()));
       }
       return Promise.resolve(jsonResponse(torrent));

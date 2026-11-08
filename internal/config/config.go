@@ -135,11 +135,17 @@ type Config struct {
 	FUSE FUSE `toml:"fuse"`
 	// SMB groups the settings of the built-in read-only SMB file output.
 	SMB SMB `toml:"smb"`
-	// Lab groups the settings of the upload statistics experiment.
-	Lab Lab `toml:"lab"`
+	// Experiments groups the settings of the experimental features.
+	Experiments Experiments `toml:"experiments"`
 }
 
-// Lab groups the settings of the upload statistics experiment.
+// Experiments groups the settings of the experimental features.
+type Experiments struct {
+	// Upload groups the settings of the upload statistics experiment.
+	Upload UploadExperiment `toml:"upload"`
+}
+
+// UploadExperiment groups the settings of the upload statistics experiment.
 //
 // The experiment rewrites the upload counter reported to trackers so that the
 // anomaly detection of a tracker can be exercised. It is off unless a mode is
@@ -148,24 +154,24 @@ type Config struct {
 //
 // The rules that relate one setting to another live in the experiment
 // package. The configuration holds the values and checks their shape.
-type Lab struct {
-	// UploadMode selects the reporting model: baseline, inject, or amplify.
+type UploadExperiment struct {
+	// Mode selects the reporting model: baseline, inject, or amplify.
 	// Empty infers the mode from the other settings.
-	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify" component:"experiment"`
-	// UploadRate is the average synthetic growth of the reported upload in
-	// inject mode.
-	UploadRate ByteRate `toml:"upload_rate" component:"experiment"`
-	// UploadMultiplier grows the reported upload by this factor of the real
-	// payload bytes in amplify mode.
-	UploadMultiplier Ratio `toml:"upload_multiplier" component:"experiment"`
-	// UploadJitter is the per-announce deviation from the nominal increment,
-	// in percent.
-	UploadJitter Percent `toml:"upload_jitter" component:"experiment"`
-	// UploadCap is the per-torrent ceiling on the cumulative reported upload.
-	UploadCap OptionalByteQuantity `toml:"upload_cap" component:"experiment"`
-	// UploadSeed fixes the random jitter sequence for reproducible runs. Zero
-	// lets the process choose one.
-	UploadSeed int64 `toml:"upload_seed" component:"experiment"`
+	Mode string `toml:"mode" enum:",baseline,inject,amplify" component:"experiment"`
+	// Rate is the average synthetic growth of the reported upload in inject
+	// mode.
+	Rate ByteRate `toml:"rate" component:"experiment"`
+	// Multiplier grows the reported upload by this factor of the real payload
+	// bytes in amplify mode.
+	Multiplier Ratio `toml:"multiplier" component:"experiment"`
+	// Jitter is the per-announce deviation from the nominal increment, in
+	// percent.
+	Jitter Percent `toml:"jitter" component:"experiment"`
+	// Cap is the per-torrent ceiling on the cumulative reported upload.
+	Cap OptionalByteQuantity `toml:"cap" component:"experiment"`
+	// Seed fixes the random jitter sequence for reproducible runs. Zero lets
+	// the process choose one.
+	Seed int64 `toml:"seed" component:"experiment"`
 	// AnnounceLog is the JSON Lines file that receives one record per tracker
 	// announce. Empty disables it.
 	AnnounceLog string `toml:"announce_log" component:"experiment"`
@@ -369,7 +375,7 @@ func (c Config) Validate() error {
 func (c Config) validateSyntax(collector *validationCollector) {
 	collector.add(validateEnum(backendPath, string(c.Backend)))
 	collector.add(validateEnum(smbSTRMPath, string(c.SMB.STRM)))
-	collector.add(validateEnum(labUploadModePath, strings.ToLower(strings.TrimSpace(c.Lab.UploadMode))))
+	collector.add(validateEnum(experimentsUploadModePath, strings.ToLower(strings.TrimSpace(c.Experiments.Upload.Mode))))
 	if c.Filesystem.ReadTimeout <= 0 {
 		collector.add(invalid("filesystem.read_timeout", errPositive))
 	}
@@ -431,27 +437,28 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	collector.add(c.validateCredentialShape())
 	collector.add(c.validateSMBShape())
-	collector.add(c.validateLabShape())
+	collector.add(c.validateUploadExperimentShape())
 }
 
-// validateLabShape checks the shape of the upload statistics experiment
-// settings.
+// validateUploadExperimentShape checks the shape of the upload statistics
+// experiment settings.
 //
 // The rules that relate one setting to another live in the experiment
 // package: they decide what a set of settings means, not whether a value is
 // usable on its own.
-func (c Config) validateLabShape() error {
-	if c.Lab.UploadRate < 0 {
-		return invalid("lab.upload_rate", errPositive)
+func (c Config) validateUploadExperimentShape() error {
+	upload := c.Experiments.Upload
+	if upload.Rate < 0 {
+		return invalid("experiments.upload.rate", errPositive)
 	}
-	if c.Lab.UploadJitter < 0 || c.Lab.UploadJitter > 100 {
-		return invalid("lab.upload_jitter", errors.New("must be between 0 and 100 percent"))
+	if upload.Jitter < 0 || upload.Jitter > 100 {
+		return invalid("experiments.upload.jitter", errors.New("must be between 0 and 100 percent"))
 	}
-	if c.Lab.UploadMultiplier != 0 && c.Lab.UploadMultiplier <= 1 {
-		return invalid("lab.upload_multiplier", errors.New("must be greater than 1"))
+	if upload.Multiplier != 0 && upload.Multiplier <= 1 {
+		return invalid("experiments.upload.multiplier", errors.New("must be greater than 1"))
 	}
-	if c.Lab.PeerSampleInterval < 0 {
-		return invalid("lab.peer_sample_interval", errPositive)
+	if upload.PeerSampleInterval < 0 {
+		return invalid("experiments.upload.peer_sample_interval", errPositive)
 	}
 	return nil
 }

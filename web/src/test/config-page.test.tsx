@@ -75,6 +75,18 @@ function configView(overrides: Partial<ConfigView> = {}): ConfigView {
         documentation: 'CapacityBytes is the maximum size of the in-memory piece cache.',
       }),
       configKey({
+        path: 'experiments.upload.mode',
+        section: 'experiments.upload',
+        kind: 'enum',
+        values: ['baseline', 'inject', 'amplify'],
+        default: 'baseline',
+        file_value: 'baseline',
+        effective_value: 'inject',
+        source: 'file',
+        component: 'experiment',
+        documentation: 'Mode selects the reporting model: baseline, inject, or amplify.',
+      }),
+      configKey({
         path: 'password',
         section: '',
         secret: true,
@@ -139,6 +151,7 @@ describe('ConfigPage', () => {
     expect(screen.getByText('基础')).toBeInTheDocument();
     expect(screen.getByText('日志')).toBeInTheDocument();
     expect(screen.getByText('缓存')).toBeInTheDocument();
+    expect(screen.getByText('上传实验')).toBeInTheDocument();
 
     const level = screen.getByRole('article', { name: 'log.level' });
     expect(within(level).getByTestId('config-effective-value')).toHaveTextContent('debug');

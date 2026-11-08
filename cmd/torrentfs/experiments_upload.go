@@ -10,7 +10,7 @@ import (
 )
 
 // labSessionOptions reads the upload statistics experiment from the
-// configuration and, when the experiment is configured, returns the session
+// [experiments.upload] configuration and, when the experiment is configured, returns the session
 // option that owns it. The session restores persisted runtime settings, opens
 // the optional announce log, and routes announces through the reporter; the
 // Web UI can then change the runtime settings (mode, rate, multiplier, jitter,
@@ -19,14 +19,14 @@ import (
 // This is research tooling for exercising anomaly detection on a tracker you
 // operate and must not be pointed at a third-party tracker.
 func labSessionOptions(cfg config.Config, logger *slog.Logger) ([]session.Option, error) {
-	settings, enabled, err := experiments.SettingsFrom(cfg.Lab)
+	settings, enabled, err := experiments.SettingsFrom(cfg.Experiments.Upload)
 	if err != nil {
-		return nil, fmt.Errorf("lab experiment: %w", err)
+		return nil, fmt.Errorf("experiments.upload experiment: %w", err)
 	}
 	if !enabled {
 		return nil, nil
 	}
-	logger.Warn("lab upload experiment configured; runtime settings can be changed from the Web UI",
+	logger.Warn("upload statistics experiment configured; runtime settings can be changed from the Web UI",
 		"mode", settings.Mode,
 		"rate_bytes_per_second", settings.RateBytesPerSecond,
 		"multiplier", settings.Multiplier,

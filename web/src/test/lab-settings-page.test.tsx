@@ -103,7 +103,7 @@ describe('LabSettingsPage', () => {
     expect(screen.getByText(/amplify 的上报值在每次 announce 时按真实增量 × 倍率累积/)).toBeInTheDocument();
 
     const [url, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('/api/v1/lab');
+    expect(url).toBe('/api/v1/experiments/upload');
     expect(request.method ?? 'GET').toBe('GET');
   });
 
@@ -180,7 +180,7 @@ describe('LabSettingsPage', () => {
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByText('上传实验未启用')).toBeInTheDocument());
-    expect(screen.getByText(/TORRENTFS_LAB_UPLOAD_MODE/)).toBeInTheDocument();
+    expect(screen.getByText(/TORRENTFS_EXPERIMENTS_UPLOAD_MODE/)).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '实验模式' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存设置' })).toBeDisabled();
   });
@@ -200,7 +200,7 @@ describe('LabSettingsPage', () => {
     await waitFor(() => expect(screen.getByRole('combobox', { name: '实验模式' })).toHaveValue('inject'));
     fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('TORRENTFS_LAB_UPLOAD_MODE'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('TORRENTFS_EXPERIMENTS_UPLOAD_MODE'));
     expect(screen.queryByText(/已保存/)).not.toBeInTheDocument();
   });
 });

@@ -192,6 +192,26 @@ func removedTOMLDocument(key string) string {
 		return "[smb]\nusername = \"file-user\"\n"
 	case "smb.password_file":
 		return "[smb]\npassword_file = \"/file/secret\"\n"
+	case "lab":
+		// The removed section without one of its keys: the section itself is
+		// what the user has to migrate away from.
+		return "[lab]\nunused = true\n"
+	case "lab.upload_mode":
+		return "[lab]\nupload_mode = \"baseline\"\n"
+	case "lab.upload_rate":
+		return "[lab]\nupload_rate = \"1MiB/s\"\n"
+	case "lab.upload_multiplier":
+		return "[lab]\nupload_multiplier = \"2\"\n"
+	case "lab.upload_jitter":
+		return "[lab]\nupload_jitter = \"10\"\n"
+	case "lab.upload_cap":
+		return "[lab]\nupload_cap = \"1MiB\"\n"
+	case "lab.upload_seed":
+		return "[lab]\nupload_seed = 1\n"
+	case "lab.announce_log":
+		return "[lab]\nannounce_log = \"/tmp/announce.jsonl\"\n"
+	case "lab.peer_sample_interval":
+		return "[lab]\npeer_sample_interval = \"10s\"\n"
 	default:
 		return "[unknown]\nvalue = true\n"
 	}

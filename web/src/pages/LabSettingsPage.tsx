@@ -25,7 +25,7 @@ import { labSettingsApplied, userFacingLabError } from '../utils/user-facing-err
 import { usePageVisible } from '../utils/visibility';
 import styles from './LabSettingsPage.module.css';
 
-const ENV_HINT = 'TORRENTFS_LAB_UPLOAD_MODE';
+const ENV_HINT = 'TORRENTFS_EXPERIMENTS_UPLOAD_MODE';
 
 function capInputError(result: ReturnType<typeof parseByteQuantity>): string {
   if ('value' in result) {
@@ -203,8 +203,8 @@ export function LabSettingsPage() {
             上传实验需要在后台服务启动时通过环境变量开启。请设置
             <code className={styles.code}>{ENV_HINT}</code>
             为 baseline、inject 或 amplify，并按需设置
-            <code className={styles.code}>TORRENTFS_LAB_UPLOAD_RATE</code>、
-            <code className={styles.code}>TORRENTFS_LAB_UPLOAD_MULTIPLIER</code> 等变量，然后重启服务。
+            <code className={styles.code}>TORRENTFS_EXPERIMENTS_UPLOAD_RATE</code>、
+            <code className={styles.code}>TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER</code> 等变量，然后重启服务。
             启用前表单不可编辑。
           </p>
         </Alert>

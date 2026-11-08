@@ -28,7 +28,7 @@ export function App() {
       <Route element={<AppLayout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/config" element={<ConfigPage />} />
-        <Route path="/lab" element={<LabSettingsPage />} />
+        <Route path="/experiments" element={<LabSettingsPage />} />
         <Route path="/torrents/:id" element={<TorrentDetailPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

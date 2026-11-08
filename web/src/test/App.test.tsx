@@ -103,7 +103,7 @@ function dashboardHandler(options: {
     if (url.endsWith('/stats')) {
       return runtimeStatsResponse();
     }
-    if (url.endsWith('/lab')) {
+    if (url.endsWith('/experiments/upload')) {
       return disabledLabResponse();
     }
     throw new Error(`Unexpected request: ${url}`);

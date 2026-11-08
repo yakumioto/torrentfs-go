@@ -25,7 +25,8 @@ const SECTION_LABELS: Record<string, string> = {
   filesystem: '文件系统',
   fuse: 'FUSE',
   smb: 'SMB',
-  lab: '上传实验',
+  experiments: '实验',
+  'experiments.upload': '上传实验',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
