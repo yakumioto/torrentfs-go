@@ -12,7 +12,6 @@ import type {
   SubtitleUploadResponse,
   Torrent,
   TorrentStatus,
-  UploadRateSettings,
 } from '../types/api';
 import { apiErrorFromResponse } from './errors';
 
@@ -158,18 +157,6 @@ export class ApiClient {
 
   getOperation(operationId: string, signal?: AbortSignal): Promise<Operation> {
     return this.request<Operation>(`/operations/${encodeURIComponent(operationId)}`, { signal });
-  }
-
-  getUploadRateSettings(signal?: AbortSignal): Promise<UploadRateSettings> {
-    return this.request<UploadRateSettings>('/settings/upload-rate', { signal });
-  }
-
-  setUploadRateSettings(settings: UploadRateSettings, signal?: AbortSignal): Promise<UploadRateSettings> {
-    return this.request<UploadRateSettings>('/settings/upload-rate', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-      signal,
-    });
   }
 
   getLab(signal?: AbortSignal): Promise<LabView> {

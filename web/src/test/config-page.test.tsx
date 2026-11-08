@@ -183,6 +183,45 @@ describe('ConfigPage', () => {
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
   });
 
+  it('renders the upload rate section from the schema without a hand-written form', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({
+      keys: [
+        configKey({
+          path: 'upload_rate.limit',
+          section: 'upload_rate',
+          kind: 'byte_rate',
+          default: '',
+          file_value: '1MiB/s',
+          effective_value: '1MiB/s',
+          source: 'file',
+          component: 'session',
+          hot_apply: true,
+          documentation: 'Limit is the aggregate payload upload rate across every torrent and peer.',
+        }),
+        configKey({
+          path: 'upload_rate.schedule_start',
+          section: 'upload_rate',
+          default: '',
+          file_value: '08:00',
+          effective_value: '08:00',
+          source: 'file',
+          component: 'session',
+          hot_apply: true,
+          documentation: 'ScheduleStart is the start of the daily window in strict 24-hour HH:MM.',
+        }),
+      ],
+    }))));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'upload_rate.limit' });
+    expect(screen.getByText('上传限速')).toBeInTheDocument();
+    const limit = screen.getByRole('article', { name: 'upload_rate.limit' });
+    expect(within(limit).getByTestId('config-effective-value')).toHaveTextContent('1MiB/s');
+    expect(within(limit).getByText('立即生效')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'upload_rate.limit' })).toHaveValue('1MiB/s');
+    expect(screen.getByRole('textbox', { name: 'upload_rate.schedule_start' })).toHaveValue('08:00');
+  });
+
   it('filters the keys by a search term across paths, documentation and sections', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
     renderPage(fetchMock);

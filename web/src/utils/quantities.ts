@@ -89,9 +89,8 @@ export function formatUploadRate(value: number): string | undefined {
 }
 
 /**
- * User-facing explanation for a rejected upload-rate input. Shared by the
- * upload-limit dialog and the lab settings page so both forms phrase the same
- * parser failures identically.
+ * User-facing explanation for a rejected upload-rate input. The lab settings
+ * page uses it to phrase parser failures consistently.
  */
 export function uploadRateInputError(result: QuantityResult): string {
   if ('value' in result) {
