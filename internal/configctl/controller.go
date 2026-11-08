@@ -137,6 +137,13 @@ func (c *Controller) View() (View, error) {
 		fileValue, _ := config.ValueText(fileConfig, schemaKey.Path)
 		effectiveValue, _ := config.ValueText(c.cfg, schemaKey.Path)
 		defaultValue, _ := config.ValueText(defaults, schemaKey.Path)
+		// A schema key can be hot-applied only when a component registered an
+		// applier for it. The badge the page renders must not promise an
+		// effect the running process has no way to receive.
+		hotApply := schemaKey.HotApply
+		if _, registered := c.applierByPath[schemaKey.Path]; !registered {
+			hotApply = false
+		}
 		readOnly := ""
 		switch {
 		case schemaKey.Secret:
@@ -160,7 +167,7 @@ func (c *Controller) View() (View, error) {
 			Overridable:    schemaKey.Overridable,
 			Secret:         schemaKey.Secret,
 			Component:      schemaKey.Component,
-			HotApply:       schemaKey.HotApply,
+			HotApply:       hotApply,
 			Documentation:  schemaKey.Documentation,
 			ReadOnlyReason: readOnly,
 		})

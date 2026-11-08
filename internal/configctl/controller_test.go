@@ -41,7 +41,11 @@ func loadView(t *testing.T, path string) configctl.View {
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	view, err := configctl.New(path, cfg, sources).View()
+	controller := configctl.New(path, cfg, sources)
+	if err := controller.RegisterApplier(&recordingApplier{keys: []string{"log.level"}}); err != nil {
+		t.Fatalf("RegisterApplier: %v", err)
+	}
+	view, err := controller.View()
 	if err != nil {
 		t.Fatalf("configuration view: %v", err)
 	}
@@ -274,5 +278,36 @@ func TestViewReportsTheConfigurationFileBaseline(t *testing.T) {
 	}
 	if withoutFile.Baseline != "" {
 		t.Errorf("baseline without a configuration file = %q, want empty", withoutFile.Baseline)
+	}
+}
+
+// TestViewReportsHotApplyOnlyWithAnApplier covers the apply boundary as the
+// page sees it: a schema key marked hot-applied is only promised as immediate
+// when a running component registered an applier for it.
+func TestViewReportsHotApplyOnlyWithAnApplier(t *testing.T) {
+	path := writeConfigFile(t, "[http]\nmax_upload_size = \"1MiB\"\n")
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	controller := configctl.New(path, cfg, sources)
+
+	view, err := controller.View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if keyByPath(t, view, "http.max_upload_size").HotApply {
+		t.Error("http.max_upload_size reports HotApply=true without an applier")
+	}
+
+	if err := controller.RegisterApplier(&recordingApplier{keys: []string{"http.max_upload_size"}}); err != nil {
+		t.Fatalf("RegisterApplier: %v", err)
+	}
+	view, err = controller.View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if !keyByPath(t, view, "http.max_upload_size").HotApply {
+		t.Error("http.max_upload_size reports HotApply=false after its applier was registered")
 	}
 }

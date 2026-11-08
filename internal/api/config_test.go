@@ -109,11 +109,8 @@ func writeAPIConfigFile(t *testing.T, content string) string {
 func TestGetConfigReturnsTheReadOnlyView(t *testing.T) {
 	path := writeAPIConfigFile(t, "backend = \"none\"\npassword = \"a-password-that-must-not-leak\"\n\n[log]\nlevel = \"info\"\n")
 	t.Setenv("TORRENTFS_LOG_LEVEL", "debug")
-	cfg, sources, err := config.LoadWithSources(path)
-	if err != nil {
-		t.Fatalf("load configuration: %v", err)
-	}
-	srv := configTestServer(t, configctl.New(path, cfg, sources), nil)
+	controller, _ := configSaveController(t, path)
+	srv := configTestServer(t, controller, nil)
 
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, configPath, nil))
 	if rec.Code != http.StatusOK {
