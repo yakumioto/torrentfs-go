@@ -219,18 +219,48 @@ func (c *Controller) readOnlyReason() (string, bool, error) {
 	if !info.Mode().IsRegular() {
 		return ReadOnlyFileNotWritable, true, nil
 	}
-	if info.Mode().Perm()&0o222 == 0 || unix.Access(c.path, unix.W_OK) != nil {
-		return ReadOnlyFileNotWritable, true, nil
-	}
-	directoryPath := filepath.Dir(c.path)
-	directory, err := os.Stat(directoryPath)
+	writable, err := Writable(c.path)
 	if err != nil {
-		return "", false, fmt.Errorf("configctl: inspect the configuration directory: %w", err)
+		return "", false, fmt.Errorf("configctl: inspect the configuration file: %w", err)
 	}
-	if !directory.IsDir() || directory.Mode().Perm()&0o222 == 0 || unix.Access(directoryPath, unix.W_OK) != nil {
+	if !writable {
 		return ReadOnlyFileNotWritable, true, nil
 	}
 	return "", true, nil
+}
+
+// Writable reports whether the configuration file at path can be replaced by
+// the atomic write-back.
+//
+// It combines the declared permission bits with an access check instead of
+// probing a write: a probe would change the file it is asking about. The bits
+// keep a root process from calling a file without a write bit writable; the
+// access check catches a file the process does not own and cannot write even
+// though a write bit is set. The directory needs a write bit as well, because
+// the write-back creates a temporary file beside the configuration file.
+//
+// The startup migration uses this function too, so a sidecar is never folded
+// into a configuration the page would report as read-only.
+func Writable(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	if info.Mode().Perm()&0o222 == 0 || unix.Access(path, unix.W_OK) != nil {
+		return false, nil
+	}
+	directoryPath := filepath.Dir(path)
+	directory, err := os.Stat(directoryPath)
+	if err != nil {
+		return false, err
+	}
+	if !directory.IsDir() || directory.Mode().Perm()&0o222 == 0 || unix.Access(directoryPath, unix.W_OK) != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // sectionOf returns the configuration section of a key: everything before its
