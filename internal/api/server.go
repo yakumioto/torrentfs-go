@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/auth"
@@ -68,8 +69,7 @@ func WithLogger(l *slog.Logger) Option {
 type Server struct {
 	backend      Backend
 	auth         *auth.Service
-	tokenTTL     time.Duration
-	maxUpload    int64
+	maxUpload    atomic.Int64
 	logger       *slog.Logger
 	configViewer ConfigViewer
 	configSaver  ConfigSaver
@@ -100,13 +100,12 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	}
 	s := &Server{
 		backend:       backend,
-		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
-		maxUpload:     cfg.HTTP.MaxUploadBytes.Int64(),
 		logger:        logger,
 		configViewer:  options.configViewer,
 		configSaver:   options.configSaver,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
+	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
 	if cfg.HTTP.Auth.Enabled {
 		hash, err := cfg.PasswordHash()
 		if err != nil {
