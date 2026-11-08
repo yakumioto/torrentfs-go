@@ -253,7 +253,7 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	// from exactly the bytes the baseline covered.
 	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, c.path, emptyEnvironment{})
 	if err != nil {
-		return c.failSaveLocked(SaveInvalid, err, configcheckFieldErrors(err))
+		return c.failSaveLocked(SaveInvalid, err, fieldErrorsOf(err))
 	}
 	candidate := fileConfig
 	var parseErr error
@@ -271,7 +271,7 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	}
 	effective, effectiveSources, checkErr := configcheck.LoadContent(document, c.path)
 	if parseErr != nil || checkErr != nil {
-		fields := append(parseFields, configcheckFieldErrors(checkErr)...)
+		fields := append(parseFields, fieldErrorsOf(checkErr)...)
 		// A parse failure leaves the key out of the candidate, so the
 		// validation of the other keys still runs and one save reports every
 		// problem.
@@ -467,10 +467,4 @@ func fieldErrorsOf(err error) []FieldError {
 		converted = append(converted, FieldError{Path: field.Path, Message: field.Message})
 	}
 	return converted
-}
-
-// configcheckFieldErrors converts the problems of the start path into save
-// field problems.
-func configcheckFieldErrors(err error) []FieldError {
-	return fieldErrorsOf(err)
 }
