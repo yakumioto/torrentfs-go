@@ -25,13 +25,17 @@ RUN set -eux; \
         bash ca-certificates fuse3 passwd tini util-linux; \
     groupadd --gid 1000 torrentfs; \
     useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin torrentfs; \
-    install -d -o root -g root -m 0755 /etc/torrentfs; \
+    install -d -o torrentfs -g torrentfs -m 0755 /etc/torrentfs; \
     install -d -o torrentfs -g torrentfs -m 0755 /share /share-strm; \
     install -d -o root -g root -m 0777 /torrents; \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/torrentfs /usr/local/bin/torrentfs
 COPY docker/entrypoint.sh /usr/local/bin/torrentfs-entrypoint
-COPY docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
+# The configuration page writes the configuration file back. The write-back
+# creates a temporary file in the configuration directory, so both the file
+# and its directory belong to the runtime user. A read-only mount of either
+# leaves the page read-only instead of making a save fail halfway.
+COPY --chown=torrentfs:torrentfs docker/torrentfs.toml /etc/torrentfs/torrentfs.toml
 COPY LICENSE /usr/share/licenses/torrentfs-go/LICENSE
 COPY third_party/go-smb/LICENSE /usr/share/licenses/torrentfs-go/go-smb.LICENSE
 RUN chmod 0755 /usr/local/bin/torrentfs-entrypoint
