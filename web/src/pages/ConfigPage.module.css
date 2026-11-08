@@ -257,3 +257,12 @@
   padding: 0;
   list-style: none;
 }
+
+.reload {
+  margin-bottom: 1rem;
+}
+
+.reloadText {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}

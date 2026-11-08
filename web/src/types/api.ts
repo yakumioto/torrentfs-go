@@ -229,7 +229,7 @@ export interface ConfigKey {
   read_only_reason: ConfigKeyReadOnlyReason | '';
 }
 
-/** The outcome of the most recent save or reload; both are placeholders today. */
+/** The outcome of the most recent save or reload. */
 export interface ConfigOperationStatus {
   at: string | null;
   ok: boolean;
@@ -248,6 +248,12 @@ export interface ConfigView {
    */
   baseline: string;
   read_only_reason: ConfigPageReadOnlyReason | '';
+  /**
+   * Why the configuration file on disk cannot be used right now, for example
+   * an external edit that made it invalid. The values of the view stay those
+   * of the last successful load. Empty means the file still matches them.
+   */
+  file_error: string;
   keys: ConfigKey[];
   last_save: ConfigOperationStatus;
   last_reload: ConfigOperationStatus;

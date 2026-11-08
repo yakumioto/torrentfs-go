@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -38,6 +38,7 @@ function configView(overrides: Partial<ConfigView> = {}): ConfigView {
     config_file: '/etc/torrentfs/torrentfs.toml',
     baseline: 'baseline-digest',
     read_only_reason: '',
+    file_error: '',
     keys: [
       configKey({
         path: 'backend',
@@ -387,5 +388,71 @@ describe('ConfigPage save flow', () => {
     expect(puts).toHaveLength(1);
     const configGets = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method !== 'PUT');
     expect(configGets).toHaveLength(1);
+  });
+});
+
+
+describe('ConfigPage external reload status', () => {
+  it('shows a successful automatic reload and marks a cold key as restart-required', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({
+      last_reload: {
+        at: '2026-11-08T12:00:00Z',
+        ok: true,
+        error: '',
+        keys: ['cache.capacity'],
+      },
+    }))));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    const status = screen.getByTestId('config-reload-status');
+    expect(status).toHaveTextContent('最近一次自动重载成功');
+    const keys = screen.getByTestId('config-reload-keys');
+    expect(keys).toHaveTextContent('cache.capacity');
+    expect(keys).toHaveTextContent('重启生效');
+  });
+
+  it('shows a rejected external edit with its reason and rereads the view on demand', async () => {
+    const failing = configView({
+      file_error: 'config: load configuration: level "verbose" is not one of debug, info, warn, error',
+      last_reload: {
+        at: '2026-11-08T12:00:00Z',
+        ok: false,
+        error: 'config: load configuration: level "verbose" is not one of debug, info, warn, error',
+        keys: [],
+      },
+    });
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(failing)));
+    renderPage(fetchMock);
+
+    await screen.findByTestId('config-file-error');
+    expect(screen.getByTestId('config-file-error')).toHaveTextContent('继续使用最近一次成功加载的配置');
+    expect(screen.getByTestId('config-file-error')).toHaveTextContent('is not one of debug, info, warn, error');
+    expect(screen.getByTestId('config-reload-error')).toHaveTextContent('最近一次自动重载失败');
+
+    // The values of the last known good configuration stay on the page: the
+    // failed external edit does not remove the editing surface.
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('2GiB');
+
+    const callsBefore = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+
+  it('shows a failed reload without a file error once the file error is cleared', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({
+      last_reload: {
+        at: '2026-11-08T12:00:00Z',
+        ok: false,
+        error: 'config: experiments.upload experiment: inject needs a rate',
+        keys: [],
+      },
+    }))));
+    renderPage(fetchMock);
+
+    await screen.findByTestId('config-reload-status');
+    expect(screen.getByTestId('config-reload-status')).toHaveTextContent('最近一次自动重载失败');
+    expect(screen.getByTestId('config-reload-error')).toHaveTextContent('inject needs a rate');
+    expect(screen.queryByTestId('config-file-error')).not.toBeInTheDocument();
   });
 });

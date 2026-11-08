@@ -15,6 +15,7 @@ import {
   IconAlertTriangle,
   IconDeviceFloppy,
   IconInfoCircle,
+  IconRefresh,
   IconSearch,
 } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
@@ -180,6 +181,131 @@ function ReadOnlyBanner({ view }: { view: ConfigView }) {
     );
   }
   return null;
+}
+
+/** Render the time of the most recent automatic reload for a human. */
+function reloadTime(at: string | null): string {
+  if (at === null) {
+    return '';
+  }
+  const time = new Date(at);
+  return Number.isNaN(time.getTime()) ? at : time.toLocaleString('zh-CN', { hour12: false });
+}
+
+/** The badge that tells whether a key the reload changed took effect now. */
+function reloadKeyLabel(configKey: ConfigKey | undefined): string {
+  if (configKey === undefined) {
+    return '已更新';
+  }
+  if (configKey.read_only_reason === 'environment_override') {
+    return '环境变量覆盖';
+  }
+  return configKey.hot_apply ? '立即生效' : '重启生效';
+}
+
+/**
+ * Shows how the running process last reacted to an external edit of the
+ * configuration file: a successful automatic reload, a rejected edit that
+ * left the previous configuration in force, or the file error that currently
+ * prevents a load. The reread action refreshes the view after the operator
+ * changed the file again.
+ */
+function ReloadStatus({ view, onReread }: { view: ConfigView; onReread: () => void }) {
+  const reload = view.last_reload;
+  const reread = (
+    <Button
+      variant="light"
+      color="torrent"
+      size="compact-sm"
+      leftSection={<IconRefresh size={14} />}
+      onClick={onReread}
+      data-testid="config-reload-reread"
+    >
+      重新读取
+    </Button>
+  );
+
+  if (view.file_error !== '') {
+    return (
+      <Alert
+        color="red"
+        icon={<IconAlertTriangle size={16} />}
+        title="配置文件当前无法使用"
+        className={styles.alert}
+        data-testid="config-file-error"
+      >
+        <p className={styles.alertText}>
+          磁盘上的配置文件无法读取或未通过校验，页面与服务继续使用最近一次成功加载的配置。
+        </p>
+        <p className={styles.alertText}>{view.file_error}</p>
+        {reload.at !== null && reload.error !== '' && (
+          <p className={styles.alertText} data-testid="config-reload-error">
+            最近一次自动重载失败：{reload.error}
+          </p>
+        )}
+        <Group mt="sm">{reread}</Group>
+      </Alert>
+    );
+  }
+
+  if (reload.at === null) {
+    return (
+      <div className={`panel panel--padding ${styles.reload}`} data-testid="config-reload-status">
+        <Group justify="space-between" gap="sm">
+          <span className={styles.reloadText}>配置文件监视中：尚未检测到外部修改。</span>
+          {reread}
+        </Group>
+      </div>
+    );
+  }
+
+  if (!reload.ok) {
+    return (
+      <Alert
+        color="red"
+        icon={<IconAlertTriangle size={16} />}
+        title="最近一次自动重载失败"
+        className={styles.alert}
+        data-testid="config-reload-status"
+      >
+        <p className={styles.alertText}>
+          配置文件的外部修改未通过校验，服务继续使用最近一次成功加载的配置。
+        </p>
+        <p className={styles.alertText} data-testid="config-reload-error">{reload.error}</p>
+        <Group mt="sm">{reread}</Group>
+      </Alert>
+    );
+  }
+
+  return (
+    <Alert
+      color="green"
+      icon={<IconRefresh size={16} />}
+      title="最近一次自动重载成功"
+      className={styles.alert}
+      data-testid="config-reload-status"
+    >
+      <p className={styles.alertText}>
+        检测到配置文件的外部修改并已重新加载（{reloadTime(reload.at)}）。
+      </p>
+      {reload.keys.length > 0 && (
+        <ul className={styles.resultKeys} data-testid="config-reload-keys">
+          {reload.keys.map((path) => {
+            const changed = view.keys.find((key) => key.path === path);
+            return (
+              <li key={path}>
+                <code className={styles.code}>{path}</code>{' '}
+                <Badge variant="light" color={changed?.hot_apply ? 'teal' : 'gray'}>
+                  {reloadKeyLabel(changed)}
+                </Badge>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <Group mt="sm">{reread}</Group>
+    </Alert>
+  );
 }
 
 /** One editor control derived from the schema type of a configuration key. */
@@ -523,6 +649,10 @@ export function ConfigPage() {
       {view !== undefined && (
         <>
           <ReadOnlyBanner view={view} />
+
+          {view.config_file !== '' && (
+            <ReloadStatus view={view} onReread={() => void refetch()} />
+          )}
 
           {saveOutcome !== null && (
             <Alert
