@@ -163,6 +163,12 @@ export function configSaveFailure(error: unknown): ConfigSaveFailure | undefined
 }
 
 export function userFacingConfigSaveError(error: unknown, fallback = '配置保存失败，请稍后重试。'): string {
+  if (error instanceof ApiError) {
+    const message = CONFIG_SAVE_CODE_MESSAGES[error.code];
+    if (message !== undefined) {
+      return message;
+    }
+  }
   const failure = configSaveFailure(error);
   if (failure === undefined) {
     return fallback;

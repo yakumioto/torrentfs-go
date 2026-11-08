@@ -252,3 +252,39 @@ describe('ApiClient category calls', () => {
     expect((vi.mocked(fetch).mock.calls[1][1] as RequestInit).body).toBe(JSON.stringify({ category: '' }));
   });
 });
+
+describe('ApiClient configuration save', () => {
+  it('writes a sparse patch with the baseline and the bearer header', async () => {
+    const result = { applied: ['log.level'], restart_required: [], persisted: true };
+    vi.mocked(fetch).mockResolvedValue(response(result));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+
+    await expect(api.saveConfig({ baseline: 'digest', patch: { 'log.level': 'debug' } })).resolves.toEqual(result);
+
+    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/config');
+    expect(request.method).toBe('PUT');
+    expect(request.body).toBe(JSON.stringify({ baseline: 'digest', patch: { 'log.level': 'debug' } }));
+    expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
+  });
+
+  it('keeps the structured failure payload of a rejected save', async () => {
+    vi.mocked(fetch).mockResolvedValue(response({
+      error: '配置校验失败',
+      code: 'invalid',
+      field_errors: [{ path: 'log.level', message: 'must be one of debug, info, warn, error' }],
+      applied: [],
+      restart_required: [],
+      persisted: false,
+    }, { status: 400, statusText: 'Bad Request' }));
+    const api = new ApiClient();
+
+    await expect(api.saveConfig({ baseline: 'digest', patch: { 'log.level': 'verbose' } })).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid',
+      payload: {
+        field_errors: [{ path: 'log.level', message: 'must be one of debug, info, warn, error' }],
+      },
+    });
+  });
+});

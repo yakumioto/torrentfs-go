@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../api/errors';
 import {
+  configSaveDurabilityUnconfirmed,
+  configSaveFailure,
   labSettingsApplied,
+  userFacingConfigSaveError,
   userFacingError,
   userFacingLabError,
   userFacingOperationCode,
@@ -54,5 +57,34 @@ describe('user-facing error mapping', () => {
     expect(labSettingsApplied(applied)).toBe(true);
     expect(labSettingsApplied(new ApiError(503, 'storage', '', 'lab_settings_storage_unavailable'))).toBe(false);
     expect(labSettingsApplied(undefined)).toBe(false);
+  });
+});
+
+describe('configuration save error mapping', () => {
+  it('keeps the per-key errors and the applied keys of a structured failure', () => {
+    const failure = new ApiError(503, '内部错误路径 /etc/secret', '', 'durability_unconfirmed', {
+      error: '新配置已生效，但无法确认重启后仍能保留',
+      code: 'durability_unconfirmed',
+      field_errors: [{ path: 'cache.capacity', message: 'must be positive' }],
+      applied: ['cache.capacity'],
+      restart_required: [],
+      persisted: false,
+    });
+
+    expect(configSaveFailure(failure)?.field_errors).toEqual([{ path: 'cache.capacity', message: 'must be positive' }]);
+    expect(configSaveFailure(failure)?.applied).toEqual(['cache.capacity']);
+    expect(userFacingConfigSaveError(failure)).toContain('已生效');
+    expect(configSaveDurabilityUnconfirmed(failure)).toBe(true);
+    expect(configSaveDurabilityUnconfirmed(new ApiError(409, 'conflict', '', 'conflict'))).toBe(false);
+  });
+
+  it('maps every stable code to Chinese text and never relays server text', () => {
+    for (const code of ['invalid', 'conflict', 'read_only', 'not_configured', 'persistence_unavailable']) {
+      const error = new ApiError(409, 'internal path /secret', '', code);
+      expect(userFacingConfigSaveError(error)).not.toContain('/secret');
+      expect(userFacingConfigSaveError(error)).not.toBe('配置保存失败，请稍后重试。');
+    }
+    expect(userFacingConfigSaveError('network down')).toBe('配置保存失败，请稍后重试。');
+    expect(configSaveFailure(new ApiError(409, 'conflict', '', 'conflict'))).toBeUndefined();
   });
 });
