@@ -311,3 +311,51 @@ func TestViewReportsHotApplyOnlyWithAnApplier(t *testing.T) {
 		t.Error("http.max_upload_size reports HotApply=false after its applier was registered")
 	}
 }
+
+// TestRegisterApplierRejectsIneligibleOwnership covers the registration guard
+// the start path relies on: an applier may only claim schema keys marked
+// hot-applied, each key has one owner, and an empty or nil applier is a wiring
+// bug. A key that waits for a restart must never be reported as hot-applied.
+func TestRegisterApplierRejectsIneligibleOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		applier    configctl.Applier
+		registered []string
+		wantError  bool
+	}{
+		{name: "nil applier", applier: nil, wantError: true},
+		{name: "no keys", applier: &recordingApplier{}, wantError: true},
+		{name: "unknown key", applier: &recordingApplier{keys: []string{"log.nope"}}, wantError: true},
+		{name: "restart-only key", applier: &recordingApplier{keys: []string{"cache.capacity"}}, wantError: true},
+		{name: "mixed hot and restart-only keys",
+			applier:   &recordingApplier{keys: []string{"log.level", "cache.capacity"}},
+			wantError: true},
+		{name: "already owned key",
+			applier:    &recordingApplier{keys: []string{"log.level"}},
+			registered: []string{"log.level"},
+			wantError:  true},
+		{name: "hot key", applier: &recordingApplier{keys: []string{"log.level"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfigFile(t, "[log]\nlevel = \"info\"\n")
+			cfg, sources, err := config.LoadWithSources(path)
+			if err != nil {
+				t.Fatalf("load configuration: %v", err)
+			}
+			controller := configctl.New(path, cfg, sources)
+			if len(tt.registered) > 0 {
+				if err := controller.RegisterApplier(&recordingApplier{keys: tt.registered}); err != nil {
+					t.Fatalf("register the first applier: %v", err)
+				}
+			}
+			err = controller.RegisterApplier(tt.applier)
+			if tt.wantError && err == nil {
+				t.Fatalf("RegisterApplier(%v) succeeded, want an error", tt.applier.Keys())
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("RegisterApplier(%v): %v", tt.applier.Keys(), err)
+			}
+		})
+	}
+}

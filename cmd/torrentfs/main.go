@@ -220,11 +220,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var apiServer *api.Server
 	if httpEnabled {
 		// The controller is built before the HTTP server, because the server
-		// needs it for its routes. The log level applier is independent of the
-		// server; an applier that needs a server handle is registered after
-		// New returns, which keeps the construction order one way.
+		// needs it for its routes. The log level and session appliers are
+		// independent of the server; an applier that needs a server handle is
+		// registered after New returns, which keeps the construction order one
+		// way.
 		configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
-		if err := configController.RegisterApplier(logging.NewLevelApplier(logLevelVar)); err != nil {
+		registerAppliers := func(appliers ...configctl.Applier) error {
+			for _, applier := range appliers {
+				if err := configController.RegisterApplier(applier); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := registerAppliers(
+			logging.NewLevelApplier(logLevelVar),
+			session.NewConfigApplier(sess),
+		); err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 			sequence.run()
 			return 1
@@ -248,6 +260,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		sequence.api = apiServer
+		if err := registerAppliers(
+			api.NewMaxUploadApplier(apiServer),
+			api.NewTokenTTLApplier(apiServer),
+		); err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+			sequence.run()
+			return 1
+		}
 	}
 
 	requests := []mountRequest{{mountpoint: mountpoint, backend: sess}}

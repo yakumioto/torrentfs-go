@@ -247,3 +247,96 @@ func TestNewRejectsDisabledAuthentication(t *testing.T) {
 		t.Fatal("New with disabled authentication succeeded")
 	}
 }
+
+// TestSetTokenTTLAppliesToNewTokensAndRenewals covers the hot-applied token
+// lifetime: a replaced TTL is used by tokens created afterwards and by the
+// renewal of a token issued under the previous TTL.
+func TestSetTokenTTLAppliesToNewTokensAndRenewals(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, time.February, 2, 12, 0, 0, 0, time.UTC)}
+	service := newTestService(t, clock, nil)
+
+	oldToken, oldExpiry, err := service.Login("password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if want := clock.Now().Add(time.Minute); oldExpiry != want {
+		t.Fatalf("startup expiry = %s, want %s", oldExpiry, want)
+	}
+
+	if err := service.SetTokenTTL(90 * time.Minute); err != nil {
+		t.Fatalf("SetTokenTTL: %v", err)
+	}
+	if got := service.TokenTTL(); got != 90*time.Minute {
+		t.Fatalf("TokenTTL = %s, want 90m", got)
+	}
+
+	_, newExpiry, err := service.Login("password")
+	if err != nil {
+		t.Fatalf("second Login: %v", err)
+	}
+	if want := clock.Now().Add(90 * time.Minute); newExpiry != want {
+		t.Fatalf("expiry under the replaced TTL = %s, want %s", newExpiry, want)
+	}
+
+	clock.Advance(10 * time.Second)
+	_, renewedExpiry, err := service.Authenticate(oldToken, true)
+	if err != nil {
+		t.Fatalf("renew Authenticate: %v", err)
+	}
+	if want := clock.Now().Add(90 * time.Minute); renewedExpiry != want {
+		t.Fatalf("renewed expiry = %s, want the replaced TTL %s", renewedExpiry, want)
+	}
+
+	_, unchangedExpiry, err := service.Authenticate(oldToken, false)
+	if err != nil {
+		t.Fatalf("non-renewing Authenticate: %v", err)
+	}
+	if unchangedExpiry != renewedExpiry {
+		t.Fatalf("non-renewed expiry = %s, want the renewed %s", unchangedExpiry, renewedExpiry)
+	}
+}
+
+// TestSetTokenTTLRejectsInvalidDurations covers the guard around the setter:
+// a TTL the startup would reject leaves the current one in force.
+func TestSetTokenTTLRejectsInvalidDurations(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, time.February, 2, 12, 0, 0, 0, time.UTC)}
+	service := newTestService(t, clock, nil)
+
+	for _, ttl := range []time.Duration{0, -time.Second, 25 * time.Hour} {
+		if err := service.SetTokenTTL(ttl); err == nil {
+			t.Errorf("SetTokenTTL(%s) succeeded, want an error", ttl)
+		}
+	}
+	if got := service.TokenTTL(); got != time.Minute {
+		t.Fatalf("TokenTTL after rejected updates = %s, want the unchanged 1m", got)
+	}
+}
+
+// TestConcurrentTokenTTLUpdates drives the setter and the readers together.
+// Run under -race, it proves the current TTL is guarded like the token store.
+func TestConcurrentTokenTTLUpdates(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	service := newTestService(t, clock, nil)
+	token, _, err := service.Login("password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	var group sync.WaitGroup
+	for i := range 32 {
+		group.Add(1)
+		go func(i int) {
+			defer group.Done()
+			ttl := time.Duration(i+1) * time.Minute
+			if err := service.SetTokenTTL(ttl); err != nil {
+				t.Errorf("SetTokenTTL: %v", err)
+				return
+			}
+			if got := service.TokenTTL(); got <= 0 {
+				t.Errorf("TokenTTL = %s, want a positive value", got)
+			}
+			_, _, _ = service.Authenticate(token, true)
+		}(i)
+	}
+	group.Wait()
+}
