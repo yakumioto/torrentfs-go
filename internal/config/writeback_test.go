@@ -401,3 +401,25 @@ func TestWriteBackRoundTripsEverySchemaKey(t *testing.T) {
 		t.Fatalf("the rendered example loads to a different configuration:\n got %+v\nwant %+v", loaded, file)
 	}
 }
+
+// TestWriteBackRefusesTheRedactedSecretPlaceholder covers the safety rule
+// that the printed placeholder is never written back as a password: a caller
+// that hands the renderer the printed configuration instead of the file layer
+// gets an error instead of a configuration file with a broken secret.
+func TestWriteBackRefusesTheRedactedSecretPlaceholder(t *testing.T) {
+	file, sources := loadFileConfig(t, `username = "alice"
+password = "s3cr3t"
+`)
+	file.Password = redactedValue
+
+	_, err := WriteBack{
+		File:    file,
+		Sources: sources,
+	}.TOML()
+	if err == nil {
+		t.Fatal("TOML wrote the redacted secret placeholder")
+	}
+	if !strings.Contains(err.Error(), "redacted") {
+		t.Fatalf("TOML error = %q, want it to name the redacted placeholder", err)
+	}
+}

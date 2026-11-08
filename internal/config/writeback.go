@@ -63,6 +63,9 @@ func (w WriteBack) TOML() ([]byte, error) {
 				// environment secret into the file. Neither is written.
 				continue
 			}
+			if text == redactedValue {
+				return nil, fmt.Errorf("config: write-back: %q holds the redacted placeholder, not the file value", key.Path)
+			}
 		}
 		rendered, ok := renderConfigValue(item, value)
 		if !ok {
