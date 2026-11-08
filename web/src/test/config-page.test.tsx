@@ -322,6 +322,109 @@ describe('ConfigPage', () => {
     expect(screen.getByRole('textbox', { name: 'log.level' })).toBeDisabled();
     expect(screen.queryByRole('textbox', { name: 'password' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+    // The page never offers a process restart or exit control.
+    expect(screen.queryByRole('button', { name: /重启服务|重启进程|退出进程|退出程序/ })).not.toBeInTheDocument();
+  });
+
+  it('maps every schema kind to its editor control and saves the edited text', async () => {
+    const view = configView({
+      keys: [
+        configKey({
+          path: 'log.add_source',
+          section: 'log',
+          kind: 'bool',
+          default: 'false',
+          file_value: 'false',
+          effective_value: 'false',
+          source: 'file',
+          component: 'logging',
+          documentation: 'AddSource adds the source file and line to every log record.',
+        }),
+        configKey({
+          path: 'experiments.upload.seed',
+          section: 'experiments.upload',
+          kind: 'int',
+          default: '0',
+          file_value: '0',
+          effective_value: '0',
+          source: 'file',
+          component: 'experiment',
+          documentation: 'Seed fixes the random jitter sequence for reproducible runs.',
+        }),
+        configKey({
+          path: 'connections.bootstrap_nodes',
+          section: 'connections',
+          kind: 'list',
+          default: '[]',
+          file_value: '',
+          effective_value: '',
+          source: 'default',
+          component: 'session',
+          documentation: 'BootstrapNodes lists explicit host:port entries.',
+        }),
+        configKey({
+          path: 'filesystem.read_timeout',
+          section: 'filesystem',
+          kind: 'duration',
+          default: '30s',
+          file_value: '30s',
+          effective_value: '30s',
+          source: 'file',
+          component: 'filesystem',
+          documentation: 'ReadTimeout bounds a single read of a piece.',
+        }),
+      ],
+    });
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: [],
+          restart_required: [
+            'log.add_source',
+            'experiments.upload.seed',
+            'connections.bootstrap_nodes',
+            'filesystem.read_timeout',
+          ],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(view));
+    });
+    renderPage(fetchMock, view);
+
+    await screen.findByRole('article', { name: 'log.add_source' });
+    const addSource = within(screen.getByRole('article', { name: 'log.add_source' }))
+      .getByRole('switch', { name: 'log.add_source' });
+    expect(addSource).not.toBeChecked();
+    fireEvent.click(addSource);
+
+    fireEvent.change(
+      within(screen.getByRole('article', { name: 'experiments.upload.seed' }))
+        .getByRole('textbox', { name: 'experiments.upload.seed' }),
+      { target: { value: '7' } },
+    );
+    fireEvent.change(
+      screen.getByRole('textbox', { name: 'connections.bootstrap_nodes' }),
+      { target: { value: 'router.example:6881' } },
+    );
+    fireEvent.change(
+      screen.getByRole('textbox', { name: 'filesystem.read_timeout' }),
+      { target: { value: '45s' } },
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+    const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(put).toBeDefined();
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: {
+        'log.add_source': 'true',
+        'experiments.upload.seed': '7',
+        'connections.bootstrap_nodes': 'router.example:6881',
+        'filesystem.read_timeout': '45s',
+      },
+    });
   });
 
   it('groups the upload experiment keys under an experiments category with a deep-link anchor', async () => {
