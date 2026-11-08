@@ -52,7 +52,7 @@ export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void;
           <Tooltip label="上传实验设置">
             <ActionIcon
               component={Link}
-              to="/lab"
+              to="/experiments"
               variant="subtle"
               color="gray"
               aria-label="上传实验设置"

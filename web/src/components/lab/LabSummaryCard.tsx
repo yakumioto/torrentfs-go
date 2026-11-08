@@ -13,7 +13,7 @@ import styles from './LabSummaryCard.module.css';
 /**
  * Dashboard summary of the synthetic-upload experiment. It is a link because
  * the values are only meaningful next to their configuration, which lives on
- * the dedicated /lab page.
+ * the dedicated /experiments page.
  *
  * The card deliberately shows both points in time: the live real counter and
  * the counter captured at the last announce. Reported and overreported values
@@ -28,7 +28,7 @@ export function LabSummaryCard({ view }: { view: LabView }) {
   const tone = overreported > 0 ? styles.surplus : overreported < 0 ? styles.shortfall : undefined;
 
   return (
-    <Link to="/lab" className={`panel ${styles.card}`} aria-label="上传实验：打开上传实验设置">
+    <Link to="/experiments" className={`panel ${styles.card}`} aria-label="上传实验：打开上传实验设置">
       <div className={styles.heading}>
         <div>
           <p className="eyebrow">反作弊测试</p>

@@ -100,7 +100,7 @@ describe('ApiClient', () => {
     const api = new ApiClient({ getToken: () => 'opaque' });
     await expect(api.getLab()).resolves.toEqual(lab);
     const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/lab');
+    expect(url).toBe('/api/v1/experiments/upload');
     expect(request.method ?? 'GET').toBe('GET');
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
   });
@@ -126,7 +126,7 @@ describe('ApiClient', () => {
     const api = new ApiClient({ getToken: () => 'opaque' });
     await expect(api.setLabSettings(update)).resolves.toEqual(applied);
     const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/lab/settings');
+    expect(url).toBe('/api/v1/experiments/upload/settings');
     expect(request.method).toBe('PUT');
     expect(request.body).toBe(JSON.stringify(update));
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');

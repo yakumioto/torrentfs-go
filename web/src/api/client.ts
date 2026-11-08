@@ -158,11 +158,11 @@ export class ApiClient {
   }
 
   getLab(signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/lab', { signal });
+    return this.request<LabView>('/experiments/upload', { signal });
   }
 
   setLabSettings(settings: LabSettingsUpdate, signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/lab/settings', {
+    return this.request<LabView>('/experiments/upload/settings', {
       method: 'PUT',
       body: JSON.stringify(settings),
       signal,
