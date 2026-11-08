@@ -96,7 +96,7 @@ func (e *ExperimentError) Unwrap() error { return e.Err }
 // settings means. The configuration package cannot import it without a cycle,
 // so the check lives here, above both.
 func checkExperiment(cfg config.Config) error {
-	if _, _, err := experiments.SettingsFrom(cfg.Experiments.Upload); err != nil {
+	if _, err := experiments.SettingsFrom(cfg.Experiments.Upload); err != nil {
 		return &ExperimentError{Err: err}
 	}
 	return nil

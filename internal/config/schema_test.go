@@ -551,7 +551,7 @@ func TestEnumeratedConfigurationKeysListTheirValues(t *testing.T) {
 	want := map[string][]string{
 		"backend":                 {"none", "fuse", "smb"},
 		"smb.strm":                {"auto", "on", "off"},
-		"experiments.upload.mode": {"", "baseline", "inject", "amplify"},
+		"experiments.upload.mode": {"baseline", "inject", "amplify"},
 	}
 	for _, key := range Schema() {
 		values, ok := want[key.Path]

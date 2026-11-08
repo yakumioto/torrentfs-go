@@ -183,7 +183,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(cfg, logger)
+	labOptions, labErr := labSessionOptions(cfg, nil, logger)
 	if labErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
 		return 2

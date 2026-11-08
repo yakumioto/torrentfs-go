@@ -61,9 +61,11 @@ no_port_forwarding = true
 bootstrap_nodes = []
 
 [experiments.upload]
-# Mode selects the reporting model: baseline, inject, or amplify.
-# Empty infers the mode from the other settings.
-mode = ""
+# Mode selects the reporting model: baseline, inject, or amplify. It
+# defaults to baseline, the control arm that reports the real counters.
+# There is no inference: a rate or multiplier needs its mode or the
+# experiment refuses to start.
+mode = "baseline"
 # Rate is the average synthetic growth of the reported upload in inject
 # mode.
 rate = ""
@@ -71,8 +73,8 @@ rate = ""
 # bytes in amplify mode.
 multiplier = "0"
 # Jitter is the per-announce deviation from the nominal increment, in
-# percent.
-jitter = "0"
+# percent. It defaults to 20 percent; zero disables the deviation.
+jitter = "20"
 # Cap is the per-torrent ceiling on the cumulative reported upload.
 cap = "0B"
 # Seed fixes the random jitter sequence for reproducible runs. Zero lets

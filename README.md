@@ -185,10 +185,10 @@ strm = "off"
 | `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
 | `smb.listen_addr` | `TORRENTFS_SMB_LISTEN_ADDR` | `0.0.0.0:1445` | ListenAddr is the address the SMB service binds. |
 | `smb.strm` | `TORRENTFS_SMB_STRM` | `auto` | STRM switches the STRM share of the SMB output: auto, on, or off. |
-| `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `` | Mode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
+| `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `baseline` | Mode selects the reporting model: baseline, inject, or amplify. It defaults to baseline, the control arm that reports the real counters. There is no inference: a rate or multiplier needs its mode or the experiment refuses to start. |
 | `experiments.upload.rate` | `TORRENTFS_EXPERIMENTS_UPLOAD_RATE` | `` | Rate is the average synthetic growth of the reported upload in inject mode. |
 | `experiments.upload.multiplier` | `TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER` | `0` | Multiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
-| `experiments.upload.jitter` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` | `0` | Jitter is the per-announce deviation from the nominal increment, in percent. |
+| `experiments.upload.jitter` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` | `20` | Jitter is the per-announce deviation from the nominal increment, in percent. It defaults to 20 percent; zero disables the deviation. |
 | `experiments.upload.cap` | `TORRENTFS_EXPERIMENTS_UPLOAD_CAP` | `0B` | Cap is the per-torrent ceiling on the cumulative reported upload. |
 | `experiments.upload.seed` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` | `0` | Seed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
 | `experiments.upload.announce_log` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |

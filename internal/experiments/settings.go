@@ -103,81 +103,69 @@ type Settings struct {
 	PeerSampleInterval time.Duration
 }
 
-// Enabled reports whether an experiment mode was configured.
-func (s Settings) Enabled() bool { return s.Mode != "" }
+// DefaultSettings returns the settings of the always-on experiment when the
+// configuration names nothing: baseline mode, the default jitter, a wall-clock
+// seed, and no announce log.
+func DefaultSettings() Settings {
+	settings, err := SettingsFrom(config.Default().Experiments.Upload)
+	if err != nil {
+		// The built-in defaults are valid by construction; keep the fallback
+		// explicit so a future default cannot make the session unusable.
+		return Settings{RuntimeSettings: RuntimeSettings{Mode: ModeBaseline, JitterFraction: float64(defaultJitterPercent) / 100}}
+	}
+	return settings
+}
 
 // SettingsFrom turns the configuration of the experiment into its settings.
 //
 // The configuration holds the values and checks their shape; the rules that
 // relate one setting to another live here, because they decide what a set of
-// settings means. enabled is false with a nil error when nothing is
-// configured. A partially configured setup is an error so a typo cannot
-// silently fall back to normal announce reporting.
-func SettingsFrom(cfg config.UploadExperiment) (settings Settings, enabled bool, err error) {
+// settings means. The experiment is always on, so an unconfigured experiment
+// is the baseline arm. A mode is never inferred: a rate or multiplier without
+// its mode is an error that names the mode to add, so a mistyped or obsolete
+// configuration cannot silently change what the tracker sees.
+func SettingsFrom(cfg config.UploadExperiment) (Settings, error) {
 	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.Mode)))
+	if mode == "" {
+		mode = ModeBaseline
+	}
 	switch mode {
-	case "":
-		switch {
-		case cfg.Rate != 0:
-			mode = ModeInject
-		case cfg.Multiplier != 0:
-			mode = ModeAmplify
-		case cfg.AnnounceLog != "":
-			mode = ModeBaseline
-		default:
-			for _, knob := range []struct {
-				key   string
-				value bool
-			}{
-				{"jitter", cfg.Jitter != 0},
-				{"cap", cfg.Cap != 0},
-				{"seed", cfg.Seed != 0},
-				{"peer_sample_interval", cfg.PeerSampleInterval != 0},
-			} {
-				if knob.value {
-					return Settings{}, false, fmt.Errorf("experiments.upload.%s is set but no experiment mode, rate, or announce log is configured", knob.key)
-				}
-			}
-			return Settings{}, false, nil
-		}
 	case ModeBaseline, ModeInject, ModeAmplify:
 	default:
-		return Settings{}, false, fmt.Errorf("experiments.upload.mode: unknown mode %q (want baseline, inject, or amplify)", cfg.Mode)
+		return Settings{}, fmt.Errorf("experiments.upload.mode: unknown mode %q (want baseline, inject, or amplify)", cfg.Mode)
 	}
 
-	runtime := RuntimeSettings{
-		Mode:           mode,
-		JitterFraction: float64(defaultJitterPercent) / 100,
-	}
+	runtime := RuntimeSettings{Mode: mode}
 	switch mode {
 	case ModeBaseline:
-		if cfg.Rate != 0 || cfg.Multiplier != 0 {
-			return Settings{}, false, fmt.Errorf("mode %q reports the real counters and does not use experiments.upload.rate or experiments.upload.multiplier", mode)
+		if cfg.Rate != 0 {
+			return Settings{}, fmt.Errorf("experiments.upload.rate is set but experiments.upload.mode is %q; set experiments.upload.mode = %q to use the rate", ModeBaseline, ModeInject)
+		}
+		if cfg.Multiplier != 0 {
+			return Settings{}, fmt.Errorf("experiments.upload.multiplier is set but experiments.upload.mode is %q; set experiments.upload.mode = %q to use the multiplier", ModeBaseline, ModeAmplify)
 		}
 	case ModeInject:
 		if cfg.Rate == 0 {
-			return Settings{}, false, fmt.Errorf("mode %q requires experiments.upload.rate", mode)
+			return Settings{}, fmt.Errorf("experiments.upload.rate must be positive in mode %q", ModeInject)
 		}
 		if cfg.Multiplier != 0 {
-			return Settings{}, false, fmt.Errorf("experiments.upload.multiplier only applies to mode %q", ModeAmplify)
+			return Settings{}, fmt.Errorf("experiments.upload.multiplier only applies to mode %q; experiments.upload.mode is %q", ModeAmplify, ModeInject)
 		}
 		runtime.RateBytesPerSecond = float64(cfg.Rate)
 	case ModeAmplify:
-		if cfg.Multiplier == 0 {
-			return Settings{}, false, fmt.Errorf("mode %q requires experiments.upload.multiplier", mode)
+		if cfg.Multiplier <= 1 {
+			return Settings{}, fmt.Errorf("experiments.upload.multiplier must be greater than 1 in mode %q", ModeAmplify)
 		}
 		if cfg.Rate != 0 {
-			return Settings{}, false, fmt.Errorf("experiments.upload.rate only applies to mode %q", ModeInject)
+			return Settings{}, fmt.Errorf("experiments.upload.rate only applies to mode %q; experiments.upload.mode is %q", ModeInject, ModeAmplify)
 		}
 		runtime.Multiplier = float64(cfg.Multiplier)
 	}
-	if cfg.Jitter != 0 {
-		runtime.JitterFraction = float64(cfg.Jitter) / 100
-	}
+	runtime.JitterFraction = float64(cfg.Jitter) / 100
 	runtime.CapBytes = int64(cfg.Cap)
-	runtime, err = NormalizeRuntimeSettings(runtime)
+	runtime, err := NormalizeRuntimeSettings(runtime)
 	if err != nil {
-		return Settings{}, false, err
+		return Settings{}, err
 	}
 
 	seed := time.Now().UnixNano()
@@ -187,7 +175,7 @@ func SettingsFrom(cfg config.UploadExperiment) (settings Settings, enabled bool,
 	peerSampleInterval := defaultPeerSampleInterval
 	if cfg.PeerSampleInterval != 0 {
 		if cfg.AnnounceLog == "" {
-			return Settings{}, false, fmt.Errorf("experiments.upload.peer_sample_interval requires experiments.upload.announce_log")
+			return Settings{}, fmt.Errorf("experiments.upload.peer_sample_interval requires experiments.upload.announce_log")
 		}
 		peerSampleInterval = time.Duration(cfg.PeerSampleInterval)
 	}
@@ -196,5 +184,5 @@ func SettingsFrom(cfg config.UploadExperiment) (settings Settings, enabled bool,
 		Seed:               seed,
 		AnnounceLogPath:    cfg.AnnounceLog,
 		PeerSampleInterval: peerSampleInterval,
-	}, true, nil
+	}, nil
 }
