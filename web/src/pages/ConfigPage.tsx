@@ -225,8 +225,7 @@ function KeyControl({
           size="sm"
         />
       );
-    case 'int':
-    case 'int64': {
+    case 'int': {
       const numeric = draft.trim() === '' ? '' : Number(draft);
       return (
         <NumberInput
