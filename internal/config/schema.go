@@ -378,6 +378,10 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		return func(raw string) (any, error) { return parseEnvList(raw), nil }, "list", true
 	case reflect.TypeOf(ByteRate(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				// The empty value is the "not set" state of a rate.
+				return ByteRate(0), nil
+			}
 			value, err := ParseByteRate(raw)
 			if err != nil {
 				return nil, err

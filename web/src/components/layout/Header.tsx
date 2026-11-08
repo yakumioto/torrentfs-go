@@ -1,5 +1,5 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconAdjustments, IconBox, IconFlask, IconLogout, IconPlus, IconRefresh, IconSettings } from '@tabler/icons-react';
+import { IconAdjustments, IconBox, IconFlask, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -8,7 +8,7 @@ import { queryKeys } from '../../queries/keys';
 import { ConnectionPill } from './ConnectionPill';
 import styles from './Header.module.css';
 
-export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void; onOpenUploadRateSettings: () => void }) {
+export function Header({ onAdd }: { onAdd: () => void }) {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -47,17 +47,6 @@ export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void;
               aria-label="配置"
             >
               <IconAdjustments size={18} />
-            </ActionIcon>
-          </Tooltip>
-          <Tooltip label="上传限速设置">
-            <ActionIcon
-              type="button"
-              variant="subtle"
-              color="gray"
-              onClick={onOpenUploadRateSettings}
-              aria-label="上传限速设置"
-            >
-              <IconSettings size={18} />
             </ActionIcon>
           </Tooltip>
           <Tooltip label="上传实验设置">

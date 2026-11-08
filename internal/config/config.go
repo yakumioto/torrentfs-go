@@ -135,6 +135,9 @@ type Config struct {
 	FUSE FUSE `toml:"fuse"`
 	// SMB groups the settings of the built-in read-only SMB file output.
 	SMB SMB `toml:"smb"`
+	// UploadRate groups the session-wide aggregate upload limit and its
+	// optional daily window.
+	UploadRate UploadRate `toml:"upload_rate"`
 	// Experiments groups the settings of the experimental features.
 	Experiments Experiments `toml:"experiments"`
 }
@@ -437,6 +440,7 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	collector.add(c.validateCredentialShape())
 	collector.add(c.validateSMBShape())
+	collector.add(c.validateUploadRateShape())
 	collector.add(c.validateUploadExperimentShape())
 }
 

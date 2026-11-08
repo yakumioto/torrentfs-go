@@ -22,6 +22,7 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/configcheck"
 	"github.com/yakumioto/torrentfs-go/internal/configctl"
+	"github.com/yakumioto/torrentfs-go/internal/configmigrate"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
@@ -151,6 +152,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize logging: %v\n", err)
 		return 2
 	}
+	// The retired upload-rate sidecar is folded into the configuration before
+	// the session reads it. A read-only deployment keeps the sidecar value for
+	// this run and the migration warns; the next start after a successful
+	// write-back archives it.
+	migration, err := configmigrate.MigrateUploadRate(configmigrate.Options{
+		ConfigPath:  configFile,
+		TorrentsDir: torrentsDir,
+		Config:      cfg,
+		Sources:     sources,
+		Logger:      logger,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
+	cfg, sources = migration.Config, migration.Sources
 	logLevel := cfg.Log.Level
 	if logLevel == "" {
 		logLevel = "info"
@@ -217,6 +234,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := registerAppliers(
 		logging.NewLevelApplier(logLevelVar),
 		session.NewConfigApplier(sess),
+		session.NewUploadRateApplier(sess),
 	); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 		sequence.run()

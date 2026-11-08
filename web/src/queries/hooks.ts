@@ -14,7 +14,6 @@ import type {
   SubtitleUploadResponse,
   Torrent,
   TorrentStatus,
-  UploadRateSettings,
 } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
@@ -350,29 +349,6 @@ export function usePruneTorrents(api: ApiClient) {
         queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);
       }
       void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
-    },
-  });
-}
-
-export function useUploadRateSettings(api: ApiClient, enabled: boolean) {
-  return useQuery<UploadRateSettings>({
-    queryKey: queryKeys.uploadRateSettings,
-    queryFn: ({ signal }) => api.getUploadRateSettings(signal),
-    enabled,
-    retry: shouldRetry,
-    retryDelay,
-  });
-}
-
-export function useSetUploadRateSettings(api: ApiClient) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ settings, signal }: { settings: UploadRateSettings; signal?: AbortSignal }) =>
-      api.setUploadRateSettings(settings, signal),
-    onSuccess: (saved: UploadRateSettings) => {
-      // The daemon returns the normalized value it applied, so the cache holds
-      // what a later read would return instead of the request echo.
-      queryClient.setQueryData(queryKeys.uploadRateSettings, saved);
     },
   });
 }

@@ -57,6 +57,7 @@ const SECTION_LABELS: Record<string, string> = {
   filesystem: '文件系统',
   fuse: 'FUSE',
   smb: 'SMB',
+  upload_rate: '上传限速',
   experiments: '实验',
   'experiments.upload': '上传实验',
 };

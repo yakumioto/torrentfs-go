@@ -35,8 +35,6 @@ type Backend interface {
 	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
-	UploadRateSettings() session.UploadRateSettings
-	SetUploadRateSettings(ctx context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error)
 	LabStatus() session.LabStatus
 	SetLabSettings(ctx context.Context, settings session.LabSettings) (session.LabSettings, error)
 }
@@ -131,8 +129,6 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
 	mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/v1/config", s.handleSaveConfig)
-	mux.HandleFunc("GET /api/v1/settings/upload-rate", s.handleGetUploadRateSettings)
-	mux.HandleFunc("PUT /api/v1/settings/upload-rate", s.handleSetUploadRateSettings)
 	mux.HandleFunc("GET /api/v1/experiments/upload", s.handleGetLab)
 	mux.HandleFunc("PUT /api/v1/experiments/upload/settings", s.handleSetLabSettings)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)

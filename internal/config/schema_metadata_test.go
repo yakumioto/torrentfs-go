@@ -26,6 +26,9 @@ func TestOnlyTheHotApplyBoundaryIsMarkedHotApply(t *testing.T) {
 		"connections.uploading_conns": "session",
 		"connections.read_grace":      "session",
 		"http.auth.token_ttl":         "auth",
+		"upload_rate.limit":           "session",
+		"upload_rate.schedule_start":  "session",
+		"upload_rate.schedule_end":    "session",
 	}
 	for _, key := range Schema() {
 		component, hot := want[key.Path]

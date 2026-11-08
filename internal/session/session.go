@@ -237,18 +237,20 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("acquire-instance-lock", err)
 		return nil, err
 	}
-	// Upload settings are read before anything else is opened: a sidecar that
-	// cannot be understood must fail startup rather than start with a limit the
-	// operator believes is in force.
-	uploadSettings, uploadPolicy, err := loadUploadRateSettings(metadataDir)
+	// The upload limit comes from the configuration, which the loaders have
+	// already validated: the session does not read the retired .metadata
+	// sidecar. The startup migration folds a legacy sidecar into the
+	// configuration before the session is created.
+	uploadSettings, err := UploadRateSettingsFromConfig(cfg)
 	if err != nil {
 		releaseInstanceLock(instanceLock)
-		logInitFailure("load-upload-rate-settings", err)
+		logInitFailure("upload-rate-configuration", err)
 		return nil, err
 	}
+	uploadPolicy := compileUploadRatePolicy(uploadSettings)
 	// The experiment runtime settings are restored before the client is created
 	// so the first announce already uses the persisted mode. A sidecar that
-	// cannot be understood fails startup, like the upload-rate settings.
+	// cannot be understood fails startup.
 	var (
 		labRuntime          experiments.RuntimeSettings
 		labRuntimePersisted bool

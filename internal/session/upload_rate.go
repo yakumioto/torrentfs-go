@@ -8,6 +8,8 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"golang.org/x/time/rate"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 // uploadRatePolicy is the compiled aggregate peer upload rule: one bytes/second
@@ -38,11 +40,11 @@ func compileUploadRatePolicy(settings UploadRateSettings) uploadRatePolicy {
 	if settings.Schedule == nil {
 		return policy
 	}
-	start, err := parseUploadScheduleTime(settings.Schedule.Start)
+	start, err := config.ParseUploadRateTime(settings.Schedule.Start)
 	if err != nil {
 		return uploadRatePolicy{}
 	}
-	end, err := parseUploadScheduleTime(settings.Schedule.End)
+	end, err := config.ParseUploadRateTime(settings.Schedule.End)
 	if err != nil {
 		return uploadRatePolicy{}
 	}
