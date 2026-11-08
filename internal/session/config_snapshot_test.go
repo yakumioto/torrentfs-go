@@ -103,9 +103,16 @@ func TestConnectionAllocatorUsesReplacedConfig(t *testing.T) {
 	next := cfg
 	next.Connections.ReadingConns = 9
 	sess.SetConfig(next)
-	session.AllocateConnectionsForTest(sess)
-	if got := session.ConnectionAllowanceForTest(st); got != 9 {
-		t.Fatalf("reading allowance after SetConfig = %d, want 9", got)
+	// The background allocator may have captured the previous snapshot just
+	// before the replacement; its next pass observes the new one. Wait for the
+	// allowance the current snapshot calls for instead of racing that pass.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := waitFor(ctx, func() bool {
+		session.AllocateConnectionsForTest(sess)
+		return session.ConnectionAllowanceForTest(st) == 9
+	}); err != nil {
+		t.Fatalf("reading allowance after SetConfig = %d, want 9: %v", session.ConnectionAllowanceForTest(st), err)
 	}
 }
 
