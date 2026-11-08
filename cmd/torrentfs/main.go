@@ -20,6 +20,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configctl"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
@@ -200,7 +201,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	sequence := shutdownSequence{logger: logger, sess: sess}
 	var apiServer *api.Server
 	if httpEnabled {
-		apiServer, err = api.New(cfg, sess, api.WithLogger(logger))
+		apiServer, err = api.New(cfg, sess,
+			api.WithLogger(logger),
+			api.WithConfigViewer(configctl.New(configFile, cfg, sources)),
+		)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
 			sequence.run()

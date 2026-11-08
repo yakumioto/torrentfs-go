@@ -53,7 +53,8 @@ type CategoryBackend interface {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	logger *slog.Logger
+	logger       *slog.Logger
+	configViewer ConfigViewer
 }
 
 // WithLogger routes API lifecycle and authentication logs to l.
@@ -64,13 +65,14 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 type Server struct {
-	backend   Backend
-	auth      *auth.Service
-	tokenTTL  time.Duration
-	maxUpload int64
-	logger    *slog.Logger
-	handler   http.Handler
-	http      *http.Server
+	backend      Backend
+	auth         *auth.Service
+	tokenTTL     time.Duration
+	maxUpload    int64
+	logger       *slog.Logger
+	configViewer ConfigViewer
+	handler      http.Handler
+	http         *http.Server
 
 	mu       sync.RWMutex
 	listener net.Listener
@@ -99,6 +101,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
 		maxUpload:     cfg.HTTP.MaxUploadBytes.Int64(),
 		logger:        logger,
+		configViewer:  options.configViewer,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	if cfg.HTTP.Auth.Enabled {
@@ -124,6 +127,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/categories", s.handleListCategories)
 	mux.HandleFunc("POST /api/v1/categories", s.handleCreateCategory)
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
+	mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)
 	mux.HandleFunc("GET /api/v1/settings/upload-rate", s.handleGetUploadRateSettings)
 	mux.HandleFunc("PUT /api/v1/settings/upload-rate", s.handleSetUploadRateSettings)
 	mux.HandleFunc("GET /api/v1/lab", s.handleGetLab)
