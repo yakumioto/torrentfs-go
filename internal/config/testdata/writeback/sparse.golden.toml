@@ -1,0 +1,25 @@
+# Username is the login name the SMB output accepts. The HTTP login does
+# not check a user name, so the key is only required for the SMB output.
+username = "alice"
+
+[cache]
+# CapacityBytes is the maximum number of bytes retained in memory.
+capacity = "1GiB"
+
+[http]
+# ListenAddr is the address the HTTP service binds. Empty disables the
+# service. The default binds loopback only.
+listen_addr = "127.0.0.1:9000"
+
+[http.auth]
+# TokenTTL is the inactivity window of a login token. A valid request
+# slides the window; the tokens live in memory and die with the process.
+token_ttl = "45m0s"
+
+[log]
+# Level is the minimum level of a log record: debug, info, warn, or
+# error. Debug is disabled by default.
+level = "debug"
+# Format is the shape of a log record: text for humans or json for log
+# collectors.
+format = "text"
