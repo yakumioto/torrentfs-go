@@ -390,6 +390,9 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		}, "byte rate", true
 	case reflect.TypeOf(Percent(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return Percent(0), nil
+			}
 			value, err := ParsePercent(raw)
 			if err != nil {
 				return nil, err
@@ -398,6 +401,9 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		}, "percent", true
 	case reflect.TypeOf(Ratio(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return Ratio(0), nil
+			}
 			value, err := ParseRatio(raw)
 			if err != nil {
 				return nil, err

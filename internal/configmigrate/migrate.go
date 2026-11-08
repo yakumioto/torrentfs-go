@@ -19,7 +19,6 @@ import (
 	"strconv"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/configctl"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -103,11 +102,11 @@ func MigrateUploadRate(options Options) (Result, error) {
 	}
 
 	if options.ConfigPath != "" {
-		writable, writableErr := configctl.Writable(options.ConfigPath)
-		if writableErr != nil && !errors.Is(writableErr, os.ErrNotExist) {
+		exists, writable, writableErr := config.WriteBackAvailable(options.ConfigPath)
+		if writableErr != nil {
 			return Result{}, fmt.Errorf("configmigrate: inspect the configuration file: %w", writableErr)
 		}
-		if writable {
+		if exists && writable {
 			return migrateIntoConfigurationFile(options, result, settings, sidecar, logger)
 		}
 	}

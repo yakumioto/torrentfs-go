@@ -9,24 +9,39 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-// labSessionOptions reads the upload statistics experiment from the
-// [experiments.upload] configuration and, when the experiment is configured, returns the session
-// option that owns it. The session restores persisted runtime settings, opens
-// the optional announce log, and routes announces through the reporter; the
-// Web UI can then change the runtime settings (mode, rate, multiplier, jitter,
-// cap) without a restart.
+// experimentSettings turns the [experiments.upload] configuration into the
+// settings of the always-on experiment.
+//
+// The experiment has no enable switch: the configuration always yields
+// settings, and an unconfigured experiment is the baseline arm. legacy, when
+// non-nil, replaces the runtime settings of the configuration: it carries the
+// values of the retired .metadata/lab_settings.json sidecar that could not be
+// merged into the configuration file, so an upgrade does not change what the
+// operator sees.
+func experimentSettings(cfg config.Config, legacy *experiments.RuntimeSettings) (experiments.Settings, error) {
+	settings, err := experiments.SettingsFrom(cfg.Experiments.Upload)
+	if err != nil {
+		return experiments.Settings{}, err
+	}
+	if legacy != nil {
+		settings.RuntimeSettings = *legacy
+	}
+	return settings, nil
+}
+
+// labSessionOptions returns the session option that owns the upload statistics
+// experiment. The experiment is always on, so the option is always returned;
+// the session opens the optional announce log and starts the peer sampler only
+// when the configuration names one.
 //
 // This is research tooling for exercising anomaly detection on a tracker you
 // operate and must not be pointed at a third-party tracker.
-func labSessionOptions(cfg config.Config, logger *slog.Logger) ([]session.Option, error) {
-	settings, enabled, err := experiments.SettingsFrom(cfg.Experiments.Upload)
+func labSessionOptions(cfg config.Config, legacy *experiments.RuntimeSettings, logger *slog.Logger) ([]session.Option, error) {
+	settings, err := experimentSettings(cfg, legacy)
 	if err != nil {
 		return nil, fmt.Errorf("experiments.upload experiment: %w", err)
 	}
-	if !enabled {
-		return nil, nil
-	}
-	logger.Warn("upload statistics experiment configured; runtime settings can be changed from the Web UI",
+	logger.Info("upload statistics experiment running",
 		"mode", settings.Mode,
 		"rate_bytes_per_second", settings.RateBytesPerSecond,
 		"multiplier", settings.Multiplier,
@@ -35,5 +50,9 @@ func labSessionOptions(cfg config.Config, logger *slog.Logger) ([]session.Option
 		"announce_log", settings.AnnounceLogPath,
 		"peer_sample_interval", settings.PeerSampleInterval.String(),
 	)
+	if settings.Mode != experiments.ModeBaseline {
+		logger.Warn("the upload statistics experiment rewrites the reported upload; only use it against a tracker you operate",
+			"mode", settings.Mode)
+	}
 	return []session.Option{session.WithLabExperiment(settings)}, nil
 }

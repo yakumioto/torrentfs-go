@@ -61,9 +61,11 @@ no_port_forwarding = true
 bootstrap_nodes = []
 
 [experiments.upload]
-# Mode selects the reporting model: baseline, inject, or amplify.
-# Empty infers the mode from the other settings.
-mode = ""
+# Mode selects the reporting model: baseline, inject, or amplify. It
+# defaults to baseline, the control arm that reports the real counters.
+# There is no inference: a rate or multiplier needs its mode or the
+# experiment refuses to start.
+mode = "baseline"
 # Rate is the average synthetic growth of the reported upload in inject
 # mode.
 rate = ""
@@ -71,18 +73,21 @@ rate = ""
 # bytes in amplify mode.
 multiplier = "0"
 # Jitter is the per-announce deviation from the nominal increment, in
-# percent.
-jitter = "0"
+# percent. It defaults to 20 percent; zero disables the deviation.
+jitter = "20"
 # Cap is the per-torrent ceiling on the cumulative reported upload.
 cap = "0B"
 # Seed fixes the random jitter sequence for reproducible runs. Zero lets
-# the process choose one.
+# the process choose one. The seed is fixed at startup; a new value takes
+# effect after a restart.
 seed = 0
 # AnnounceLog is the JSON Lines file that receives one record per tracker
-# announce. Empty disables it.
+# announce. Empty disables it. The file is opened at startup; a new value
+# takes effect after a restart.
 announce_log = ""
 # PeerSampleInterval is how often peer activity is sampled into the
-# announce log.
+# announce log. It is read at startup; a new value takes effect after a
+# restart.
 peer_sample_interval = "0s"
 
 [filesystem]

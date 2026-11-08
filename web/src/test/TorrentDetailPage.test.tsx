@@ -35,10 +35,9 @@ function makeStatus(torrent: Torrent): TorrentStatus {
   return { torrent, metainfo_ready: true, piece_length: 16, pieces: [], files: [], subtitle_targets: [], subtitles: [] };
 }
 
-function disabledLab() {
+function baselineLab() {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -104,7 +103,7 @@ describe('TorrentDetailPage', () => {
         return Promise.resolve(jsonResponse(snapshot));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       return Promise.resolve(jsonResponse(detailTorrent));
     });
@@ -172,7 +171,7 @@ describe('TorrentDetailPage', () => {
         return Promise.resolve(jsonResponse(status));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       return Promise.resolve(jsonResponse(torrent));
     });
@@ -224,7 +223,7 @@ describe('TorrentDetailPage', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
     });
@@ -254,7 +253,7 @@ describe('TorrentDetailPage', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
     });
@@ -276,13 +275,12 @@ describe('TorrentDetailPage', () => {
     expect(screen.getByText('12 B')).toBeInTheDocument();
   });
 
-  it('shows the per-torrent lab counters only when the experiment is enabled', async () => {
+  it('shows the per-torrent lab counters of the running experiment', async () => {
     const torrent = makeTorrent({ name: 'Lab fixture', state: 'ready', info_hash: 'abc123' });
     const status = makeStatus(torrent);
     const lastAnnounceAt = new Date(Date.now() - 13 * 60 * 1000).toISOString();
-    const enabledLab = {
-      enabled: true,
-      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 2, jitter_percent: 20, cap_bytes: 0 },
+    const labView = {
+        settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 2, jitter_percent: 20, cap_bytes: 0 },
       seed: 42,
       announce_log: '/var/log/torrentfs/lab.jsonl',
       peer_sample_interval_seconds: 5,
@@ -304,7 +302,7 @@ describe('TorrentDetailPage', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(enabledLab));
+        return Promise.resolve(jsonResponse(labView));
       }
       return Promise.resolve(jsonResponse(url.endsWith('/status') ? status : torrent));
     });

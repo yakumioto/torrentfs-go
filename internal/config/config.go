@@ -150,36 +150,42 @@ type Experiments struct {
 
 // UploadExperiment groups the settings of the upload statistics experiment.
 //
-// The experiment rewrites the upload counter reported to trackers so that the
-// anomaly detection of a tracker can be exercised. It is off unless a mode is
-// configured, and it belongs to a tracker the operator runs: pointing it at a
-// third-party tracker misreports that tracker's statistics.
+// The experiment is always on. Its baseline mode reports the client's real
+// counters and records ground truth, so there is no configuration switch that
+// turns the experiment off. It belongs to a tracker the operator runs: pointing
+// a rewriting mode at a third-party tracker misreports that tracker's
+// statistics.
 //
 // The rules that relate one setting to another live in the experiment
 // package. The configuration holds the values and checks their shape.
 type UploadExperiment struct {
-	// Mode selects the reporting model: baseline, inject, or amplify.
-	// Empty infers the mode from the other settings.
-	Mode string `toml:"mode" enum:",baseline,inject,amplify" component:"experiment"`
+	// Mode selects the reporting model: baseline, inject, or amplify. It
+	// defaults to baseline, the control arm that reports the real counters.
+	// There is no inference: a rate or multiplier needs its mode or the
+	// experiment refuses to start.
+	Mode string `toml:"mode" enum:"baseline,inject,amplify" component:"experiment" hotapply:"true"`
 	// Rate is the average synthetic growth of the reported upload in inject
 	// mode.
-	Rate ByteRate `toml:"rate" component:"experiment"`
+	Rate ByteRate `toml:"rate" component:"experiment" hotapply:"true"`
 	// Multiplier grows the reported upload by this factor of the real payload
 	// bytes in amplify mode.
-	Multiplier Ratio `toml:"multiplier" component:"experiment"`
+	Multiplier Ratio `toml:"multiplier" component:"experiment" hotapply:"true"`
 	// Jitter is the per-announce deviation from the nominal increment, in
-	// percent.
-	Jitter Percent `toml:"jitter" component:"experiment"`
+	// percent. It defaults to 20 percent; zero disables the deviation.
+	Jitter Percent `toml:"jitter" component:"experiment" hotapply:"true"`
 	// Cap is the per-torrent ceiling on the cumulative reported upload.
-	Cap OptionalByteQuantity `toml:"cap" component:"experiment"`
+	Cap OptionalByteQuantity `toml:"cap" component:"experiment" hotapply:"true"`
 	// Seed fixes the random jitter sequence for reproducible runs. Zero lets
-	// the process choose one.
+	// the process choose one. The seed is fixed at startup; a new value takes
+	// effect after a restart.
 	Seed int64 `toml:"seed" component:"experiment"`
 	// AnnounceLog is the JSON Lines file that receives one record per tracker
-	// announce. Empty disables it.
+	// announce. Empty disables it. The file is opened at startup; a new value
+	// takes effect after a restart.
 	AnnounceLog string `toml:"announce_log" component:"experiment"`
 	// PeerSampleInterval is how often peer activity is sampled into the
-	// announce log.
+	// announce log. It is read at startup; a new value takes effect after a
+	// restart.
 	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval" component:"experiment"`
 }
 
@@ -343,9 +349,10 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Filesystem: Filesystem{ReadTimeout: defaultReadTimeout},
-		FUSE:       FUSE{AllowOther: false},
-		SMB:        SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
+		Filesystem:  Filesystem{ReadTimeout: defaultReadTimeout},
+		FUSE:        FUSE{AllowOther: false},
+		SMB:         SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
+		Experiments: Experiments{Upload: UploadExperiment{Mode: "baseline", Jitter: 20}},
 	}
 }
 

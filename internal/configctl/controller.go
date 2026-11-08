@@ -20,12 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
@@ -239,73 +236,24 @@ func configurationBaseline(content []byte) string {
 // readOnlyReason reports why the configuration page is read-only, and whether
 // the configuration file exists.
 //
-// The check combines the declared permission bits with an access check
-// instead of probing a write: a probe would change the file it is asking
-// about. The bits keep a root process from calling a file without a write bit
-// writable; the access check catches a file the process does not own and
-// cannot write even though a write bit is set, as with the root-owned file
-// the default image ships to a uid 1000 process. A symlink is read-only,
-// matching the atomic write-back, which replaces the target path instead of
-// following the link. The directory needs a write bit as well, because the
-// write-back creates a temporary file beside the configuration file.
+// The check lives in the configuration package, next to the atomic write-back
+// it describes, so the page and the startup migration agree on which file can
+// be replaced.
 func (c *Controller) readOnlyReason() (string, bool, error) {
 	if c.path == "" {
 		return ReadOnlyNotConfigured, false, nil
 	}
-	// Lstat, not Stat: the write-back replaces the target path, so a symlink
-	// cannot be written back through and the page must not promise it.
-	info, err := os.Lstat(c.path)
+	exists, writable, err := config.WriteBackAvailable(c.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return ReadOnlyNotConfigured, false, nil
-		}
-		return "", false, fmt.Errorf("configctl: inspect the configuration file: %w", err)
+		return "", false, fmt.Errorf("configctl: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return ReadOnlyFileNotWritable, true, nil
-	}
-	writable, err := Writable(c.path)
-	if err != nil {
-		return "", false, fmt.Errorf("configctl: inspect the configuration file: %w", err)
-	}
-	if !writable {
+	switch {
+	case !exists:
+		return ReadOnlyNotConfigured, false, nil
+	case !writable:
 		return ReadOnlyFileNotWritable, true, nil
 	}
 	return "", true, nil
-}
-
-// Writable reports whether the configuration file at path can be replaced by
-// the atomic write-back.
-//
-// It combines the declared permission bits with an access check instead of
-// probing a write: a probe would change the file it is asking about. The bits
-// keep a root process from calling a file without a write bit writable; the
-// access check catches a file the process does not own and cannot write even
-// though a write bit is set. The directory needs a write bit as well, because
-// the write-back creates a temporary file beside the configuration file.
-//
-// The startup migration uses this function too, so a sidecar is never folded
-// into a configuration the page would report as read-only.
-func Writable(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, nil
-	}
-	if info.Mode().Perm()&0o222 == 0 || unix.Access(path, unix.W_OK) != nil {
-		return false, nil
-	}
-	directoryPath := filepath.Dir(path)
-	directory, err := os.Stat(directoryPath)
-	if err != nil {
-		return false, err
-	}
-	if !directory.IsDir() || directory.Mode().Perm()&0o222 == 0 || unix.Access(directoryPath, unix.W_OK) != nil {
-		return false, nil
-	}
-	return true, nil
 }
 
 // sectionOf returns the configuration section of a key: everything before its

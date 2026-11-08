@@ -191,14 +191,14 @@ strm = "off"
 | `upload_rate.limit` | `TORRENTFS_UPLOAD_RATE_LIMIT` | `` | Limit is the aggregate payload upload rate across every torrent and peer. The empty value disables upload limiting. A window requires a positive limit. |
 | `upload_rate.schedule_start` | `TORRENTFS_UPLOAD_RATE_SCHEDULE_START` | `` | ScheduleStart is the start of the daily window in strict 24-hour HH:MM (local time). Both boundaries empty means the limit applies around the clock. It must be set together with ScheduleEnd and must be earlier than it. |
 | `upload_rate.schedule_end` | `TORRENTFS_UPLOAD_RATE_SCHEDULE_END` | `` | ScheduleEnd is the end of the daily window in strict 24-hour HH:MM (local time), excluded from the window. Both boundaries empty means the limit applies around the clock. |
-| `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `` | Mode selects the reporting model: baseline, inject, or amplify. Empty infers the mode from the other settings. |
+| `experiments.upload.mode` | `TORRENTFS_EXPERIMENTS_UPLOAD_MODE` | `baseline` | Mode selects the reporting model: baseline, inject, or amplify. It defaults to baseline, the control arm that reports the real counters. There is no inference: a rate or multiplier needs its mode or the experiment refuses to start. |
 | `experiments.upload.rate` | `TORRENTFS_EXPERIMENTS_UPLOAD_RATE` | `` | Rate is the average synthetic growth of the reported upload in inject mode. |
 | `experiments.upload.multiplier` | `TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER` | `0` | Multiplier grows the reported upload by this factor of the real payload bytes in amplify mode. |
-| `experiments.upload.jitter` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` | `0` | Jitter is the per-announce deviation from the nominal increment, in percent. |
+| `experiments.upload.jitter` | `TORRENTFS_EXPERIMENTS_UPLOAD_JITTER` | `20` | Jitter is the per-announce deviation from the nominal increment, in percent. It defaults to 20 percent; zero disables the deviation. |
 | `experiments.upload.cap` | `TORRENTFS_EXPERIMENTS_UPLOAD_CAP` | `0B` | Cap is the per-torrent ceiling on the cumulative reported upload. |
-| `experiments.upload.seed` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` | `0` | Seed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. |
-| `experiments.upload.announce_log` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. |
-| `experiments.upload.peer_sample_interval` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. |
+| `experiments.upload.seed` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` | `0` | Seed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. The seed is fixed at startup; a new value takes effect after a restart. |
+| `experiments.upload.announce_log` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. The file is opened at startup; a new value takes effect after a restart. |
+| `experiments.upload.peer_sample_interval` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. It is read at startup; a new value takes effect after a restart. |
 <!-- END generated:readme-reference -->
 
 ### 检查与查看配置

@@ -2,7 +2,6 @@ package session_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -116,9 +115,6 @@ func TestSyntheticAnnounceUploadReachesTracker(t *testing.T) {
 	// The management view reports the same synthetic counter next to the real
 	// one so a tracker-side record can be compared per torrent.
 	status := sess.LabStatus()
-	if !status.Enabled {
-		t.Fatal("LabStatus reports the experiment disabled")
-	}
 	if len(status.Torrents) != 1 {
 		t.Fatalf("got %d tracked torrents, want 1", len(status.Torrents))
 	}
@@ -228,78 +224,64 @@ func TestLabSettingsHotUpdateChangesTheRunningRate(t *testing.T) {
 		t.Fatalf("reported upload gained %d after switching to 8MiB/s, want at least 4MiB", gained)
 	}
 
-	persisted, err := os.ReadFile(filepath.Join(torrentsDir, ".metadata", "lab_settings.json"))
-	if err != nil {
-		t.Fatalf("read persisted lab settings: %v", err)
-	}
-	var record struct {
-		Mode               string  `json:"mode"`
-		RateBytesPerSecond float64 `json:"rate_bytes_per_second"`
-	}
-	if err := json.Unmarshal(persisted, &record); err != nil {
-		t.Fatalf("decode persisted lab settings: %v", err)
-	}
-	if record.Mode != string(experiments.ModeInject) || record.RateBytesPerSecond != 8<<20 {
-		t.Fatalf("persisted settings = %+v, want inject at 8MiB/s", record)
+	if _, err := os.Stat(filepath.Join(torrentsDir, ".metadata", "lab_settings.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime settings wrote the retired sidecar: %v", err)
 	}
 }
 
-// TestLabSettingsRestoreAfterRestart covers the sidecar: a runtime update is
-// restored by the next session even though the environment still carries the
-// startup values.
-func TestLabSettingsRestoreAfterRestart(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+// TestSessionIgnoresTheRetiredSettingsSidecar covers the migration boundary:
+// the session no longer reads .metadata/lab_settings.json, so only the startup
+// migration decides what an old sidecar means.
+func TestSessionIgnoresTheRetiredSettingsSidecar(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	work := t.TempDir()
 	torrentsDir := filepath.Join(work, "torrents")
-	startup := experiments.Settings{
-		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
+	metadataDir := filepath.Join(torrentsDir, ".metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("make metadata dir: %v", err)
+	}
+	record := `{"version":1,"mode":"amplify","rate_bytes_per_second":0,"multiplier":3,"jitter_fraction":0,"cap_bytes":0}`
+	if err := os.WriteFile(filepath.Join(metadataDir, "lab_settings.json"), []byte(record), 0o600); err != nil {
+		t.Fatalf("write the retired sidecar: %v", err)
+	}
+
+	sess := newLabSession(t, torrentsDir, experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline, JitterFraction: 0.2},
 		Seed:            1,
+	})
+	status := sess.LabStatus()
+	if status.Settings.Mode != experiments.ModeBaseline {
+		t.Fatalf("mode = %q, want the startup baseline; the session read the retired sidecar", status.Settings.Mode)
 	}
-
-	first := newLabSession(t, torrentsDir, startup)
-	if _, err := first.SetLabSettings(ctx, experiments.RuntimeSettings{
-		Mode:           experiments.ModeAmplify,
-		Multiplier:     3,
-		JitterFraction: 0,
-	}); err != nil {
-		t.Fatalf("SetLabSettings: %v", err)
-	}
-	if err := first.Close(ctx); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	second := newLabSession(t, torrentsDir, startup)
-	status := second.LabStatus()
-	if !status.Enabled {
-		t.Fatal("restored session reports the experiment disabled")
-	}
-	if status.Settings.Mode != experiments.ModeAmplify || status.Settings.Multiplier != 3 {
-		t.Fatalf("restored settings = %+v, want amplify x3", status.Settings)
-	}
+	_ = ctx
 }
 
-func TestSetLabSettingsRejectsInvalidAndDisabled(t *testing.T) {
+func TestSetLabSettingsRejectsInvalidSettings(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	torrentsDir := t.TempDir()
-	sess := newLabSession(t, torrentsDir, experiments.Settings{
+	sess := newLabSession(t, t.TempDir(), experiments.Settings{
 		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
 		Seed:            1,
 	})
 	if _, err := sess.SetLabSettings(ctx, experiments.RuntimeSettings{Mode: experiments.ModeInject}); !errors.Is(err, session.ErrInvalidLabSettings) {
 		t.Fatalf("SetLabSettings(inject without rate) error = %v, want ErrInvalidLabSettings", err)
 	}
+}
 
-	plainDir := filepath.Join(t.TempDir(), "torrents")
-	if err := os.MkdirAll(plainDir, 0o755); err != nil {
+// TestSessionStartsInBaselineMode covers the always-on contract: a session
+// created without an experiment option still owns a reporter, and the
+// management view reports the baseline settings instead of an empty one.
+func TestSessionStartsInBaselineMode(t *testing.T) {
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
+	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
 	}
 	cfg := testConfig()
 	cfg.Connections.ListenHost = "127.0.0.1"
-	plain, err := session.NewWithClientConfig(cfg, plainDir, func(cc *session.TorrentClientConfig) {
+	sess, err := session.NewWithClientConfig(cfg, torrentsDir, func(cc *session.TorrentClientConfig) {
 		cc.NoDHT = true
 		cc.DisableUTP = true
 		cc.DisableIPv6 = true
@@ -309,15 +291,20 @@ func TestSetLabSettingsRejectsInvalidAndDisabled(t *testing.T) {
 		t.Fatalf("NewWithClientConfig: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := plain.Close(context.Background()); err != nil {
+		if err := sess.Close(context.Background()); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	if _, err := plain.SetLabSettings(ctx, experiments.RuntimeSettings{Mode: experiments.ModeBaseline}); !errors.Is(err, session.ErrLabDisabled) {
-		t.Fatalf("SetLabSettings without experiment error = %v, want ErrLabDisabled", err)
+
+	status := sess.LabStatus()
+	if status.Settings.Mode != experiments.ModeBaseline {
+		t.Fatalf("mode = %q, want baseline", status.Settings.Mode)
 	}
-	if status := plain.LabStatus(); status.Enabled {
-		t.Fatalf("LabStatus reports enabled without the experiment: %+v", status)
+	if status.Seed == 0 {
+		t.Fatal("seed = 0, want a wall-clock seed")
+	}
+	if len(status.Torrents) != 0 {
+		t.Fatalf("torrents = %+v, want an empty list before the first announce", status.Torrents)
 	}
 }
 

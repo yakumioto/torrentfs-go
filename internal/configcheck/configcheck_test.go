@@ -62,6 +62,58 @@ mode = "inject"
 	}
 }
 
+// TestLoadRejectsARateOrMultiplierWithoutItsMode covers the migration contract
+// of an old experiment configuration: a rate or multiplier was once enough to
+// select a mode, and the start now reports that the mode has to be named
+// instead of silently changing what the tracker sees.
+func TestLoadRejectsARateOrMultiplierWithoutItsMode(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantKey  string
+		wantHint string
+	}{
+		{
+			name:     "rate without mode",
+			body:     "[experiments.upload]\nrate = \"2MiB/s\"\n",
+			wantKey:  "experiments.upload.rate",
+			wantHint: `mode = "inject"`,
+		},
+		{
+			name:     "multiplier without mode",
+			body:     "[experiments.upload]\nmultiplier = \"3\"\n",
+			wantKey:  "experiments.upload.multiplier",
+			wantHint: `mode = "amplify"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := configcheck.Load(writeConfigFile(t, tc.body))
+			if err == nil {
+				t.Fatal("Load accepted an experiment mode that is not named")
+			}
+			for _, want := range []string{tc.wantKey, "experiments.upload.mode", tc.wantHint} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the report does not contain %q: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadAcceptsAnUnconfiguredExperiment covers the contract that a
+// configuration that does not mention the experiment starts in the baseline
+// arm instead of being rejected or disabled.
+func TestLoadAcceptsAnUnconfiguredExperiment(t *testing.T) {
+	cfg, _, err := configcheck.Load(writeConfigFile(t, "backend = \"none\"\n\n[http]\nlisten_addr = \"127.0.0.1:0\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Experiments.Upload.Mode != "baseline" {
+		t.Fatalf("experiments.upload.mode = %q, want baseline", cfg.Experiments.Upload.Mode)
+	}
+}
+
 // TestLoadKeepsOneProblemOneDiagnosis covers the contract that a rejected
 // experiment value is not restated by the cross-field rules.
 func TestLoadKeepsOneProblemOneDiagnosis(t *testing.T) {

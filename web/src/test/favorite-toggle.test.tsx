@@ -88,8 +88,7 @@ describe('favorite toggle', () => {
       }
       if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse({
-          enabled: false,
-          settings: null,
+          settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
           seed: 0,
           announce_log: '',
           peer_sample_interval_seconds: 0,

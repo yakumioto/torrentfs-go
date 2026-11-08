@@ -152,11 +152,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize logging: %v\n", err)
 		return 2
 	}
+	// The retired experiment sidecar is imported before the session starts, so
+	// the first announce already uses the migrated values. A merge into the
+	// configuration file changes the effective configuration, which is loaded
+	// again; a read-only deployment keeps the sidecar as a runtime fallback.
+	experimentSidecar, experimentErr := migrateLegacyExperimentSettings(configFile, torrentsDir, logger)
+	if experimentErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", experimentErr)
+		return 2
+	}
+	if experimentSidecar.Migrated {
+		cfg, sources, err = loadConfig(configFile)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+			return 2
+		}
+	}
 	// The retired upload-rate sidecar is folded into the configuration before
-	// the session reads it. A read-only deployment keeps the sidecar value for
-	// this run and the migration warns; the next start after a successful
-	// write-back archives it.
-	migration, err := configmigrate.MigrateUploadRate(configmigrate.Options{
+	// the session reads it. It runs after the experiment migration because that
+	// migration may reload the configuration file; running it first would drop
+	// the in-memory fallback a read-only deployment keeps for this run. A
+	// read-only deployment keeps the sidecar value for this run and the
+	// migration warns; the next start after a successful write-back archives it.
+	uploadRateMigration, err := configmigrate.MigrateUploadRate(configmigrate.Options{
 		ConfigPath:  configFile,
 		TorrentsDir: torrentsDir,
 		Config:      cfg,
@@ -167,7 +185,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		return 2
 	}
-	cfg, sources = migration.Config, migration.Sources
+	cfg, sources = uploadRateMigration.Config, uploadRateMigration.Sources
 	logLevel := cfg.Log.Level
 	if logLevel == "" {
 		logLevel = "info"
@@ -200,7 +218,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(cfg, logger)
+	labOptions, labErr := labSessionOptions(cfg, experimentSidecar.Runtime, logger)
 	if labErr != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
 		return 2
@@ -235,6 +253,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logging.NewLevelApplier(logLevelVar),
 		session.NewConfigApplier(sess),
 		session.NewUploadRateApplier(sess),
+		session.NewExperimentApplier(sess),
 	); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 		sequence.run()

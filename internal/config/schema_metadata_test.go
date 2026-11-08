@@ -20,15 +20,20 @@ func TestEveryConfigurationKeyDeclaresItsComponent(t *testing.T) {
 // other key takes effect at the next start.
 func TestOnlyTheHotApplyBoundaryIsMarkedHotApply(t *testing.T) {
 	want := map[string]string{
-		"log.level":                   "logging",
-		"http.max_upload_size":        "api",
-		"connections.reading_conns":   "session",
-		"connections.uploading_conns": "session",
-		"connections.read_grace":      "session",
-		"http.auth.token_ttl":         "auth",
-		"upload_rate.limit":           "session",
-		"upload_rate.schedule_start":  "session",
-		"upload_rate.schedule_end":    "session",
+		"log.level":                     "logging",
+		"http.max_upload_size":          "api",
+		"connections.reading_conns":     "session",
+		"connections.uploading_conns":   "session",
+		"connections.read_grace":        "session",
+		"http.auth.token_ttl":           "auth",
+		"upload_rate.limit":             "session",
+		"upload_rate.schedule_start":    "session",
+		"upload_rate.schedule_end":      "session",
+		"experiments.upload.mode":       "experiment",
+		"experiments.upload.rate":       "experiment",
+		"experiments.upload.multiplier": "experiment",
+		"experiments.upload.jitter":     "experiment",
+		"experiments.upload.cap":        "experiment",
 	}
 	for _, key := range Schema() {
 		component, hot := want[key.Path]

@@ -45,15 +45,32 @@ func TestUploadExperimentLoadsFromTheConfigurationFile(t *testing.T) {
 	}
 }
 
-// TestUploadExperimentIsUnsetByDefault covers the contract that the
-// experiment does nothing unless it is configured.
-func TestUploadExperimentIsUnsetByDefault(t *testing.T) {
+// TestUploadExperimentDefaultsToBaseline covers the contract that the
+// experiment is always on: an unconfigured experiment reports the real
+// counters in the baseline arm instead of being disabled.
+func TestUploadExperimentDefaultsToBaseline(t *testing.T) {
 	cfg, err := config.Load(writeConfig(t, "[log]\nlevel = \"debug\"\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Experiments.Upload != (config.UploadExperiment{}) {
-		t.Errorf("the experiment is configured without being set: %+v", cfg.Experiments.Upload)
+	if cfg.Experiments.Upload.Mode != "baseline" {
+		t.Errorf("experiments.upload.mode = %q, want the baseline default", cfg.Experiments.Upload.Mode)
+	}
+	if cfg.Experiments.Upload.Jitter != config.Percent(20) {
+		t.Errorf("experiments.upload.jitter = %v, want the 20%% default", cfg.Experiments.Upload.Jitter)
+	}
+}
+
+// TestUploadExperimentRejectsAnEmptyMode covers the contract that a mode is
+// always named: an empty value is not the missing mode of an old
+// configuration, it is a value the user wrote and the schema rejects.
+func TestUploadExperimentRejectsAnEmptyMode(t *testing.T) {
+	_, err := config.Load(writeConfig(t, "[experiments.upload]\nmode = \"\"\n"))
+	if err == nil {
+		t.Fatal("Load accepted an empty mode")
+	}
+	if !strings.Contains(err.Error(), "experiments.upload.mode") {
+		t.Errorf("Load error %q does not name experiments.upload.mode", err)
 	}
 }
 

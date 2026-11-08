@@ -28,3 +28,23 @@ func TestRetiredUploadRateSettingsRoutesAreGone(t *testing.T) {
 		})
 	}
 }
+
+// TestRetiredExperimentRoutesAreGone covers the experiment rename and the
+// retirement of the settings write endpoint: the monitor answers only under
+// its new path, and a client still calling the old path learns that it is
+// gone instead of reaching the experiment.
+func TestRetiredExperimentRoutesAreGone(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, nil)
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/v1/lab", nil),
+		httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(`{"mode":"baseline"}`)),
+		httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"mode":"baseline"}`)),
+	} {
+		rec := do(t, srv, request)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want 404; body %s",
+				request.Method, request.URL.Path, rec.Code, rec.Body.String())
+		}
+	}
+}

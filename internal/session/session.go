@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,12 +42,8 @@ type Option func(*sessionOptions)
 
 type sessionOptions struct {
 	logger *slog.Logger
-	// announceRequestDirector, when non-nil, rewrites each HTTP tracker
-	// announce request after the client fills in its parameters. Only the
-	// experimental synthetic-upload harness sets it; see internal/experiments.
-	announceRequestDirector func(*http.Request) error
-	// labSettings, when non-nil, enables the session-owned experiment, which
-	// supersedes announceRequestDirector when both are set.
+	// labSettings, when non-nil, overrides the experiment settings the
+	// session starts with. The experiment itself is always on.
 	labSettings *experiments.Settings
 }
 
@@ -56,19 +51,6 @@ type sessionOptions struct {
 func WithLogger(l *slog.Logger) Option {
 	return func(options *sessionOptions) {
 		options.logger = l
-	}
-}
-
-// WithAnnounceRequestDirector installs a hook that may rewrite each HTTP(S)
-// tracker announce request after the client fills in uploaded, downloaded,
-// left, event, and the other announce parameters. It exists for the
-// experimental synthetic-upload harness (internal/experiments), which fabricates
-// announce statistics to exercise tracker-side anomaly detection; a normal
-// deployment never sets it. UDP tracker announces and DHT announcements bypass
-// the hook.
-func WithAnnounceRequestDirector(director func(*http.Request) error) Option {
-	return func(options *sessionOptions) {
-		options.announceRequestDirector = director
 	}
 }
 
@@ -121,8 +103,8 @@ type Session struct {
 	// second process cannot manage the same directory.
 	instanceLock *os.File
 
-	// lab is nil unless the session was created with WithLabExperiment. It is
-	// guarded by mu; the reporter behind it is safe for concurrent use.
+	// lab is the always-on experiment state. It is guarded by mu; the reporter
+	// behind it is safe for concurrent use.
 	lab *labState
 
 	// dhtRecorder keeps the last per-family bootstrap outcome for the status
@@ -248,46 +230,30 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		return nil, err
 	}
 	uploadPolicy := compileUploadRatePolicy(uploadSettings)
-	// The experiment runtime settings are restored before the client is created
-	// so the first announce already uses the persisted mode. A sidecar that
-	// cannot be understood fails startup.
-	var (
-		labRuntime          experiments.RuntimeSettings
-		labRuntimePersisted bool
-		labReporter         *experiments.Reporter
-		labRecorder         *experiments.Recorder
-	)
+	// The upload statistics experiment is always on: the session always owns a
+	// reporter, and an unconfigured experiment is the baseline arm. Only an
+	// announce log named by the configuration opens a recorder and starts the
+	// peer sampler.
+	labSettings := experiments.DefaultSettings()
 	if options.labSettings != nil {
-		labRuntime, labRuntimePersisted, err = loadLabSettings(metadataDir, options.labSettings.RuntimeSettings)
+		labSettings = *options.labSettings
+	}
+	var labRecorder *experiments.Recorder
+	if labSettings.AnnounceLogPath != "" {
+		labRecorder, err = experiments.OpenRecorder(labSettings.AnnounceLogPath, logger)
 		if err != nil {
 			releaseInstanceLock(instanceLock)
-			logInitFailure("load-lab-settings", err)
-			return nil, err
+			logInitFailure("open-experiment-announce-log", err)
+			return nil, fmt.Errorf("session: experiment announce log: %w", err)
 		}
-		if options.labSettings.AnnounceLogPath != "" {
-			labRecorder, err = experiments.OpenRecorder(options.labSettings.AnnounceLogPath, logger)
-			if err != nil {
-				releaseInstanceLock(instanceLock)
-				logInitFailure("open-lab-announce-log", err)
-				return nil, fmt.Errorf("session: lab experiment: %w", err)
+		defer func() {
+			if retErr != nil {
+				_ = labRecorder.Close()
 			}
-			defer func() {
-				if retErr != nil {
-					_ = labRecorder.Close()
-				}
-			}()
-			labRecorder.WriteSettings(experiments.Settings{
-				RuntimeSettings:    labRuntime,
-				Seed:               options.labSettings.Seed,
-				AnnounceLogPath:    options.labSettings.AnnounceLogPath,
-				PeerSampleInterval: options.labSettings.PeerSampleInterval,
-			})
-		}
-		labReporter = experiments.NewReporter(experiments.Settings{
-			RuntimeSettings: labRuntime,
-			Seed:            options.labSettings.Seed,
-		}, labRecorder)
+		}()
+		labRecorder.WriteSettings(labSettings)
 	}
+	labReporter := experiments.NewReporter(labSettings, labRecorder)
 	var streamSigner *stream.Signer
 	if cfg.STRM.BaseURL != "" {
 		streamSigner, err = resolveStreamSigner(metadataDir)
@@ -356,13 +322,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if customize != nil {
 		customize(cc)
 	}
-	if options.announceRequestDirector != nil {
-		cc.HttpRequestDirector = options.announceRequestDirector
-	}
-	if labReporter != nil {
-		// The session-owned experiment supersedes the raw director option.
-		cc.HttpRequestDirector = labReporter.Director
-	}
+	// The always-on experiment observes every announce. Baseline passes the
+	// request through unchanged; a rewriting mode replaces only "uploaded".
+	cc.HttpRequestDirector = labReporter.Director
 	// The peer ID is resolved after customize so an explicitly injected client
 	// config always wins, and before NewClient so the durable identity is the
 	// one this client announces with.
@@ -425,25 +387,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// and waits before the client is torn down.
 	s.uploadRate.start(s.bgCtx, &s.bgMu, &s.bgWg)
 	s.startConnectionAllocator()
-	if labReporter != nil {
-		state := &labState{
-			settings: *options.labSettings,
-			reporter: labReporter,
-			recorder: labRecorder,
-		}
-		s.lab = state
-		s.startLabSampler(state)
-		logger.Warn("lab upload experiment enabled; only use this build against a tracker you operate",
-			"mode", labRuntime.Mode,
-			"rate_bytes_per_second", labRuntime.RateBytesPerSecond,
-			"multiplier", labRuntime.Multiplier,
-			"jitter_percent", labRuntime.JitterFraction*100,
-			"cap_bytes", labRuntime.CapBytes,
-			"announce_log", options.labSettings.AnnounceLogPath,
-			"peer_sample_interval", options.labSettings.PeerSampleInterval.String(),
-			"restored_from_sidecar", labRuntimePersisted,
-		)
+	experimentState := &labState{
+		settings: labSettings,
+		reporter: labReporter,
+		recorder: labRecorder,
 	}
+	s.lab = experimentState
+	s.startLabSampler(experimentState)
 	startup := []struct {
 		stage string
 		fn    func() error

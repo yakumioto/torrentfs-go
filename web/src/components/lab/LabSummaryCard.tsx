@@ -11,9 +11,9 @@ import {
 import styles from './LabSummaryCard.module.css';
 
 /**
- * Dashboard summary of the synthetic-upload experiment. It is a link because
- * the values are only meaningful next to their configuration, which lives on
- * the dedicated /experiments page.
+ * Dashboard summary of the always-on synthetic-upload experiment. It is a link
+ * to the dedicated /experiments page, which shows the running settings beside
+ * the live counters.
  *
  * The card deliberately shows both points in time: the live real counter and
  * the counter captured at the last announce. Reported and overreported values
@@ -21,14 +21,11 @@ import styles from './LabSummaryCard.module.css';
  * is the pending real upload that the tracker has not seen yet.
  */
 export function LabSummaryCard({ view }: { view: LabView }) {
-  if (!view.enabled) {
-    return null;
-  }
   const overreported = view.totals.overreported_bytes;
   const tone = overreported > 0 ? styles.surplus : overreported < 0 ? styles.shortfall : undefined;
 
   return (
-    <Link to="/experiments" className={`panel ${styles.card}`} aria-label="上传实验：打开上传实验设置">
+    <Link to="/experiments" className={`panel ${styles.card}`} aria-label="上传实验：打开上传实验监控">
       <div className={styles.heading}>
         <div>
           <p className="eyebrow">反作弊测试</p>
@@ -64,7 +61,7 @@ export function LabSummaryCard({ view }: { view: LabView }) {
       <div className={styles.meta}>
         <span>随机种子 {view.seed}</span>
         <span>每 {formatPeerSampleInterval(view.peer_sample_interval_seconds)}采样 peer</span>
-        <span className={styles.more}>查看设置<IconChevronRight size={14} aria-hidden="true" /></span>
+        <span className={styles.more}>查看监控<IconChevronRight size={14} aria-hidden="true" /></span>
       </div>
     </Link>
   );

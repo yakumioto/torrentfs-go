@@ -8,7 +8,7 @@ import { queryKeys } from '../queries/keys';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { AppLayout } from '../components/layout/AppLayout';
 import { DashboardPage } from '../pages/DashboardPage';
-import { LabSettingsPage } from '../pages/LabSettingsPage';
+import { ExperimentsPage } from '../pages/ExperimentsPage';
 import { theme } from '../styles/theme';
 import type { LabView, RuntimeStats, Torrent } from '../types/api';
 
@@ -42,10 +42,9 @@ function runtimeStats(overrides: Partial<RuntimeStats> = {}): RuntimeStats {
   };
 }
 
-function disabledLab(): LabView {
+function baselineLab(): LabView {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -60,9 +59,8 @@ function disabledLab(): LabView {
   };
 }
 
-function enabledLab(overrides: Partial<LabView> = {}): LabView {
+function injectLab(overrides: Partial<LabView> = {}): LabView {
   return {
-    enabled: true,
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
@@ -90,7 +88,7 @@ function renderDashboard(
   statsBody: unknown = runtimeStats(),
   statsStatus = 200,
   listResponses: Torrent[][] = [torrents],
-  labBody: unknown = disabledLab(),
+  labBody: unknown = baselineLab(),
 ) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -126,7 +124,7 @@ function renderDashboard(
             <Routes>
               <Route element={<AppLayout />}>
                 <Route path="/" element={<DashboardPage />} />
-                <Route path="/experiments" element={<LabSettingsPage />} />
+                <Route path="/experiments" element={<ExperimentsPage />} />
               </Route>
             </Routes>
           </MemoryRouter>
@@ -272,11 +270,11 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: '磁力链接' })).toBeInTheDocument());
   });
 
-  it('shows the lab summary and per-torrent reported counters when enabled', async () => {
-    renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, enabledLab());
+  it('shows the lab summary and per-torrent reported counters', async () => {
+    renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, injectLab());
 
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
-    const card = screen.getByRole('link', { name: '上传实验：打开上传实验设置' });
+    const card = screen.getByRole('link', { name: '上传实验：打开上传实验监控' });
     expect(card).toHaveTextContent('上传实验');
     expect(card).toHaveTextContent('注入虚报');
     expect(card).toHaveTextContent('实时真实上传');
@@ -292,11 +290,11 @@ describe('DashboardPage', () => {
     expect(screen.getByTitle('相对上次上报时真实量；待上报 4.8 MiB 尚未计入')).toBeInTheDocument();
 
     fireEvent.click(card);
-    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
   });
 
-  it('renders a dash for torrents without lab counters and hides the card when disabled', async () => {
-    renderDashboard([torrent({ info_hash: 'not-reported-yet' })], runtimeStats(), 200, undefined, enabledLab({ torrents: [] }));
+  it('renders a dash for torrents without lab counters and shows the baseline card', async () => {
+    renderDashboard([torrent({ info_hash: 'not-reported-yet' })], runtimeStats(), 200, undefined, injectLab({ torrents: [] }));
 
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
     expect(screen.getByText(/上报 — · 虚报 —/)).toBeInTheDocument();
@@ -304,7 +302,6 @@ describe('DashboardPage', () => {
     cleanup();
     renderDashboard([torrent()]);
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
-    expect(screen.queryByText('上传实验')).not.toBeInTheDocument();
-    expect(screen.queryByText(/上报 .* · 虚报 /)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '上传实验：打开上传实验监控' })).toHaveTextContent('基线（真实上报）');
   });
 });

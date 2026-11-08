@@ -14,16 +14,15 @@ import {
 import styles from './TorrentLabSummary.module.css';
 
 /**
- * Per-torrent view of the synthetic-upload experiment. Renders nothing unless
- * the daemon reports the experiment as enabled, so normal deployments keep the
- * detail page unchanged.
+ * Per-torrent view of the always-on synthetic-upload experiment. It renders
+ * once the daemon's experiment view is available.
  *
  * Reported and overreported values use the real counter captured at the last
  * announce; the live counter and the pending delta are shown separately so a
  * large gap is explained rather than read as a broken multiplier.
  */
 export function TorrentLabSummary({ lab, infoHash }: { lab?: LabView; infoHash: string }) {
-  if (lab?.enabled !== true) {
+  if (lab === undefined) {
     return null;
   }
   const stat = labTorrentStat(lab, infoHash);
@@ -46,7 +45,7 @@ export function TorrentLabSummary({ lab, infoHash }: { lab?: LabView; infoHash: 
             <IconFlask size={17} aria-hidden="true" /> 上传实验
           </h2>
         </div>
-        <Badge variant="light" color="torrent">{labModeLabel(lab.settings?.mode)}</Badge>
+        <Badge variant="light" color="torrent">{labModeLabel(lab.settings.mode)}</Badge>
       </div>
       <dl className={styles.grid}>
         <div><dt>实时真实上传</dt><dd>{stat === undefined ? '—' : formatBytes(stat.real_uploaded_bytes)}</dd></div>

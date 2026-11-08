@@ -28,7 +28,7 @@ export function TorrentList({
   onSortDirectionToggle,
 }: {
   torrents?: Torrent[];
-  /** Live lab view; per-torrent reported/overreported values appear when enabled. */
+  /** Live lab view; per-torrent reported/overreported values appear once it is loaded. */
   lab?: LabView;
   loading: boolean;
   error: unknown;
@@ -41,7 +41,7 @@ export function TorrentList({
   onSortKeyChange: (key: TorrentSortKey) => void;
   onSortDirectionToggle: () => void;
 }) {
-  const labEnabled = lab?.enabled === true;
+  const showLab = lab !== undefined;
   const labStats = indexLabTorrentStats(lab);
 
   if (loading && torrents === undefined) {
@@ -133,7 +133,7 @@ export function TorrentList({
         <TorrentRow
           key={torrent.id}
           torrent={torrent}
-          labEnabled={labEnabled}
+          showLab={showLab}
           labStat={labStats.get(torrent.info_hash)}
         />
       ))}

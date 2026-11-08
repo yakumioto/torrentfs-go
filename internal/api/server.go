@@ -36,7 +36,6 @@ type Backend interface {
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
 	LabStatus() session.LabStatus
-	SetLabSettings(ctx context.Context, settings session.LabSettings) (session.LabSettings, error)
 }
 
 // CategoryBackend is the optional category management surface. Keeping it
@@ -130,7 +129,6 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/v1/config", s.handleSaveConfig)
 	mux.HandleFunc("GET /api/v1/experiments/upload", s.handleGetLab)
-	mux.HandleFunc("PUT /api/v1/experiments/upload/settings", s.handleSetLabSettings)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)

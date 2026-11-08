@@ -40,10 +40,9 @@ function makeRuntimeStats() {
   };
 }
 
-function disabledLab() {
+function baselineLab() {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -121,7 +120,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       listRequests += 1;
       if (listRequests === 1) {
@@ -167,7 +166,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(status));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       if (url.endsWith('/torrent-1')) {
         return Promise.resolve(jsonResponse(torrent));
@@ -201,7 +200,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       if (url.endsWith('/torrents')) {
         return Promise.resolve(jsonResponse([torrent]));
@@ -212,11 +211,11 @@ describe('Header refresh control', () => {
     renderApp('/', fetchMock);
     await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
 
-    const link = screen.getByRole('link', { name: '上传实验设置' });
+    const link = screen.getByRole('link', { name: '上传实验监控' });
     expect(link).toHaveAttribute('href', '/experiments');
     fireEvent.click(link);
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());
-    expect(screen.getByText('上传实验未启用')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('基线（真实上报）').length).toBeGreaterThan(0));
   });
 });

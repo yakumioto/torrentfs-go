@@ -59,10 +59,9 @@ function makeRuntimeStats() {
   };
 }
 
-function disabledLab() {
+function baselineLab() {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -124,7 +123,7 @@ describe('background refresh resilience', () => {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       listRequests += 1;
       return Promise.resolve(listRequests === 1 ? jsonResponse([torrent]) : failingResponse());
@@ -157,7 +156,7 @@ describe('background refresh resilience', () => {
         return Promise.resolve(statusRequests === 1 ? jsonResponse(makeStatus(torrent)) : failingResponse());
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(baselineLab()));
       }
       return Promise.resolve(jsonResponse(torrent));
     });

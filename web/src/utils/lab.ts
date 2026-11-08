@@ -35,7 +35,7 @@ export function labModeOption(mode: LabMode | '' | undefined): LabModeOption | u
 }
 
 export function labModeLabel(mode: LabMode | '' | undefined): string {
-  return labModeOption(mode)?.label ?? '未启用';
+  return labModeOption(mode)?.label ?? '—';
 }
 
 /**
@@ -71,7 +71,7 @@ export function formatSignedBytes(value: number): string {
 }
 
 export function labTorrentStat(view: LabView | undefined, infoHash: string): LabTorrentStat | undefined {
-  if (view === undefined || !view.enabled || infoHash === '') {
+  if (view === undefined || infoHash === '') {
     return undefined;
   }
   return view.torrents.find((stat) => stat.info_hash === infoHash);
@@ -79,7 +79,7 @@ export function labTorrentStat(view: LabView | undefined, infoHash: string): Lab
 
 /** Indexes per-torrent lab counters by info hash for the task list. */
 export function indexLabTorrentStats(view: LabView | undefined): Map<string, LabTorrentStat> {
-  if (view === undefined || !view.enabled) {
+  if (view === undefined) {
     return new Map();
   }
   return new Map(view.torrents.map((stat) => [stat.info_hash, stat]));
