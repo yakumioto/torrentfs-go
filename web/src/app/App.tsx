@@ -4,6 +4,7 @@ import { ConnectionFailure } from '../components/layout/ConnectionFailure';
 import { LoadingScreen } from '../components/layout/LoadingScreen';
 import { LoginPage } from '../pages/LoginPage';
 import { DashboardPage } from '../pages/DashboardPage';
+import { ConfigPage } from '../pages/ConfigPage';
 import { LabSettingsPage } from '../pages/LabSettingsPage';
 import { TorrentDetailPage } from '../pages/TorrentDetailPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
@@ -26,6 +27,7 @@ export function App() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route path="/" element={<DashboardPage />} />
+        <Route path="/config" element={<ConfigPage />} />
         <Route path="/experiments" element={<LabSettingsPage />} />
         <Route path="/torrents/:id" element={<TorrentDetailPage />} />
         <Route path="*" element={<NotFoundPage />} />

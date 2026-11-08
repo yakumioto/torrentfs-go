@@ -1,5 +1,6 @@
 import type {
   Category,
+  ConfigView,
   LabSettingsUpdate,
   LabView,
   LoginResponse,
@@ -83,6 +84,10 @@ export class ApiClient {
 
   getRuntimeStats(signal?: AbortSignal): Promise<RuntimeStats> {
     return this.request<RuntimeStats>('/stats', { signal });
+  }
+
+  getConfig(signal?: AbortSignal): Promise<ConfigView> {
+    return this.request<ConfigView>('/config', { signal });
   }
 
   getTorrent(id: string, signal?: AbortSignal): Promise<Torrent> {

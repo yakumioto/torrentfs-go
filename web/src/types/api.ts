@@ -191,3 +191,58 @@ export interface LabView {
   totals: LabTotals;
   torrents: LabTorrentStat[];
 }
+
+/** Where a configuration value came from, in precedence order. */
+export type ConfigSource = 'default' | 'file' | 'environment';
+
+/** A stable machine-readable reason a configuration key cannot be edited. */
+export type ConfigKeyReadOnlyReason = 'environment_override' | 'secret';
+
+/** A stable machine-readable reason the whole configuration page is read-only. */
+export type ConfigPageReadOnlyReason = 'not_configured' | 'file_not_writable';
+
+/**
+ * One configuration key as the read-only configuration page sees it. The
+ * schema metadata drives the grouping, the labels and the apply badge; the
+ * values come from the file layer and from the effective configuration.
+ */
+export interface ConfigKey {
+  path: string;
+  /** The configuration section that groups the key; empty for top-level keys. */
+  section: string;
+  /** The schema type: string, bool, int, int64, duration, byte_quantity, byte_rate, percent, ratio, list, or enum. */
+  kind: string;
+  /** The accepted values of an enumerated key; empty for every other kind. */
+  values: string[];
+  default: string;
+  /** The file layer value, before the environment is merged. A secret is empty. */
+  file_value: string;
+  /** The value the process uses. A secret is empty. */
+  effective_value: string;
+  source: ConfigSource | string;
+  environment: string;
+  overridable: boolean;
+  secret: boolean;
+  component: string;
+  hot_apply: boolean;
+  documentation: string;
+  read_only_reason: ConfigKeyReadOnlyReason | '';
+}
+
+/** The outcome of the most recent save or reload; both are placeholders today. */
+export interface ConfigOperationStatus {
+  at: string | null;
+  ok: boolean;
+  error: string;
+  keys: string[];
+}
+
+/** The read-only configuration view: schema metadata, values, sources and read-only reasons. */
+export interface ConfigView {
+  /** The configuration file the process loaded; empty when it started without one. */
+  config_file: string;
+  read_only_reason: ConfigPageReadOnlyReason | '';
+  keys: ConfigKey[];
+  last_save: ConfigOperationStatus;
+  last_reload: ConfigOperationStatus;
+}
