@@ -6,7 +6,6 @@ import type {
   ConfigSaveRequest,
   ConfigSaveResult,
   ConfigView,
-  LabSettingsUpdate,
   LabView,
   Operation,
   PruneResult,
@@ -391,19 +390,6 @@ export function useLab(api: ApiClient, enabled: boolean) {
     refetchIntervalInBackground: false,
     retry: shouldRetry,
     retryDelay,
-  });
-}
-
-export function useSetLabSettings(api: ApiClient) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ settings, signal }: { settings: LabSettingsUpdate; signal?: AbortSignal }) =>
-      api.setLabSettings(settings, signal),
-    onSuccess: (saved: LabView) => {
-      // The response is the post-apply view, so it already contains both the
-      // normalized settings and the refreshed totals.
-      queryClient.setQueryData(queryKeys.lab, saved);
-    },
   });
 }
 

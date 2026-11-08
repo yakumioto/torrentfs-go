@@ -3,7 +3,6 @@ import type {
   ConfigSaveRequest,
   ConfigSaveResult,
   ConfigView,
-  LabSettingsUpdate,
   LabView,
   LoginResponse,
   Operation,
@@ -174,14 +173,6 @@ export class ApiClient {
 
   getLab(signal?: AbortSignal): Promise<LabView> {
     return this.request<LabView>('/experiments/upload', { signal });
-  }
-
-  setLabSettings(settings: LabSettingsUpdate, signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/experiments/upload/settings', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-      signal,
-    });
   }
 
   private async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {

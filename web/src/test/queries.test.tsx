@@ -3,14 +3,13 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import { operationRefetchInterval, useAddTorrentFiles, useLab, useOperation, useSetLabSettings } from '../queries/hooks';
+import { operationRefetchInterval, useAddTorrentFiles, useLab, useOperation } from '../queries/hooks';
 import { queryKeys } from '../queries/keys';
 import { retryDelay, shouldRetry } from '../queries/retry';
 import type { LabView, Operation } from '../types/api';
 
 function labView(overrides: Partial<LabView> = {}): LabView {
   return {
-    enabled: true,
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
@@ -139,7 +138,7 @@ describe('query contracts', () => {
     expect(addTorrent).toHaveBeenCalledOnce();
   });
 
-  it('polls the live lab view only while enabled', async () => {
+  it('polls the live lab view only while the page is visible', async () => {
     const api = { getLab: vi.fn().mockResolvedValue(labView()) } as unknown as ApiClient;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
@@ -157,23 +156,4 @@ describe('query contracts', () => {
     queryClient.clear();
   });
 
-  it('stores the applied lab view returned by the settings write', async () => {
-    const applied = labView({
-      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 3, jitter_percent: 20, cap_bytes: 0 },
-    });
-    const api = { setLabSettings: vi.fn().mockResolvedValue(applied) } as unknown as ApiClient;
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
-    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-    const hook = renderHook(() => useSetLabSettings(api), { wrapper });
-
-    await act(async () => {
-      await hook.result.current.mutateAsync({ settings: { mode: 'amplify', multiplier: 3 } });
-    });
-
-    expect(api.setLabSettings).toHaveBeenCalledWith({ mode: 'amplify', multiplier: 3 }, undefined);
-    expect(queryClient.getQueryData(queryKeys.lab)).toEqual(applied);
-
-    hook.unmount();
-    queryClient.clear();
-  });
 });

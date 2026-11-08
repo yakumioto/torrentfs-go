@@ -60,13 +60,13 @@ export function Header({ onAdd, onOpenUploadRateSettings }: { onAdd: () => void;
               <IconSettings size={18} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip label="上传实验设置">
+          <Tooltip label="上传实验监控">
             <ActionIcon
               component={Link}
               to="/experiments"
               variant="subtle"
               color="gray"
-              aria-label="上传实验设置"
+              aria-label="上传实验监控"
             >
               <IconFlask size={18} />
             </ActionIcon>

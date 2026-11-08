@@ -147,18 +147,6 @@ export interface LabSettings {
   cap_bytes: number;
 }
 
-/**
- * Runtime-updatable part of the lab settings. Only `mode` is required by the
- * management endpoint; omitted fields fall back to the daemon defaults.
- */
-export interface LabSettingsUpdate {
-  mode: LabMode;
-  rate_bytes_per_second?: number;
-  multiplier?: number;
-  jitter_percent?: number;
-  cap_bytes?: number;
-}
-
 export interface LabTorrentStat {
   info_hash: string;
   /** Live real upload counter for this torrent. */
@@ -183,8 +171,8 @@ export interface LabTotals {
 }
 
 export interface LabView {
-  enabled: boolean;
-  settings: LabSettings | null;
+  /** The experiment is always on, so the settings are always present. */
+  settings: LabSettings;
   seed: number;
   announce_log: string;
   peer_sample_interval_seconds: number;

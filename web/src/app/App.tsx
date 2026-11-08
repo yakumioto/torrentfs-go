@@ -5,7 +5,7 @@ import { LoadingScreen } from '../components/layout/LoadingScreen';
 import { LoginPage } from '../pages/LoginPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { ConfigPage } from '../pages/ConfigPage';
-import { LabSettingsPage } from '../pages/LabSettingsPage';
+import { ExperimentsPage } from '../pages/ExperimentsPage';
 import { TorrentDetailPage } from '../pages/TorrentDetailPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { useAuth } from './auth-context';
@@ -28,7 +28,7 @@ export function App() {
       <Route element={<AppLayout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/config" element={<ConfigPage />} />
-        <Route path="/experiments" element={<LabSettingsPage />} />
+        <Route path="/experiments" element={<ExperimentsPage />} />
         <Route path="/torrents/:id" element={<TorrentDetailPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

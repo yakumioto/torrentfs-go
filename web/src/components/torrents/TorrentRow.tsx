@@ -30,10 +30,10 @@ function labRowTitle(labStat: LabTorrentStat | undefined): string {
   return `相对上次上报时真实量；待上报 ${formatBytes(pending)} 尚未计入`;
 }
 
-export function TorrentRow({ torrent, labEnabled = false, labStat }: {
+export function TorrentRow({ torrent, showLab = false, labStat }: {
   torrent: Torrent;
-  /** When the experiment is running, each row also shows reported/overreported bytes. */
-  labEnabled?: boolean;
+  /** When the experiment view is loaded, each row also shows reported/overreported bytes. */
+  showLab?: boolean;
   labStat?: LabTorrentStat;
 }) {
   const auth = useAuth();
@@ -67,7 +67,7 @@ export function TorrentRow({ torrent, labEnabled = false, labStat }: {
         <div className={`${styles.upload} text-mono`}>
           <span className={styles.mobileLabel}>上传量</span>
           <span>{formatBytes(torrent.uploaded_bytes)}</span>
-          {labEnabled && (
+          {showLab && (
             <span
               className={styles.labValues}
               title={labRowTitle(labStat)}

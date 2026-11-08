@@ -123,7 +123,7 @@ export function DashboardPage() {
         </div>
       )}
 
-      {labQuery.data?.enabled === true && <LabSummaryCard view={labQuery.data} />}
+      {labQuery.data !== undefined && <LabSummaryCard view={labQuery.data} />}
 
       <section aria-label="任务摘要" className={styles.summary}>
         <div className={styles.summaryCard}>

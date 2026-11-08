@@ -14,7 +14,6 @@ import {
 
 function labView(overrides: Partial<LabView> = {}): LabView {
   return {
-    enabled: true,
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
     announce_log: '/var/log/torrentfs/lab.jsonl',
@@ -51,7 +50,7 @@ describe('lab presentation helpers', () => {
     expect(labModeLabel('baseline')).toContain('基线');
     expect(labModeLabel('inject')).toContain('虚报');
     expect(labModeLabel('amplify')).toContain('放大');
-    expect(labModeLabel(undefined)).toBe('未启用');
+    expect(labModeLabel(undefined)).toBe('—');
     expect(labModeOption('baseline')?.description).toContain('对照组');
   });
 
@@ -72,16 +71,13 @@ describe('lab presentation helpers', () => {
     expect(labPendingRealUploadBytes(2048, 2048)).toBe(0);
   });
 
-  it('looks up per-torrent counters by info hash and ignores the disabled view', () => {
+  it('looks up per-torrent counters by info hash', () => {
     const view = labView();
     expect(labTorrentStat(view, 'abc123')?.reported_uploaded_bytes).toBe(4_197_247);
     expect(labTorrentStat(view, 'abc123')?.real_uploaded_at_last_announce_bytes).toBe(1000);
     expect(labTorrentStat(view, 'missing')).toBeUndefined();
     expect(indexLabTorrentStats(view).get('def456')?.real_uploaded_bytes).toBe(2048);
 
-    const disabled = labView({ enabled: false, settings: null, torrents: [] });
-    expect(labTorrentStat(disabled, 'abc123')).toBeUndefined();
-    expect(indexLabTorrentStats(disabled).size).toBe(0);
     expect(indexLabTorrentStats(undefined).size).toBe(0);
   });
 
