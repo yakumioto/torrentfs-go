@@ -6,10 +6,12 @@
 // value the file layer holds, the effective value, the source, and the reason
 // a key cannot be edited.
 //
-// The save path, the hot apply and the external reload belong to the follow-up
-// tickets. The view already carries the zero status of both operations and a
-// stable structure, so those tickets extend the controller instead of the
-// wire contract.
+// A save validates a sparse patch, writes the configuration file back
+// atomically, and hot-applies the changed keys. The external reload polls the
+// file digest and runs the same load, validation and apply path, so an edit
+// made outside the process reaches the running components without a restart.
+// Both operations report their outcome in the view; a rejected external edit
+// keeps the last known good configuration in force and in the view.
 package configctl
 
 import (
@@ -62,7 +64,24 @@ type Controller struct {
 	appliers      []registration
 	applierByPath map[string]int
 
-	lastSave Status
+	// fileConfig is the file configuration of the most recent load or save;
+	// baseline is the digest of the bytes it came from. The view reads the
+	// cached pair instead of the file, so an external edit that made the file
+	// invalid keeps the last known good values visible. observed is the digest
+	// of the most recent bytes the controller looked at, including bytes it
+	// rejected: an unchanged invalid file is one failure, not one per poll.
+	fileConfig config.Config
+	baseline   string
+	observed   string
+	fileError  string
+
+	// reloadInterval is the poll interval of Watch. newTicker produces its
+	// tick channel; the tests inject one to drive the poll without sleeping.
+	reloadInterval time.Duration
+	newTicker      tickerFactory
+
+	lastSave   Status
+	lastReload Status
 
 	// writeBackFile is the atomic write-back of the configuration file. The
 	// tests inject a failure at this system boundary; production leaves the
@@ -78,19 +97,52 @@ type Controller struct {
 // read-only and shows the built-in defaults.
 func New(path string, cfg config.Config, sources config.Sources, options ...Option) *Controller {
 	controller := &Controller{
-		path:          path,
-		cfg:           cfg,
-		sources:       sources,
-		logger:        slog.New(slog.DiscardHandler),
-		applierByPath: map[string]int{},
-		writeBackFile: config.WriteBackFile,
+		path:           path,
+		cfg:            cfg,
+		sources:        sources,
+		logger:         slog.New(slog.DiscardHandler),
+		applierByPath:  map[string]int{},
+		writeBackFile:  config.WriteBackFile,
+		reloadInterval: DefaultReloadInterval,
+		newTicker:      productionTicker,
 	}
 	for _, option := range options {
 		if option != nil {
 			option(controller)
 		}
 	}
+	controller.loadInitialFileState()
 	return controller
+}
+
+// loadInitialFileState caches the file configuration the process started
+// with.
+//
+// The view and the reload path read the file layer from this cache, so a later
+// external edit that makes the file invalid cannot take the view down: the
+// page keeps showing the last configuration that loaded. The digest of the
+// initial bytes seeds the poll, so the first check after a start does not
+// report the file the process just loaded as an external change.
+func (c *Controller) loadInitialFileState() {
+	c.fileConfig = config.Default()
+	if c.path == "" {
+		return
+	}
+	content, err := os.ReadFile(c.path)
+	if err != nil {
+		c.fileError = fmt.Sprintf("configctl: read the configuration file: %v", err)
+		c.observed = missingFileDigest
+		return
+	}
+	digest := configurationBaseline(content)
+	c.observed = digest
+	fileConfig, _, err := config.LoadContentWithSourcesFromEnvironment(content, c.path, emptyEnvironment{})
+	if err != nil {
+		c.fileError = fmt.Sprintf("configctl: load the file configuration: %v", err)
+		return
+	}
+	c.fileConfig = fileConfig
+	c.baseline = digest
 }
 
 // Option configures a Controller.
@@ -113,23 +165,15 @@ func (c *Controller) View() (View, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	reason, exists, err := c.readOnlyReason()
+	reason, _, err := c.readOnlyReason()
 	if err != nil {
 		return View{}, err
 	}
-	fileConfig := config.Default()
-	baseline := ""
-	if c.path != "" && exists {
-		content, err := os.ReadFile(c.path)
-		if err != nil {
-			return View{}, fmt.Errorf("configctl: read the configuration file: %w", err)
-		}
-		baseline = configurationBaseline(content)
-		fileConfig, err = config.LoadContentWithEnvironment(content, c.path, emptyEnvironment{})
-		if err != nil {
-			return View{}, fmt.Errorf("configctl: load the file configuration: %w", err)
-		}
-	}
+	// The file values come from the last configuration that loaded, not from
+	// a fresh read: an external edit that made the file invalid must degrade
+	// the page to the last known good values instead of failing the request.
+	fileConfig := c.fileConfig
+	baseline := c.baseline
 
 	defaults := config.Default()
 	keys := make([]Key, 0, len(config.Schema()))
@@ -177,9 +221,10 @@ func (c *Controller) View() (View, error) {
 		ConfigFile:     c.path,
 		Baseline:       baseline,
 		ReadOnlyReason: reason,
+		FileError:      c.fileError,
 		Keys:           keys,
 		LastSave:       normalizeStatus(c.lastSave),
-		LastReload:     emptyStatus(),
+		LastReload:     normalizeStatus(c.lastReload),
 	}, nil
 }
 
@@ -243,12 +288,6 @@ func sectionOf(path string) string {
 	return path[:index]
 }
 
-// emptyStatus is the zero status of an operation the read-only view has not
-// run yet.
-func emptyStatus() Status {
-	return Status{Keys: []string{}}
-}
-
 // normalizeStatus keeps the keys of a reported status an empty list instead of
 // null, so a client always reads the same shape.
 func normalizeStatus(status Status) Status {
@@ -284,13 +323,19 @@ type View struct {
 	// ReadOnlyReason explains why the whole page is read-only: not_configured
 	// or file_not_writable. Empty means a save would be possible.
 	ReadOnlyReason string `json:"read_only_reason"`
+	// FileError reports why the configuration file on disk cannot be used
+	// right now, for example because an external edit made it invalid. The
+	// values of the view stay those of the last successful load, so a broken
+	// file degrades the page instead of failing it. Empty means the file
+	// still matches the values shown.
+	FileError string `json:"file_error"`
 	// Keys lists every configuration key in schema order.
 	Keys []Key `json:"keys"`
-	// LastSave is the status of the most recent save. The read-only view
-	// reports the zero status until the save path exists.
+	// LastSave is the status of the most recent save, and the zero status
+	// before the first save.
 	LastSave Status `json:"last_save"`
-	// LastReload is the status of the most recent external reload. The
-	// read-only view reports the zero status until the reload path exists.
+	// LastReload is the status of the most recent external reload. The zero
+	// status means no external change was detected since the start.
 	LastReload Status `json:"last_reload"`
 }
 
@@ -335,8 +380,10 @@ type Key struct {
 
 // Status is the outcome of a save or a reload.
 //
-// The read-only view reports the zero value; the save and reload tickets fill
-// the timestamp, the changed keys, and the failure reason.
+// The zero value means the operation has not run since the start: no
+// timestamp, no keys, no failure. A failed operation reports OK=false with the
+// reason in Error; the keys of a failed reload are empty because no value
+// changed.
 type Status struct {
 	// At is when the operation happened, or nil when it never ran.
 	At *time.Time `json:"at"`
