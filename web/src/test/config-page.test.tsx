@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -103,6 +103,24 @@ function configView(overrides: Partial<ConfigView> = {}): ConfigView {
   };
 }
 
+function disabledLab() {
+  return {
+    enabled: false,
+    settings: null,
+    seed: 0,
+    announce_log: '',
+    peer_sample_interval_seconds: 0,
+    totals: {
+      real_uploaded_bytes: 0,
+      real_uploaded_at_last_announce_bytes: 0,
+      reported_uploaded_bytes: 0,
+      overreported_bytes: 0,
+      pending_real_upload_bytes: 0,
+    },
+    torrents: [],
+  };
+}
+
 function authValue(api: ApiClient): AuthContextValue {
   return {
     api,
@@ -134,6 +152,29 @@ function renderPage(fetchMock: ReturnType<typeof vi.fn>, view: ConfigView = conf
     </QueryClientProvider>,
   );
   return view;
+}
+
+function renderAppAt(fetchMock: ReturnType<typeof vi.fn>, path = '/config') {
+  const api = new ApiClient();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  vi.stubGlobal('fetch', fetchMock);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MantineProvider theme={theme} defaultColorScheme="light">
+        <AuthContext.Provider value={authValue(api)}>
+          <MemoryRouter initialEntries={[path]}>
+            <App />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+}
+
+function beforeUnloadEvent(): Event {
+  const event = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(event);
+  return event;
 }
 
 beforeEach(() => vi.unstubAllGlobals());
@@ -269,6 +310,100 @@ describe('ConfigPage', () => {
   });
 });
 
+describe('ConfigPage change preview', () => {
+  it('shows only the changed keys and their new values before saving', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    const preview = screen.getByTestId('config-diff-preview');
+    expect(within(preview).getByText('cache.capacity')).toBeInTheDocument();
+    expect(within(preview).getByText('1GiB')).toBeInTheDocument();
+    // Unchanged keys and the previous value are deliberately absent.
+    expect(within(preview).queryByText('2GiB')).not.toBeInTheDocument();
+    expect(within(preview).queryByText('backend')).not.toBeInTheDocument();
+    expect(within(preview).queryByText('baseline')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+  });
+});
+
+describe('ConfigPage dangerous changes', () => {
+  it('asks for confirmation before saving a dangerous key and does not save when cancelled', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: ['cache.capacity'],
+          restart_required: ['backend'],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'backend' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'backend' }), { target: { value: 'fuse' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    const preview = screen.getByTestId('config-diff-preview');
+    expect(within(preview).getByText('backend')).toBeInTheDocument();
+    expect(within(preview).getByText('fuse')).toBeInTheDocument();
+    expect(within(preview).getByText('输出形态变化')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('危险配置项确认');
+    expect(dialog).toHaveTextContent('backend');
+    expect(dialog).toHaveTextContent('输出形态变化');
+    expect(dialog).toHaveTextContent(/挂载点/);
+    // Only the dangerous keys are listed; safe changes stay in the preview.
+    expect(within(dialog).queryByText('cache.capacity')).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+    expect(screen.getByRole('combobox', { name: 'backend' })).toHaveValue('fuse');
+    expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 2 项');
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    const confirm = await screen.findByRole('dialog');
+    fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' }));
+
+    await screen.findByText('保存成功');
+    const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(putCall).toBeDefined();
+    expect(JSON.parse((putCall?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: { backend: 'fuse', 'cache.capacity': '1GiB' },
+    });
+  });
+
+  it('saves a safe change without interrupting for confirmation', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({ applied: ['cache.capacity'], restart_required: [], persisted: true }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+});
+
 describe('ConfigPage save flow', () => {
   it('saves a sparse patch with the baseline and groups the applied and restart keys', async () => {
     const view = configView();
@@ -387,5 +522,182 @@ describe('ConfigPage save flow', () => {
     expect(puts).toHaveLength(1);
     const configGets = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method !== 'PUT');
     expect(configGets).toHaveLength(1);
+  });
+});
+
+describe('ConfigPage unsaved changes', () => {
+  it('warns about unsaved changes, blocks navigation and lets the user stay', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/v1/config') {
+        return Promise.resolve(jsonResponse(configView()));
+      }
+      if (url === '/api/v1/experiments/upload') {
+        return Promise.resolve(jsonResponse(disabledLab()));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderAppAt(fetchMock);
+    await screen.findByRole('article', { name: 'cache.capacity' });
+
+    expect(beforeUnloadEvent().defaultPrevented).toBe(false);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 1 项');
+    expect(beforeUnloadEvent().defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    const stayDialog = await screen.findByRole('dialog');
+    expect(stayDialog).toHaveTextContent('离开配置页面');
+    expect(stayDialog).toHaveTextContent('1 项未保存的改动');
+    fireEvent.click(within(stayDialog).getByRole('button', { name: '留在此页' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('article', { name: 'cache.capacity' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+
+    fireEvent.click(screen.getByRole('link', { name: '上传实验设置' }));
+    const leaveDialog = await screen.findByRole('dialog');
+    fireEvent.click(within(leaveDialog).getByRole('button', { name: '放弃改动并离开' }));
+
+    await screen.findByRole('heading', { name: '上传实验设置' });
+    expect(screen.queryByRole('article', { name: 'cache.capacity' })).not.toBeInTheDocument();
+  });
+
+  it('clears the unsaved state and unload warning after a successful save', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({ applied: ['cache.capacity'], restart_required: [], persisted: true }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    expect(screen.getByTestId('config-dirty-count')).toBeInTheDocument();
+    expect(beforeUnloadEvent().defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    await waitFor(() => expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+    expect(beforeUnloadEvent().defaultPrevented).toBe(false);
+  });
+});
+
+describe('ConfigPage save result groups', () => {
+  it('separates applied and restart-required keys with counts and explanations', async () => {
+    const view = configView({
+      keys: [
+        ...configView().keys,
+        configKey({
+          path: 'http.max_upload_size',
+          section: 'http',
+          kind: 'byte_quantity',
+          default: '32MiB',
+          file_value: '32MiB',
+          effective_value: '32MiB',
+          component: 'api',
+          hot_apply: true,
+        }),
+      ],
+    });
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: ['http.max_upload_size'],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(view));
+    });
+    renderPage(fetchMock, view);
+
+    await screen.findByRole('article', { name: 'http.max_upload_size' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'http.max_upload_size' }), { target: { value: '64MiB' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    expect(screen.getByTestId('config-save-summary')).toHaveTextContent('已生效 1 项，重启后生效 1 项');
+
+    const applied = screen.getByTestId('config-applied-group');
+    expect(applied).toHaveTextContent('已生效（1 项）');
+    expect(applied).toHaveTextContent('已应用到运行中的进程');
+    expect(within(applied).getByTestId('config-applied-keys')).toHaveTextContent('http.max_upload_size');
+
+    const restart = screen.getByTestId('config-restart-group');
+    expect(restart).toHaveTextContent('重启后生效（1 项）');
+    expect(restart).toHaveTextContent('重启服务后才采用新值');
+    expect(within(restart).getByTestId('config-restart-keys')).toHaveTextContent('cache.capacity');
+  });
+});
+
+describe('ConfigPage external modification', () => {
+  it('keeps local edits on a conflict and reloads from disk only when the user asks', async () => {
+    const localView = configView();
+    const remoteView = configView({
+      baseline: 'remote-baseline',
+      keys: localView.keys.map((key) => (key.path === 'cache.capacity'
+        ? { ...key, file_value: '3GiB', effective_value: '3GiB', source: 'file' }
+        : key)),
+    });
+    let configGets = 0;
+    let conflict = true;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        if (conflict) {
+          conflict = false;
+          return Promise.resolve(jsonResponse({
+            error: '配置文件已被外部修改',
+            code: 'conflict',
+            field_errors: [],
+            applied: [],
+            restart_required: [],
+            persisted: false,
+          }, 409));
+        }
+        return Promise.resolve(jsonResponse({
+          applied: [],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : remoteView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存未完成');
+    expect(screen.getByText(/配置文件已被外部修改/)).toBeInTheDocument();
+    expect(screen.getByText(/重新加载后才能继续保存/)).toBeInTheDocument();
+    // The page must not rebase silently before the user chooses to reload.
+    expect(configGets).toBe(1);
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+
+    fireEvent.click(screen.getByRole('button', { name: '重新加载配置' }));
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('3GiB'));
+    expect(screen.queryByText('保存未完成')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument();
+    expect(configGets).toBe(2);
+
+    // The reloaded baseline is what the next save sends.
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '4GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    const puts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(JSON.parse((puts[1]?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'remote-baseline',
+      patch: { 'cache.capacity': '4GiB' },
+    });
   });
 });

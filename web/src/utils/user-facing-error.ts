@@ -108,7 +108,7 @@ export function userFacingOperationCode(code: string | undefined, fallback = '�
  */
 const CONFIG_SAVE_CODE_MESSAGES: Record<string, string> = {
   invalid: '配置校验失败，请修正标记的配置项后重试。',
-  conflict: '配置文件已被外部修改，请重新读取页面后再保存。',
+  conflict: '配置文件已被外部修改，本地改动尚未保存；重新加载后才能继续保存。',
   read_only: '配置为只读，无法保存；请检查环境变量覆盖与配置文件权限。',
   not_configured: '后台服务没有加载配置文件，无法保存。',
   persistence_unavailable: '配置未能写入，文件与当前运行值均未改变；请检查磁盘空间和目录权限。',
