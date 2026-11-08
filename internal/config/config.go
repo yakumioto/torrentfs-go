@@ -107,14 +107,14 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 // Config holds torrentfs runtime settings.
 type Config struct {
 	// Backend selects the output backend: none, fuse, or smb.
-	Backend Backend `toml:"backend" enum:"none,fuse,smb"`
+	Backend Backend `toml:"backend" enum:"none,fuse,smb" component:"process"`
 	// Username is the login name the SMB output accepts. The HTTP login does
 	// not check a user name, so the key is only required for the SMB output.
-	Username string `toml:"username"`
+	Username string `toml:"username" component:"auth"`
 	// Password is the plaintext password shared by the SMB output and the
 	// HTTP login. It is required for the SMB output and for enabled HTTP
 	// authentication, and it has no default.
-	Password string `toml:"password" secret:"true"`
+	Password string `toml:"password" secret:"true" component:"auth"`
 	// Connections groups the network settings of the torrent session.
 	Connections Connections `toml:"connections"`
 	// Proxy groups the optional outbound proxy settings.
@@ -151,58 +151,58 @@ type Config struct {
 type Lab struct {
 	// UploadMode selects the reporting model: baseline, inject, or amplify.
 	// Empty infers the mode from the other settings.
-	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify"`
+	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify" component:"experiment"`
 	// UploadRate is the average synthetic growth of the reported upload in
 	// inject mode.
-	UploadRate ByteRate `toml:"upload_rate"`
+	UploadRate ByteRate `toml:"upload_rate" component:"experiment"`
 	// UploadMultiplier grows the reported upload by this factor of the real
 	// payload bytes in amplify mode.
-	UploadMultiplier Ratio `toml:"upload_multiplier"`
+	UploadMultiplier Ratio `toml:"upload_multiplier" component:"experiment"`
 	// UploadJitter is the per-announce deviation from the nominal increment,
 	// in percent.
-	UploadJitter Percent `toml:"upload_jitter"`
+	UploadJitter Percent `toml:"upload_jitter" component:"experiment"`
 	// UploadCap is the per-torrent ceiling on the cumulative reported upload.
-	UploadCap OptionalByteQuantity `toml:"upload_cap"`
+	UploadCap OptionalByteQuantity `toml:"upload_cap" component:"experiment"`
 	// UploadSeed fixes the random jitter sequence for reproducible runs. Zero
 	// lets the process choose one.
-	UploadSeed int64 `toml:"upload_seed"`
+	UploadSeed int64 `toml:"upload_seed" component:"experiment"`
 	// AnnounceLog is the JSON Lines file that receives one record per tracker
 	// announce. Empty disables it.
-	AnnounceLog string `toml:"announce_log"`
+	AnnounceLog string `toml:"announce_log" component:"experiment"`
 	// PeerSampleInterval is how often peer activity is sampled into the
 	// announce log.
-	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval"`
+	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval" component:"experiment"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
 type HTTP struct {
 	// ListenAddr is the address the HTTP service binds. Empty disables the
 	// service. The default binds loopback only.
-	ListenAddr string `toml:"listen_addr"`
+	ListenAddr string `toml:"listen_addr" component:"api"`
 	// Auth configures the optional single-user HTTP authentication service.
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
-	MaxUploadBytes ByteQuantity `toml:"max_upload_size"`
+	MaxUploadBytes ByteQuantity `toml:"max_upload_size" component:"api" hotapply:"true"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
 type STRM struct {
 	// BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
 	// proxy path prefix. Empty disables signed streaming links.
-	BaseURL string `toml:"base_url"`
+	BaseURL string `toml:"base_url" component:"stream"`
 }
 
 // Log groups the process log settings.
 type Log struct {
 	// Level is the minimum level of a log record: debug, info, warn, or
 	// error. Debug is disabled by default.
-	Level string `toml:"level"`
+	Level string `toml:"level" component:"logging" hotapply:"true"`
 	// Format is the shape of a log record: text for humans or json for log
 	// collectors.
-	Format string `toml:"format"`
+	Format string `toml:"format" component:"logging"`
 	// AddSource adds the source file and line to every log record.
-	AddSource bool `toml:"add_source"`
+	AddSource bool `toml:"add_source" component:"logging"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -231,70 +231,70 @@ func (d Duration) String() string {
 type Auth struct {
 	// Enabled turns on the HTTP login. It is required for a listener that is
 	// not bound to the loopback address.
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" component:"auth"`
 	// TokenTTL is the inactivity window of a login token. A valid request
 	// slides the window; the tokens live in memory and die with the process.
-	TokenTTL Duration `toml:"token_ttl"`
+	TokenTTL Duration `toml:"token_ttl" component:"auth" hotapply:"true"`
 }
 
 // Connections groups network settings of the torrent session.
 type Connections struct {
 	// ListenHost is the address the session listens on for peer
 	// connections. Empty lets the client pick its default.
-	ListenHost string `toml:"listen_host"`
+	ListenHost string `toml:"listen_host" component:"session"`
 	// ListenPort is the TCP/UDP port for incoming peer connections.
 	// 0 selects a random free port.
-	ListenPort int `toml:"listen_port"`
+	ListenPort int `toml:"listen_port" component:"session"`
 	// ReadingConns is the peer connection allowance for a torrent that is
 	// being read: a file handle is open, or one was open within ReadGrace.
 	// A torrent whose whole content is already in the piece cache does not use
 	// it, because playback is served from the cache. It must be at least 1.
-	ReadingConns int `toml:"reading_conns"`
+	ReadingConns int `toml:"reading_conns" component:"session" hotapply:"true"`
 	// UploadingConns is the peer connection allowance while a torrent is
 	// uploading but nobody is reading it. There is no session-wide budget;
 	// every torrent's allowance is decided independently. A value of 0 disables
 	// the uploading allowance, leaving a cached torrent its probe connection.
-	UploadingConns int `toml:"uploading_conns"`
+	UploadingConns int `toml:"uploading_conns" component:"session" hotapply:"true"`
 	// ReadGrace is how long a torrent keeps its reading allowance after its
 	// last file handle closes. It covers a seek, a pause or a player reconnect
 	// without dropping the peer connections. It must be positive.
-	ReadGrace Duration `toml:"read_grace"`
+	ReadGrace Duration `toml:"read_grace" component:"session" hotapply:"true"`
 	// DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
-	DisableIPv4 bool `toml:"disable_ipv4"`
+	DisableIPv4 bool `toml:"disable_ipv4" component:"session"`
 	// DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
 	// Only one family may be disabled: disabling both leaves no transport.
-	DisableIPv6 bool `toml:"disable_ipv6"`
+	DisableIPv6 bool `toml:"disable_ipv6" component:"session"`
 	// NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true
 	// so a deployment with no UPnP device behaves the same as one that has a
 	// device but no mapping rule.
-	NoPortForwarding bool `toml:"no_port_forwarding"`
+	NoPortForwarding bool `toml:"no_port_forwarding" component:"session"`
 	// BootstrapNodes overrides the default DHT bootstrap hosts with explicit
 	// host:port entries. Entries are resolved per address family and filtered
 	// to the family of the socket that asks for them. Empty uses the
 	// client's built-in bootstrap list.
-	BootstrapNodes []string `toml:"bootstrap_nodes"`
+	BootstrapNodes []string `toml:"bootstrap_nodes" component:"session"`
 }
 
 // Proxy groups optional outbound proxy settings.
 type Proxy struct {
 	// Socks5URL is an optional SOCKS5 or SOCKS5H endpoint.
-	Socks5URL string `toml:"socks5_url"`
+	Socks5URL string `toml:"socks5_url" component:"session"`
 }
 
 // Cache groups in-memory piece cache settings.
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
-	CapacityBytes ByteQuantity `toml:"capacity"`
+	CapacityBytes ByteQuantity `toml:"capacity" component:"cache"`
 }
 
 // Identity groups the client identity values sent to trackers and peers.
 type Identity struct {
 	// TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.
-	TrackerUserAgent string `toml:"tracker_user_agent"`
+	TrackerUserAgent string `toml:"tracker_user_agent" component:"session"`
 	// PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.
-	PeerIDPrefix string `toml:"peer_id_prefix"`
+	PeerIDPrefix string `toml:"peer_id_prefix" component:"session"`
 	// ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
-	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version"`
+	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version" component:"session"`
 }
 
 // Default returns the default configuration: an ephemeral listen port, an
