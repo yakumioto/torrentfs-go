@@ -41,7 +41,7 @@ func filesystemLibrarySession(tb testing.TB) *Session {
 			tb.Errorf("close benchmark storage: %v", err)
 		}
 	})
-	s := &Session{cl: client, cfg: config.Default(), torrents: make(map[metainfo.Hash]*Torrent), states: make(map[metainfo.Hash]*registryEntry)}
+	s := &Session{cl: client, config: configSnapshot{cfg: config.Default()}, torrents: make(map[metainfo.Hash]*Torrent), states: make(map[metainfo.Hash]*registryEntry)}
 	for i := 0; i < 111; i++ {
 		count := 8
 		if i == 0 {
