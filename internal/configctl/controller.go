@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
@@ -119,17 +121,22 @@ func (c *Controller) View() (View, error) {
 // readOnlyReason reports why the configuration page is read-only, and whether
 // the configuration file exists.
 //
-// The check reads the declared permission bits instead of probing a write:
-// the process may run as root, where opening a read-only file for writing
-// succeeds, and a probe would change the file it is asking about. A file
-// without a write bit is therefore read-only even for root. The atomic
-// write-back creates a temporary file beside the configuration file, so the
-// directory needs a write bit as well.
+// The check combines the declared permission bits with an access check
+// instead of probing a write: a probe would change the file it is asking
+// about. The bits keep a root process from calling a file without a write bit
+// writable; the access check catches a file the process does not own and
+// cannot write even though a write bit is set, as with the root-owned file
+// the default image ships to a uid 1000 process. A symlink is read-only,
+// matching the atomic write-back, which replaces the target path instead of
+// following the link. The directory needs a write bit as well, because the
+// write-back creates a temporary file beside the configuration file.
 func (c *Controller) readOnlyReason() (string, bool, error) {
 	if c.path == "" {
 		return ReadOnlyNotConfigured, false, nil
 	}
-	info, err := os.Stat(c.path)
+	// Lstat, not Stat: the write-back replaces the target path, so a symlink
+	// cannot be written back through and the page must not promise it.
+	info, err := os.Lstat(c.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return ReadOnlyNotConfigured, false, nil
@@ -139,14 +146,15 @@ func (c *Controller) readOnlyReason() (string, bool, error) {
 	if !info.Mode().IsRegular() {
 		return ReadOnlyFileNotWritable, true, nil
 	}
-	if info.Mode().Perm()&0o222 == 0 {
+	if info.Mode().Perm()&0o222 == 0 || unix.Access(c.path, unix.W_OK) != nil {
 		return ReadOnlyFileNotWritable, true, nil
 	}
-	directory, err := os.Stat(filepath.Dir(c.path))
+	directoryPath := filepath.Dir(c.path)
+	directory, err := os.Stat(directoryPath)
 	if err != nil {
 		return "", false, fmt.Errorf("configctl: inspect the configuration directory: %w", err)
 	}
-	if !directory.IsDir() || directory.Mode().Perm()&0o222 == 0 {
+	if !directory.IsDir() || directory.Mode().Perm()&0o222 == 0 || unix.Access(directoryPath, unix.W_OK) != nil {
 		return ReadOnlyFileNotWritable, true, nil
 	}
 	return "", true, nil

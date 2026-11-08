@@ -196,6 +196,22 @@ func TestViewReportsAnUnwritableConfigurationFile(t *testing.T) {
 		}
 	})
 
+	t.Run("symlink", func(t *testing.T) {
+		// The atomic write-back replaces the target path, so a symlink cannot
+		// be written back through: the page treats it as read-only instead of
+		// promising a save the writer would refuse.
+		target := writeConfigFile(t, "[log]\nlevel = \"info\"\n")
+		link := filepath.Join(filepath.Dir(target), "config.toml")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink configuration file: %v", err)
+		}
+
+		view := loadView(t, link)
+		if view.ReadOnlyReason != configctl.ReadOnlyFileNotWritable {
+			t.Fatalf("read-only reason = %q, want %q", view.ReadOnlyReason, configctl.ReadOnlyFileNotWritable)
+		}
+	})
+
 	t.Run("directory", func(t *testing.T) {
 		path := writeConfigFile(t, "[log]\nlevel = \"info\"\n")
 		dir := filepath.Dir(path)
