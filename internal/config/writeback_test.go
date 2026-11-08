@@ -227,10 +227,10 @@ token_ttl = "15m"
 [identity]
 tracker_user_agent = "torrentfs-test/1.0"
 
-[lab]
-upload_mode = "inject"
-upload_rate = "1MiB/s"
-upload_jitter = "12.5"
+[experiments.upload]
+mode = "inject"
+rate = "1MiB/s"
+jitter = "12.5"
 
 [log]
 level = "info"
@@ -250,12 +250,12 @@ base_url = "https://media.example/torrentfs/"
 	file.Log.AddSource = true
 	file.Cache.CapacityBytes = 2 << 30
 	file.Connections.BootstrapNodes = []string{"router.example:6881", "dht.example:6881", "extra.example:6881"}
-	file.Lab.UploadJitter = 20
+	file.Experiments.Upload.Jitter = 20
 
 	document, err := WriteBack{
 		File:    file,
 		Sources: sources,
-		Changed: []string{"log.level", "log.add_source", "cache.capacity", "connections.bootstrap_nodes", "lab.upload_jitter"},
+		Changed: []string{"log.level", "log.add_source", "cache.capacity", "connections.bootstrap_nodes", "experiments.upload.jitter"},
 	}.TOML()
 	if err != nil {
 		t.Fatalf("TOML: %v", err)
