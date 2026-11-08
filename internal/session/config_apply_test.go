@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -227,5 +229,104 @@ func TestConfigApplierOwnsHotAppliedKeys(t *testing.T) {
 	controller := configctl.New("", config.Default(), nil)
 	if err := controller.RegisterApplier(session.NewConfigApplier(sess)); err != nil {
 		t.Fatalf("RegisterApplier: %v", err)
+	}
+}
+
+// TestSaveAppliesConnectionAllowancesAndKeepsColdKeys is the acceptance path
+// of the ticket: a save through the configuration controller reaches the
+// running allocator, while a cold key keeps its running value and is reported
+// for the next restart.
+func TestSaveAppliesConnectionAllowancesAndKeepsColdKeys(t *testing.T) {
+	work := t.TempDir()
+	path := filepath.Join(work, "torrentfs.toml")
+	body := `[connections]
+reading_conns = 3
+uploading_conns = 2
+read_grace = "1m"
+
+[cache]
+capacity = "1GiB"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write configuration file: %v", err)
+	}
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	sess := newLoopbackSession(t, cfg, filepath.Join(work, "torrents"))
+	advance := fakeConnectionClock(t, sess)
+
+	content := bytes.Repeat([]byte{14}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if err := sess.AddTorrent(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	st, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent not registered")
+	}
+	handle, err := sess.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	session.AllocateConnectionsForTest(sess)
+	if got := session.ConnectionAllowanceForTest(st); got != 3 {
+		t.Fatalf("allowance from the file configuration = %d, want 3", got)
+	}
+	if err := handle.(io.Closer).Close(); err != nil {
+		t.Fatalf("close the file handle: %v", err)
+	}
+	advance(30 * time.Second)
+
+	controller := configctl.New(path, cfg, sources)
+	if err := controller.RegisterApplier(session.NewConfigApplier(sess)); err != nil {
+		t.Fatalf("RegisterApplier: %v", err)
+	}
+	view, err := controller.View()
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	result, err := controller.Save(context.Background(), configctl.SaveRequest{
+		Baseline: view.Baseline,
+		Patch: map[string]string{
+			"connections.reading_conns":   "9",
+			"connections.uploading_conns": "7",
+			"connections.read_grace":      "10m",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	wantApplied := "connections.reading_conns,connections.uploading_conns,connections.read_grace"
+	if got := strings.Join(result.Applied, ","); got != wantApplied {
+		t.Fatalf("applied = %v, want %s", result.Applied, wantApplied)
+	}
+	session.AllocateConnectionsForTest(sess)
+	if got := session.ConnectionAllowanceForTest(st); got != 9 {
+		t.Fatalf("allowance after the save = %d, want 9", got)
+	}
+
+	// A cold key is written but not adopted by the running session: the
+	// session applier owns the connection keys only.
+	view, err = controller.View()
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	result, err = controller.Save(context.Background(), configctl.SaveRequest{
+		Baseline: view.Baseline,
+		Patch:    map[string]string{"cache.capacity": "2GiB"},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Errorf("applied = %v, want none for a cold key", result.Applied)
+	}
+	if got := strings.Join(result.RestartRequired, ","); got != "cache.capacity" {
+		t.Errorf("restart required = %v, want [cache.capacity]", result.RestartRequired)
+	}
+	if got := sess.Config().Cache.CapacityBytes; got != cfg.Cache.CapacityBytes {
+		t.Errorf("running cache.capacity = %d, want the unchanged %d", got, cfg.Cache.CapacityBytes)
 	}
 }
