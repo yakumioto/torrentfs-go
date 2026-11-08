@@ -56,12 +56,11 @@ func ParseUploadRateTime(raw string) (int, error) {
 // runtime mapping cannot drift apart. The session maps its runtime settings
 // onto this shape and calls the same function.
 func (u UploadRate) ValidateShape() error {
-	uploadRate := u
-	if uploadRate.Limit < 0 {
+	if u.Limit < 0 {
 		return invalid("upload_rate.limit", errNonNegative)
 	}
-	start := uploadRate.ScheduleStart
-	end := uploadRate.ScheduleEnd
+	start := u.ScheduleStart
+	end := u.ScheduleEnd
 	switch {
 	case start == "" && end == "":
 		return nil
@@ -72,7 +71,7 @@ func (u UploadRate) ValidateShape() error {
 		return invalid("upload_rate.schedule_end",
 			errors.New("must be set together with upload_rate.schedule_start"))
 	}
-	if uploadRate.Limit <= 0 {
+	if u.Limit <= 0 {
 		return invalid("upload_rate.limit", errors.New("must be positive when a schedule window is configured"))
 	}
 	startMinute, err := ParseUploadRateTime(start)

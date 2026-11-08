@@ -253,19 +253,36 @@ func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) err
 	return nil
 }
 
+// legacyValues returns the text of every sidecar value and whether the
+// sidecar carries it. The file merge and the runtime fallback both map the
+// same record, so the conversion lives in one place.
+func legacyValues(settings session.UploadRateSettings) (limit, start, end string, hasLimit, hasWindow bool) {
+	if settings.RateLimitBytesPerSecond > 0 {
+		limit = legacyByteRate(settings.RateLimitBytesPerSecond)
+		hasLimit = true
+	}
+	if settings.Schedule != nil {
+		start = settings.Schedule.Start
+		end = settings.Schedule.End
+		hasWindow = true
+	}
+	return limit, start, end, hasLimit, hasWindow
+}
+
 // legacyFilePatch returns the sidecar values a writable file should receive.
 //
 // Only the values the sidecar actually carries join the file: an unset limit
 // or window stays absent and keeps its built-in default. A schedule implies a
 // positive limit, so both are written together.
 func legacyFilePatch(settings session.UploadRateSettings) map[string]string {
+	limit, start, end, hasLimit, hasWindow := legacyValues(settings)
 	patch := map[string]string{}
-	if settings.RateLimitBytesPerSecond > 0 {
-		patch["upload_rate.limit"] = legacyByteRate(settings.RateLimitBytesPerSecond)
+	if hasLimit {
+		patch["upload_rate.limit"] = limit
 	}
-	if settings.Schedule != nil {
-		patch["upload_rate.schedule_start"] = settings.Schedule.Start
-		patch["upload_rate.schedule_end"] = settings.Schedule.End
+	if hasWindow {
+		patch["upload_rate.schedule_start"] = start
+		patch["upload_rate.schedule_end"] = end
 	}
 	return patch
 }
@@ -274,19 +291,12 @@ func legacyFilePatch(settings session.UploadRateSettings) map[string]string {
 // an unset limit and window are written as empty values so they clear a file
 // value in the running configuration.
 func legacyRuntimePatch(settings session.UploadRateSettings) map[string]string {
-	patch := map[string]string{
-		"upload_rate.limit":          "",
-		"upload_rate.schedule_start": "",
-		"upload_rate.schedule_end":   "",
+	limit, start, end, _, _ := legacyValues(settings)
+	return map[string]string{
+		"upload_rate.limit":          limit,
+		"upload_rate.schedule_start": start,
+		"upload_rate.schedule_end":   end,
 	}
-	if settings.RateLimitBytesPerSecond > 0 {
-		patch["upload_rate.limit"] = legacyByteRate(settings.RateLimitBytesPerSecond)
-	}
-	if settings.Schedule != nil {
-		patch["upload_rate.schedule_start"] = settings.Schedule.Start
-		patch["upload_rate.schedule_end"] = settings.Schedule.End
-	}
-	return patch
 }
 
 // legacyByteRate renders a sidecar rate as the text the configuration parser

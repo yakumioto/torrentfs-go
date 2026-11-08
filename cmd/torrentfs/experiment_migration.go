@@ -78,26 +78,27 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	}
 
 	candidate := file.Config
+	legacyUpload := legacyExperimentUpload(settings)
 	upload := candidate.Experiments.Upload
 	changed := make([]string, 0, 5)
-	if file.Sources.SourceOf("experiments.upload.mode") != config.SourceFile {
-		upload.Mode = string(settings.Mode)
+	if !file.Sources.FromFile("experiments.upload.mode") {
+		upload.Mode = legacyUpload.Mode
 		changed = append(changed, "experiments.upload.mode")
 	}
-	if file.Sources.SourceOf("experiments.upload.rate") != config.SourceFile {
-		upload.Rate = config.ByteRate(settings.RateBytesPerSecond)
+	if !file.Sources.FromFile("experiments.upload.rate") {
+		upload.Rate = legacyUpload.Rate
 		changed = append(changed, "experiments.upload.rate")
 	}
-	if file.Sources.SourceOf("experiments.upload.multiplier") != config.SourceFile {
-		upload.Multiplier = config.Ratio(settings.Multiplier)
+	if !file.Sources.FromFile("experiments.upload.multiplier") {
+		upload.Multiplier = legacyUpload.Multiplier
 		changed = append(changed, "experiments.upload.multiplier")
 	}
-	if file.Sources.SourceOf("experiments.upload.jitter") != config.SourceFile {
-		upload.Jitter = config.Percent(settings.JitterFraction * 100)
+	if !file.Sources.FromFile("experiments.upload.jitter") {
+		upload.Jitter = legacyUpload.Jitter
 		changed = append(changed, "experiments.upload.jitter")
 	}
-	if file.Sources.SourceOf("experiments.upload.cap") != config.SourceFile {
-		upload.Cap = config.OptionalByteQuantity(settings.CapBytes)
+	if !file.Sources.FromFile("experiments.upload.cap") {
+		upload.Cap = legacyUpload.Cap
 		changed = append(changed, "experiments.upload.cap")
 	}
 	candidate.Experiments.Upload = upload

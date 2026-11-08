@@ -21,6 +21,22 @@ func experimentSettings(cfg config.Config) (experiments.Settings, error) {
 	return experiments.SettingsFrom(cfg.Experiments.Upload)
 }
 
+// legacyExperimentUpload returns the [experiments.upload] values of the
+// retired sidecar.
+//
+// The file migration and the read-only runtime fallback both map the same
+// sidecar record, so the conversion lives in one place; only the rule for
+// which keys may be replaced differs between the two paths.
+func legacyExperimentUpload(settings experiments.RuntimeSettings) config.UploadExperiment {
+	return config.UploadExperiment{
+		Mode:       string(settings.Mode),
+		Rate:       config.ByteRate(settings.RateBytesPerSecond),
+		Multiplier: config.Ratio(settings.Multiplier),
+		Jitter:     config.Percent(settings.JitterFraction * 100),
+		Cap:        config.OptionalByteQuantity(settings.CapBytes),
+	}
+}
+
 // applyLegacyExperimentRuntime overlays the retired sidecar values onto the
 // configuration a read-only start uses.
 //
@@ -37,25 +53,26 @@ func applyLegacyExperimentRuntime(cfg *config.Config, sources config.Sources, le
 	if sources == nil {
 		sources = config.Sources{}
 	}
+	legacyUpload := legacyExperimentUpload(*legacy)
 	upload := cfg.Experiments.Upload
 	if sources.SourceOf("experiments.upload.mode") != config.SourceEnvironment {
-		upload.Mode = string(legacy.Mode)
+		upload.Mode = legacyUpload.Mode
 		sources["experiments.upload.mode"] = config.SourceFile
 	}
 	if sources.SourceOf("experiments.upload.rate") != config.SourceEnvironment {
-		upload.Rate = config.ByteRate(legacy.RateBytesPerSecond)
+		upload.Rate = legacyUpload.Rate
 		sources["experiments.upload.rate"] = config.SourceFile
 	}
 	if sources.SourceOf("experiments.upload.multiplier") != config.SourceEnvironment {
-		upload.Multiplier = config.Ratio(legacy.Multiplier)
+		upload.Multiplier = legacyUpload.Multiplier
 		sources["experiments.upload.multiplier"] = config.SourceFile
 	}
 	if sources.SourceOf("experiments.upload.jitter") != config.SourceEnvironment {
-		upload.Jitter = config.Percent(legacy.JitterFraction * 100)
+		upload.Jitter = legacyUpload.Jitter
 		sources["experiments.upload.jitter"] = config.SourceFile
 	}
 	if sources.SourceOf("experiments.upload.cap") != config.SourceEnvironment {
-		upload.Cap = config.OptionalByteQuantity(legacy.CapBytes)
+		upload.Cap = legacyUpload.Cap
 		sources["experiments.upload.cap"] = config.SourceFile
 	}
 	cfg.Experiments.Upload = upload

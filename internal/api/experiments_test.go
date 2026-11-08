@@ -49,7 +49,7 @@ func TestGetExperimentReturnsTheLiveComparison(t *testing.T) {
 			JitterFraction:     0.2,
 		},
 		Seed:               42,
-		AnnounceLogPath:    "/tmp/lab.jsonl",
+		AnnounceLogPath:    "/tmp/experiments.jsonl",
 		PeerSampleInterval: 5 * time.Second,
 		Torrents: []session.ExperimentTorrentStatus{
 			{
@@ -105,7 +105,7 @@ func TestGetExperimentReturnsTheLiveComparison(t *testing.T) {
 	if got.Settings.JitterPercent != 20 {
 		t.Fatalf("jitter = %v, want 20", got.Settings.JitterPercent)
 	}
-	if got.Seed != 42 || got.AnnounceLog != "/tmp/lab.jsonl" || got.PeerSampleIntervalSeconds != 5 {
+	if got.Seed != 42 || got.AnnounceLog != "/tmp/experiments.jsonl" || got.PeerSampleIntervalSeconds != 5 {
 		t.Fatalf("metadata = seed %d log %q interval %v", got.Seed, got.AnnounceLog, got.PeerSampleIntervalSeconds)
 	}
 	if got.Totals.RealUploadedBytes != 150 ||

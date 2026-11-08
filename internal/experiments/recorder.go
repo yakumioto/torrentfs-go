@@ -137,7 +137,7 @@ func (r *Recorder) writeRecord(record any) {
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {
-		r.logError("encode lab record", err)
+		r.logError("encode experiment record", err)
 		return
 	}
 	payload = append(payload, '\n')
@@ -147,7 +147,7 @@ func (r *Recorder) writeRecord(record any) {
 		return
 	}
 	if _, err := r.file.Write(payload); err != nil {
-		r.logError("write lab record", err)
+		r.logError("write experiment record", err)
 	}
 }
 
