@@ -1,6 +1,8 @@
 package configctl_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -250,5 +252,27 @@ func TestViewStatusStartsEmpty(t *testing.T) {
 		if len(status.Keys) != 0 {
 			t.Errorf("%s status keys = %v, want empty", name, status.Keys)
 		}
+	}
+}
+
+// TestViewReportsTheConfigurationFileBaseline covers the conflict contract of
+// the save path: the view carries a digest of the file bytes the page edited,
+// so a save can refuse to overwrite a file another writer changed.
+func TestViewReportsTheConfigurationFileBaseline(t *testing.T) {
+	body := "backend = \"none\"\n\n[log]\nlevel = \"info\"\n"
+	path := writeConfigFile(t, body)
+	view := loadView(t, path)
+
+	sum := sha256.Sum256([]byte(body))
+	if want := hex.EncodeToString(sum[:]); view.Baseline != want {
+		t.Errorf("baseline = %q, want the SHA-256 of the file %q", view.Baseline, want)
+	}
+
+	withoutFile, err := configctl.New("", config.Default(), config.Sources{}).View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if withoutFile.Baseline != "" {
+		t.Errorf("baseline without a configuration file = %q, want empty", withoutFile.Baseline)
 	}
 }

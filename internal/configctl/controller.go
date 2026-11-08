@@ -13,10 +13,14 @@
 package configctl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -44,10 +48,26 @@ const (
 )
 
 // Controller reads the configuration as the configuration page sees it.
+//
+// The controller guards its state with a reader/writer lock: a save replaces
+// the effective configuration, the sources and the last-save status while a
+// view may be serving them, and the page polls the view while it saves.
 type Controller struct {
+	mu      sync.RWMutex
 	path    string
 	cfg     config.Config
 	sources config.Sources
+	logger  *slog.Logger
+
+	appliers      []registration
+	applierByPath map[string]int
+
+	lastSave Status
+
+	// writeBackFile is the atomic write-back of the configuration file. The
+	// tests inject a failure at this system boundary; production leaves the
+	// configuration package writer.
+	writeBackFile func(path string, document []byte) (published bool, err error)
 }
 
 // New builds a controller for the configuration file at path.
@@ -56,19 +76,56 @@ type Controller struct {
 // start; the controller does not reload the process environment. An empty
 // path is a deployment that started without a configuration file: the page is
 // read-only and shows the built-in defaults.
-func New(path string, cfg config.Config, sources config.Sources) *Controller {
-	return &Controller{path: path, cfg: cfg, sources: sources}
+func New(path string, cfg config.Config, sources config.Sources, options ...Option) *Controller {
+	controller := &Controller{
+		path:          path,
+		cfg:           cfg,
+		sources:       sources,
+		logger:        slog.New(slog.DiscardHandler),
+		applierByPath: map[string]int{},
+		writeBackFile: config.WriteBackFile,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(controller)
+		}
+	}
+	return controller
+}
+
+// Option configures a Controller.
+type Option func(*Controller)
+
+// WithLogger routes the configuration audit to l.
+//
+// The audit names the configuration keys a save changed and never their
+// values, so a secret in the configuration file stays out of the log.
+func WithLogger(l *slog.Logger) Option {
+	return func(controller *Controller) {
+		if l != nil {
+			controller.logger = l
+		}
+	}
 }
 
 // View renders the read-only configuration view.
 func (c *Controller) View() (View, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	reason, exists, err := c.readOnlyReason()
 	if err != nil {
 		return View{}, err
 	}
 	fileConfig := config.Default()
+	baseline := ""
 	if c.path != "" && exists {
-		fileConfig, err = config.LoadWithEnvironment(c.path, emptyEnvironment{})
+		content, err := os.ReadFile(c.path)
+		if err != nil {
+			return View{}, fmt.Errorf("configctl: read the configuration file: %w", err)
+		}
+		baseline = configurationBaseline(content)
+		fileConfig, err = config.LoadContentWithEnvironment(content, c.path, emptyEnvironment{})
 		if err != nil {
 			return View{}, fmt.Errorf("configctl: load the file configuration: %w", err)
 		}
@@ -111,11 +168,20 @@ func (c *Controller) View() (View, error) {
 
 	return View{
 		ConfigFile:     c.path,
+		Baseline:       baseline,
 		ReadOnlyReason: reason,
 		Keys:           keys,
-		LastSave:       emptyStatus(),
+		LastSave:       normalizeStatus(c.lastSave),
 		LastReload:     emptyStatus(),
 	}, nil
+}
+
+// configurationBaseline returns the digest that tells the save path whether
+// the file is still the one the page rendered. The empty digest means there is
+// no file to edit.
+func configurationBaseline(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
 
 // readOnlyReason reports why the configuration page is read-only, and whether
@@ -176,6 +242,15 @@ func emptyStatus() Status {
 	return Status{Keys: []string{}}
 }
 
+// normalizeStatus keeps the keys of a reported status an empty list instead of
+// null, so a client always reads the same shape.
+func normalizeStatus(status Status) Status {
+	if status.Keys == nil {
+		status.Keys = []string{}
+	}
+	return status
+}
+
 // emptyEnvironment is an environment with no variable set.
 //
 // The file configuration is the built-in defaults overlaid with the file, so
@@ -194,6 +269,11 @@ type View struct {
 	// ConfigFile is the configuration file the process loaded at start.
 	// Empty means the deployment started without one.
 	ConfigFile string `json:"config_file"`
+	// Baseline is a digest of the configuration file bytes the page was
+	// rendered from. A save sends it back; a file another writer changed has
+	// a different digest, so the save is refused instead of overwriting the
+	// change. Empty means there is no configuration file.
+	Baseline string `json:"baseline"`
 	// ReadOnlyReason explains why the whole page is read-only: not_configured
 	// or file_not_writable. Empty means a save would be possible.
 	ReadOnlyReason string `json:"read_only_reason"`
