@@ -23,6 +23,7 @@ type configResponse struct {
 	ConfigFile     string `json:"config_file"`
 	Baseline       string `json:"baseline"`
 	ReadOnlyReason string `json:"read_only_reason"`
+	FileError      string `json:"file_error"`
 	Keys           []struct {
 		Path           string   `json:"path"`
 		Section        string   `json:"section"`
@@ -266,5 +267,82 @@ func TestGetConfigWithoutAControllerFailsLoudly(t *testing.T) {
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, configPath, nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET status = %d, want 503; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGetConfigReportsASuccessfulExternalReload covers the page contract of
+// the poll: after a valid external edit the view reports the new file and
+// effective values and the timestamped successful reload of the changed key.
+func TestGetConfigReportsASuccessfulExternalReload(t *testing.T) {
+	path := writeAPIConfigFile(t, "[log]\nlevel = \"info\"\n")
+	controller, applier := configSaveController(t, path)
+	srv := configTestServer(t, controller, nil)
+
+	if err := os.WriteFile(path, []byte("[log]\nlevel = \"debug\"\n"), 0o600); err != nil {
+		t.Fatalf("change the configuration file externally: %v", err)
+	}
+	if _, err := controller.CheckExternalChange(); err != nil {
+		t.Fatalf("CheckExternalChange: %v", err)
+	}
+	if len(applier.applied) != 1 {
+		t.Fatalf("the applier received %d configurations, want 1", len(applier.applied))
+	}
+
+	response := configViewOf(t, srv)
+	if response.FileError != "" {
+		t.Errorf("file_error = %q, want empty", response.FileError)
+	}
+	if response.Baseline == "" {
+		t.Error("the reloaded view carries no baseline")
+	}
+	level := response.Keys[configKey(t, response, "log.level")]
+	if level.FileValue != "debug" || level.EffectiveValue != "debug" {
+		t.Errorf("log.level = file %q, effective %q; want debug/debug", level.FileValue, level.EffectiveValue)
+	}
+	if response.LastReload.At == nil || !response.LastReload.OK {
+		t.Errorf("last_reload = %+v, want a successful timestamped reload", response.LastReload)
+	}
+	if strings.Join(response.LastReload.Keys, ",") != "log.level" {
+		t.Errorf("last_reload keys = %v, want [log.level]", response.LastReload.Keys)
+	}
+}
+
+// TestGetConfigDegradesToLastKnownGoodAfterAnInvalidExternalEdit covers the
+// failure contract of the page endpoint: the file on disk is invalid, but GET
+// still answers 200 with the last known good values, the file error, and the
+// recorded reload failure. The running configuration is unchanged.
+func TestGetConfigDegradesToLastKnownGoodAfterAnInvalidExternalEdit(t *testing.T) {
+	path := writeAPIConfigFile(t, "[log]\nlevel = \"info\"\n")
+	controller, applier := configSaveController(t, path)
+	srv := configTestServer(t, controller, nil)
+
+	if err := os.WriteFile(path, []byte("[log]\nlevel = \"verbose\"\n"), 0o600); err != nil {
+		t.Fatalf("change the configuration file externally: %v", err)
+	}
+	if _, err := controller.CheckExternalChange(); err == nil {
+		t.Fatal("CheckExternalChange accepted an invalid configuration file")
+	}
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, configPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200 despite the invalid file; body %s", rec.Code, rec.Body.String())
+	}
+	response := decodeConfigResponse(t, rec)
+	if response.FileError == "" {
+		t.Error("the view reports no file error for an invalid configuration file")
+	}
+	if response.LastReload.At == nil || response.LastReload.OK {
+		t.Errorf("last_reload = %+v, want a failed timestamped reload", response.LastReload)
+	}
+	if response.LastReload.Error == "" {
+		t.Error("last_reload carries no failure reason")
+	}
+	level := response.Keys[configKey(t, response, "log.level")]
+	if level.FileValue != "info" || level.EffectiveValue != "info" {
+		t.Errorf("log.level = file %q, effective %q; want the last known good info/info",
+			level.FileValue, level.EffectiveValue)
+	}
+	if len(applier.applied) != 0 {
+		t.Error("the invalid reload applied a configuration to a component")
 	}
 }
