@@ -21,6 +21,7 @@ const configPath = "/api/v1/config"
 // to the JSON tags fails this test instead of moving with it.
 type configResponse struct {
 	ConfigFile     string `json:"config_file"`
+	Baseline       string `json:"baseline"`
 	ReadOnlyReason string `json:"read_only_reason"`
 	Keys           []struct {
 		Path           string   `json:"path"`
@@ -124,6 +125,9 @@ func TestGetConfigReturnsTheReadOnlyView(t *testing.T) {
 	response := decodeConfigResponse(t, rec)
 	if response.ConfigFile != path {
 		t.Errorf("config_file = %q, want %q", response.ConfigFile, path)
+	}
+	if response.Baseline == "" {
+		t.Error("the read-only view carries no baseline digest")
 	}
 	if response.ReadOnlyReason != "" {
 		t.Errorf("read_only_reason = %q, want empty for a writable file", response.ReadOnlyReason)
