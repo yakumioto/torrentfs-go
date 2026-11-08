@@ -32,10 +32,12 @@ refuse_secret() {
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM
-	if [[ -n "$compose_project" ]]; then
-		compose 60 down --remove-orphans >/dev/null 2>&1 || true
-	fi
+	# Remove the containers before the project so the named configuration
+	# volume is no longer in use when Compose removes it.
 	for container in "${containers[@]}"; do timeout 30 docker rm -f "$container" >/dev/null 2>&1 || true; done
+	if [[ -n "$compose_project" ]]; then
+		compose 60 down --remove-orphans --volumes >/dev/null 2>&1 || true
+	fi
 	# Only the private mktemp tree is mounted into this root cleanup helper.
 	timeout 30 docker run --rm --user 0:0 --entrypoint /bin/sh \
 		--mount "type=bind,src=$work_dir,dst=/scratch" "$IMAGE" \
@@ -61,6 +63,14 @@ timeout 30 docker run --rm --cap-drop ALL --security-opt no-new-privileges:true 
 	--entrypoint /bin/sh "$IMAGE" -eu -c '
 		test "$(id -u)" = 1000 && test "$(id -g)" = 1000
 		test -r /etc/torrentfs/torrentfs.toml
+		# The configuration page writes the file back, so the runtime user
+		# must own the file and the directory that holds the temporary file.
+		test -w /etc/torrentfs/torrentfs.toml
+		test -w /etc/torrentfs
+		test "$(stat -c %u:%g /etc/torrentfs)" = 1000:1000
+		test "$(stat -c %u:%g /etc/torrentfs/torrentfs.toml)" = 1000:1000
+		touch /etc/torrentfs/.write-probe
+		rm /etc/torrentfs/.write-probe
 		test -x /usr/local/bin/torrentfs-entrypoint
 		test -d /torrents && test -w /torrents
 		test ! -e /dev/fuse && test ! -d /run/samba
@@ -128,6 +138,50 @@ stop_clean() {
 	[[ "$status" == 0 ]] || fail "shutdown returned $status: ${output//"$SECRET"/[REDACTED]}"
 	refuse_secret "$output" 'startup/shutdown logs disclosed a password'
 }
+# wait_http waits until the HTTP service serves its page. The optional
+# container names the container whose logs help when it never does.
+wait_http() {
+	local url="$1" container="${2:-}" output
+	for _ in {1..100}; do
+		if curl --silent --fail --max-time 2 "$url/" >/dev/null; then return 0; fi
+		sleep 0.1
+	done
+	if [[ -n "$container" ]]; then
+		output="$(timeout 10 docker logs "$container" 2>&1)" || true
+		printf '%s\n' "${output//"$SECRET"/[REDACTED]}" >&2
+	fi
+	fail "$url did not start serving HTTP"
+}
+# api_token logs in with the shared credential and prints the bearer token.
+api_token() {
+	local url="$1" response
+	response="$(curl --silent --show-error --fail --max-time 5 \
+		--header 'Content-Type: application/json' \
+		--data "{\"password\":\"$SECRET\"}" "$url/api/v1/auth/login")" ||
+		fail "login failed at $url"
+	printf '%s' "$response" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+}
+# fetch_config stores the configuration view of an authenticated API.
+fetch_config() {
+	local url="$1" token="$2" destination="$3"
+	timeout 10 curl --silent --show-error --fail --max-time 5 \
+		--header "Authorization: Bearer $token" \
+		"$url/api/v1/config" -o "$destination" ||
+		fail "the configuration view of $url is unavailable"
+}
+# save_config posts a one-key sparse patch with the given baseline and prints
+# the HTTP status; the response body goes to destination.
+save_config() {
+	local url="$1" token="$2" baseline="$3" path="$4" value="$5" destination="$6"
+	python3 -I -c 'import json, sys; print(json.dumps({"baseline": sys.argv[1], "patch": {sys.argv[2]: sys.argv[3]}}))' \
+		"$baseline" "$path" "$value" >"$work_dir/config-save-request.json"
+	timeout 10 curl --silent --show-error --max-time 5 \
+		--request PUT \
+		--header 'Content-Type: application/json' \
+		--header "Authorization: Bearer $token" \
+		--data @"$work_dir/config-save-request.json" \
+		--output "$destination" --write-out '%{http_code}' "$url/api/v1/config"
+}
 expect_failure() {
 	local name="$1" expected="$2" output status=0
 	shift 2
@@ -174,12 +228,14 @@ printf 'docker config smoke: the Compose template names the current settings\n'
 
 # A template that names the right settings still has to start. The service is
 # started through `compose run`, which keeps the service definition (image,
-# user, environment, volumes, capabilities) but publishes no host ports, so the
-# check does not depend on the host's 445 and 8080 being free.
+# user, environment, volumes, capabilities). The service's fixed host ports are
+# not published; only the HTTP port is published on a random loopback port so
+# the configuration page can be driven without depending on host port 8080.
 timeout 30 docker tag "$IMAGE" "$COMPOSE_IMAGE_TAG"
 compose_tagged=1
 containers+=("$compose_container")
-compose 60 run --detach --no-deps --name "$compose_container" torrentfs >/dev/null 2>&1
+compose 60 run --detach --no-deps --publish 127.0.0.1::8080 \
+	--name "$compose_container" torrentfs >/dev/null 2>&1
 wait_running "$compose_container"
 compose_output="$(timeout 10 docker logs "$compose_container" 2>&1)"
 refuse_secret "$compose_output" 'the Compose start disclosed the password'
@@ -189,11 +245,54 @@ refuse_secret "$compose_output" 'the Compose start disclosed the password'
 # far enough to create its metadata directory in the mounted torrents volume.
 assert_identity "$compose_container" 1000 1000
 [[ -d "$compose_dir/torrents/.metadata" ]] || fail 'the Compose start did not write to the mounted torrents directory'
+
+# The template mounts a writable configuration volume seeded from the image, so
+# the configuration page can save in a Compose deployment too.
+mounts="$(timeout 10 docker inspect "$compose_container" --format '{{range .Mounts}}{{.Destination}}={{.Type}}={{.RW}} {{end}}')"
+[[ "$mounts" == *'/etc/torrentfs=volume=true'* ]] ||
+	fail 'the Compose template does not mount a writable configuration volume'
+timeout 10 docker exec "$compose_container" /bin/sh -eu -c '
+	dest=/etc/torrentfs/torrentfs.toml
+	test "$(stat -c %u:%g "$dest")" = 1000:1000
+	touch /etc/torrentfs/.compose-write-probe
+	rm /etc/torrentfs/.compose-write-probe
+' || fail 'the Compose configuration volume is not writable by the runtime user'
+port="$(docker port "$compose_container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
+url="http://127.0.0.1:$port"
+wait_http "$url" "$compose_container"
+token="$(api_token "$url")"
+fetch_config "$url" "$token" "$work_dir/compose-config-view.json"
+baseline="$(python3 -I - "$work_dir/compose-config-view.json" <<'PY'
+import json, sys
+view = json.load(open(sys.argv[1]))
+assert view["read_only_reason"] == "", view["read_only_reason"]
+assert view["baseline"], "the view carries no baseline"
+key = next(key for key in view["keys"] if key["path"] == "log.level")
+assert key["hot_apply"], key
+assert key["read_only_reason"] == "", key["read_only_reason"]
+print(view["baseline"])
+PY
+)" || fail 'the Compose configuration page is read-only'
+status="$(save_config "$url" "$token" "$baseline" log.level debug "$work_dir/compose-save-response.json")"
+[[ "$status" == 200 ]] ||
+	fail "the Compose configuration save returned $status: $(cat "$work_dir/compose-save-response.json")"
+python3 -I - "$work_dir/compose-save-response.json" <<'PY' || fail 'the Compose save did not hot-apply log.level'
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response["applied"] == ["log.level"], response
+assert response["restart_required"] == [], response
+assert response["persisted"] is True, response
+PY
+refuse_secret "$(cat "$work_dir/compose-save-response.json")" 'the Compose save response disclosed the password'
+timeout 10 docker exec "$compose_container" /bin/sh -eu -c '
+	grep -qx "level = \"debug\"" /etc/torrentfs/torrentfs.toml
+' || fail 'the Compose save did not write the mounted configuration volume'
 stop_clean "$compose_container"
-compose 60 down --remove-orphans >/dev/null 2>&1
+timeout 30 docker rm -f "$compose_container" >/dev/null 2>&1 || true
+compose 60 down --remove-orphans --volumes >/dev/null 2>&1
 timeout 30 docker image rm "$COMPOSE_IMAGE_TAG" >/dev/null 2>&1 || true
 compose_tagged=0
-printf 'docker config smoke: the Compose template starts\n'
+printf 'docker config smoke: the Compose template starts and saves a writable configuration\n'
 
 start "${PREFIX}-default"
 assert_identity "${PREFIX}-default" 1000 1000
@@ -321,4 +420,119 @@ status="$(curl --silent --show-error --max-time 5 --header 'Content-Type: applic
 	--data "{\"password\":\"$SECRET\"}" -o /dev/null -w '%{http_code}' "$url/api/v1/auth/login")"
 [[ "$status" == 200 ]] || fail 'HTTP shared credential login failed'
 stop_clean "$container"
+
+# The image ships the configuration file and its directory owned by the
+# runtime user, so the configuration page can write back without a mount. The
+# save must hot-apply the value, change the file on disk, and survive a
+# restart.
+container="${PREFIX}-writable"
+start "$container" --publish 127.0.0.1::8080 \
+	--env TORRENTFS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+	--env TORRENTFS_HTTP_AUTH_ENABLED=true --env "TORRENTFS_PASSWORD=$SECRET"
+port="$(docker port "$container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
+url="http://127.0.0.1:$port"
+wait_http "$url" "$container"
+token="$(api_token "$url")"
+fetch_config "$url" "$token" "$work_dir/writable-config-view.json"
+baseline="$(python3 -I - "$work_dir/writable-config-view.json" <<'PY'
+import json, sys
+view = json.load(open(sys.argv[1]))
+assert view["read_only_reason"] == "", view["read_only_reason"]
+assert view["baseline"], "the view carries no baseline"
+key = next(key for key in view["keys"] if key["path"] == "log.level")
+assert key["hot_apply"], key
+assert key["read_only_reason"] == "", key["read_only_reason"]
+print(view["baseline"])
+PY
+)" || fail 'the image configuration page is read-only'
+status="$(save_config "$url" "$token" "$baseline" log.level debug "$work_dir/writable-save-response.json")"
+[[ "$status" == 200 ]] ||
+	fail "the configuration save returned $status: $(cat "$work_dir/writable-save-response.json")"
+python3 -I - "$work_dir/writable-save-response.json" <<'PY' || fail 'the configuration save did not hot-apply log.level'
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response["applied"] == ["log.level"], response
+assert response["restart_required"] == [], response
+assert response["persisted"] is True, response
+PY
+refuse_secret "$(cat "$work_dir/writable-save-response.json")" 'the configuration save response disclosed the password'
+timeout 10 docker exec "$container" /bin/sh -eu -c '
+	dest=/etc/torrentfs/torrentfs.toml
+	grep -qx "level = \"debug\"" "$dest"
+	test -f "$dest.bak"
+' || fail 'the configuration save did not change the image configuration file'
+timeout 30 docker restart "$container" >/dev/null
+wait_running "$container"
+# A random published port is reassigned when the container restarts, so the
+# URL has to be read again instead of reused.
+port="$(docker port "$container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
+url="http://127.0.0.1:$port"
+wait_http "$url" "$container"
+token="$(api_token "$url")"
+fetch_config "$url" "$token" "$work_dir/writable-config-restarted.json"
+python3 -I - "$work_dir/writable-config-restarted.json" <<'PY' || fail 'the restart did not load the saved configuration'
+import json, sys
+view = json.load(open(sys.argv[1]))
+assert view["read_only_reason"] == "", view["read_only_reason"]
+key = next(key for key in view["keys"] if key["path"] == "log.level")
+assert key["file_value"] == "debug", key
+assert key["effective_value"] == "debug", key
+assert key["source"] == "file", key
+PY
+stop_clean "$container"
+printf 'docker config smoke: a configuration save writes the image file, hot-applies, and survives a restart\n'
+
+# A read-only configuration mount leaves the page read-only with a stable
+# reason, answers the save with the read_only code instead of crashing, and
+# leaves the mounted file untouched.
+cat >"$work_dir/read-only.toml" <<EOF
+username = "torrentfs"
+password = "$SECRET"
+backend = "none"
+
+[http]
+listen_addr = "0.0.0.0:8080"
+
+[http.auth]
+enabled = true
+EOF
+chmod 0644 "$work_dir/read-only.toml"
+container="${PREFIX}-readonly"
+start "$container" --publish 127.0.0.1::8080 \
+	--mount "type=bind,src=$work_dir/read-only.toml,dst=/etc/torrentfs/torrentfs.toml,readonly"
+port="$(docker port "$container" 8080/tcp | awk -F: 'NR == 1 { print $NF }')"
+url="http://127.0.0.1:$port"
+wait_http "$url" "$container"
+token="$(api_token "$url")"
+fetch_config "$url" "$token" "$work_dir/read-only-config-view.json"
+baseline="$(python3 -I - "$work_dir/read-only-config-view.json" <<'PY'
+import json, sys
+view = json.load(open(sys.argv[1]))
+assert view["read_only_reason"] == "file_not_writable", view["read_only_reason"]
+assert view["baseline"], "the view carries no baseline"
+print(view["baseline"])
+PY
+)" || fail 'the read-only configuration was not reported as file_not_writable'
+before="$(timeout 10 docker exec "$container" sha256sum /etc/torrentfs/torrentfs.toml | awk '{print $1}')"
+status="$(save_config "$url" "$token" "$baseline" log.level debug "$work_dir/read-only-save-response.json")"
+[[ "$status" == 409 ]] ||
+	fail "the read-only configuration save returned $status: $(cat "$work_dir/read-only-save-response.json")"
+python3 -I - "$work_dir/read-only-save-response.json" <<'PY' || fail 'the read-only save did not report read_only'
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response["code"] == "read_only", response
+assert response["persisted"] is False, response
+assert response["applied"] == [], response
+assert response["restart_required"] == [], response
+PY
+after="$(timeout 10 docker exec "$container" sha256sum /etc/torrentfs/torrentfs.toml | awk '{print $1}')"
+[[ "$before" == "$after" ]] || fail 'the read-only configuration file changed'
+[[ "$(timeout 10 docker inspect "$container" --format '{{.State.Status}}')" == running ]] ||
+	fail 'the process exited after a rejected read-only save'
+status="$(curl --silent --show-error --max-time 5 --header "Authorization: Bearer $token" \
+	-o /dev/null -w '%{http_code}' "$url/api/v1/torrents")"
+[[ "$status" == 200 ]] || fail 'the process stopped serving after a rejected read-only save'
+stop_clean "$container"
+printf 'docker config smoke: a read-only configuration is reported and rejected without an effect\n'
+
 printf 'docker config smoke: all checks passed\n'
