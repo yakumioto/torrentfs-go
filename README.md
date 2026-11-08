@@ -293,6 +293,7 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 - **实验常驻**：不再有启用/禁用开关，也没有「实验未启用」错误；默认 `experiments.upload.mode = "baseline"`（只观测、不改写）。模式不再推断：旧配置只写 `rate` 或 `multiplier`、不写 `mode` 时启动报错，并提示补 `mode = "inject"` 或 `mode = "amplify"`。
 - **上传限速成为配置项**：`[upload_rate]` 的 `limit`、`schedule_start`、`schedule_end` 及派生的环境变量（如 `TORRENTFS_UPLOAD_RATE_LIMIT`）；时间窗要求正限额、`start < end` 且在同一自然日内。以前「上传限速只能在 Web UI 设置、不通过 TOML / 环境变量」的行为已取消。
 - `seed`、`announce_log`、`peer_sample_interval` 在启动时读取，配置页面保存后标记「重启生效」；`mode`、`rate`、`multiplier`、`jitter`、`cap` 保存后立即生效。
+- **没有配置文件启动的部署**：配置页面始终只读，上传限速与实验设置也不能再从 Web UI 调整；需要以 `-config`（或 `TORRENTFS_CONFIG`）指定配置文件后重启。
 
 ### 旧侧车迁移
 
@@ -346,7 +347,7 @@ go test -race ./...
 ./scripts/config-docs-check.sh
 ```
 
-CI 会执行上述检查，并额外运行 golangci-lint、Docker 配置/SMB 冒烟和真实 FUSE 挂载测试。
+CI 会执行上述检查，并额外运行 golangci-lint、配置生成物逐字节校验（`config-docs`）、Docker 配置/SMB 冒烟和真实 FUSE 挂载测试。
 
 ## 许可证
 
