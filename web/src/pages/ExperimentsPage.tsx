@@ -1,5 +1,5 @@
 import { Alert, Badge, Button, Group, Loader } from '@mantine/core';
-import { IconAlertTriangle, IconFlask, IconRefresh } from '@tabler/icons-react';
+import { IconAdjustments, IconAlertTriangle, IconFlask, IconRefresh } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
 import { useLab } from '../queries/hooks';
@@ -41,13 +41,26 @@ export function ExperimentsPage() {
           </h1>
           <p className={styles.subtitle}>
             上传实验常驻运行，默认处于基线模式。这里展示向 tracker 上报的上传量与本机真实传输量，
-            用于自建 tracker 的反作弊测试。实验参数在<Link to="/config">配置页面</Link>的
-            <code className={styles.code}>experiments.upload</code>一节维护。
+            用于自建 tracker 的反作弊测试。实验参数在
+            <Link to="/config#experiments">配置页面的实验分类</Link>
+            （<code className={styles.code}>experiments.upload</code> 节）中维护。
           </p>
         </div>
-        {settings !== undefined && (
-          <Badge size="lg" variant="light" color="torrent">{labModeLabel(settings.mode)}</Badge>
-        )}
+        <Group gap="xs" align="center">
+          {settings !== undefined && (
+            <Badge size="lg" variant="light" color="torrent">{labModeLabel(settings.mode)}</Badge>
+          )}
+          <Button
+            component={Link}
+            to="/config#experiments"
+            variant="light"
+            color="torrent"
+            size="compact-sm"
+            leftSection={<IconAdjustments size={15} />}
+          >
+            修改实验设置
+          </Button>
+        </Group>
       </section>
 
       {query.isPending && (
