@@ -230,6 +230,7 @@ describe('ConfigPage', () => {
     await screen.findByRole('article', { name: 'log.level' });
     expect(screen.getByText('配置页面只读：没有加载配置文件')).toBeInTheDocument();
     expect(screen.getByText(/-config/)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /保存/ })).not.toBeInTheDocument();
   });
 
@@ -242,6 +243,7 @@ describe('ConfigPage', () => {
     await screen.findByRole('article', { name: 'log.level' });
     expect(screen.getByText(/配置文件不可写/)).toBeInTheDocument();
     expect(screen.getByText(/写权限/)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /保存/ })).not.toBeInTheDocument();
   });
 
