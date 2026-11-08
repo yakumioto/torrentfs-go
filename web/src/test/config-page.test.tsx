@@ -632,3 +632,69 @@ describe('ConfigPage save result groups', () => {
     expect(within(restart).getByTestId('config-restart-keys')).toHaveTextContent('cache.capacity');
   });
 });
+
+describe('ConfigPage external modification', () => {
+  it('keeps local edits on a conflict and reloads from disk only when the user asks', async () => {
+    const localView = configView();
+    const remoteView = configView({
+      baseline: 'remote-baseline',
+      keys: localView.keys.map((key) => (key.path === 'cache.capacity'
+        ? { ...key, file_value: '3GiB', effective_value: '3GiB', source: 'file' }
+        : key)),
+    });
+    let configGets = 0;
+    let conflict = true;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        if (conflict) {
+          conflict = false;
+          return Promise.resolve(jsonResponse({
+            error: '配置文件已被外部修改',
+            code: 'conflict',
+            field_errors: [],
+            applied: [],
+            restart_required: [],
+            persisted: false,
+          }, 409));
+        }
+        return Promise.resolve(jsonResponse({
+          applied: [],
+          restart_required: ['cache.capacity'],
+          persisted: true,
+        }));
+      }
+      configGets += 1;
+      return Promise.resolve(jsonResponse(configGets === 1 ? localView : remoteView));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存未完成');
+    expect(screen.getByText(/配置文件已被外部修改/)).toBeInTheDocument();
+    // The page must not rebase silently before the user chooses to reload.
+    expect(configGets).toBe(1);
+    expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
+
+    fireEvent.click(screen.getByRole('button', { name: '重新加载配置' }));
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('3GiB'));
+    expect(screen.queryByText('保存未完成')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('config-dirty-count')).not.toBeInTheDocument();
+    expect(configGets).toBe(2);
+
+    // The reloaded baseline is what the next save sends.
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '4GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+
+    const puts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(JSON.parse((puts[1]?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'remote-baseline',
+      patch: { 'cache.capacity': '4GiB' },
+    });
+  });
+});

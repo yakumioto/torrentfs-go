@@ -441,6 +441,7 @@ export function ConfigPage() {
   const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
   const [saveMessage, setSaveMessage] = useState('');
   const [dangerOpen, setDangerOpen] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const durabilityRefetched = useRef<unknown>(null);
 
   const view = query.data;
@@ -576,6 +577,32 @@ export function ConfigPage() {
     performSave();
   };
 
+  const reloadFromDisk = async () => {
+    if (reloading) {
+      return;
+    }
+    setReloading(true);
+    // Dropping the failed mutation also clears the conflict notice; the user
+    // chose to replace the local drafts with what is on disk.
+    save.reset();
+    setSaveMessage('');
+    setSaveOutcome(null);
+    setFieldErrors({});
+    setDangerOpen(false);
+    try {
+      const result = await refetch();
+      if (result.data !== undefined) {
+        seedFromView(result.data);
+      } else {
+        setSaveMessage('重新读取配置失败，请稍后重试。');
+      }
+    } finally {
+      setReloading(false);
+    }
+  };
+
+  const conflict = save.isError && configSaveFailure(save.error)?.code === 'conflict';
+
   const term = search.trim().toLowerCase();
   const filtered = term === '' || view === undefined
     ? view?.keys ?? []
@@ -637,8 +664,24 @@ export function ConfigPage() {
           )}
 
           {saveMessage !== '' && saveOutcome === null && (
-            <Alert color="red" icon={<IconAlertTriangle size={16} />} title="保存未完成" className={styles.alert}>
+            <Alert color={conflict ? 'yellow' : 'red'} icon={<IconAlertTriangle size={16} />} title="保存未完成" className={styles.alert}>
               <p className={styles.alertText}>{saveMessage}</p>
+              {conflict && (
+                <Group justify="space-between" align="center" gap="sm" mt="sm" wrap="wrap">
+                  <span className={styles.alertHint}>
+                    重新加载会放弃页面上的本地改动，并读取磁盘上的最新配置。
+                  </span>
+                  <Button
+                    variant="light"
+                    color="yellow"
+                    size="compact-sm"
+                    onClick={() => void reloadFromDisk()}
+                    loading={reloading}
+                  >
+                    重新加载配置
+                  </Button>
+                </Group>
+              )}
             </Alert>
           )}
 
