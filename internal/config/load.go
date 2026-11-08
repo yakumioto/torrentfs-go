@@ -37,12 +37,55 @@ func LoadWithEnvironment(path string, lookup Environment) (Config, error) {
 	return cfg, err
 }
 
+// LoadContentWithSources loads a configuration document held in memory and
+// reports where every effective value came from. name identifies the document
+// in error messages; the caller that validates a rendered write-back passes
+// the configuration file path, so a problem names the file the user edits.
+func LoadContentWithSources(content []byte, name string) (Config, Sources, error) {
+	return loadContentWithSources(content, name, osEnvironment{})
+}
+
+// LoadContentWithEnvironment loads a configuration document held in memory
+// from a given environment.
+func LoadContentWithEnvironment(content []byte, name string, lookup Environment) (Config, error) {
+	cfg, _, err := loadContentWithSources(content, name, lookup)
+	return cfg, err
+}
+
+// LoadContentWithSourcesFromEnvironment loads a configuration document held in
+// memory from a given environment and reports where every effective value came
+// from.
+//
+// The write-back loads the file configuration layer through this function with
+// an empty environment: it needs the value and the source of every key the
+// file carries, and the environment is not part of a configuration file.
+func LoadContentWithSourcesFromEnvironment(content []byte, name string, lookup Environment) (Config, Sources, error) {
+	return loadContentWithSources(content, name, lookup)
+}
+
 func load(path string, lookup envLookup) (Config, error) {
 	cfg, _, err := loadWithSources(path, lookup)
 	return cfg, err
 }
 
 func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
+	if path != "" {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return Config{}, nil, fmt.Errorf("config: open %q: %w", path, err)
+		}
+		return loadContentWithSources(content, path, lookup)
+	}
+	return loadContentWithSources(nil, "", lookup)
+}
+
+// loadContentWithSources loads a configuration document held in memory.
+//
+// A document loaded from disk and a document the configuration page rendered
+// travel through this function, so the value rules, the environment merge and
+// the sources cannot drift apart. name identifies the document in error
+// messages; an empty name means no document at all.
+func loadContentWithSources(content []byte, name string, lookup envLookup) (Config, Sources, error) {
 	cfg := Default()
 	sources := Sources{}
 	// Every configuration key starts at its built-in default, so the record
@@ -55,19 +98,15 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	// environment name does not: it is reported with the other problems, so a
 	// user who also has a bad value learns about both at once.
 	envRemoved := removedEnvironmentNames(lookup)
-	if path != "" {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return Config{}, nil, fmt.Errorf("config: open %q: %w", path, err)
-		}
-		document, err := decodeDocument(content, path)
+	if name != "" {
+		document, err := decodeDocument(content, name)
 		if err != nil {
 			return Config{}, nil, err
 		}
 		if fileRemoved := removedTOMLNames(document); len(fileRemoved) > 0 {
 			return Config{}, nil, fmt.Errorf("config: %w", &RemovedError{Names: append(envRemoved, fileRemoved...)})
 		}
-		set, err := decodeFile(content, path, &cfg)
+		set, err := decodeFile(content, name, &cfg)
 		if err != nil {
 			return Config{}, nil, err
 		}
@@ -91,10 +130,10 @@ func loadWithSources(path string, lookup envLookup) (Config, Sources, error) {
 	// failed decode leaves the zero value: there are no values to check then.
 	validateErr := collector.err()
 	if validateErr != nil {
-		if path == "" {
+		if name == "" {
 			validateErr = fmt.Errorf("config: validate: %w", validateErr)
 		} else {
-			validateErr = fmt.Errorf("config: validate %q: %w", path, validateErr)
+			validateErr = fmt.Errorf("config: validate %q: %w", name, validateErr)
 		}
 	}
 	if len(envRemoved) > 0 {

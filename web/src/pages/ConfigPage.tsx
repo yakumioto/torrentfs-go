@@ -1,10 +1,32 @@
-import { Accordion, Alert, Badge, Button, Code, Group, Loader, TextInput } from '@mantine/core';
-import { IconAlertTriangle, IconInfoCircle, IconSearch } from '@tabler/icons-react';
-import { useState } from 'react';
+import {
+  Accordion,
+  Alert,
+  Badge,
+  Button,
+  Code,
+  Group,
+  Loader,
+  NativeSelect,
+  NumberInput,
+  Switch,
+  TextInput,
+} from '@mantine/core';
+import {
+  IconAlertTriangle,
+  IconDeviceFloppy,
+  IconInfoCircle,
+  IconSearch,
+} from '@tabler/icons-react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../app/auth-context';
-import { useConfig } from '../queries/hooks';
-import type { ConfigKey, ConfigView } from '../types/api';
+import { useConfig, useSaveConfig } from '../queries/hooks';
+import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
 import { usePageVisible } from '../utils/visibility';
+import {
+  configSaveDurabilityUnconfirmed,
+  configSaveFailure,
+  userFacingConfigSaveError,
+} from '../utils/user-facing-error';
 import styles from './ConfigPage.module.css';
 
 /**
@@ -160,7 +182,89 @@ function ReadOnlyBanner({ view }: { view: ConfigView }) {
   return null;
 }
 
-function KeyCard({ configKey }: { configKey: ConfigKey }) {
+/** One editor control derived from the schema type of a configuration key. */
+function KeyControl({
+  configKey,
+  draft,
+  editable,
+  onChange,
+}: {
+  configKey: ConfigKey;
+  draft: string;
+  editable: boolean;
+  onChange: (value: string) => void;
+}) {
+  const label = configKey.path;
+  switch (configKey.kind) {
+    case 'enum': {
+      const options = configKey.values.map((value) => ({
+        value,
+        label: value === '' ? '（未设置）' : value,
+      }));
+      if (!configKey.values.includes(draft)) {
+        options.push({ value: draft, label: draft === '' ? '（未设置）' : draft });
+      }
+      return (
+        <NativeSelect
+          aria-label={label}
+          data={options}
+          value={draft}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          disabled={!editable}
+          size="xs"
+        />
+      );
+    }
+    case 'bool':
+      return (
+        <Switch
+          aria-label={label}
+          checked={draft === 'true'}
+          onChange={(event) => onChange(event.currentTarget.checked ? 'true' : 'false')}
+          disabled={!editable}
+          size="sm"
+        />
+      );
+    case 'int': {
+      const numeric = draft.trim() === '' ? '' : Number(draft);
+      return (
+        <NumberInput
+          aria-label={label}
+          value={Number.isFinite(numeric as number) ? numeric : ''}
+          onChange={(value) => onChange(value === '' ? '' : String(value))}
+          disabled={!editable}
+          allowDecimal={false}
+          size="xs"
+        />
+      );
+    }
+    default:
+      return (
+        <TextInput
+          aria-label={label}
+          value={draft}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          disabled={!editable}
+          placeholder={configKey.kind === 'list' ? '逗号分隔，例如 tracker.example:6881' : undefined}
+          size="xs"
+        />
+      );
+  }
+}
+
+function KeyCard({
+  configKey,
+  draft,
+  editable,
+  onChange,
+  error,
+}: {
+  configKey: ConfigKey;
+  draft: string;
+  editable: boolean;
+  onChange: (value: string) => void;
+  error?: string;
+}) {
   return (
     <article className={`panel panel--padding ${styles.key}`} aria-label={configKey.path}>
       <div className={styles.keyHeader}>
@@ -203,11 +307,19 @@ function KeyCard({ configKey }: { configKey: ConfigKey }) {
       </dl>
 
       {configKey.values.length > 0 && (
-        <p className={styles.meta}>可选值：{configKey.values.join(' / ')}</p>
+        <p className={styles.meta}>可选值：{configKey.values.filter((value) => value !== '').join(' / ')}</p>
       )}
       {configKey.component !== '' && (
         <p className={styles.meta}>所属组件：{componentLabel(configKey.component)}</p>
       )}
+
+      {!configKey.secret && (
+        <div className={styles.editor}>
+          <span className={styles.editorLabel}>新值</span>
+          <KeyControl configKey={configKey} draft={draft} editable={editable} onChange={onChange} />
+        </div>
+      )}
+
       {configKey.read_only_reason === 'environment_override' && (
         <p className={styles.readOnlyNote}>
           该项由环境变量 <code className={styles.code}>{configKey.environment}</code> 覆盖，配置文件中的值不会生效。
@@ -218,17 +330,156 @@ function KeyCard({ configKey }: { configKey: ConfigKey }) {
           口令属于凭据，不会在页面上显示，也不能在这里编辑；保存其他配置时它会原样保留。
         </p>
       )}
+      {error !== undefined && (
+        <p className={styles.fieldError} role="alert">{error}</p>
+      )}
     </article>
   );
+}
+
+function SaveResultGroups({ result }: { result: ConfigSaveResult }) {
+  return (
+    <div className={styles.result}>
+      <p className={styles.resultSummary} data-testid="config-save-summary">
+        已生效 {result.applied.length} 项，重启后生效 {result.restart_required.length} 项。
+      </p>
+      {result.applied.length > 0 && (
+        <div>
+          <strong>已生效</strong>
+          <ul className={styles.resultKeys} data-testid="config-applied-keys">
+            {result.applied.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+          </ul>
+        </div>
+      )}
+      {result.restart_required.length > 0 && (
+        <div>
+          <strong>重启后生效</strong>
+          <ul className={styles.resultKeys} data-testid="config-restart-keys">
+            {result.restart_required.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface SaveOutcome {
+  code: string;
+  result: ConfigSaveResult;
 }
 
 export function ConfigPage() {
   const auth = useAuth();
   const visible = usePageVisible();
   const query = useConfig(auth.api, auth.isReady && visible);
+  const save = useSaveConfig(auth.api);
+
   const [search, setSearch] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [seeded, setSeeded] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
+  const [saveMessage, setSaveMessage] = useState('');
+  const durabilityRefetched = useRef<unknown>(null);
 
   const view = query.data;
+  const refetch = query.refetch;
+
+  // Seed the form from the file layer once. A background refetch must not
+  // replace what the user is editing; a save deliberately keeps the draft the
+  // user submitted.
+  useEffect(() => {
+    if (view === undefined || seeded) {
+      return;
+    }
+    const next: Record<string, string> = {};
+    for (const key of view.keys) {
+      next[key.path] = key.file_value;
+    }
+    setDrafts(next);
+    setSeeded(true);
+  }, [view, seeded]);
+
+  useEffect(() => {
+    if (!save.isSuccess || save.data === undefined) {
+      return;
+    }
+    setSaveOutcome({ code: '', result: save.data });
+    setSaveMessage('');
+    setFieldErrors({});
+  }, [save.isSuccess, save.data]);
+
+  useEffect(() => {
+    if (!save.isError || save.error === null) {
+      return;
+    }
+    const failure = configSaveFailure(save.error);
+    setSaveMessage(userFacingConfigSaveError(save.error));
+    setSaveOutcome(null);
+    if (failure === undefined || view === undefined) {
+      setFieldErrors({});
+      return;
+    }
+    const known = new Set(view.keys.map((key) => key.path));
+    const errors: Record<string, string> = {};
+    const extra: string[] = [];
+    for (const field of failure.field_errors) {
+      if (field.path !== '' && known.has(field.path)) {
+        errors[field.path] = field.message;
+      } else {
+        extra.push(field.path === '' ? field.message : `${field.path}: ${field.message}`);
+      }
+    }
+    setFieldErrors(errors);
+    if (extra.length > 0) {
+      setSaveMessage(`${userFacingConfigSaveError(save.error)}\n${extra.join('\n')}`);
+    }
+    if (configSaveDurabilityUnconfirmed(save.error)) {
+      setSaveOutcome({
+        code: failure.code,
+        result: {
+          applied: failure.applied,
+          restart_required: failure.restart_required,
+          persisted: failure.persisted,
+        },
+      });
+      // The values are in force, so refresh the baseline the next save uses.
+      // Refetch once per failed mutation: the refreshed view must not restart
+      // the cycle that the error itself started.
+      if (durabilityRefetched.current !== save.error) {
+        durabilityRefetched.current = save.error;
+        void refetch();
+      }
+    }
+  }, [save.isError, save.error, view, refetch]);
+
+  const pageReadOnly = view !== undefined && view.read_only_reason !== '';
+  const patch: Record<string, string> = {};
+  if (view !== undefined && !pageReadOnly) {
+    for (const key of view.keys) {
+      if (key.secret || key.read_only_reason !== '') {
+        continue;
+      }
+      const draft = drafts[key.path];
+      if (draft !== undefined && draft !== key.file_value) {
+        patch[key.path] = draft;
+      }
+    }
+  }
+  const dirtyCount = Object.keys(patch).length;
+  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
+
+  const submit = () => {
+    if (view === undefined || !canSave) {
+      return;
+    }
+    setSaveOutcome(null);
+    setSaveMessage('');
+    setFieldErrors({});
+    save.reset();
+    save.mutate({ baseline: view.baseline, patch });
+  };
+
   const term = search.trim().toLowerCase();
   const filtered = term === '' || view === undefined
     ? view?.keys ?? []
@@ -242,11 +493,13 @@ export function ConfigPage() {
           <p className="eyebrow">设置</p>
           <h1 className={styles.title} id="config-title">配置</h1>
           <p className={styles.subtitle}>
-            按配置节浏览后台服务的全部配置项：文件值、生效值、来源与生效方式一目了然。
-            当前为只读视图，保存与热应用将在后续版本提供。
+            按配置节查看并编辑后台服务的配置项：文件值、生效值、来源与生效方式一目了然。
+            保存时整体校验、写回配置文件，并把能立即生效的配置项应用到运行中的进程。
           </p>
         </div>
-        <Badge size="lg" variant="light" color="torrent">只读</Badge>
+        <Badge size="lg" variant="light" color={pageReadOnly ? 'gray' : 'torrent'}>
+          {pageReadOnly ? '只读' : '可编辑'}
+        </Badge>
       </section>
 
       {query.isPending && (
@@ -271,6 +524,28 @@ export function ConfigPage() {
         <>
           <ReadOnlyBanner view={view} />
 
+          {saveOutcome !== null && (
+            <Alert
+              color={saveOutcome.code === 'durability_unconfirmed' ? 'yellow' : 'green'}
+              icon={saveOutcome.code === 'durability_unconfirmed'
+                ? <IconAlertTriangle size={16} />
+                : <IconDeviceFloppy size={16} />}
+              title={saveOutcome.code === 'durability_unconfirmed' ? '新配置已生效，但持久化未确认' : '保存成功'}
+              className={styles.alert}
+            >
+              {saveOutcome.code === 'durability_unconfirmed' && (
+                <p className={styles.alertText}>{saveMessage}</p>
+              )}
+              <SaveResultGroups result={saveOutcome.result} />
+            </Alert>
+          )}
+
+          {saveMessage !== '' && saveOutcome === null && (
+            <Alert color="red" icon={<IconAlertTriangle size={16} />} title="保存未完成" className={styles.alert}>
+              <p className={styles.alertText}>{saveMessage}</p>
+            </Alert>
+          )}
+
           <div className={styles.toolbar}>
             <TextInput
               aria-label="搜索配置项"
@@ -280,11 +555,31 @@ export function ConfigPage() {
               onChange={(event) => setSearch(event.currentTarget.value)}
               className={styles.search}
             />
-            {view.config_file !== '' && (
-              <span className={styles.file}>
-                配置文件：<code className={styles.code}>{view.config_file}</code>
-              </span>
-            )}
+            <Group gap="sm" className={styles.actions}>
+              {view.config_file !== '' && (
+                <span className={styles.file}>
+                  配置文件：<code className={styles.code}>{view.config_file}</code>
+                </span>
+              )}
+              {!pageReadOnly && (
+                <>
+                  {dirtyCount > 0 && (
+                    <Badge variant="light" color="yellow" data-testid="config-dirty-count">
+                      未保存 {dirtyCount} 项
+                    </Badge>
+                  )}
+                  <Button
+                    color="torrent"
+                    leftSection={<IconDeviceFloppy size={16} />}
+                    onClick={submit}
+                    loading={save.isPending}
+                    disabled={!canSave}
+                  >
+                    保存
+                  </Button>
+                </>
+              )}
+            </Group>
           </div>
 
           {term !== '' && filtered.length === 0 && (
@@ -310,7 +605,14 @@ export function ConfigPage() {
                 <Accordion.Panel>
                   <div className={styles.keys}>
                     {section.keys.map((key) => (
-                      <KeyCard key={key.path} configKey={key} />
+                      <KeyCard
+                        key={key.path}
+                        configKey={key}
+                        draft={drafts[key.path] ?? ''}
+                        editable={!pageReadOnly && key.read_only_reason === ''}
+                        onChange={(value) => setDrafts((previous) => ({ ...previous, [key.path]: value }))}
+                        error={fieldErrors[key.path]}
+                      />
                     ))}
                   </div>
                 </Accordion.Panel>

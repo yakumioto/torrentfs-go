@@ -1,6 +1,8 @@
 package configctl_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +41,11 @@ func loadView(t *testing.T, path string) configctl.View {
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	view, err := configctl.New(path, cfg, sources).View()
+	controller := configctl.New(path, cfg, sources)
+	if err := controller.RegisterApplier(&recordingApplier{keys: []string{"log.level"}}); err != nil {
+		t.Fatalf("RegisterApplier: %v", err)
+	}
+	view, err := controller.View()
 	if err != nil {
 		t.Fatalf("configuration view: %v", err)
 	}
@@ -250,5 +256,58 @@ func TestViewStatusStartsEmpty(t *testing.T) {
 		if len(status.Keys) != 0 {
 			t.Errorf("%s status keys = %v, want empty", name, status.Keys)
 		}
+	}
+}
+
+// TestViewReportsTheConfigurationFileBaseline covers the conflict contract of
+// the save path: the view carries a digest of the file bytes the page edited,
+// so a save can refuse to overwrite a file another writer changed.
+func TestViewReportsTheConfigurationFileBaseline(t *testing.T) {
+	body := "backend = \"none\"\n\n[log]\nlevel = \"info\"\n"
+	path := writeConfigFile(t, body)
+	view := loadView(t, path)
+
+	sum := sha256.Sum256([]byte(body))
+	if want := hex.EncodeToString(sum[:]); view.Baseline != want {
+		t.Errorf("baseline = %q, want the SHA-256 of the file %q", view.Baseline, want)
+	}
+
+	withoutFile, err := configctl.New("", config.Default(), config.Sources{}).View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if withoutFile.Baseline != "" {
+		t.Errorf("baseline without a configuration file = %q, want empty", withoutFile.Baseline)
+	}
+}
+
+// TestViewReportsHotApplyOnlyWithAnApplier covers the apply boundary as the
+// page sees it: a schema key marked hot-applied is only promised as immediate
+// when a running component registered an applier for it.
+func TestViewReportsHotApplyOnlyWithAnApplier(t *testing.T) {
+	path := writeConfigFile(t, "[http]\nmax_upload_size = \"1MiB\"\n")
+	cfg, sources, err := config.LoadWithSources(path)
+	if err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	controller := configctl.New(path, cfg, sources)
+
+	view, err := controller.View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if keyByPath(t, view, "http.max_upload_size").HotApply {
+		t.Error("http.max_upload_size reports HotApply=true without an applier")
+	}
+
+	if err := controller.RegisterApplier(&recordingApplier{keys: []string{"http.max_upload_size"}}); err != nil {
+		t.Fatalf("RegisterApplier: %v", err)
+	}
+	view, err = controller.View()
+	if err != nil {
+		t.Fatalf("configuration view: %v", err)
+	}
+	if !keyByPath(t, view, "http.max_upload_size").HotApply {
+		t.Error("http.max_upload_size reports HotApply=false after its applier was registered")
 	}
 }

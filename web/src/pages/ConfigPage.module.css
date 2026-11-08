@@ -208,3 +208,52 @@
     grid-template-columns: 1fr;
   }
 }
+
+.editor {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.editorLabel {
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+}
+
+.fieldError {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--mantine-color-red-6) 12%, transparent);
+  color: var(--mantine-color-red-7);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.actions {
+  min-width: 0;
+}
+
+.result {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.resultSummary {
+  margin: 0;
+  font-weight: 600;
+}
+
+.resultKeys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  list-style: none;
+}

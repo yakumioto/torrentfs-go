@@ -21,6 +21,7 @@ const configPath = "/api/v1/config"
 // to the JSON tags fails this test instead of moving with it.
 type configResponse struct {
 	ConfigFile     string `json:"config_file"`
+	Baseline       string `json:"baseline"`
 	ReadOnlyReason string `json:"read_only_reason"`
 	Keys           []struct {
 		Path           string   `json:"path"`
@@ -108,11 +109,8 @@ func writeAPIConfigFile(t *testing.T, content string) string {
 func TestGetConfigReturnsTheReadOnlyView(t *testing.T) {
 	path := writeAPIConfigFile(t, "backend = \"none\"\npassword = \"a-password-that-must-not-leak\"\n\n[log]\nlevel = \"info\"\n")
 	t.Setenv("TORRENTFS_LOG_LEVEL", "debug")
-	cfg, sources, err := config.LoadWithSources(path)
-	if err != nil {
-		t.Fatalf("load configuration: %v", err)
-	}
-	srv := configTestServer(t, configctl.New(path, cfg, sources), nil)
+	controller, _ := configSaveController(t, path)
+	srv := configTestServer(t, controller, nil)
 
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, configPath, nil))
 	if rec.Code != http.StatusOK {
@@ -124,6 +122,9 @@ func TestGetConfigReturnsTheReadOnlyView(t *testing.T) {
 	response := decodeConfigResponse(t, rec)
 	if response.ConfigFile != path {
 		t.Errorf("config_file = %q, want %q", response.ConfigFile, path)
+	}
+	if response.Baseline == "" {
+		t.Error("the read-only view carries no baseline digest")
 	}
 	if response.ReadOnlyReason != "" {
 		t.Errorf("read_only_reason = %q, want empty for a writable file", response.ReadOnlyReason)
