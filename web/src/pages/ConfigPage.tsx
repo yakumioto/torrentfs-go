@@ -25,6 +25,7 @@ import { useLocation } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
+import { configValueInputError } from '../utils/config-value';
 import { useUnsavedChangesGuard } from '../utils/unsaved-changes';
 import { usePageVisible } from '../utils/visibility';
 import {
@@ -252,13 +253,60 @@ function ReadOnlyBanner({ view }: { view: ConfigView }) {
   return null;
 }
 
-/** Render the time of the most recent automatic reload for a human. */
-function reloadTime(at: string | null): string {
+/** Render the time of the most recent save or automatic reload for a human. */
+function operationTime(at: string | null): string {
   if (at === null) {
     return '';
   }
   const time = new Date(at);
   return Number.isNaN(time.getTime()) ? at : time.toLocaleString('zh-CN', { hour12: false });
+}
+
+/**
+ * Shows the outcome of the most recent save stored in the configuration view,
+ * so a page reload keeps reporting what happened instead of losing it with
+ * the mutation state. A save made in this session is shown by its own result
+ * block instead; this status is the persisted record.
+ */
+function SaveStatus({ view }: { view: ConfigView }) {
+  const save = view.last_save;
+  if (save.at === null) {
+    return null;
+  }
+  if (!save.ok) {
+    return (
+      <Alert
+        color="red"
+        icon={<IconAlertTriangle size={16} />}
+        title="最近一次保存失败"
+        className={styles.alert}
+        data-testid="config-save-status"
+      >
+        <p className={styles.alertText} data-testid="config-save-status-error">{save.error}</p>
+        <p className={styles.alertText}>
+          时间：<span data-testid="config-save-status-time">{operationTime(save.at)}</span>
+        </p>
+      </Alert>
+    );
+  }
+  return (
+    <Alert
+      color="green"
+      icon={<IconDeviceFloppy size={16} />}
+      title="最近一次保存成功"
+      className={styles.alert}
+      data-testid="config-save-status"
+    >
+      <p className={styles.alertText}>
+        时间：<span data-testid="config-save-status-time">{operationTime(save.at)}</span>
+      </p>
+      {save.keys.length > 0 && (
+        <ul className={styles.resultKeys} data-testid="config-save-status-keys">
+          {save.keys.map((path) => <li key={path}><code className={styles.code}>{path}</code></li>)}
+        </ul>
+      )}
+    </Alert>
+  );
 }
 
 /** The badge that tells whether a key the reload changed took effect now. */
@@ -360,7 +408,7 @@ function ReloadStatus({ view, onReread, rereadDisabled }: {
       data-testid="config-reload-status"
     >
       <p className={styles.alertText}>
-        检测到配置文件的外部修改并已重新加载（{reloadTime(reload.at)}）。
+        检测到配置文件的外部修改并已重新加载（{operationTime(reload.at)}）。
       </p>
       {reload.keys.length > 0 && (
         <ul className={styles.resultKeys} data-testid="config-reload-keys">
@@ -804,7 +852,23 @@ export function ConfigPage() {
   const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
   const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
   const dirtyCount = changes.length;
-  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending && !reloading;
+  // Unit and duration syntax is checked before the request, with the same
+  // syntax the backend accepts. An empty value is left to the backend because
+  // whether it is allowed belongs to the key, not to its type.
+  const clientErrors: Record<string, string> = {};
+  if (view !== undefined) {
+    for (const key of view.keys) {
+      if (key.secret || key.read_only_reason !== '') {
+        continue;
+      }
+      const message = configValueInputError(key.kind, drafts[key.path] ?? '');
+      if (message !== undefined) {
+        clientErrors[key.path] = message;
+      }
+    }
+  }
+  const hasClientErrors = Object.keys(clientErrors).length > 0;
+  const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !hasClientErrors && !save.isPending && !reloading;
   const guard = useUnsavedChangesGuard(dirtyCount > 0);
 
   const performSave = () => {
@@ -926,6 +990,8 @@ export function ConfigPage() {
               rereadDisabled={save.isPending || reloading}
             />
           )}
+
+          {saveOutcome === null && <SaveStatus view={view} />}
 
           {saveOutcome !== null && (
             <Alert
@@ -1080,7 +1146,7 @@ export function ConfigPage() {
                             draft={drafts[key.path] ?? ''}
                             editable={!pageReadOnly && key.read_only_reason === ''}
                             onChange={(value) => setDrafts((previous) => ({ ...previous, [key.path]: value }))}
-                            error={fieldErrors[key.path]}
+                            error={fieldErrors[key.path] ?? clientErrors[key.path]}
                           />
                         ))}
                       </div>

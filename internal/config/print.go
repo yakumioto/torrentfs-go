@@ -275,6 +275,16 @@ func reflectValueOf(cfg Config, index []int) reflect.Value {
 // The value is rendered the way the user would write it: a duration as a Go
 // duration, a byte quantity with its unit, a list as its items.
 func renderValue(value reflect.Value) string {
+	// A byte rate is written the way the configuration file writes it, so the
+	// configuration page can put the value straight into an editable field.
+	// The zero value has no unit and means "not set", so it renders empty.
+	if value.Kind() == reflect.Float64 && value.Type() == reflect.TypeOf(ByteRate(0)) {
+		rate := ByteRate(value.Float())
+		if rate == 0 {
+			return ""
+		}
+		return formatByteRate(float64(rate))
+	}
 	// A named type knows how to write itself: a byte quantity writes its
 	// unit, a duration writes its text. The check comes before the kind
 	// switch, because a named integer is still an integer.

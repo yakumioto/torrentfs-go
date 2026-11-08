@@ -1,22 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import type { LabView } from '../types/api';
+import type { ExperimentView } from '../types/api';
 import {
   formatPeerSampleInterval,
   formatRelativeTime,
   formatSignedBytes,
-  indexLabTorrentStats,
-  labModeLabel,
-  labModeOption,
-  labOverreportedBytes,
-  labPendingRealUploadBytes,
-  labTorrentStat,
-} from '../utils/lab';
+  indexExperimentTorrentStats,
+  experimentModeLabel,
+  experimentModeOption,
+  experimentOverreportedBytes,
+  experimentPendingRealUploadBytes,
+  experimentTorrentStat,
+} from '../utils/experiments';
 
-function labView(overrides: Partial<LabView> = {}): LabView {
+function experimentView(overrides: Partial<ExperimentView> = {}): ExperimentView {
   return {
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
-    announce_log: '/var/log/torrentfs/lab.jsonl',
+    announce_log: '/var/log/torrentfs/experiment.jsonl',
     peer_sample_interval_seconds: 5,
     totals: {
       real_uploaded_bytes: 5_000_000,
@@ -45,21 +45,21 @@ function labView(overrides: Partial<LabView> = {}): LabView {
   };
 }
 
-describe('lab presentation helpers', () => {
+describe('experiment presentation helpers', () => {
   it('labels the three experiment modes in Chinese', () => {
-    expect(labModeLabel('baseline')).toContain('基线');
-    expect(labModeLabel('inject')).toContain('虚报');
-    expect(labModeLabel('amplify')).toContain('放大');
-    expect(labModeLabel(undefined)).toBe('—');
-    expect(labModeOption('baseline')?.description).toContain('对照组');
+    expect(experimentModeLabel('baseline')).toContain('基线');
+    expect(experimentModeLabel('inject')).toContain('虚报');
+    expect(experimentModeLabel('amplify')).toContain('放大');
+    expect(experimentModeLabel(undefined)).toBe('—');
+    expect(experimentModeOption('baseline')?.description).toContain('对照组');
   });
 
   it('compares reported bytes against the counter at the last announce', () => {
     // The live counter is much larger here; using it would show a bogus
     // negative "overreport" even though the multiplier is working.
-    expect(labOverreportedBytes(4_197_247, 1000)).toBe(4_196_247);
-    expect(labOverreportedBytes(1024, 2048)).toBe(-1024);
-    expect(labOverreportedBytes(2048, 2048)).toBe(0);
+    expect(experimentOverreportedBytes(4_197_247, 1000)).toBe(4_196_247);
+    expect(experimentOverreportedBytes(1024, 2048)).toBe(-1024);
+    expect(experimentOverreportedBytes(2048, 2048)).toBe(0);
     expect(formatSignedBytes(4_196_247)).toBe('+4.0 MiB');
     expect(formatSignedBytes(-1024)).toBe('-1.0 KiB');
     expect(formatSignedBytes(0)).toBe('0 B');
@@ -67,18 +67,18 @@ describe('lab presentation helpers', () => {
   });
 
   it('reports the real upload not yet part of an announce', () => {
-    expect(labPendingRealUploadBytes(5_000_000, 1000)).toBe(4_999_000);
-    expect(labPendingRealUploadBytes(2048, 2048)).toBe(0);
+    expect(experimentPendingRealUploadBytes(5_000_000, 1000)).toBe(4_999_000);
+    expect(experimentPendingRealUploadBytes(2048, 2048)).toBe(0);
   });
 
   it('looks up per-torrent counters by info hash', () => {
-    const view = labView();
-    expect(labTorrentStat(view, 'abc123')?.reported_uploaded_bytes).toBe(4_197_247);
-    expect(labTorrentStat(view, 'abc123')?.real_uploaded_at_last_announce_bytes).toBe(1000);
-    expect(labTorrentStat(view, 'missing')).toBeUndefined();
-    expect(indexLabTorrentStats(view).get('def456')?.real_uploaded_bytes).toBe(2048);
+    const view = experimentView();
+    expect(experimentTorrentStat(view, 'abc123')?.reported_uploaded_bytes).toBe(4_197_247);
+    expect(experimentTorrentStat(view, 'abc123')?.real_uploaded_at_last_announce_bytes).toBe(1000);
+    expect(experimentTorrentStat(view, 'missing')).toBeUndefined();
+    expect(indexExperimentTorrentStats(view).get('def456')?.real_uploaded_bytes).toBe(2048);
 
-    expect(indexLabTorrentStats(undefined).size).toBe(0);
+    expect(indexExperimentTorrentStats(undefined).size).toBe(0);
   });
 
   it('describes the peer sampling interval', () => {

@@ -268,6 +268,50 @@ func TestMigrateUploadRateFromAReadOnlyConfigurationKeepsTheLegacyRuntime(t *tes
 	}
 }
 
+// TestMigrateUploadRateKeepsEnvironmentValuesOnTheLegacyRuntime covers the
+// documented precedence during a read-only downgrade: the environment is a
+// configuration source, so the retired sidecar must not replace a value the
+// environment supplies. The page shows the same values the session uses.
+func TestMigrateUploadRateKeepsEnvironmentValuesOnTheLegacyRuntime(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a root process can write a read-only file, so the read-only contract cannot be observed")
+	}
+	t.Setenv("TORRENTFS_UPLOAD_RATE_LIMIT", "2MiB/s")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "torrentfs.toml")
+	writeTestFile(t, configPath, "[log]\nlevel = \"info\"\n")
+	if err := os.Chmod(configPath, 0o444); err != nil {
+		t.Fatalf("make the configuration read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o644) })
+	torrentsDir := filepath.Join(dir, "torrents")
+	writeTestFile(t, sidecarPath(torrentsDir), legacySidecarBody)
+
+	cfg, sources := loadTestConfig(t, configPath)
+	result, logOutput := runMigration(t, configPath, torrentsDir, cfg, sources)
+
+	if result.Migrated || !result.LegacyInUse {
+		t.Fatalf("the read-only migration result = %+v, want the legacy runtime", result)
+	}
+	// The environment limit wins; the sidecar still supplies the window the
+	// environment does not set.
+	assertRuntimeSettings(t, result.Config, session.UploadRateSettings{
+		RateLimitBytesPerSecond: 2 << 20,
+		Schedule:                &session.UploadRateSchedule{Start: "08:00", End: "22:00"},
+	})
+	if got := result.Sources.SourceOf("upload_rate.limit"); got != config.SourceEnvironment {
+		t.Errorf("the source of upload_rate.limit = %q, want environment", got)
+	}
+	for _, path := range []string{"upload_rate.schedule_start", "upload_rate.schedule_end"} {
+		if got := result.Sources.SourceOf(path); got != config.SourceFile {
+			t.Errorf("the source of %q = %q, want the closest source file", path, got)
+		}
+	}
+	if !strings.Contains(logOutput, "not migrated") {
+		t.Errorf("the startup log does not warn about the pending migration: %s", logOutput)
+	}
+}
+
 // TestMigrateUploadRateArchivesOnTheNextStartAfterASuccessfulSave covers the
 // read-only deployment that later became writable: the next start imports the
 // still-missing sidecar keys into the file (the save may not have touched

@@ -42,9 +42,9 @@ type Option func(*sessionOptions)
 
 type sessionOptions struct {
 	logger *slog.Logger
-	// labSettings, when non-nil, overrides the experiment settings the
+	// experimentSettings, when non-nil, overrides the experiment settings the
 	// session starts with. The experiment itself is always on.
-	labSettings *experiments.Settings
+	experimentSettings *experiments.Settings
 }
 
 // WithLogger routes session and anacrolix client logs to l.
@@ -103,9 +103,9 @@ type Session struct {
 	// second process cannot manage the same directory.
 	instanceLock *os.File
 
-	// lab is the always-on experiment state. It is guarded by mu; the reporter
-	// behind it is safe for concurrent use.
-	lab *labState
+	// experiment is the always-on experiment state. It is guarded by mu; the
+	// reporter behind it is safe for concurrent use.
+	experiment *experimentState
 
 	// dhtRecorder keeps the last per-family bootstrap outcome for the status
 	// API and for transition-only DHT logging.
@@ -234,13 +234,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// reporter, and an unconfigured experiment is the baseline arm. Only an
 	// announce log named by the configuration opens a recorder and starts the
 	// peer sampler.
-	labSettings := experiments.DefaultSettings()
-	if options.labSettings != nil {
-		labSettings = *options.labSettings
+	experimentSettings := experiments.DefaultSettings()
+	if options.experimentSettings != nil {
+		experimentSettings = *options.experimentSettings
 	}
-	var labRecorder *experiments.Recorder
-	if labSettings.AnnounceLogPath != "" {
-		labRecorder, err = experiments.OpenRecorder(labSettings.AnnounceLogPath, logger)
+	var experimentRecorder *experiments.Recorder
+	if experimentSettings.AnnounceLogPath != "" {
+		experimentRecorder, err = experiments.OpenRecorder(experimentSettings.AnnounceLogPath, logger)
 		if err != nil {
 			releaseInstanceLock(instanceLock)
 			logInitFailure("open-experiment-announce-log", err)
@@ -248,12 +248,12 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		}
 		defer func() {
 			if retErr != nil {
-				_ = labRecorder.Close()
+				_ = experimentRecorder.Close()
 			}
 		}()
-		labRecorder.WriteSettings(labSettings)
+		experimentRecorder.WriteSettings(experimentSettings)
 	}
-	labReporter := experiments.NewReporter(labSettings, labRecorder)
+	experimentReporter := experiments.NewReporter(experimentSettings, experimentRecorder)
 	var streamSigner *stream.Signer
 	if cfg.STRM.BaseURL != "" {
 		streamSigner, err = resolveStreamSigner(metadataDir)
@@ -324,7 +324,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	// The always-on experiment observes every announce. Baseline passes the
 	// request through unchanged; a rewriting mode replaces only "uploaded".
-	cc.HttpRequestDirector = labReporter.Director
+	cc.HttpRequestDirector = experimentReporter.Director
 	// The peer ID is resolved after customize so an explicitly injected client
 	// config always wins, and before NewClient so the durable identity is the
 	// one this client announces with.
@@ -387,13 +387,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// and waits before the client is torn down.
 	s.uploadRate.start(s.bgCtx, &s.bgMu, &s.bgWg)
 	s.startConnectionAllocator()
-	experimentState := &labState{
-		settings: labSettings,
-		reporter: labReporter,
-		recorder: labRecorder,
+	experimentState := &experimentState{
+		settings: experimentSettings,
+		reporter: experimentReporter,
+		recorder: experimentRecorder,
 	}
-	s.lab = experimentState
-	s.startLabSampler(experimentState)
+	s.experiment = experimentState
+	s.startExperimentSampler(experimentState)
 	startup := []struct {
 		stage string
 		fn    func() error
@@ -483,9 +483,9 @@ func (s *Session) Close(ctx context.Context) error {
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
 	subtitleStore := s.subtitleStore
-	var labRecorder *experiments.Recorder
-	if s.lab != nil {
-		labRecorder = s.lab.recorder
+	var experimentRecorder *experiments.Recorder
+	if s.experiment != nil {
+		experimentRecorder = s.experiment.recorder
 	}
 	s.mu.Unlock()
 	s.logger.Info("session closing")
@@ -525,9 +525,9 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	// The sampler is already stopped, so the announce log is idle and can be
 	// closed after the client has sent its final stopped announces.
-	if labRecorder != nil {
-		if err := labRecorder.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close lab announce log: %w", err))
+	if experimentRecorder != nil {
+		if err := experimentRecorder.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close experiment announce log: %w", err))
 		}
 	}
 	if storageCloser != nil {

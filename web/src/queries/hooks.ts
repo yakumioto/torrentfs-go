@@ -6,7 +6,7 @@ import type {
   ConfigSaveRequest,
   ConfigSaveResult,
   ConfigView,
-  LabView,
+  ExperimentView,
   Operation,
   PruneResult,
   RuntimeStats,
@@ -66,15 +66,29 @@ export function useRuntimeStats(api: ApiClient, enabled: boolean) {
 }
 
 /**
- * The configuration view is a snapshot of the process and the file, so it is
- * read once when the page becomes visible. Saving and hot reload, which would
- * make it live, belong to the follow-up tickets.
+ * How often the configuration page refreshes the view while it is visible.
+ *
+ * The process watches the configuration file every two seconds, so a refresh
+ * on the same order surfaces the automatic reload status (and a file error)
+ * without the reader reloading the page. A hidden tab and a background page
+ * do not poll: the process keeps watching, and the next visible read catches
+ * up.
+ */
+export const CONFIG_POLL_INTERVAL = 2200;
+
+/**
+ * The configuration view is a live snapshot of the process and the file while
+ * the page is visible, so an accepted external reload reaches the page
+ * without a manual refresh. The view still seeds the form only once; polling
+ * never replaces unsaved drafts or the baseline they were typed against.
  */
 export function useConfig(api: ApiClient, enabled: boolean) {
   return useQuery<ConfigView>({
     queryKey: queryKeys.config,
     queryFn: ({ signal }) => api.getConfig(signal),
     enabled,
+    refetchInterval: enabled ? CONFIG_POLL_INTERVAL : false,
+    refetchIntervalInBackground: false,
     retry: shouldRetry,
     retryDelay,
   });
@@ -357,10 +371,10 @@ export function usePruneTorrents(api: ApiClient) {
  * with every tracker announce, so the dashboard polls faster than the torrent
  * list to keep the displayed totals close to what the tracker just received.
  */
-export function useLab(api: ApiClient, enabled: boolean) {
-  return useQuery<LabView>({
-    queryKey: queryKeys.lab,
-    queryFn: ({ signal }) => api.getLab(signal),
+export function useExperiment(api: ApiClient, enabled: boolean) {
+  return useQuery<ExperimentView>({
+    queryKey: queryKeys.experiments,
+    queryFn: ({ signal }) => api.getExperiment(signal),
     enabled,
     refetchInterval: 2000,
     refetchIntervalInBackground: false,

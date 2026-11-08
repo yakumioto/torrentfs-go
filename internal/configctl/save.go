@@ -12,6 +12,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/configcheck"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 )
 
 // Stable machine-readable reasons a save was rejected. The page branches on
@@ -250,43 +251,22 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	// The write-back renders the file configuration layer: the built-in
 	// defaults overlaid with the file, before the environment is merged. The
 	// rendered document was read from content, so the candidate is derived
-	// from exactly the bytes the baseline covered.
-	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, c.path, emptyEnvironment{})
+	// from exactly the bytes the baseline covered. A patch value that does
+	// not parse is reported with the validation problems of the other keys,
+	// so one save names every mistake.
+	file, err := configwrite.Load(content, c.path)
 	if err != nil {
 		return c.failSaveLocked(SaveInvalid, err, fieldErrorsOf(err))
 	}
-	candidate := fileConfig
-	var parseErr error
-	var parseFields []FieldError
-	for _, path := range changed {
-		if err := config.SetText(&candidate, path, request.Patch[path]); err != nil {
-			parseErr = errors.Join(parseErr, err)
-			parseFields = append(parseFields, fieldErrorsOf(err)...)
-		}
-	}
-
-	document, err := config.WriteBack{File: candidate, Sources: fileSources, Changed: changed}.TOML()
+	prepared, err := configwrite.Prepare(file, c.path, request.Patch, false)
 	if err != nil {
-		return c.failSaveLocked(SaveInvalid, err, parseFields)
+		return c.failSaveLocked(SaveInvalid, err, fieldErrorsOf(err))
 	}
-	effective, effectiveSources, checkErr := configcheck.LoadContent(document, c.path)
-	if parseErr != nil || checkErr != nil {
-		fields := append(parseFields, fieldErrorsOf(checkErr)...)
-		// A parse failure leaves the key out of the candidate, so the
-		// validation of the other keys still runs and one save reports every
-		// problem.
-		cause := errors.Join(parseErr, checkErr)
-		if cause == nil {
-			cause = errors.New("the patch is invalid")
-		}
-		return c.failSaveLocked(SaveInvalid, cause, fields)
-	}
+	effective, effectiveSources := prepared.Effective, prepared.EffectiveSources
+	document := prepared.Document
 
-	published, writeErr := c.writeBackFile(c.path, document)
+	published, writeErr := configwrite.Publish(c.path, document, c.writeBackFile)
 	if !published {
-		if writeErr == nil {
-			writeErr = errors.New("the write-back did not publish the configuration file")
-		}
 		return c.failSaveLocked(SavePersistenceUnavailable, writeErr, nil)
 	}
 
@@ -295,12 +275,12 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	// configuration adopts only the keys that took effect; a changed key that
 	// waits for a restart keeps the value and source the process still uses,
 	// so the view never reports an effect that did not happen.
-	applied, restartRequired := c.applyLocked(effective, changed)
+	applied, restartRequired := c.applyLocked(effective, prepared.Changed)
 	c.cfg, c.sources = runningConfiguration(c.cfg, c.sources, effective, effectiveSources, applied)
 	// The controller wrote these bytes itself: adopt them as the file the
 	// view shows and as the baseline the external poll compares against, so
 	// the next poll neither reloads the save nor logs it again.
-	c.fileConfig = candidate
+	c.fileConfig = prepared.Candidate
 	c.baseline = configurationBaseline(document)
 	c.observed = c.baseline
 	c.fileError = ""
@@ -308,9 +288,9 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 	result := SaveResult{Applied: applied, RestartRequired: restartRequired, Persisted: writeErr == nil}
 	now := time.Now().UTC()
 	if writeErr != nil {
-		c.lastSave = Status{At: &now, OK: false, Error: writeErr.Error(), Keys: changed}
+		c.lastSave = Status{At: &now, OK: false, Error: writeErr.Error(), Keys: prepared.Changed}
 		c.logger.Error("configuration saved without confirmed durability",
-			slog.String("keys", strings.Join(changed, ",")), "err", writeErr)
+			slog.String("keys", strings.Join(prepared.Changed, ",")), "err", writeErr)
 		return result, &SaveError{
 			Code:            SaveDurabilityUnconfirmed,
 			Err:             writeErr,
@@ -320,11 +300,11 @@ func (c *Controller) Save(ctx context.Context, request SaveRequest) (SaveResult,
 		}
 	}
 
-	c.lastSave = Status{At: &now, OK: true, Keys: changed}
+	c.lastSave = Status{At: &now, OK: true, Keys: prepared.Changed}
 	// The audit names the configuration keys only: a value, and in particular
 	// a secret, never reaches the log.
 	c.logger.Info("configuration saved",
-		slog.String("keys", strings.Join(changed, ",")),
+		slog.String("keys", strings.Join(prepared.Changed, ",")),
 		slog.String("applied", strings.Join(applied, ",")),
 		slog.String("restart_required", strings.Join(restartRequired, ",")))
 	return result, nil

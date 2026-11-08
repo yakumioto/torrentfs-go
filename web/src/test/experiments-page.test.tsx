@@ -7,17 +7,17 @@ import { ApiClient } from '../api/client';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { ExperimentsPage } from '../pages/ExperimentsPage';
 import { theme } from '../styles/theme';
-import type { LabView } from '../types/api';
+import type { ExperimentView } from '../types/api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-function labView(overrides: Partial<LabView> = {}): LabView {
+function experimentView(overrides: Partial<ExperimentView> = {}): ExperimentView {
   return {
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
-    announce_log: '/var/log/torrentfs/lab.jsonl',
+    announce_log: '/var/log/torrentfs/experiment.jsonl',
     peer_sample_interval_seconds: 5,
     totals: {
       real_uploaded_bytes: 5_000_000,
@@ -66,7 +66,7 @@ afterEach(() => cleanup());
 
 describe('ExperimentsPage', () => {
   it('renders the running experiment and the live counters', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(labView())));
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(experimentView())));
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
@@ -75,7 +75,7 @@ describe('ExperimentsPage', () => {
     expect(screen.getByText('虚报速率')).toBeInTheDocument();
     expect(screen.getByText('2MiB/s')).toBeInTheDocument();
     expect(screen.getByText('42')).toBeInTheDocument();
-    expect(screen.getByText('/var/log/torrentfs/lab.jsonl')).toBeInTheDocument();
+    expect(screen.getByText('/var/log/torrentfs/experiment.jsonl')).toBeInTheDocument();
     expect(screen.getByText('5 秒')).toBeInTheDocument();
     expect(screen.getByText('实时真实上传')).toBeInTheDocument();
     expect(screen.getByText('Tracker 上报')).toBeInTheDocument();
@@ -83,7 +83,7 @@ describe('ExperimentsPage', () => {
   });
 
   it('does not offer a settings form: the configuration page owns the values', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(labView())));
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(experimentView())));
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
@@ -99,7 +99,7 @@ describe('ExperimentsPage', () => {
   });
 
   it('shows the baseline default without hiding the page', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(labView({
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(experimentView({
       settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
       seed: 7,
       announce_log: '',
@@ -122,7 +122,7 @@ describe('ExperimentsPage', () => {
   it('offers a retry when the first read fails', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ error: 'boom' }, 400))
-      .mockResolvedValue(jsonResponse(labView()));
+      .mockResolvedValue(jsonResponse(experimentView()));
     renderPage(fetchMock);
 
     await waitFor(() => expect(screen.getByText('无法读取上传实验状态')).toBeInTheDocument());

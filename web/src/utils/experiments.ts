@@ -1,8 +1,8 @@
-import type { LabMode, LabTorrentStat, LabView } from '../types/api';
+import type { ExperimentMode, ExperimentTorrentStat, ExperimentView } from '../types/api';
 import { formatBytes, formatDate } from './format';
 
-export interface LabModeOption {
-  value: LabMode;
+export interface ExperimentModeOption {
+  value: ExperimentMode;
   label: string;
   description: string;
 }
@@ -12,7 +12,7 @@ export interface LabModeOption {
  * explicit, because which one is active decides whether the reported upload is
  * related to real peer traffic at all.
  */
-export const LAB_MODE_OPTIONS: readonly LabModeOption[] = [
+export const EXPERIMENT_MODE_OPTIONS: readonly ExperimentModeOption[] = [
   {
     value: 'baseline',
     label: '基线（真实上报）',
@@ -30,12 +30,12 @@ export const LAB_MODE_OPTIONS: readonly LabModeOption[] = [
   },
 ];
 
-export function labModeOption(mode: LabMode | '' | undefined): LabModeOption | undefined {
-  return LAB_MODE_OPTIONS.find((option) => option.value === mode);
+export function experimentModeOption(mode: ExperimentMode | '' | undefined): ExperimentModeOption | undefined {
+  return EXPERIMENT_MODE_OPTIONS.find((option) => option.value === mode);
 }
 
-export function labModeLabel(mode: LabMode | '' | undefined): string {
-  return labModeOption(mode)?.label ?? '—';
+export function experimentModeLabel(mode: ExperimentMode | '' | undefined): string {
+  return experimentModeOption(mode)?.label ?? '—';
 }
 
 /**
@@ -44,7 +44,7 @@ export function labModeLabel(mode: LabMode | '' | undefined): string {
  * announce, so diffing it against the live counter would show a misleading
  * negative "overreport" while real traffic is simply ahead of the last report.
  */
-export function labOverreportedBytes(reported: number, realAtLastAnnounce: number): number {
+export function experimentOverreportedBytes(reported: number, realAtLastAnnounce: number): number {
   return reported - realAtLastAnnounce;
 }
 
@@ -52,7 +52,7 @@ export function labOverreportedBytes(reported: number, realAtLastAnnounce: numbe
  * Real upload bytes accumulated since the last announce. They are visible to
  * the local counters but not yet reflected in the reported value.
  */
-export function labPendingRealUploadBytes(realUploaded: number, realAtLastAnnounce: number): number {
+export function experimentPendingRealUploadBytes(realUploaded: number, realAtLastAnnounce: number): number {
   return realUploaded - realAtLastAnnounce;
 }
 
@@ -70,15 +70,15 @@ export function formatSignedBytes(value: number): string {
   return `${value > 0 ? '+' : '-'}${formatBytes(Math.abs(value))}`;
 }
 
-export function labTorrentStat(view: LabView | undefined, infoHash: string): LabTorrentStat | undefined {
+export function experimentTorrentStat(view: ExperimentView | undefined, infoHash: string): ExperimentTorrentStat | undefined {
   if (view === undefined || infoHash === '') {
     return undefined;
   }
   return view.torrents.find((stat) => stat.info_hash === infoHash);
 }
 
-/** Indexes per-torrent lab counters by info hash for the task list. */
-export function indexLabTorrentStats(view: LabView | undefined): Map<string, LabTorrentStat> {
+/** Indexes per-torrent experiment counters by info hash for the task list. */
+export function indexExperimentTorrentStats(view: ExperimentView | undefined): Map<string, ExperimentTorrentStat> {
   if (view === undefined) {
     return new Map();
   }

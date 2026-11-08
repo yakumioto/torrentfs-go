@@ -3,7 +3,7 @@ export const queryKeys = {
   categories: ['categories'] as const,
   runtimeStats: ['runtime-stats'] as const,
   config: ['config'] as const,
-  lab: ['lab'] as const,
+  experiments: ['experiments'] as const,
   torrent: (id: string) => ['torrent', id] as const,
   torrentStatus: (id: string) => ['torrent-status', id] as const,
   operation: (operationId: string) => ['operation', operationId] as const,

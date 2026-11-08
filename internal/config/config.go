@@ -458,17 +458,26 @@ func (c Config) validateSyntax(collector *validationCollector) {
 // package: they decide what a set of settings means, not whether a value is
 // usable on its own.
 func (c Config) validateUploadExperimentShape() error {
-	upload := c.Experiments.Upload
-	if upload.Rate < 0 {
+	return c.Experiments.Upload.ValidateShape()
+}
+
+// ValidateShape checks the value ranges of the upload statistics experiment.
+//
+// The rules that relate one setting to another (which mode a rate or a
+// multiplier belongs to) live in the experiment package, because they decide
+// what a set of settings means. The experiment settings mapping calls this
+// function too, so the value ranges are written down once.
+func (u UploadExperiment) ValidateShape() error {
+	if u.Rate < 0 {
 		return invalid("experiments.upload.rate", errPositive)
 	}
-	if upload.Jitter < 0 || upload.Jitter > 100 {
+	if u.Jitter < 0 || u.Jitter > 100 {
 		return invalid("experiments.upload.jitter", errors.New("must be between 0 and 100 percent"))
 	}
-	if upload.Multiplier != 0 && upload.Multiplier <= 1 {
+	if u.Multiplier != 0 && u.Multiplier <= 1 {
 		return invalid("experiments.upload.multiplier", errors.New("must be greater than 1"))
 	}
-	if upload.PeerSampleInterval < 0 {
+	if u.PeerSampleInterval < 0 {
 		return invalid("experiments.upload.peer_sample_interval", errPositive)
 	}
 	return nil
@@ -531,10 +540,17 @@ func (c Config) validateSMBShape() error {
 }
 
 func validateAuth(auth Auth) error {
-	if auth.TokenTTL <= 0 {
+	return ValidateTokenTTL(time.Duration(auth.TokenTTL))
+}
+
+// ValidateTokenTTL checks a login-token lifetime against the configuration and
+// the authentication service. Both entry points call it, so a lifetime the
+// configuration page saves is the lifetime the running service accepts.
+func ValidateTokenTTL(ttl time.Duration) error {
+	if ttl <= 0 {
 		return invalid("http.auth.token_ttl", errPositive)
 	}
-	if time.Duration(auth.TokenTTL) > 24*time.Hour {
+	if ttl > 24*time.Hour {
 		return invalid("http.auth.token_ttl", errAuthTokenTTLMax)
 	}
 	return nil

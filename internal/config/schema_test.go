@@ -607,6 +607,38 @@ func TestEnvironmentFUSEMountpointDoesNotSelectBackend(t *testing.T) {
 	}
 }
 
+// TestSchemaKindsAreCanonicalWireValues covers the contract that a kind is a
+// stable machine-readable value shared with the configuration page. The page
+// maps the kind onto its editor and label, so a kind with a space or a
+// different spelling silently falls back to a generic editor.
+func TestSchemaKindsAreCanonicalWireValues(t *testing.T) {
+	canonical := map[string]bool{
+		"string":        true,
+		"bool":          true,
+		"int":           true,
+		"int64":         true,
+		"duration":      true,
+		"byte_quantity": true,
+		"byte_rate":     true,
+		"percent":       true,
+		"ratio":         true,
+		"list":          true,
+		"enum":          true,
+	}
+	seen := map[string]bool{}
+	for _, key := range Schema() {
+		if !canonical[key.Kind] {
+			t.Errorf("the configuration key %q has the non-canonical kind %q", key.Path, key.Kind)
+		}
+		seen[key.Kind] = true
+	}
+	for _, kind := range []string{"byte_quantity", "byte_rate"} {
+		if !seen[kind] {
+			t.Errorf("the schema never reports the kind %q", kind)
+		}
+	}
+}
+
 // configValue returns the effective value of a configuration key.
 func configValue(t *testing.T, cfg *Config, path string) any {
 	t.Helper()

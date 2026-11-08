@@ -202,6 +202,7 @@ func TestValueTextRendersAValueForTheConfigurationPage(t *testing.T) {
 	cfg.Log.Level = "debug"
 	cfg.Log.AddSource = true
 	cfg.Connections.ListenPort = 51413
+	cfg.UploadRate.Limit = config.ByteRate(1 << 20)
 
 	tests := []struct {
 		path string
@@ -212,6 +213,8 @@ func TestValueTextRendersAValueForTheConfigurationPage(t *testing.T) {
 		{"log.add_source", "true"},
 		{"connections.listen_port", "51413"},
 		{"http.auth.token_ttl", "30m0s"},
+		{"upload_rate.limit", "1MiB/s"},
+		{"upload_rate.schedule_start", ""},
 	}
 	for _, test := range tests {
 		got, ok := config.ValueText(cfg, test.path)

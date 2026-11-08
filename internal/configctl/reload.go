@@ -11,6 +11,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/configcheck"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 )
 
 // DefaultReloadInterval is how often Watch checks the configuration file for
@@ -21,18 +22,6 @@ const DefaultReloadInterval = 2 * time.Second
 // It cannot collide with a SHA-256 hex digest, so a file that reappears is
 // always a change the next poll examines.
 const missingFileDigest = "-"
-
-// WithReloadInterval sets how often Watch checks the configuration file. A
-// non-positive interval keeps the default. The interval is a parameter so an
-// embedder or a test can shorten or lengthen the poll without changing the
-// reload path itself.
-func WithReloadInterval(interval time.Duration) Option {
-	return func(controller *Controller) {
-		if interval > 0 {
-			controller.reloadInterval = interval
-		}
-	}
-}
 
 // ReloadResult is the outcome of one external-change check.
 type ReloadResult struct {
@@ -100,10 +89,11 @@ func (c *Controller) CheckExternalChange() (ReloadResult, error) {
 	// not one failure per poll until the file changes again.
 	c.observed = digest
 
-	fileConfig, _, err := config.LoadContentWithSourcesFromEnvironment(content, c.path, emptyEnvironment{})
+	file, err := configwrite.Load(content, c.path)
 	if err != nil {
 		return c.failReloadLocked(err)
 	}
+	fileConfig := file.Config
 	effective, effectiveSources, err := configcheck.LoadContent(content, c.path)
 	if err != nil {
 		return c.failReloadLocked(err)
@@ -177,6 +167,9 @@ func (c *Controller) Watch(ctx context.Context) {
 }
 
 // tickerFactory produces the tick channel of the poll and its stop function.
+//
+// The interval is the production poll period; the tests replace the factory
+// with one they send on, so they drive the poll without waiting for it.
 type tickerFactory func(time.Duration) (<-chan time.Time, func())
 
 // productionTicker is the real poll clock.

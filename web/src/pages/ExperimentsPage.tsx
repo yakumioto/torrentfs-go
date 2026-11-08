@@ -2,14 +2,14 @@ import { Alert, Badge, Button, Group, Loader } from '@mantine/core';
 import { IconAdjustments, IconAlertTriangle, IconFlask, IconRefresh } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
-import { useLab } from '../queries/hooks';
+import { useExperiment } from '../queries/hooks';
 import { formatBytes } from '../utils/format';
 import {
   formatPeerSampleInterval,
   formatSignedBytes,
-  labModeLabel,
-  labModeOption,
-} from '../utils/lab';
+  experimentModeLabel,
+  experimentModeOption,
+} from '../utils/experiments';
 import { formatByteQuantity, formatUploadRate } from '../utils/quantities';
 import { usePageVisible } from '../utils/visibility';
 import styles from './ExperimentsPage.module.css';
@@ -24,12 +24,12 @@ import styles from './ExperimentsPage.module.css';
 export function ExperimentsPage() {
   const auth = useAuth();
   const visible = usePageVisible();
-  const query = useLab(auth.api, auth.isReady && visible);
+  const query = useExperiment(auth.api, auth.isReady && visible);
 
   const view = query.data;
   const settings = view?.settings;
   const totals = view?.totals;
-  const modeDescription = labModeOption(settings?.mode)?.description;
+  const modeDescription = experimentModeOption(settings?.mode)?.description;
 
   return (
     <div className={styles.page}>
@@ -48,7 +48,7 @@ export function ExperimentsPage() {
         </div>
         <Group gap="xs" align="center">
           {settings !== undefined && (
-            <Badge size="lg" variant="light" color="torrent">{labModeLabel(settings.mode)}</Badge>
+            <Badge size="lg" variant="light" color="torrent">{experimentModeLabel(settings.mode)}</Badge>
           )}
           <Button
             component={Link}
@@ -96,7 +96,7 @@ export function ExperimentsPage() {
               </div>
             </div>
             <dl className={styles.metaList}>
-              <div><dt>实验模式</dt><dd>{labModeLabel(settings.mode)}</dd></div>
+              <div><dt>实验模式</dt><dd>{experimentModeLabel(settings.mode)}</dd></div>
               {settings.mode === 'inject' && (
                 <div><dt>虚报速率</dt><dd className="text-mono">{formatUploadRate(settings.rate_bytes_per_second)}</dd></div>
               )}

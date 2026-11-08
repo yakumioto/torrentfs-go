@@ -1,17 +1,17 @@
 import { Badge } from '@mantine/core';
 import { IconFlask } from '@tabler/icons-react';
-import type { LabView } from '../../types/api';
+import type { ExperimentView } from '../../types/api';
 import { formatBytes, formatDate } from '../../utils/format';
 import {
   formatPeerSampleInterval,
   formatRelativeTime,
   formatSignedBytes,
-  labModeLabel,
-  labOverreportedBytes,
-  labPendingRealUploadBytes,
-  labTorrentStat,
-} from '../../utils/lab';
-import styles from './TorrentLabSummary.module.css';
+  experimentModeLabel,
+  experimentOverreportedBytes,
+  experimentPendingRealUploadBytes,
+  experimentTorrentStat,
+} from '../../utils/experiments';
+import styles from './TorrentExperimentSummary.module.css';
 
 /**
  * Per-torrent view of the always-on synthetic-upload experiment. It renders
@@ -21,31 +21,31 @@ import styles from './TorrentLabSummary.module.css';
  * announce; the live counter and the pending delta are shown separately so a
  * large gap is explained rather than read as a broken multiplier.
  */
-export function TorrentLabSummary({ lab, infoHash }: { lab?: LabView; infoHash: string }) {
-  if (lab === undefined) {
+export function TorrentExperimentSummary({ experiment, infoHash }: { experiment?: ExperimentView; infoHash: string }) {
+  if (experiment === undefined) {
     return null;
   }
-  const stat = labTorrentStat(lab, infoHash);
+  const stat = experimentTorrentStat(experiment, infoHash);
   const overreported = stat === undefined
     ? undefined
-    : labOverreportedBytes(stat.reported_uploaded_bytes, stat.real_uploaded_at_last_announce_bytes);
+    : experimentOverreportedBytes(stat.reported_uploaded_bytes, stat.real_uploaded_at_last_announce_bytes);
   const pending = stat === undefined
     ? undefined
-    : labPendingRealUploadBytes(stat.real_uploaded_bytes, stat.real_uploaded_at_last_announce_bytes);
+    : experimentPendingRealUploadBytes(stat.real_uploaded_bytes, stat.real_uploaded_at_last_announce_bytes);
   const tone = overreported === undefined
     ? undefined
     : overreported > 0 ? styles.surplus : overreported < 0 ? styles.shortfall : undefined;
 
   return (
-    <section className={`${styles.panel} panel panel--padding`} aria-labelledby="torrent-lab-title">
+    <section className={`${styles.panel} panel panel--padding`} aria-labelledby="torrent-experiment-title">
       <div className="section-heading">
         <div>
           <p className="eyebrow">反作弊测试</p>
-          <h2 id="torrent-lab-title" className={styles.title}>
+          <h2 id="torrent-experiment-title" className={styles.title}>
             <IconFlask size={17} aria-hidden="true" /> 上传实验
           </h2>
         </div>
-        <Badge variant="light" color="torrent">{labModeLabel(lab.settings.mode)}</Badge>
+        <Badge variant="light" color="torrent">{experimentModeLabel(experiment.settings.mode)}</Badge>
       </div>
       <dl className={styles.grid}>
         <div><dt>实时真实上传</dt><dd>{stat === undefined ? '—' : formatBytes(stat.real_uploaded_bytes)}</dd></div>
@@ -61,7 +61,7 @@ export function TorrentLabSummary({ lab, infoHash }: { lab?: LabView; infoHash: 
       <p className={styles.note}>
         Tracker 只在上报（announce）时看到新值，两次 announce 之间实时真实上传会领先于上报值；
         虚报量按上次上报时点对比，待上报真实增量会在下次 announce 时按实验模式计入上报。
-        本轮实验的 peer 采样间隔为 {formatPeerSampleInterval(lab.peer_sample_interval_seconds)}。
+        本轮实验的 peer 采样间隔为 {formatPeerSampleInterval(experiment.peer_sample_interval_seconds)}。
       </p>
       {stat !== undefined && stat.last_announce_at !== null && stat.last_announce_at !== undefined && (
         <p className={styles.note}>上次 announce 绝对时间：{formatDate(stat.last_announce_at)}</p>

@@ -8,8 +8,8 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-// labSettingsBody is the wire form of the runtime-tunable experiment settings.
-type labSettingsBody struct {
+// experimentSettingsBody is the wire form of the runtime-tunable experiment settings.
+type experimentSettingsBody struct {
 	Mode               string  `json:"mode"`
 	RateBytesPerSecond int64   `json:"rate_bytes_per_second"`
 	Multiplier         float64 `json:"multiplier"`
@@ -17,10 +17,10 @@ type labSettingsBody struct {
 	CapBytes           int64   `json:"cap_bytes"`
 }
 
-// labTorrentBody is the per-torrent real versus reported upload comparison.
+// experimentTorrentBody is the per-torrent real versus reported upload comparison.
 // RealUploadedBytes is live; RealUploadedAtLastAnnounceBytes is the same counter
 // when the last announce was sent, which is the value the tracker can see.
-type labTorrentBody struct {
+type experimentTorrentBody struct {
 	InfoHash                        string     `json:"info_hash"`
 	RealUploadedBytes               int64      `json:"real_uploaded_bytes"`
 	RealUploadedAtLastAnnounceBytes int64      `json:"real_uploaded_at_last_announce_bytes"`
@@ -28,11 +28,11 @@ type labTorrentBody struct {
 	LastAnnounceAt                  *time.Time `json:"last_announce_at"`
 }
 
-// labTotalsBody aggregates the tracked torrents. OverreportedBytes is reported
+// experimentTotalsBody aggregates the tracked torrents. OverreportedBytes is reported
 // minus the real counter at the last announce and may be negative;
 // PendingRealUploadBytes is the live counter minus that same announce-time
 // counter, i.e. traffic the tracker has not seen yet.
-type labTotalsBody struct {
+type experimentTotalsBody struct {
 	RealUploadedBytes               int64 `json:"real_uploaded_bytes"`
 	RealUploadedAtLastAnnounceBytes int64 `json:"real_uploaded_at_last_announce_bytes"`
 	ReportedUploadedBytes           int64 `json:"reported_uploaded_bytes"`
@@ -40,22 +40,22 @@ type labTotalsBody struct {
 	PendingRealUploadBytes          int64 `json:"pending_real_upload_bytes"`
 }
 
-// labBody is the GET /api/v1/experiments/upload response contract. The
+// experimentBody is the GET /api/v1/experiments/upload response contract. The
 // experiment is always on, so the response always carries settings and
 // counters; there is no enabled field.
-type labBody struct {
-	Settings                  labSettingsBody  `json:"settings"`
-	Seed                      int64            `json:"seed"`
-	AnnounceLog               string           `json:"announce_log"`
-	PeerSampleIntervalSeconds float64          `json:"peer_sample_interval_seconds"`
-	Totals                    labTotalsBody    `json:"totals"`
-	Torrents                  []labTorrentBody `json:"torrents"`
+type experimentBody struct {
+	Settings                  experimentSettingsBody  `json:"settings"`
+	Seed                      int64                   `json:"seed"`
+	AnnounceLog               string                  `json:"announce_log"`
+	PeerSampleIntervalSeconds float64                 `json:"peer_sample_interval_seconds"`
+	Totals                    experimentTotalsBody    `json:"totals"`
+	Torrents                  []experimentTorrentBody `json:"torrents"`
 }
 
-func newLabBody(status session.LabStatus) labBody {
+func newExperimentBody(status session.ExperimentStatus) experimentBody {
 	settings := status.Settings
-	body := labBody{
-		Settings: labSettingsBody{
+	body := experimentBody{
+		Settings: experimentSettingsBody{
 			Mode:               string(settings.Mode),
 			RateBytesPerSecond: int64(math.Round(settings.RateBytesPerSecond)),
 			Multiplier:         settings.Multiplier,
@@ -65,10 +65,10 @@ func newLabBody(status session.LabStatus) labBody {
 		Seed:                      status.Seed,
 		AnnounceLog:               status.AnnounceLogPath,
 		PeerSampleIntervalSeconds: status.PeerSampleInterval.Seconds(),
-		Torrents:                  []labTorrentBody{},
+		Torrents:                  []experimentTorrentBody{},
 	}
 	for _, torrent := range status.Torrents {
-		entry := labTorrentBody{
+		entry := experimentTorrentBody{
 			InfoHash:                        torrent.InfoHash,
 			RealUploadedBytes:               torrent.RealUploadedBytes,
 			RealUploadedAtLastAnnounceBytes: torrent.RealUploadedAtLastAnnounceBytes,
@@ -88,6 +88,6 @@ func newLabBody(status session.LabStatus) labBody {
 	return body
 }
 
-func (s *Server) handleGetLab(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, newLabBody(s.backend.LabStatus()))
+func (s *Server) handleGetExperiment(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, newExperimentBody(s.backend.ExperimentStatus()))
 }

@@ -19,6 +19,7 @@ import (
 	"strconv"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -136,52 +137,41 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 		return fallbackToLegacy(options, result, settings, sidecar, logger,
 			"the configuration file could not be read", err)
 	}
-	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, options.ConfigPath, emptyEnvironment{})
+	file, err := configwrite.Load(content, options.ConfigPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("configmigrate: load the file configuration: %w", err)
 	}
 
 	filePatch := legacyFilePatch(settings)
-	var missing []string
+	missingPatch := map[string]string{}
 	for _, path := range uploadRateKeys {
-		if _, ok := filePatch[path]; !ok {
+		text, ok := filePatch[path]
+		if !ok {
 			continue
 		}
-		if fileSources.FromFile(path) {
+		if file.Sources.FromFile(path) {
 			// The configuration file already carries the key: a value the
 			// operator wrote by hand wins over the retired sidecar.
 			continue
 		}
-		missing = append(missing, path)
+		missingPatch[path] = text
 	}
 
-	if len(missing) > 0 {
-		candidate := fileConfig
-		for _, path := range missing {
-			if err := config.SetText(&candidate, path, filePatch[path]); err != nil {
-				return Result{}, fmt.Errorf("configmigrate: apply the retired value of %s: %w", path, err)
-			}
-		}
-		document, err := config.WriteBack{File: candidate, Sources: fileSources, Changed: missing}.TOML()
+	var migratedKeys []string
+	if len(missingPatch) > 0 {
+		// The shared write-back pipeline loads the file layer, renders the
+		// sparse document, and validates it through the same loader and
+		// process rules as a start. The imported window and limit have
+		// already been validated together, so this only catches a conflict
+		// with the rest of the file.
+		prepared, err := configwrite.Prepare(file, options.ConfigPath, missingPatch, false)
 		if err != nil {
-			return Result{}, fmt.Errorf("configmigrate: render the configuration file: %w", err)
-		}
-		// Validate the file layer through the same loader a start uses. The
-		// imported window and limit have already been validated together, so
-		// this only catches a conflict with the rest of the file.
-		if _, _, err := config.LoadContentWithSourcesFromEnvironment(document, options.ConfigPath, emptyEnvironment{}); err != nil {
 			return Result{}, fmt.Errorf("configmigrate: the migrated configuration is invalid: %w", err)
 		}
+		migratedKeys = prepared.Changed
 
-		writeBackFile := options.WriteBackFile
-		if writeBackFile == nil {
-			writeBackFile = config.WriteBackFile
-		}
-		published, writeErr := writeBackFile(options.ConfigPath, document)
+		published, writeErr := configwrite.Publish(options.ConfigPath, prepared.Document, options.WriteBackFile)
 		if !published {
-			if writeErr == nil {
-				writeErr = errors.New("the write-back did not publish the configuration file")
-			}
 			return fallbackToLegacy(options, result, settings, sidecar, logger,
 				"the configuration file could not be written", writeErr)
 		}
@@ -196,7 +186,7 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 		if result.Sources == nil {
 			result.Sources = config.Sources{}
 		}
-		for _, path := range missing {
+		for _, path := range prepared.Changed {
 			if result.Sources.SourceOf(path) == config.SourceEnvironment {
 				continue
 			}
@@ -215,7 +205,7 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 	}
 	result.Migrated = true
 	logger.Info("upload rate settings migrated into the configuration file",
-		"path", options.ConfigPath, "keys", missing)
+		"path", options.ConfigPath, "keys", migratedKeys)
 	return result, nil
 }
 
@@ -235,11 +225,22 @@ func fallbackToLegacy(options Options, result Result, settings session.UploadRat
 // applyLegacyRuntime overlays the sidecar value onto the runtime configuration.
 //
 // Every upload-rate key is overwritten unless the environment supplies it: the
-// sidecar is a complete value, and an empty window must clear a window the file
-// carries. The configuration page keeps reporting the file values, and it is
-// read-only in every deployment that reaches this path.
+// environment is a configuration source and wins over the retired sidecar, so
+// a read-only deployment must keep the value it already runs with. The source
+// record follows the value, so the configuration page reports the same values
+// and sources the session uses.
+//
+// A runtime value that came from the retired sidecar is recorded as a file
+// value: the source model has only default, file, and environment, and the
+// sidecar is a persisted file the operator supplied. No configuration file is
+// writable in a deployment that takes this path, so the page is read-only and
+// names the real file it loaded; the upgraded file replaces that source on the
+// next writable start.
 func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) error {
 	patch := legacyRuntimePatch(settings)
+	if result.Sources == nil {
+		result.Sources = config.Sources{}
+	}
 	for _, path := range uploadRateKeys {
 		if result.Sources.SourceOf(path) == config.SourceEnvironment {
 			continue
@@ -247,8 +248,25 @@ func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) err
 		if err := config.SetText(&result.Config, path, patch[path]); err != nil {
 			return fmt.Errorf("configmigrate: apply the retired value of %s: %w", path, err)
 		}
+		result.Sources[path] = config.SourceFile
 	}
 	return nil
+}
+
+// legacyValues returns the text of every sidecar value and whether the
+// sidecar carries it. The file merge and the runtime fallback both map the
+// same record, so the conversion lives in one place.
+func legacyValues(settings session.UploadRateSettings) (limit, start, end string, hasLimit, hasWindow bool) {
+	if settings.RateLimitBytesPerSecond > 0 {
+		limit = legacyByteRate(settings.RateLimitBytesPerSecond)
+		hasLimit = true
+	}
+	if settings.Schedule != nil {
+		start = settings.Schedule.Start
+		end = settings.Schedule.End
+		hasWindow = true
+	}
+	return limit, start, end, hasLimit, hasWindow
 }
 
 // legacyFilePatch returns the sidecar values a writable file should receive.
@@ -257,13 +275,14 @@ func applyLegacyRuntime(result *Result, settings session.UploadRateSettings) err
 // or window stays absent and keeps its built-in default. A schedule implies a
 // positive limit, so both are written together.
 func legacyFilePatch(settings session.UploadRateSettings) map[string]string {
+	limit, start, end, hasLimit, hasWindow := legacyValues(settings)
 	patch := map[string]string{}
-	if settings.RateLimitBytesPerSecond > 0 {
-		patch["upload_rate.limit"] = legacyByteRate(settings.RateLimitBytesPerSecond)
+	if hasLimit {
+		patch["upload_rate.limit"] = limit
 	}
-	if settings.Schedule != nil {
-		patch["upload_rate.schedule_start"] = settings.Schedule.Start
-		patch["upload_rate.schedule_end"] = settings.Schedule.End
+	if hasWindow {
+		patch["upload_rate.schedule_start"] = start
+		patch["upload_rate.schedule_end"] = end
 	}
 	return patch
 }
@@ -272,19 +291,12 @@ func legacyFilePatch(settings session.UploadRateSettings) map[string]string {
 // an unset limit and window are written as empty values so they clear a file
 // value in the running configuration.
 func legacyRuntimePatch(settings session.UploadRateSettings) map[string]string {
-	patch := map[string]string{
-		"upload_rate.limit":          "",
-		"upload_rate.schedule_start": "",
-		"upload_rate.schedule_end":   "",
+	limit, start, end, _, _ := legacyValues(settings)
+	return map[string]string{
+		"upload_rate.limit":          limit,
+		"upload_rate.schedule_start": start,
+		"upload_rate.schedule_end":   end,
 	}
-	if settings.RateLimitBytesPerSecond > 0 {
-		patch["upload_rate.limit"] = legacyByteRate(settings.RateLimitBytesPerSecond)
-	}
-	if settings.Schedule != nil {
-		patch["upload_rate.schedule_start"] = settings.Schedule.Start
-		patch["upload_rate.schedule_end"] = settings.Schedule.End
-	}
-	return patch
 }
 
 // legacyByteRate renders a sidecar rate as the text the configuration parser
@@ -357,13 +369,3 @@ func readLegacyUploadRateSettings(path string) (session.UploadRateSettings, bool
 	}
 	return normalized, true, nil
 }
-
-// emptyEnvironment is an environment with no variable set. The file layer is
-// loaded through the same loader a start uses, with the environment left out.
-type emptyEnvironment struct{}
-
-// Lookup reports that no environment variable is set.
-func (emptyEnvironment) Lookup(string) (string, bool) { return "", false }
-
-// Names reports no environment variable.
-func (emptyEnvironment) Names() []string { return nil }

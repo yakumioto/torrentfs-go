@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 )
 
 // Stable machine-readable reasons a configuration key, or the whole page,
@@ -133,12 +134,12 @@ func (c *Controller) loadInitialFileState() {
 	}
 	digest := configurationBaseline(content)
 	c.observed = digest
-	fileConfig, _, err := config.LoadContentWithSourcesFromEnvironment(content, c.path, emptyEnvironment{})
+	file, err := configwrite.Load(content, c.path)
 	if err != nil {
 		c.fileError = fmt.Sprintf("configctl: load the file configuration: %v", err)
 		return
 	}
-	c.fileConfig = fileConfig
+	c.fileConfig = file.Config
 	c.baseline = digest
 }
 
@@ -274,19 +275,6 @@ func normalizeStatus(status Status) Status {
 	}
 	return status
 }
-
-// emptyEnvironment is an environment with no variable set.
-//
-// The file configuration is the built-in defaults overlaid with the file, so
-// the view loads it through the same loader with an empty environment instead
-// of repeating the merge.
-type emptyEnvironment struct{}
-
-// Lookup reports that no environment variable is set.
-func (emptyEnvironment) Lookup(string) (string, bool) { return "", false }
-
-// Names reports no environment variable.
-func (emptyEnvironment) Names() []string { return nil }
 
 // View is the read-only configuration the configuration page renders.
 type View struct {

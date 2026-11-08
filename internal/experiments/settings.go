@@ -125,6 +125,12 @@ func DefaultSettings() Settings {
 // its mode is an error that names the mode to add, so a mistyped or obsolete
 // configuration cannot silently change what the tracker sees.
 func SettingsFrom(cfg config.UploadExperiment) (Settings, error) {
+	// The value ranges are the configuration's shape rule, not a second copy
+	// here. The mode relationships below decide what a valid set of values
+	// means.
+	if err := cfg.ValidateShape(); err != nil {
+		return Settings{}, err
+	}
 	mode := Mode(strings.ToLower(strings.TrimSpace(cfg.Mode)))
 	if mode == "" {
 		mode = ModeBaseline

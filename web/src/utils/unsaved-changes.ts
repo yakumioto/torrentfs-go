@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useEffect } from 'react';
+import { useBlocker } from 'react-router-dom';
 
 export interface UnsavedChangesGuard {
   /** The in-app destination the user tried to open while the page was dirty. */
@@ -11,66 +11,19 @@ export interface UnsavedChangesGuard {
 }
 
 /**
- * Guards page unload and in-app link navigation while a form has unsaved
- * changes. The application uses the declarative router, whose blocker API is
- * only available with data routers, so link clicks are intercepted in the
- * capture phase before the router sees them.
+ * Guards page unload and every in-app navigation while a form has unsaved
+ * changes.
+ *
+ * The application uses a data router, so the router's own blocker API covers
+ * link clicks, programmatic navigation, and the browser's back/forward
+ * buttons. A hash change on the same page and a click on the page already
+ * open are not navigations away, so they do not interrupt the user.
  */
 export function useUnsavedChangesGuard(dirty: boolean): UnsavedChangesGuard {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const dirtyRef = useRef(dirty);
-  const locationRef = useRef(location);
-  const [pendingHref, setPendingHref] = useState<string | null>(null);
-
-  useEffect(() => {
-    locationRef.current = location;
-  }, [location]);
-
-  useEffect(() => {
-    dirtyRef.current = dirty;
-    if (!dirty) {
-      setPendingHref(null);
-    }
-  }, [dirty]);
-
-  useEffect(() => {
-    const handleClick = (event: MouseEvent) => {
-      if (!dirtyRef.current || event.defaultPrevented) {
-        return;
-      }
-      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-        return;
-      }
-      const target = event.target;
-      if (!(target instanceof Element)) {
-        return;
-      }
-      const anchor = target.closest('a[href]');
-      if (!(anchor instanceof HTMLAnchorElement)) {
-        return;
-      }
-      if (anchor.target !== '' && anchor.target !== '_self') {
-        return;
-      }
-      if (anchor.hasAttribute('download')) {
-        return;
-      }
-      const href = anchor.getAttribute('href') ?? '';
-      if (!href.startsWith('/') || href.startsWith('//')) {
-        return;
-      }
-      // A link to the page already open is not a navigation worth guarding.
-      if (href === locationRef.current.pathname) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      setPendingHref(href);
-    };
-    document.addEventListener('click', handleClick, true);
-    return () => document.removeEventListener('click', handleClick, true);
-  }, []);
+  const blocker = useBlocker(({ currentLocation, nextLocation }) =>
+    dirty
+    && (nextLocation.pathname !== currentLocation.pathname
+      || nextLocation.search !== currentLocation.search));
 
   useEffect(() => {
     if (!dirty) {
@@ -85,14 +38,20 @@ export function useUnsavedChangesGuard(dirty: boolean): UnsavedChangesGuard {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [dirty]);
 
+  const blocked = blocker.state === 'blocked';
   return {
-    pendingHref,
+    pendingHref: blocked
+      ? `${blocker.location.pathname}${blocker.location.search}${blocker.location.hash}`
+      : null,
     leave: () => {
-      if (pendingHref !== null) {
-        setPendingHref(null);
-        navigate(pendingHref);
+      if (blocker.state === 'blocked') {
+        blocker.proceed();
       }
     },
-    stay: () => setPendingHref(null),
+    stay: () => {
+      if (blocker.state === 'blocked') {
+        blocker.reset();
+      }
+    },
   };
 }

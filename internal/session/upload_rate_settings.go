@@ -45,37 +45,30 @@ func cloneUploadRateSettings(settings UploadRateSettings) UploadRateSettings {
 // validateUploadRateSettings normalizes and validates settings and compiles the
 // runtime policy from the same pass, so validation and compilation cannot
 // drift.
+//
+// The cross-field rules live in the configuration package, next to the keys
+// they describe. The runtime type only adds the nil-versus-empty distinction
+// of its optional schedule before mapping onto the shared shape.
 func validateUploadRateSettings(settings UploadRateSettings) (UploadRateSettings, uploadRatePolicy, error) {
 	fail := func(format string, args ...any) (UploadRateSettings, uploadRatePolicy, error) {
 		return UploadRateSettings{}, uploadRatePolicy{}, fmt.Errorf("%w: %s", ErrInvalidUploadRateSettings, fmt.Sprintf(format, args...))
 	}
-	if settings.RateLimitBytesPerSecond < 0 {
-		return fail("rate_limit_bytes_per_second must not be negative")
-	}
-
+	shape := config.UploadRate{Limit: config.ByteRate(settings.RateLimitBytesPerSecond)}
 	normalized := UploadRateSettings{RateLimitBytesPerSecond: settings.RateLimitBytesPerSecond}
-	if settings.Schedule == nil {
-		return normalized, compileUploadRatePolicy(normalized), nil
+	if settings.Schedule != nil {
+		if settings.Schedule.Start == "" || settings.Schedule.End == "" {
+			return fail("schedule requires both start and end")
+		}
+		shape.ScheduleStart = settings.Schedule.Start
+		shape.ScheduleEnd = settings.Schedule.End
 	}
-	if settings.Schedule.Start == "" || settings.Schedule.End == "" {
-		return fail("schedule requires both start and end")
+	if err := shape.ValidateShape(); err != nil {
+		return fail("%v", err)
 	}
-	if settings.RateLimitBytesPerSecond <= 0 {
-		return fail("schedule requires a positive rate_limit_bytes_per_second")
+	if shape.ScheduleStart != "" {
+		schedule := UploadRateSchedule{Start: shape.ScheduleStart, End: shape.ScheduleEnd}
+		normalized.Schedule = &schedule
 	}
-	start, err := config.ParseUploadRateTime(settings.Schedule.Start)
-	if err != nil {
-		return fail("schedule.start: %v", err)
-	}
-	end, err := config.ParseUploadRateTime(settings.Schedule.End)
-	if err != nil {
-		return fail("schedule.end: %v", err)
-	}
-	if start >= end {
-		return fail("schedule.start must be before schedule.end")
-	}
-	schedule := *settings.Schedule
-	normalized.Schedule = &schedule
 	return normalized, compileUploadRatePolicy(normalized), nil
 }
 

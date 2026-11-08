@@ -44,7 +44,7 @@ type SchemaKey struct {
 	// configuration key.
 	Overridable bool
 	// Kind names the type of the value: string, bool, int, int64, duration,
-	// byte quantity, byte rate, percent, ratio, list, or enum.
+	// byte_quantity, byte_rate, percent, ratio, list, or enum.
 	Kind string
 	// Values lists the accepted values of an enumerated configuration key.
 	// It is empty for every other kind.
@@ -373,7 +373,7 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 				return nil, err
 			}
 			return ByteQuantity(value), nil
-		}, "byte quantity", true
+		}, "byte_quantity", true
 	case reflect.TypeOf([]string(nil)):
 		return func(raw string) (any, error) { return parseEnvList(raw), nil }, "list", true
 	case reflect.TypeOf(ByteRate(0)):
@@ -387,7 +387,7 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 				return nil, err
 			}
 			return ByteRate(value), nil
-		}, "byte rate", true
+		}, "byte_rate", true
 	case reflect.TypeOf(Percent(0)):
 		return func(raw string) (any, error) {
 			if strings.TrimSpace(raw) == "" {
@@ -428,7 +428,7 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 				return nil, err
 			}
 			return OptionalByteQuantity(value), nil
-		}, "byte quantity", true
+		}, "byte_quantity", true
 	case reflect.TypeOf(OptionalDuration(0)):
 		return func(raw string) (any, error) {
 			if strings.TrimSpace(raw) == "" {

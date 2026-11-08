@@ -11,8 +11,8 @@ import (
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-func TestGetLabAlwaysReturnsData(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{
+func TestGetExperimentAlwaysReturnsData(t *testing.T) {
+	backend := &fakeBackend{experimentStatus: session.ExperimentStatus{
 		Settings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline, JitterFraction: 0.2},
 		Seed:     42,
 	}}
@@ -41,17 +41,17 @@ func TestGetLabAlwaysReturnsData(t *testing.T) {
 	}
 }
 
-func TestGetLabReturnsTheLiveComparison(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{
-		Settings: session.LabSettings{
+func TestGetExperimentReturnsTheLiveComparison(t *testing.T) {
+	backend := &fakeBackend{experimentStatus: session.ExperimentStatus{
+		Settings: session.ExperimentSettings{
 			Mode:               experiments.ModeInject,
 			RateBytesPerSecond: 2 << 20,
 			JitterFraction:     0.2,
 		},
 		Seed:               42,
-		AnnounceLogPath:    "/tmp/lab.jsonl",
+		AnnounceLogPath:    "/tmp/experiments.jsonl",
 		PeerSampleInterval: 5 * time.Second,
-		Torrents: []session.LabTorrentStatus{
+		Torrents: []session.ExperimentTorrentStatus{
 			{
 				InfoHash:                        "aaaa",
 				RealUploadedBytes:               100,
@@ -105,7 +105,7 @@ func TestGetLabReturnsTheLiveComparison(t *testing.T) {
 	if got.Settings.JitterPercent != 20 {
 		t.Fatalf("jitter = %v, want 20", got.Settings.JitterPercent)
 	}
-	if got.Seed != 42 || got.AnnounceLog != "/tmp/lab.jsonl" || got.PeerSampleIntervalSeconds != 5 {
+	if got.Seed != 42 || got.AnnounceLog != "/tmp/experiments.jsonl" || got.PeerSampleIntervalSeconds != 5 {
 		t.Fatalf("metadata = seed %d log %q interval %v", got.Seed, got.AnnounceLog, got.PeerSampleIntervalSeconds)
 	}
 	if got.Totals.RealUploadedBytes != 150 ||
