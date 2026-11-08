@@ -22,8 +22,9 @@ type WriteBack struct {
 	// File is the file configuration layer the new file is rendered from.
 	File Config
 	// Sources records the input of every configuration key. A key whose
-	// source is SourceFile is a key the configuration file carries; an
-	// environment value is never written back.
+	// source is SourceFile is a key the configuration file carries. File must
+	// be the file layer, not the effective configuration: the renderer has no
+	// way to recover a file value the environment replaced.
 	Sources Sources
 	// Changed lists the configuration keys the caller changed. It is the
 	// second set of keys the document holds.
