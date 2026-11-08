@@ -235,9 +235,10 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var src session.Source
+	limit := s.maxUploadBytes()
 	switch mediaType {
 	case "application/json":
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		var body struct {
 			MagnetURI string `json:"magnet_uri"`
 		}
@@ -255,8 +256,8 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		src = session.Source{MagnetURI: body.MagnetURI}
 	case "multipart/form-data":
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
-		if err := r.ParseMultipartForm(s.maxUpload); err != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		if err := r.ParseMultipartForm(limit); err != nil {
 			if isTooLarge(err) {
 				writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 				return
@@ -316,7 +317,7 @@ func (s *Server) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "categories unavailable")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes())
 	var body struct {
 		Name *string `json:"name"`
 	}
@@ -346,7 +347,7 @@ func (s *Server) handleSetTorrentCategory(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "categories unavailable")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes())
 	var body struct {
 		Category *string `json:"category"`
 	}
@@ -402,7 +403,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetFavorite(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes())
 	var body struct {
 		Favorite *bool `json:"favorite"`
 	}
@@ -427,7 +428,7 @@ func (s *Server) handleSetFavorite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes())
 	var body struct {
 		OlderThanDays *int `json:"older_than_days"`
 	}

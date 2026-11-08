@@ -78,7 +78,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token:     token,
 		TokenType: "Bearer",
-		ExpiresIn: int64((s.tokenTTL + time.Second - 1) / time.Second),
+		ExpiresIn: int64((s.auth.TokenTTL() + time.Second - 1) / time.Second),
 	})
 }
 
