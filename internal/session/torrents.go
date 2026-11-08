@@ -204,7 +204,7 @@ func (s *Session) prepareTorrentSpecLocked(ctx context.Context, spec *torrent.To
 	if s.deletionPendingLocked(spec.InfoHash) {
 		return nil, false, fmt.Errorf("%w: %s", ErrDeleting, spec.InfoHash)
 	}
-	if s.cfg.Proxy.Socks5URL != "" {
+	if s.config.load().Proxy.Socks5URL != "" {
 		spec.Trackers = filterProxyTrackers(spec.Trackers)
 	}
 
@@ -363,7 +363,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 func (t *Torrent) openReaderHandle(r *raFile) *openedFile {
 	t.readersOpen.Add(1)
 	t.noteReadActivity()
-	readTimeout := time.Duration(t.session.cfg.Filesystem.ReadTimeout)
+	readTimeout := time.Duration(t.session.config.load().Filesystem.ReadTimeout)
 	return &openedFile{
 		file:        r,
 		readTimeout: readTimeout,

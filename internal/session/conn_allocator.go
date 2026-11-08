@@ -328,7 +328,7 @@ func (s *Session) allocatorNow() time.Time {
 func (s *Session) allocateConnections() {
 	now := s.connAlloc.clock()
 	timing := s.connAlloc.windows()
-	conn := s.cfg.Connections
+	conn := s.config.load().Connections
 	s.mu.RLock()
 	torrents := make([]*Torrent, 0, len(s.torrents))
 	for _, st := range s.torrents {
