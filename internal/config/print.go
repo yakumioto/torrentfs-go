@@ -229,6 +229,17 @@ func tomlValue(key PrintedKey) string {
 	}
 }
 
+// ValueText returns the value of the configuration key in cfg, rendered for a
+// human, and reports false for a path the schema does not know.
+//
+// The configuration page reads the text of the file layer and of the
+// effective configuration, so a reader sees the same shape a configuration
+// file uses. The caller is responsible for redacting a secret: this function
+// renders the value it is given.
+func ValueText(cfg Config, path string) (string, bool) {
+	return configurationValue(cfg, path)
+}
+
 // configurationValue returns the effective value of the configuration key with
 // the given path, rendered for a human.
 func configurationValue(cfg Config, path string) (string, bool) {
