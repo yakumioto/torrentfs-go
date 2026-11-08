@@ -49,13 +49,14 @@ func ParseUploadRateTime(raw string) (int, error) {
 	return hour*60 + minute, nil
 }
 
-// validateUploadRateShape checks the upload limit and its optional window.
+// ValidateShape checks the upload limit and its optional window.
 //
 // The rules that relate the keys to each other live here, in the same function
 // that checks a single value, so the start, the configuration page and the
-// runtime mapping cannot drift apart.
-func (c Config) validateUploadRateShape() error {
-	uploadRate := c.UploadRate
+// runtime mapping cannot drift apart. The session maps its runtime settings
+// onto this shape and calls the same function.
+func (u UploadRate) ValidateShape() error {
+	uploadRate := u
 	if uploadRate.Limit < 0 {
 		return invalid("upload_rate.limit", errNonNegative)
 	}
@@ -87,6 +88,12 @@ func (c Config) validateUploadRateShape() error {
 			errors.New("must be before upload_rate.schedule_end on the same day"))
 	}
 	return nil
+}
+
+// validateUploadRateShape checks the configuration values through the shared
+// shape rule.
+func (c Config) validateUploadRateShape() error {
+	return c.UploadRate.ValidateShape()
 }
 
 // UploadRateWindowConfigured reports whether both boundaries of the daily

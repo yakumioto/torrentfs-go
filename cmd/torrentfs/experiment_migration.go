@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/configcheck"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 	"github.com/yakumioto/torrentfs-go/internal/experiments"
 )
 
@@ -26,14 +26,6 @@ type experimentMigration struct {
 	// not archived.
 	ArchivedPath string
 }
-
-// migrationEnvironment is an environment with no variable set: the migration
-// merges into the file configuration layer, which the environment never
-// touches.
-type migrationEnvironment struct{}
-
-func (migrationEnvironment) Lookup(string) (string, bool) { return "", false }
-func (migrationEnvironment) Names() []string              { return nil }
 
 // migrateLegacyExperimentSettings imports the retired experiment sidecar into
 // the configuration file.
@@ -77,7 +69,7 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 	if err != nil {
 		return experimentMigration{}, fmt.Errorf("migrate experiment settings: read %q: %w", configPath, err)
 	}
-	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, configPath, migrationEnvironment{})
+	file, err := configwrite.Load(content, configPath)
 	if err != nil {
 		// The start loader reports the real problem with the value rules. The
 		// sidecar stays in place, so a fixed configuration migrates on the
@@ -85,40 +77,37 @@ func migrateLegacyExperimentSettings(configPath, torrentsDir string, logger *slo
 		return experimentMigration{}, nil
 	}
 
-	candidate := fileConfig
+	candidate := file.Config
 	upload := candidate.Experiments.Upload
 	changed := make([]string, 0, 5)
-	if fileSources.SourceOf("experiments.upload.mode") != config.SourceFile {
+	if file.Sources.SourceOf("experiments.upload.mode") != config.SourceFile {
 		upload.Mode = string(settings.Mode)
 		changed = append(changed, "experiments.upload.mode")
 	}
-	if fileSources.SourceOf("experiments.upload.rate") != config.SourceFile {
+	if file.Sources.SourceOf("experiments.upload.rate") != config.SourceFile {
 		upload.Rate = config.ByteRate(settings.RateBytesPerSecond)
 		changed = append(changed, "experiments.upload.rate")
 	}
-	if fileSources.SourceOf("experiments.upload.multiplier") != config.SourceFile {
+	if file.Sources.SourceOf("experiments.upload.multiplier") != config.SourceFile {
 		upload.Multiplier = config.Ratio(settings.Multiplier)
 		changed = append(changed, "experiments.upload.multiplier")
 	}
-	if fileSources.SourceOf("experiments.upload.jitter") != config.SourceFile {
+	if file.Sources.SourceOf("experiments.upload.jitter") != config.SourceFile {
 		upload.Jitter = config.Percent(settings.JitterFraction * 100)
 		changed = append(changed, "experiments.upload.jitter")
 	}
-	if fileSources.SourceOf("experiments.upload.cap") != config.SourceFile {
+	if file.Sources.SourceOf("experiments.upload.cap") != config.SourceFile {
 		upload.Cap = config.OptionalByteQuantity(settings.CapBytes)
 		changed = append(changed, "experiments.upload.cap")
 	}
 	candidate.Experiments.Upload = upload
 
 	if len(changed) > 0 {
-		document, err := (config.WriteBack{File: candidate, Sources: fileSources, Changed: changed}).TOML()
+		prepared, err := configwrite.Render(candidate, file.Sources, changed, configPath)
 		if err != nil {
-			return experimentMigration{}, fmt.Errorf("migrate experiment settings: %w", err)
-		}
-		if _, _, err := configcheck.LoadContent(document, configPath); err != nil {
 			return fallback("the merged configuration is invalid", err)
 		}
-		published, writeErr := config.WriteBackFile(configPath, document)
+		published, writeErr := configwrite.Publish(configPath, prepared.Document, nil)
 		if !published {
 			return fallback("the configuration file could not be written", writeErr)
 		}

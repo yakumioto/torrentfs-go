@@ -19,6 +19,7 @@ import (
 	"strconv"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configwrite"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -136,52 +137,41 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 		return fallbackToLegacy(options, result, settings, sidecar, logger,
 			"the configuration file could not be read", err)
 	}
-	fileConfig, fileSources, err := config.LoadContentWithSourcesFromEnvironment(content, options.ConfigPath, emptyEnvironment{})
+	file, err := configwrite.Load(content, options.ConfigPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("configmigrate: load the file configuration: %w", err)
 	}
 
 	filePatch := legacyFilePatch(settings)
-	var missing []string
+	missingPatch := map[string]string{}
 	for _, path := range uploadRateKeys {
-		if _, ok := filePatch[path]; !ok {
+		text, ok := filePatch[path]
+		if !ok {
 			continue
 		}
-		if fileSources.FromFile(path) {
+		if file.Sources.FromFile(path) {
 			// The configuration file already carries the key: a value the
 			// operator wrote by hand wins over the retired sidecar.
 			continue
 		}
-		missing = append(missing, path)
+		missingPatch[path] = text
 	}
 
-	if len(missing) > 0 {
-		candidate := fileConfig
-		for _, path := range missing {
-			if err := config.SetText(&candidate, path, filePatch[path]); err != nil {
-				return Result{}, fmt.Errorf("configmigrate: apply the retired value of %s: %w", path, err)
-			}
-		}
-		document, err := config.WriteBack{File: candidate, Sources: fileSources, Changed: missing}.TOML()
+	var migratedKeys []string
+	if len(missingPatch) > 0 {
+		// The shared write-back pipeline loads the file layer, renders the
+		// sparse document, and validates it through the same loader and
+		// process rules as a start. The imported window and limit have
+		// already been validated together, so this only catches a conflict
+		// with the rest of the file.
+		prepared, err := configwrite.Prepare(file, options.ConfigPath, missingPatch, false)
 		if err != nil {
-			return Result{}, fmt.Errorf("configmigrate: render the configuration file: %w", err)
-		}
-		// Validate the file layer through the same loader a start uses. The
-		// imported window and limit have already been validated together, so
-		// this only catches a conflict with the rest of the file.
-		if _, _, err := config.LoadContentWithSourcesFromEnvironment(document, options.ConfigPath, emptyEnvironment{}); err != nil {
 			return Result{}, fmt.Errorf("configmigrate: the migrated configuration is invalid: %w", err)
 		}
+		migratedKeys = prepared.Changed
 
-		writeBackFile := options.WriteBackFile
-		if writeBackFile == nil {
-			writeBackFile = config.WriteBackFile
-		}
-		published, writeErr := writeBackFile(options.ConfigPath, document)
+		published, writeErr := configwrite.Publish(options.ConfigPath, prepared.Document, options.WriteBackFile)
 		if !published {
-			if writeErr == nil {
-				writeErr = errors.New("the write-back did not publish the configuration file")
-			}
 			return fallbackToLegacy(options, result, settings, sidecar, logger,
 				"the configuration file could not be written", writeErr)
 		}
@@ -196,7 +186,7 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 		if result.Sources == nil {
 			result.Sources = config.Sources{}
 		}
-		for _, path := range missing {
+		for _, path := range prepared.Changed {
 			if result.Sources.SourceOf(path) == config.SourceEnvironment {
 				continue
 			}
@@ -215,7 +205,7 @@ func migrateIntoConfigurationFile(options Options, result Result, settings sessi
 	}
 	result.Migrated = true
 	logger.Info("upload rate settings migrated into the configuration file",
-		"path", options.ConfigPath, "keys", missing)
+		"path", options.ConfigPath, "keys", migratedKeys)
 	return result, nil
 }
 
@@ -369,13 +359,3 @@ func readLegacyUploadRateSettings(path string) (session.UploadRateSettings, bool
 	}
 	return normalized, true, nil
 }
-
-// emptyEnvironment is an environment with no variable set. The file layer is
-// loaded through the same loader a start uses, with the environment left out.
-type emptyEnvironment struct{}
-
-// Lookup reports that no environment variable is set.
-func (emptyEnvironment) Lookup(string) (string, bool) { return "", false }
-
-// Names reports no environment variable.
-func (emptyEnvironment) Names() []string { return nil }

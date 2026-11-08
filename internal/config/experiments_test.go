@@ -248,8 +248,8 @@ func TestConfigPrintUsesTheNewExperimentKeys(t *testing.T) {
 	if got := values["experiments.upload.mode"]; got != "inject" {
 		t.Errorf("experiments.upload.mode = %q, want inject", got)
 	}
-	if got := values["experiments.upload.rate"]; got != "1048576" {
-		t.Errorf("experiments.upload.rate = %q, want the byte rate 1048576", got)
+	if got := values["experiments.upload.rate"]; got != "1MiB/s" {
+		t.Errorf("experiments.upload.rate = %q, want the byte rate 1MiB/s", got)
 	}
 }
 
