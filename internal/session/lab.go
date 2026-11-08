@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 )
 
 // Lab experiment settings are per-torrents-directory state, not static
@@ -40,25 +40,25 @@ const (
 
 // LabSettings is the runtime-tunable part of the experiment, exposed by the
 // management API.
-type LabSettings = lab.RuntimeSettings
+type LabSettings = experiments.RuntimeSettings
 
 // labState is nil unless the session was created with WithLabExperiment.
 type labState struct {
 	// settings holds the values that are fixed for this process.
-	settings lab.Settings
-	reporter *lab.Reporter
-	recorder *lab.Recorder
+	settings experiments.Settings
+	reporter *experiments.Reporter
+	recorder *experiments.Recorder
 }
 
 // labSettingsRecord is the on-disk schema. The version stays separate from the
 // public wire contract.
 type labSettingsRecord struct {
-	Version            int      `json:"version"`
-	Mode               lab.Mode `json:"mode"`
-	RateBytesPerSecond float64  `json:"rate_bytes_per_second"`
-	Multiplier         float64  `json:"multiplier"`
-	JitterFraction     float64  `json:"jitter_fraction"`
-	CapBytes           int64    `json:"cap_bytes"`
+	Version            int              `json:"version"`
+	Mode               experiments.Mode `json:"mode"`
+	RateBytesPerSecond float64          `json:"rate_bytes_per_second"`
+	Multiplier         float64          `json:"multiplier"`
+	JitterFraction     float64          `json:"jitter_fraction"`
+	CapBytes           int64            `json:"cap_bytes"`
 }
 
 func labSettingsPath(metadataDir string) string {
@@ -66,11 +66,11 @@ func labSettingsPath(metadataDir string) string {
 }
 
 // WithLabExperiment enables the experimental upload-statistics harness. The
-// settings are validated by the caller (lab.SettingsFrom). The session opens
+// settings are validated by the caller (experiments.SettingsFrom). The session opens
 // the optional announce log, restores any persisted runtime settings, and
 // routes tracker announces through the reporter; the Web UI can then change the
 // runtime settings through SetLabSettings.
-func WithLabExperiment(settings lab.Settings) Option {
+func WithLabExperiment(settings experiments.Settings) Option {
 	return func(options *sessionOptions) {
 		settings := settings
 		options.labSettings = &settings
@@ -79,23 +79,23 @@ func WithLabExperiment(settings lab.Settings) Option {
 
 // loadLabSettings restores the persisted runtime settings, falling back to the
 // startup values when no sidecar exists. persisted reports which source won.
-func loadLabSettings(metadataDir string, fallback lab.RuntimeSettings) (settings lab.RuntimeSettings, persisted bool, err error) {
+func loadLabSettings(metadataDir string, fallback experiments.RuntimeSettings) (settings experiments.RuntimeSettings, persisted bool, err error) {
 	path := labSettingsPath(metadataDir)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		normalized, normErr := lab.NormalizeRuntimeSettings(fallback)
+		normalized, normErr := experiments.NormalizeRuntimeSettings(fallback)
 		if normErr != nil {
-			return lab.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, normErr)
+			return experiments.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, normErr)
 		}
 		return normalized, false, nil
 	} else if err != nil {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: inspect %s: %w", path, err)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: inspect %s: %w", path, err)
 	}
 	if _, err := requireRegularFile(path); err != nil {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: %s: %w", labSettingsFileName, err)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: %s: %w", labSettingsFileName, err)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: read %s: %w", labSettingsFileName, err)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: read %s: %w", labSettingsFileName, err)
 	}
 	defer func() { _ = file.Close() }()
 
@@ -103,15 +103,15 @@ func loadLabSettings(metadataDir string, fallback lab.RuntimeSettings) (settings
 	decoder.DisallowUnknownFields()
 	var record labSettingsRecord
 	if err := decoder.Decode(&record); err != nil {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: %w", labSettingsFileName, err)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: %w", labSettingsFileName, err)
 	}
 	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: unexpected trailing data", labSettingsFileName)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: unexpected trailing data", labSettingsFileName)
 	}
 	if record.Version != labSettingsVersion {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("session: %s: unsupported version %d", labSettingsFileName, record.Version)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: %s: unsupported version %d", labSettingsFileName, record.Version)
 	}
-	normalized, err := lab.NormalizeRuntimeSettings(lab.RuntimeSettings{
+	normalized, err := experiments.NormalizeRuntimeSettings(experiments.RuntimeSettings{
 		Mode:               record.Mode,
 		RateBytesPerSecond: record.RateBytesPerSecond,
 		Multiplier:         record.Multiplier,
@@ -119,7 +119,7 @@ func loadLabSettings(metadataDir string, fallback lab.RuntimeSettings) (settings
 		CapBytes:           record.CapBytes,
 	})
 	if err != nil {
-		return lab.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
+		return experiments.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
 	}
 	return normalized, true, nil
 }
@@ -127,7 +127,7 @@ func loadLabSettings(metadataDir string, fallback lab.RuntimeSettings) (settings
 // saveLabSettings atomically publishes runtime settings. The returned published
 // flag reports whether the rename committed; when it did, a restart observes
 // the new value even if the directory sync failed.
-func saveLabSettings(metadataDir string, settings lab.RuntimeSettings) (published bool, err error) {
+func saveLabSettings(metadataDir string, settings experiments.RuntimeSettings) (published bool, err error) {
 	path := labSettingsPath(metadataDir)
 	if _, err := os.Lstat(path); err == nil {
 		if _, err := requireRegularFile(path); err != nil {
@@ -136,7 +136,7 @@ func saveLabSettings(metadataDir string, settings lab.RuntimeSettings) (publishe
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("%w: %v", ErrLabSettingsStorageUnavailable, err)
 	}
-	normalized, err := lab.NormalizeRuntimeSettings(settings)
+	normalized, err := experiments.NormalizeRuntimeSettings(settings)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
 	}
@@ -168,11 +168,11 @@ func (s *Session) startLabSampler(state *labState) {
 	if state == nil || state.recorder == nil {
 		return
 	}
-	sampler := lab.NewPeerSampler(state.recorder, state.settings.PeerSampleInterval, func() []lab.PeerSnapshot {
+	sampler := experiments.NewPeerSampler(state.recorder, state.settings.PeerSampleInterval, func() []experiments.PeerSnapshot {
 		activities := s.TorrentPeerActivities()
-		snapshots := make([]lab.PeerSnapshot, 0, len(activities))
+		snapshots := make([]experiments.PeerSnapshot, 0, len(activities))
 		for _, activity := range activities {
-			snapshots = append(snapshots, lab.PeerSnapshot{
+			snapshots = append(snapshots, experiments.PeerSnapshot{
 				InfoHash:         activity.InfoHash,
 				UploadedBytes:    activity.UploadedBytes,
 				DownloadedBytes:  activity.DownloadedBytes,
@@ -211,7 +211,7 @@ type LabTorrentStatus struct {
 // LabStatus is the management API's view of the experiment.
 type LabStatus struct {
 	Enabled            bool
-	Settings           lab.RuntimeSettings
+	Settings           experiments.RuntimeSettings
 	Seed               int64
 	AnnounceLogPath    string
 	PeerSampleInterval time.Duration
@@ -265,34 +265,34 @@ func (s *Session) LabStatus() LabStatus {
 // The caller must already have validated the mode/rate combination through
 // NormalizeRuntimeSettings; this method validates again so an API caller cannot
 // bypass it. A session created without WithLabExperiment returns ErrLabDisabled.
-func (s *Session) SetLabSettings(ctx context.Context, settings lab.RuntimeSettings) (lab.RuntimeSettings, error) {
+func (s *Session) SetLabSettings(ctx context.Context, settings experiments.RuntimeSettings) (experiments.RuntimeSettings, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return lab.RuntimeSettings{}, err
+		return experiments.RuntimeSettings{}, err
 	}
-	normalized, err := lab.NormalizeRuntimeSettings(settings)
+	normalized, err := experiments.NormalizeRuntimeSettings(settings)
 	if err != nil {
-		return lab.RuntimeSettings{}, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
+		return experiments.RuntimeSettings{}, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureActiveLocked(); err != nil {
-		return lab.RuntimeSettings{}, err
+		return experiments.RuntimeSettings{}, err
 	}
 	state := s.lab
 	if state == nil {
-		return lab.RuntimeSettings{}, ErrLabDisabled
+		return experiments.RuntimeSettings{}, ErrLabDisabled
 	}
 	if err := ctx.Err(); err != nil {
-		return lab.RuntimeSettings{}, err
+		return experiments.RuntimeSettings{}, err
 	}
 	published, saveErr := saveLabSettings(s.metadataDir, normalized)
 	if !published {
 		s.logger.Error("lab settings save failed", "err", saveErr)
-		return lab.RuntimeSettings{}, saveErr
+		return experiments.RuntimeSettings{}, saveErr
 	}
 	state.reporter.UpdateRuntime(normalized)
 	if saveErr != nil {

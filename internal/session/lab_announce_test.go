@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
 // newLabSession builds a loopback-only session with the experiment enabled
 // through the same session option a production caller uses.
-func newLabSession(t *testing.T, torrentsDir string, settings lab.Settings) *session.Session {
+func newLabSession(t *testing.T, torrentsDir string, settings experiments.Settings) *session.Session {
 	t.Helper()
 	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
 		t.Fatalf("make torrents dir: %v", err)
@@ -67,8 +67,8 @@ func TestSyntheticAnnounceUploadReachesTracker(t *testing.T) {
 	hashHex := hash.HexString()
 
 	const rate = 1 << 20 // 1 MiB/s
-	sess := newLabSession(t, filepath.Join(work, "torrents"), lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeInject, RateBytesPerSecond: rate, JitterFraction: 0},
+	sess := newLabSession(t, filepath.Join(work, "torrents"), experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: rate, JitterFraction: 0},
 		Seed:            1,
 	})
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: writeTorrent(t, work, torrentBytes)}); err != nil {
@@ -151,8 +151,8 @@ func TestBaselineAnnounceKeepsRealUpload(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 	hashHex := hash.HexString()
 
-	sess := newLabSession(t, filepath.Join(work, "torrents"), lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeBaseline},
+	sess := newLabSession(t, filepath.Join(work, "torrents"), experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline},
 	})
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: writeTorrent(t, work, torrentBytes)}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
@@ -184,8 +184,8 @@ func TestLabSettingsHotUpdateChangesTheRunningRate(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 	hashHex := hash.HexString()
 
-	sess := newLabSession(t, torrentsDir, lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
+	sess := newLabSession(t, torrentsDir, experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
 		Seed:            1,
 	})
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: writeTorrent(t, work, torrentBytes)}); err != nil {
@@ -201,8 +201,8 @@ func TestLabSettingsHotUpdateChangesTheRunningRate(t *testing.T) {
 	}
 	announcesBefore := tracker.announceCount(hashHex)
 
-	applied, err := sess.SetLabSettings(ctx, lab.RuntimeSettings{
-		Mode:               lab.ModeInject,
+	applied, err := sess.SetLabSettings(ctx, experiments.RuntimeSettings{
+		Mode:               experiments.ModeInject,
 		RateBytesPerSecond: 8 << 20,
 		JitterFraction:     0,
 	})
@@ -239,7 +239,7 @@ func TestLabSettingsHotUpdateChangesTheRunningRate(t *testing.T) {
 	if err := json.Unmarshal(persisted, &record); err != nil {
 		t.Fatalf("decode persisted lab settings: %v", err)
 	}
-	if record.Mode != string(lab.ModeInject) || record.RateBytesPerSecond != 8<<20 {
+	if record.Mode != string(experiments.ModeInject) || record.RateBytesPerSecond != 8<<20 {
 		t.Fatalf("persisted settings = %+v, want inject at 8MiB/s", record)
 	}
 }
@@ -253,14 +253,14 @@ func TestLabSettingsRestoreAfterRestart(t *testing.T) {
 
 	work := t.TempDir()
 	torrentsDir := filepath.Join(work, "torrents")
-	startup := lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
+	startup := experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
 		Seed:            1,
 	}
 
 	first := newLabSession(t, torrentsDir, startup)
-	if _, err := first.SetLabSettings(ctx, lab.RuntimeSettings{
-		Mode:           lab.ModeAmplify,
+	if _, err := first.SetLabSettings(ctx, experiments.RuntimeSettings{
+		Mode:           experiments.ModeAmplify,
 		Multiplier:     3,
 		JitterFraction: 0,
 	}); err != nil {
@@ -275,7 +275,7 @@ func TestLabSettingsRestoreAfterRestart(t *testing.T) {
 	if !status.Enabled {
 		t.Fatal("restored session reports the experiment disabled")
 	}
-	if status.Settings.Mode != lab.ModeAmplify || status.Settings.Multiplier != 3 {
+	if status.Settings.Mode != experiments.ModeAmplify || status.Settings.Multiplier != 3 {
 		t.Fatalf("restored settings = %+v, want amplify x3", status.Settings)
 	}
 }
@@ -285,11 +285,11 @@ func TestSetLabSettingsRejectsInvalidAndDisabled(t *testing.T) {
 	defer cancel()
 
 	torrentsDir := t.TempDir()
-	sess := newLabSession(t, torrentsDir, lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
+	sess := newLabSession(t, torrentsDir, experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeInject, RateBytesPerSecond: 1 << 20, JitterFraction: 0},
 		Seed:            1,
 	})
-	if _, err := sess.SetLabSettings(ctx, lab.RuntimeSettings{Mode: lab.ModeInject}); !errors.Is(err, session.ErrInvalidLabSettings) {
+	if _, err := sess.SetLabSettings(ctx, experiments.RuntimeSettings{Mode: experiments.ModeInject}); !errors.Is(err, session.ErrInvalidLabSettings) {
 		t.Fatalf("SetLabSettings(inject without rate) error = %v, want ErrInvalidLabSettings", err)
 	}
 
@@ -313,7 +313,7 @@ func TestSetLabSettingsRejectsInvalidAndDisabled(t *testing.T) {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	if _, err := plain.SetLabSettings(ctx, lab.RuntimeSettings{Mode: lab.ModeBaseline}); !errors.Is(err, session.ErrLabDisabled) {
+	if _, err := plain.SetLabSettings(ctx, experiments.RuntimeSettings{Mode: experiments.ModeBaseline}); !errors.Is(err, session.ErrLabDisabled) {
 		t.Fatalf("SetLabSettings without experiment error = %v, want ErrLabDisabled", err)
 	}
 	if status := plain.LabStatus(); status.Enabled {
@@ -332,8 +332,8 @@ func TestTorrentPeerActivitiesReportsRealCounters(t *testing.T) {
 	content := make([]byte, 8<<10)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
 
-	sess := newLabSession(t, filepath.Join(work, "torrents"), lab.Settings{
-		RuntimeSettings: lab.RuntimeSettings{Mode: lab.ModeBaseline},
+	sess := newLabSession(t, filepath.Join(work, "torrents"), experiments.Settings{
+		RuntimeSettings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline},
 	})
 	if err := sess.AddTorrent(ctx, session.Source{MetainfoPath: writeTorrent(t, work, torrentBytes)}); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
