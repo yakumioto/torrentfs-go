@@ -7,6 +7,8 @@ import (
 	"io"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,4 +182,107 @@ func TestTorrentAddUsesReplacedProxyConfig(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("announce list = %v, want %v without the UDP tracker", got, want)
 	}
+}
+
+// TestConfigReplacementKeepsStartupStreamBaseURL checks that the signed
+// streaming endpoint keeps the address it was started with. The stream signer
+// is built once at startup and strm.base_url is restart-only, so replacing the
+// configuration snapshot must not change links already handed to players.
+func TestConfigReplacementKeepsStartupStreamBaseURL(t *testing.T) {
+	cfg := testConfig()
+	cfg.Connections.ListenHost = "127.0.0.1"
+	cfg.STRM.BaseURL = "http://old.example"
+	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
+
+	content := bytes.Repeat([]byte{4}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if err := sess.AddTorrent(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	next := cfg
+	next.STRM.BaseURL = "http://new.example"
+	sess.SetConfig(next)
+
+	link, err := sess.StreamURL(hash, "payload.bin")
+	if err != nil {
+		t.Fatalf("StreamURL: %v", err)
+	}
+	if !strings.HasPrefix(link, "http://old.example/stream/") {
+		t.Fatalf("StreamURL = %q, want the startup base URL", link)
+	}
+}
+
+// TestSessionConfigSnapshotConcurrentReadAndReplace drives the current
+// configuration from one goroutine while the runtime read paths and the
+// snapshot reader run from others. Run under -race, it proves the snapshot is
+// guarded and that no runtime path still reads an unsynchronized copy.
+func TestSessionConfigSnapshotConcurrentReadAndReplace(t *testing.T) {
+	cfg := testConfig()
+	cfg.Connections.ListenHost = "127.0.0.1"
+	cfg.Connections.ReadingConns = 3
+	cfg.STRM.BaseURL = "http://old.example"
+	sess := newLoopbackSession(t, cfg, filepath.Join(t.TempDir(), "torrents"))
+
+	content := bytes.Repeat([]byte{5}, testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if err := sess.AddTorrent(context.Background(), session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	next := cfg
+	next.Connections.ReadingConns = 11
+	next.Filesystem.ReadTimeout = config.Duration(10 * time.Millisecond)
+	next.Proxy.Socks5URL = "socks5://127.0.0.1:1080"
+
+	const iterations = 100
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				sess.SetConfig(next)
+			} else {
+				sess.SetConfig(cfg)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			got := sess.Config()
+			if got.Connections.ReadingConns != 3 && got.Connections.ReadingConns != 11 {
+				t.Errorf("Config() observed reading_conns = %d, want one of the two snapshots", got.Connections.ReadingConns)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			session.AllocateConnectionsForTest(sess)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			handle, err := sess.OpenFile(hash, "payload.bin")
+			if err != nil {
+				t.Errorf("OpenFile: %v", err)
+				return
+			}
+			_ = handle.(io.Closer).Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if _, err := sess.StreamURL(hash, "payload.bin"); err != nil {
+				t.Errorf("StreamURL: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
