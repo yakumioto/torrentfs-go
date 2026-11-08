@@ -52,11 +52,11 @@ describe('ApiClient', () => {
     expect(request.body).toBeInstanceOf(FormData);
   });
 
-  it('reads the lab view from the lab endpoint', async () => {
-    const lab = {
+  it('reads the experiment view from the experiment endpoint', async () => {
+    const experiment = {
       settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
       seed: 42,
-      announce_log: '/var/log/torrentfs/lab.jsonl',
+      announce_log: '/var/log/torrentfs/experiment.jsonl',
       peer_sample_interval_seconds: 5,
       totals: {
         real_uploaded_bytes: 5_000_000,
@@ -73,9 +73,9 @@ describe('ApiClient', () => {
         last_announce_at: '2026-11-05T15:12:00.123456Z',
       }],
     };
-    vi.mocked(fetch).mockResolvedValue(response(lab));
+    vi.mocked(fetch).mockResolvedValue(response(experiment));
     const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.getLab()).resolves.toEqual(lab);
+    await expect(api.getExperiment()).resolves.toEqual(experiment);
     const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/v1/experiments/upload');
     expect(request.method ?? 'GET').toBe('GET');

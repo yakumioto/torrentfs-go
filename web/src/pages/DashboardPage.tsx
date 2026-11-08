@@ -7,9 +7,9 @@ import { userFacingError } from '../utils/user-facing-error';
 import type { AppOutletContext } from '../components/layout/AppLayout';
 import { CategoryManagementDialog } from '../components/dialogs/CategoryManagementDialog';
 import { PruneTorrentsDialog } from '../components/dialogs/PruneTorrentsDialog';
-import { LabSummaryCard } from '../components/lab/LabSummaryCard';
+import { ExperimentSummaryCard } from '../components/experiments/ExperimentSummaryCard';
 import { TorrentList } from '../components/torrents/TorrentList';
-import { useLab, useRuntimeStats, useTorrentList } from '../queries/hooks';
+import { useExperiment, useRuntimeStats, useTorrentList } from '../queries/hooks';
 import { filterTorrents, summarizeTorrents, type TorrentFilter } from '../queries/filter';
 import {
   DEFAULT_TORRENT_SORT,
@@ -40,7 +40,7 @@ export function DashboardPage() {
   const [categoryOpen, setCategoryOpen] = useState(false);
   const query = useTorrentList(auth.api, auth.isReady && visible);
   const statsQuery = useRuntimeStats(auth.api, auth.isReady && visible);
-  const labQuery = useLab(auth.api, auth.isReady && visible);
+  const experimentQuery = useExperiment(auth.api, auth.isReady && visible);
   const sourceTorrents = query.data;
   const filteredTorrents = useMemo(() => filterTorrents(sourceTorrents ?? [], search, filter), [filter, search, sourceTorrents]);
   const torrents = useMemo(() => sortTorrents(filteredTorrents, sort), [filteredTorrents, sort]);
@@ -123,7 +123,7 @@ export function DashboardPage() {
         </div>
       )}
 
-      {labQuery.data !== undefined && <LabSummaryCard view={labQuery.data} />}
+      {experimentQuery.data !== undefined && <ExperimentSummaryCard view={experimentQuery.data} />}
 
       <section aria-label="任务摘要" className={styles.summary}>
         <div className={styles.summaryCard}>
@@ -175,7 +175,7 @@ export function DashboardPage() {
 
       <TorrentList
         torrents={query.data === undefined ? undefined : torrents}
-        lab={labQuery.data}
+        experiment={experimentQuery.data}
         totalCount={summary.total}
         loading={query.isPending}
         error={query.error}

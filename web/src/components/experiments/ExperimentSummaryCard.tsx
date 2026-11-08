@@ -1,14 +1,14 @@
 import { Badge } from '@mantine/core';
 import { IconChevronRight, IconFlask } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
-import type { LabView } from '../../types/api';
+import type { ExperimentView } from '../../types/api';
 import { formatBytes } from '../../utils/format';
 import {
   formatPeerSampleInterval,
   formatSignedBytes,
-  labModeLabel,
-} from '../../utils/lab';
-import styles from './LabSummaryCard.module.css';
+  experimentModeLabel,
+} from '../../utils/experiments';
+import styles from './ExperimentSummaryCard.module.css';
 
 /**
  * Dashboard summary of the always-on synthetic-upload experiment. It is a link
@@ -20,7 +20,7 @@ import styles from './LabSummaryCard.module.css';
  * are only comparable against the latter; the difference to the live counter
  * is the pending real upload that the tracker has not seen yet.
  */
-export function LabSummaryCard({ view }: { view: LabView }) {
+export function ExperimentSummaryCard({ view }: { view: ExperimentView }) {
   const overreported = view.totals.overreported_bytes;
   const tone = overreported > 0 ? styles.surplus : overreported < 0 ? styles.shortfall : undefined;
 
@@ -31,7 +31,7 @@ export function LabSummaryCard({ view }: { view: LabView }) {
           <p className="eyebrow">反作弊测试</p>
           <h2 className={styles.title}><IconFlask size={17} aria-hidden="true" /> 上传实验</h2>
         </div>
-        <Badge variant="light" color="torrent">{labModeLabel(view.settings?.mode)}</Badge>
+        <Badge variant="light" color="torrent">{experimentModeLabel(view.settings?.mode)}</Badge>
       </div>
       <dl className={styles.stats}>
         <div>

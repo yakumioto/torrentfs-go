@@ -114,10 +114,10 @@ export interface LoginResponse {
  * fabricates a time-based counter, and `amplify` multiplies the real payload
  * transfer.
  */
-export type LabMode = 'baseline' | 'inject' | 'amplify';
+export type ExperimentMode = 'baseline' | 'inject' | 'amplify';
 
-export interface LabSettings {
-  mode: LabMode;
+export interface ExperimentSettings {
+  mode: ExperimentMode;
   /** Average synthetic growth per second in inject mode, in bytes. */
   rate_bytes_per_second: number;
   /** Reported-to-real factor in amplify mode; greater than one. */
@@ -128,7 +128,7 @@ export interface LabSettings {
   cap_bytes: number;
 }
 
-export interface LabTorrentStat {
+export interface ExperimentTorrentStat {
   info_hash: string;
   /** Live real upload counter for this torrent. */
   real_uploaded_bytes: number;
@@ -139,7 +139,7 @@ export interface LabTorrentStat {
   last_announce_at?: string | null;
 }
 
-export interface LabTotals {
+export interface ExperimentTotals {
   /** Live real upload counter since start. */
   real_uploaded_bytes: number;
   /** Real upload counter at the moment the last announce was sent. */
@@ -151,14 +151,14 @@ export interface LabTotals {
   pending_real_upload_bytes: number;
 }
 
-export interface LabView {
+export interface ExperimentView {
   /** The experiment is always on, so the settings are always present. */
-  settings: LabSettings;
+  settings: ExperimentSettings;
   seed: number;
   announce_log: string;
   peer_sample_interval_seconds: number;
-  totals: LabTotals;
-  torrents: LabTorrentStat[];
+  totals: ExperimentTotals;
+  torrents: ExperimentTorrentStat[];
 }
 
 /** Where a configuration value came from, in precedence order. */

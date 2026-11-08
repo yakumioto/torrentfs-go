@@ -10,7 +10,7 @@ import { AppLayout } from '../components/layout/AppLayout';
 import { DashboardPage } from '../pages/DashboardPage';
 import { ExperimentsPage } from '../pages/ExperimentsPage';
 import { theme } from '../styles/theme';
-import type { LabView, RuntimeStats, Torrent } from '../types/api';
+import type { ExperimentView, RuntimeStats, Torrent } from '../types/api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -42,7 +42,7 @@ function runtimeStats(overrides: Partial<RuntimeStats> = {}): RuntimeStats {
   };
 }
 
-function baselineLab(): LabView {
+function baselineExperiment(): ExperimentView {
   return {
     settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
@@ -59,11 +59,11 @@ function baselineLab(): LabView {
   };
 }
 
-function injectLab(overrides: Partial<LabView> = {}): LabView {
+function injectExperiment(overrides: Partial<ExperimentView> = {}): ExperimentView {
   return {
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
-    announce_log: '/var/log/torrentfs/lab.jsonl',
+    announce_log: '/var/log/torrentfs/experiment.jsonl',
     peer_sample_interval_seconds: 5,
     totals: {
       real_uploaded_bytes: 5_000_000,
@@ -88,7 +88,7 @@ function renderDashboard(
   statsBody: unknown = runtimeStats(),
   statsStatus = 200,
   listResponses: Torrent[][] = [torrents],
-  labBody: unknown = baselineLab(),
+  experimentBody: unknown = baselineExperiment(),
 ) {
   const api = new ApiClient();
   const auth: AuthContextValue = {
@@ -110,7 +110,7 @@ function renderDashboard(
       return Promise.resolve(jsonResponse(statsBody, statsStatus));
     }
     if (String(input).endsWith('/experiments/upload')) {
-      return Promise.resolve(jsonResponse(labBody));
+      return Promise.resolve(jsonResponse(experimentBody));
     }
     const response = listResponses[Math.min(listRequest++, listResponses.length - 1)] ?? [];
     return Promise.resolve(jsonResponse(response));
@@ -270,8 +270,8 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: '磁力链接' })).toBeInTheDocument());
   });
 
-  it('shows the lab summary and per-torrent reported counters', async () => {
-    renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, injectLab());
+  it('shows the experiment summary and per-torrent reported counters', async () => {
+    renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, injectExperiment());
 
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
     const card = screen.getByRole('link', { name: '上传实验：打开上传实验监控' });
@@ -293,8 +293,8 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
   });
 
-  it('renders a dash for torrents without lab counters and shows the baseline card', async () => {
-    renderDashboard([torrent({ info_hash: 'not-reported-yet' })], runtimeStats(), 200, undefined, injectLab({ torrents: [] }));
+  it('renders a dash for torrents without experiment counters and shows the baseline card', async () => {
+    renderDashboard([torrent({ info_hash: 'not-reported-yet' })], runtimeStats(), 200, undefined, injectExperiment({ torrents: [] }));
 
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
     expect(screen.getByText(/上报 — · 虚报 —/)).toBeInTheDocument();

@@ -3,7 +3,7 @@ import type {
   ConfigSaveRequest,
   ConfigSaveResult,
   ConfigView,
-  LabView,
+  ExperimentView,
   LoginResponse,
   Operation,
   PruneResult,
@@ -158,8 +158,8 @@ export class ApiClient {
     return this.request<Operation>(`/operations/${encodeURIComponent(operationId)}`, { signal });
   }
 
-  getLab(signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/experiments/upload', { signal });
+  getExperiment(signal?: AbortSignal): Promise<ExperimentView> {
+    return this.request<ExperimentView>('/experiments/upload', { signal });
   }
 
   private async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {

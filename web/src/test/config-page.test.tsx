@@ -203,7 +203,7 @@ function configView(overrides: Partial<ConfigView> = {}): ConfigView {
   };
 }
 
-function disabledLab() {
+function disabledExperiment() {
   return {
     enabled: false,
     settings: null,
@@ -917,7 +917,7 @@ describe('ConfigPage unsaved changes', () => {
         return Promise.resolve(jsonResponse(configView()));
       }
       if (url === '/api/v1/experiments/upload') {
-        return Promise.resolve(jsonResponse(disabledLab()));
+        return Promise.resolve(jsonResponse(disabledExperiment()));
       }
       throw new Error(`Unexpected request: ${url}`);
     });

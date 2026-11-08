@@ -6,7 +6,7 @@ import type {
   ConfigSaveRequest,
   ConfigSaveResult,
   ConfigView,
-  LabView,
+  ExperimentView,
   Operation,
   PruneResult,
   RuntimeStats,
@@ -357,10 +357,10 @@ export function usePruneTorrents(api: ApiClient) {
  * with every tracker announce, so the dashboard polls faster than the torrent
  * list to keep the displayed totals close to what the tracker just received.
  */
-export function useLab(api: ApiClient, enabled: boolean) {
-  return useQuery<LabView>({
-    queryKey: queryKeys.lab,
-    queryFn: ({ signal }) => api.getLab(signal),
+export function useExperiment(api: ApiClient, enabled: boolean) {
+  return useQuery<ExperimentView>({
+    queryKey: queryKeys.experiments,
+    queryFn: ({ signal }) => api.getExperiment(signal),
     enabled,
     refetchInterval: 2000,
     refetchIntervalInBackground: false,

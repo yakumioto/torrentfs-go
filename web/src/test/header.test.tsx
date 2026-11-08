@@ -40,7 +40,7 @@ function makeRuntimeStats() {
   };
 }
 
-function baselineLab() {
+function baselineExperiment() {
   return {
     settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
@@ -120,7 +120,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(baselineLab()));
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       listRequests += 1;
       if (listRequests === 1) {
@@ -166,7 +166,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(status));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(baselineLab()));
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       if (url.endsWith('/torrent-1')) {
         return Promise.resolve(jsonResponse(torrent));
@@ -200,7 +200,7 @@ describe('Header refresh control', () => {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
       if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(baselineLab()));
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       if (url.endsWith('/torrents')) {
         return Promise.resolve(jsonResponse([torrent]));
