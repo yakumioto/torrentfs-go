@@ -250,6 +250,12 @@ func MarkReadingForTest(st *Torrent) (restore func()) {
 	}
 }
 
+// MarkUploadActivityForTest records an observed upload at now, so a test can
+// drive the uploading allowance without a real peer connection. Test-only.
+func MarkUploadActivityForTest(st *Torrent, now time.Time) {
+	st.lastUploadAt.Store(now.UnixNano())
+}
+
 // ConnectionAllowanceForTest reports the peer connection allowance the
 // allocator last applied to the torrent. Test-only.
 func ConnectionAllowanceForTest(st *Torrent) int {
