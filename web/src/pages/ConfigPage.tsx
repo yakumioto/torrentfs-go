@@ -6,9 +6,12 @@ import {
   Code,
   Group,
   Loader,
+  Modal,
   NativeSelect,
   NumberInput,
+  Stack,
   Switch,
+  Text,
   TextInput,
 } from '@mantine/core';
 import {
@@ -22,6 +25,12 @@ import { useAuth } from '../app/auth-context';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
 import { usePageVisible } from '../utils/visibility';
+import {
+  dangerousCategoryLabel,
+  dangerousConfigChanges,
+  dangerousConfigKey,
+  type DangerousConfigKey,
+} from '../utils/config-safety';
 import {
   configSaveDurabilityUnconfirmed,
   configSaveFailure,
@@ -363,6 +372,49 @@ function SaveResultGroups({ result }: { result: ConfigSaveResult }) {
   );
 }
 
+function DangerousSaveDialog({
+  opened,
+  changes,
+  onCancel,
+  onConfirm,
+}: {
+  opened: boolean;
+  changes: DangerousConfigKey[];
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal
+      opened={opened}
+      onClose={onCancel}
+      title="危险配置项确认"
+      centered
+      closeButtonProps={{ 'aria-label': '关闭弹窗' }}
+    >
+      <Stack gap="sm">
+        <Alert color="yellow" icon={<IconAlertTriangle size={16} />} className={styles.modalAlert}>
+          以下改动可能会让服务在重启后失联，或改变输出形态与挂载位置。请确认这是预期行为。
+        </Alert>
+        <ul className={styles.dangerList} data-testid="config-danger-list">
+          {changes.map((change) => (
+            <li key={change.path} className={styles.dangerItem}>
+              <div className={styles.dangerHeader}>
+                <code className={styles.code}>{change.path}</code>
+                <Badge variant="light" color="red">{dangerousCategoryLabel(change.category)}</Badge>
+              </div>
+              <p className={styles.dangerImpact}>{change.impact}</p>
+            </li>
+          ))}
+        </ul>
+        <Group justify="flex-end" gap="sm">
+          <Button variant="default" onClick={onCancel}>取消</Button>
+          <Button color="red" onClick={onConfirm}>仍然保存</Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
 interface SaveOutcome {
   code: string;
   result: ConfigSaveResult;
@@ -380,6 +432,7 @@ export function ConfigPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
   const [saveMessage, setSaveMessage] = useState('');
+  const [dangerOpen, setDangerOpen] = useState(false);
   const durabilityRefetched = useRef<unknown>(null);
 
   const view = query.data;
@@ -467,18 +520,31 @@ export function ConfigPage() {
     }
   }
   const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
+  const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
   const dirtyCount = changes.length;
   const canSave = view !== undefined && !pageReadOnly && dirtyCount > 0 && !save.isPending;
 
-  const submit = () => {
+  const performSave = () => {
     if (view === undefined || !canSave) {
       return;
     }
+    setDangerOpen(false);
     setSaveOutcome(null);
     setSaveMessage('');
     setFieldErrors({});
     save.reset();
     save.mutate({ baseline: view.baseline, patch });
+  };
+
+  const requestSave = () => {
+    if (!canSave) {
+      return;
+    }
+    if (dangerousChanges.length > 0) {
+      setDangerOpen(true);
+      return;
+    }
+    performSave();
   };
 
   const term = search.trim().toLowerCase();
@@ -572,7 +638,7 @@ export function ConfigPage() {
                   <Button
                     color="torrent"
                     leftSection={<IconDeviceFloppy size={16} />}
-                    onClick={submit}
+                    onClick={requestSave}
                     loading={save.isPending}
                     disabled={!canSave}
                   >
@@ -595,13 +661,19 @@ export function ConfigPage() {
                 <Badge variant="light" color="yellow">{changes.length} 项</Badge>
               </div>
               <ul className={styles.diffList}>
-                {changes.map((change) => (
-                  <li key={change.path} className={styles.diffItem}>
-                    <code className={styles.code}>{change.path}</code>
-                    <span className={styles.diffArrow} aria-hidden="true">→</span>
-                    <code className={styles.diffValue}>{change.value === '' ? '（空）' : change.value}</code>
-                  </li>
-                ))}
+                {changes.map((change) => {
+                  const dangerous = dangerousConfigKey(change.path);
+                  return (
+                    <li key={change.path} className={styles.diffItem}>
+                      <code className={styles.code}>{change.path}</code>
+                      <span className={styles.diffArrow} aria-hidden="true">→</span>
+                      <code className={styles.diffValue}>{change.value === '' ? '（空）' : change.value}</code>
+                      {dangerous !== undefined && (
+                        <Badge variant="light" color="red">{dangerousCategoryLabel(dangerous.category)}</Badge>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           )}
@@ -643,6 +715,13 @@ export function ConfigPage() {
               </Accordion.Item>
             ))}
           </Accordion>
+
+          <DangerousSaveDialog
+            opened={dangerOpen}
+            changes={dangerousChanges}
+            onCancel={() => setDangerOpen(false)}
+            onConfirm={performSave}
+          />
         </>
       )}
     </div>

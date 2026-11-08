@@ -137,6 +137,40 @@
   overflow-wrap: anywhere;
 }
 
+.modalAlert {
+  margin-bottom: 0;
+}
+
+.dangerList {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dangerItem {
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.dangerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.dangerImpact {
+  margin: 0.4rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.65;
+}
+
 .accordion {
   display: grid;
   gap: 0.6rem;

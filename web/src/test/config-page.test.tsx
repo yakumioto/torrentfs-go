@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -289,6 +289,75 @@ describe('ConfigPage change preview', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
     expect(screen.queryByTestId('config-diff-preview')).not.toBeInTheDocument();
+  });
+});
+
+describe('ConfigPage dangerous changes', () => {
+  it('asks for confirmation before saving a dangerous key and does not save when cancelled', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({
+          applied: ['cache.capacity'],
+          restart_required: ['backend'],
+          persisted: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'backend' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'backend' }), { target: { value: 'fuse' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+
+    const preview = screen.getByTestId('config-diff-preview');
+    expect(within(preview).getByText('backend')).toBeInTheDocument();
+    expect(within(preview).getByText('fuse')).toBeInTheDocument();
+    expect(within(preview).getByText('输出形态变化')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('危险配置项确认');
+    expect(dialog).toHaveTextContent('backend');
+    expect(dialog).toHaveTextContent('输出形态变化');
+    expect(dialog).toHaveTextContent(/挂载点/);
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+    expect(screen.getByRole('combobox', { name: 'backend' })).toHaveValue('fuse');
+    expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 2 项');
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    const confirm = await screen.findByRole('dialog');
+    fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' }));
+
+    await screen.findByText('保存成功');
+    const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(putCall).toBeDefined();
+    expect(JSON.parse((putCall?.[1] as RequestInit).body as string)).toEqual({
+      baseline: 'baseline-digest',
+      patch: { backend: 'fuse', 'cache.capacity': '1GiB' },
+    });
+  });
+
+  it('saves a safe change without interrupting for confirmation', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/config' && init?.method === 'PUT') {
+        return Promise.resolve(jsonResponse({ applied: ['cache.capacity'], restart_required: [], persisted: true }));
+      }
+      return Promise.resolve(jsonResponse(configView()));
+    });
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'cache.capacity' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '1GiB' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await screen.findByText('保存成功');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });
 
