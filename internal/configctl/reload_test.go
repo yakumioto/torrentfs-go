@@ -381,6 +381,7 @@ func TestWatchReloadsOnAnInjectedTick(t *testing.T) {
 		return ticks, func() {}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
