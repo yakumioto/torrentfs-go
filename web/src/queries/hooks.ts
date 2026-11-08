@@ -3,6 +3,7 @@ import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
 import type {
   Category,
+  ConfigView,
   LabSettingsUpdate,
   LabView,
   Operation,
@@ -59,6 +60,21 @@ export function useRuntimeStats(api: ApiClient, enabled: boolean) {
     enabled,
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+/**
+ * The configuration view is a snapshot of the process and the file, so it is
+ * read once when the page becomes visible. Saving and hot reload, which would
+ * make it live, belong to the follow-up tickets.
+ */
+export function useConfig(api: ApiClient, enabled: boolean) {
+  return useQuery<ConfigView>({
+    queryKey: queryKeys.config,
+    queryFn: ({ signal }) => api.getConfig(signal),
+    enabled,
     retry: shouldRetry,
     retryDelay,
   });
