@@ -2,47 +2,31 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/experiments"
 )
 
-// Lab experiment settings are per-torrents-directory state, not static
-// configuration: the Web UI writes them through the management API and a
-// restart restores them before the BitTorrent client is created.
+// The experiment is always on: it has no enable/disable state and persists no
+// settings of its own. The [experiments.upload] configuration owns the values,
+// the configuration page hot-applies the runtime ones, and the startup
+// migration imports a retired .metadata/lab_settings.json sidecar.
+
 var (
 	// ErrInvalidLabSettings reports a value that violates the experiment
 	// contract. The wrapped cause names the offending field.
 	ErrInvalidLabSettings = errors.New("session: invalid lab settings")
-	// ErrLabSettingsStorageUnavailable reports that the settings were not
-	// published: the previous file and the running experiment are unchanged.
-	ErrLabSettingsStorageUnavailable = errors.New("session: lab settings storage unavailable")
-	// ErrLabSettingsDurabilityUnconfirmed reports that the new settings are
-	// published and applied, but the directory could not be synced, so a
-	// restart is not guaranteed to observe them.
-	ErrLabSettingsDurabilityUnconfirmed = errors.New("session: lab settings durability unconfirmed")
-	// ErrLabDisabled reports an update attempt when the session was not created
-	// with WithLabExperiment.
-	ErrLabDisabled = errors.New("session: lab experiment is not enabled")
-)
-
-const (
-	labSettingsFileName = "lab_settings.json"
-	labSettingsVersion  = 1
 )
 
 // LabSettings is the runtime-tunable part of the experiment, exposed by the
-// management API.
+// management API and applied by the configuration page.
 type LabSettings = experiments.RuntimeSettings
 
-// labState is nil unless the session was created with WithLabExperiment.
+// labState is the session-owned experiment. It is always present.
 type labState struct {
 	// settings holds the values that are fixed for this process.
 	settings experiments.Settings
@@ -50,26 +34,9 @@ type labState struct {
 	recorder *experiments.Recorder
 }
 
-// labSettingsRecord is the on-disk schema. The version stays separate from the
-// public wire contract.
-type labSettingsRecord struct {
-	Version            int              `json:"version"`
-	Mode               experiments.Mode `json:"mode"`
-	RateBytesPerSecond float64          `json:"rate_bytes_per_second"`
-	Multiplier         float64          `json:"multiplier"`
-	JitterFraction     float64          `json:"jitter_fraction"`
-	CapBytes           int64            `json:"cap_bytes"`
-}
-
-func labSettingsPath(metadataDir string) string {
-	return filepath.Join(metadataDir, labSettingsFileName)
-}
-
-// WithLabExperiment enables the experimental upload-statistics harness. The
-// settings are validated by the caller (experiments.SettingsFrom). The session opens
-// the optional announce log, restores any persisted runtime settings, and
-// routes tracker announces through the reporter; the Web UI can then change the
-// runtime settings through SetLabSettings.
+// WithLabExperiment sets the experiment settings the session starts with. The
+// experiment itself is always on; without the option the session starts in the
+// baseline arm.
 func WithLabExperiment(settings experiments.Settings) Option {
 	return func(options *sessionOptions) {
 		settings := settings
@@ -77,93 +44,10 @@ func WithLabExperiment(settings experiments.Settings) Option {
 	}
 }
 
-// loadLabSettings restores the persisted runtime settings, falling back to the
-// startup values when no sidecar exists. persisted reports which source won.
-func loadLabSettings(metadataDir string, fallback experiments.RuntimeSettings) (settings experiments.RuntimeSettings, persisted bool, err error) {
-	path := labSettingsPath(metadataDir)
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		normalized, normErr := experiments.NormalizeRuntimeSettings(fallback)
-		if normErr != nil {
-			return experiments.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, normErr)
-		}
-		return normalized, false, nil
-	} else if err != nil {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: inspect %s: %w", path, err)
-	}
-	if _, err := requireRegularFile(path); err != nil {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: %s: %w", labSettingsFileName, err)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: read %s: %w", labSettingsFileName, err)
-	}
-	defer func() { _ = file.Close() }()
-
-	decoder := json.NewDecoder(file)
-	decoder.DisallowUnknownFields()
-	var record labSettingsRecord
-	if err := decoder.Decode(&record); err != nil {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: %w", labSettingsFileName, err)
-	}
-	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: decode %s: unexpected trailing data", labSettingsFileName)
-	}
-	if record.Version != labSettingsVersion {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("session: %s: unsupported version %d", labSettingsFileName, record.Version)
-	}
-	normalized, err := experiments.NormalizeRuntimeSettings(experiments.RuntimeSettings{
-		Mode:               record.Mode,
-		RateBytesPerSecond: record.RateBytesPerSecond,
-		Multiplier:         record.Multiplier,
-		JitterFraction:     record.JitterFraction,
-		CapBytes:           record.CapBytes,
-	})
-	if err != nil {
-		return experiments.RuntimeSettings{}, false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
-	}
-	return normalized, true, nil
-}
-
-// saveLabSettings atomically publishes runtime settings. The returned published
-// flag reports whether the rename committed; when it did, a restart observes
-// the new value even if the directory sync failed.
-func saveLabSettings(metadataDir string, settings experiments.RuntimeSettings) (published bool, err error) {
-	path := labSettingsPath(metadataDir)
-	if _, err := os.Lstat(path); err == nil {
-		if _, err := requireRegularFile(path); err != nil {
-			return false, fmt.Errorf("%w: %v", ErrLabSettingsStorageUnavailable, err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("%w: %v", ErrLabSettingsStorageUnavailable, err)
-	}
-	normalized, err := experiments.NormalizeRuntimeSettings(settings)
-	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrInvalidLabSettings, err)
-	}
-	data, err := json.Marshal(labSettingsRecord{
-		Version:            labSettingsVersion,
-		Mode:               normalized.Mode,
-		RateBytesPerSecond: normalized.RateBytesPerSecond,
-		Multiplier:         normalized.Multiplier,
-		JitterFraction:     normalized.JitterFraction,
-		CapBytes:           normalized.CapBytes,
-	})
-	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrLabSettingsStorageUnavailable, err)
-	}
-	published, err = writeFileAtomicPublished(path, append(data, '\n'))
-	if err != nil {
-		if published {
-			return true, fmt.Errorf("%w: %v", ErrLabSettingsDurabilityUnconfirmed, err)
-		}
-		return false, fmt.Errorf("%w: %v", ErrLabSettingsStorageUnavailable, err)
-	}
-	return true, nil
-}
-
 // startLabSampler records peer activity and real payload counters into the
 // announce log. It joins the session's background lifecycle, so Close cancels
-// it and waits before the recorder is closed.
+// it and waits before the recorder is closed. A session whose configuration
+// names no announce log has no recorder and starts no sampler.
 func (s *Session) startLabSampler(state *labState) {
 	if state == nil || state.recorder == nil {
 		return
@@ -210,7 +94,6 @@ type LabTorrentStatus struct {
 
 // LabStatus is the management API's view of the experiment.
 type LabStatus struct {
-	Enabled            bool
 	Settings           experiments.RuntimeSettings
 	Seed               int64
 	AnnounceLogPath    string
@@ -219,14 +102,14 @@ type LabStatus struct {
 }
 
 // LabStatus returns the experiment configuration and the per-torrent real and
-// reported upload counters. A session created without WithLabExperiment reports
-// Enabled false.
+// reported upload counters. The experiment is always on, so a session always
+// reports its settings.
 func (s *Session) LabStatus() LabStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	state := s.lab
-	if state == nil || s.state != stateActive {
-		return LabStatus{}
+	if state == nil {
+		return LabStatus{Torrents: []LabTorrentStatus{}}
 	}
 	states := state.reporter.ReportedStates()
 	torrents := make([]LabTorrentStatus, 0, len(s.torrents))
@@ -250,7 +133,6 @@ func (s *Session) LabStatus() LabStatus {
 	}
 	sort.Slice(torrents, func(i, j int) bool { return torrents[i].InfoHash < torrents[j].InfoHash })
 	return LabStatus{
-		Enabled:            true,
 		Settings:           state.reporter.RuntimeSettings(),
 		Seed:               state.settings.Seed,
 		AnnounceLogPath:    state.settings.AnnounceLogPath,
@@ -259,12 +141,13 @@ func (s *Session) LabStatus() LabStatus {
 	}
 }
 
-// SetLabSettings validates, persists, and applies runtime experiment settings
-// and returns the normalized value.
+// SetLabSettings validates and applies runtime experiment settings and returns
+// the normalized value. It changes only the running reporter: the configuration
+// file is the sole persistence, written by the configuration save path.
 //
 // The caller must already have validated the mode/rate combination through
-// NormalizeRuntimeSettings; this method validates again so an API caller cannot
-// bypass it. A session created without WithLabExperiment returns ErrLabDisabled.
+// NormalizeRuntimeSettings; this method validates again so a caller cannot
+// bypass it.
 func (s *Session) SetLabSettings(ctx context.Context, settings experiments.RuntimeSettings) (experiments.RuntimeSettings, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -284,20 +167,51 @@ func (s *Session) SetLabSettings(ctx context.Context, settings experiments.Runti
 	}
 	state := s.lab
 	if state == nil {
-		return experiments.RuntimeSettings{}, ErrLabDisabled
+		return experiments.RuntimeSettings{}, ErrInvalidLabSettings
 	}
 	if err := ctx.Err(); err != nil {
 		return experiments.RuntimeSettings{}, err
 	}
-	published, saveErr := saveLabSettings(s.metadataDir, normalized)
-	if !published {
-		s.logger.Error("lab settings save failed", "err", saveErr)
-		return experiments.RuntimeSettings{}, saveErr
-	}
 	state.reporter.UpdateRuntime(normalized)
-	if saveErr != nil {
-		s.logger.Error("lab settings applied without confirmed durability", "err", saveErr)
-		return normalized, saveErr
-	}
 	return normalized, nil
+}
+
+// experimentHotApplyKeys are the [experiments.upload] keys the running
+// reporter can replace without a restart. The seed, the announce log, and the
+// peer sample interval stay fixed for the lifetime of the process, so they are
+// restart-required.
+var experimentHotApplyKeys = []string{
+	"experiments.upload.mode",
+	"experiments.upload.rate",
+	"experiments.upload.multiplier",
+	"experiments.upload.jitter",
+	"experiments.upload.cap",
+}
+
+// ExperimentApplier applies the hot-applied [experiments.upload] keys to the
+// session's always-on reporter.
+type ExperimentApplier struct {
+	session *Session
+}
+
+// NewExperimentApplier builds the configuration applier of an experiment
+// session.
+func NewExperimentApplier(s *Session) *ExperimentApplier {
+	return &ExperimentApplier{session: s}
+}
+
+// Keys returns the configuration keys the applier can replace.
+func (a *ExperimentApplier) Keys() []string {
+	return append([]string{}, experimentHotApplyKeys...)
+}
+
+// Apply applies the runtime part of the experiment configuration to the
+// reporter.
+func (a *ExperimentApplier) Apply(cfg config.Config) error {
+	settings, err := experiments.SettingsFrom(cfg.Experiments.Upload)
+	if err != nil {
+		return err
+	}
+	_, err = a.session.SetLabSettings(context.Background(), settings.RuntimeSettings)
+	return err
 }

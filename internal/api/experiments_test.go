@@ -2,20 +2,21 @@ package api_test
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
-func TestGetLabDisabled(t *testing.T) {
-	backend := &fakeBackend{}
+func TestGetLabAlwaysReturnsData(t *testing.T) {
+	backend := &fakeBackend{labStatus: session.LabStatus{
+		Settings: experiments.RuntimeSettings{Mode: experiments.ModeBaseline, JitterFraction: 0.2},
+		Seed:     42,
+	}}
 	srv := newTestServer(t, backend, nil)
 	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/experiments/upload", nil))
 	if rec.Code != http.StatusOK {
@@ -25,11 +26,15 @@ func TestGetLabDisabled(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got["enabled"] != false {
-		t.Fatalf("enabled = %v, want false", got["enabled"])
+	if _, ok := got["enabled"]; ok {
+		t.Fatalf("response still reports an enabled field: %v", got)
 	}
-	if got["settings"] != nil {
-		t.Fatalf("settings = %v, want null", got["settings"])
+	settings, ok := got["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings = %v, want an object", got["settings"])
+	}
+	if settings["mode"] != "baseline" {
+		t.Fatalf("settings.mode = %v, want baseline", settings["mode"])
 	}
 	torrents, ok := got["torrents"].([]any)
 	if !ok || len(torrents) != 0 {
@@ -37,9 +42,8 @@ func TestGetLabDisabled(t *testing.T) {
 	}
 }
 
-func TestGetLabEnabled(t *testing.T) {
+func TestGetLabReturnsTheLiveComparison(t *testing.T) {
 	backend := &fakeBackend{labStatus: session.LabStatus{
-		Enabled: true,
 		Settings: session.LabSettings{
 			Mode:               experiments.ModeInject,
 			RateBytesPerSecond: 2 << 20,
@@ -70,7 +74,6 @@ func TestGetLabEnabled(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		Enabled  bool `json:"enabled"`
 		Settings struct {
 			Mode               string  `json:"mode"`
 			RateBytesPerSecond int64   `json:"rate_bytes_per_second"`
@@ -97,8 +100,8 @@ func TestGetLabEnabled(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if !got.Enabled || got.Settings.Mode != "inject" || got.Settings.RateBytesPerSecond != 2<<20 {
-		t.Fatalf("settings = %+v, want enabled inject at 2MiB/s", got.Settings)
+	if got.Settings.Mode != "inject" || got.Settings.RateBytesPerSecond != 2<<20 {
+		t.Fatalf("settings = %+v, want inject at 2MiB/s", got.Settings)
 	}
 	if got.Settings.JitterPercent != 20 {
 		t.Fatalf("jitter = %v, want 20", got.Settings.JitterPercent)
@@ -124,119 +127,17 @@ func TestGetLabEnabled(t *testing.T) {
 	}
 }
 
-func TestSetLabSettings(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
-	srv := newTestServer(t, backend, nil)
-	body := `{"mode":"amplify","multiplier":5,"jitter_percent":10}`
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(body)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
-	}
-	want := session.LabSettings{Mode: experiments.ModeAmplify, Multiplier: 5, JitterFraction: 0.1}
-	if backend.setLabSettings != want {
-		t.Fatalf("stored settings = %+v, want %+v", backend.setLabSettings, want)
-	}
-	if backend.labSettingsCalls != 1 {
-		t.Fatalf("SetLabSettings calls = %d, want 1", backend.labSettingsCalls)
-	}
-	var got struct {
-		Settings struct {
-			Mode          string  `json:"mode"`
-			Multiplier    float64 `json:"multiplier"`
-			JitterPercent float64 `json:"jitter_percent"`
-		} `json:"settings"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if got.Settings.Mode != "amplify" || got.Settings.Multiplier != 5 || got.Settings.JitterPercent != 10 {
-		t.Fatalf("response settings = %+v", got.Settings)
-	}
-}
-
-func TestSetLabSettingsDefaults(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
-	srv := newTestServer(t, backend, nil)
-	body := `{"mode":"baseline"}`
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(body)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
-	}
-	if backend.setLabSettings.JitterFraction != 0.2 {
-		t.Fatalf("jitter = %v, want the 20%% default", backend.setLabSettings.JitterFraction)
-	}
-}
-
-func TestSetLabSettingsRejectsMissingMode(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
-	srv := newTestServer(t, backend, nil)
-	rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"rate_bytes_per_second":1024}`)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
-	}
-	assertLabFailureCode(t, rec, api.LabCodeInvalid, false)
-	if backend.labSettingsCalls != 0 {
-		t.Fatalf("SetLabSettings called %d times, want 0", backend.labSettingsCalls)
-	}
-}
-
-func TestSetLabSettingsMapsSessionErrors(t *testing.T) {
-	cases := []struct {
-		name        string
-		err         error
-		wantStatus  int
-		wantCode    string
-		wantApplied bool
-	}{
-		{name: "invalid", err: session.ErrInvalidLabSettings, wantStatus: http.StatusBadRequest, wantCode: api.LabCodeInvalid},
-		{name: "disabled", err: session.ErrLabDisabled, wantStatus: http.StatusConflict, wantCode: api.LabCodeDisabled},
-		{name: "storage", err: session.ErrLabSettingsStorageUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: api.LabCodeStorageUnavailable},
-		{name: "durability", err: session.ErrLabSettingsDurabilityUnconfirmed, wantStatus: http.StatusServiceUnavailable, wantCode: api.LabCodeDurabilityUnconfirmed, wantApplied: true},
-		{name: "wrapped durability", err: errors.Join(session.ErrLabSettingsDurabilityUnconfirmed, errors.New("sync")), wantStatus: http.StatusServiceUnavailable, wantCode: api.LabCodeDurabilityUnconfirmed, wantApplied: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}, setLabSettingsErr: tc.err}
-			srv := newTestServer(t, backend, nil)
-			rec := do(t, srv, httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"mode":"baseline"}`)))
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d; body %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			assertLabFailureCode(t, rec, tc.wantCode, tc.wantApplied)
-		})
-	}
-}
-
-func assertLabFailureCode(t *testing.T, rec *httptest.ResponseRecorder, wantCode string, wantApplied bool) {
-	t.Helper()
-	var got struct {
-		Error   string `json:"error"`
-		Code    string `json:"code"`
-		Applied bool   `json:"applied"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode failure body: %v", err)
-	}
-	if got.Code != wantCode {
-		t.Fatalf("code = %q, want %q", got.Code, wantCode)
-	}
-	if got.Applied != wantApplied {
-		t.Fatalf("applied = %v, want %v", got.Applied, wantApplied)
-	}
-	if got.Error == "" {
-		t.Fatal("failure body has an empty error message")
-	}
-}
-
-// TestOldLabRoutesAreGone covers the contract that the monitor and settings
-// routes live under the new path only: a client still calling the removed
-// route learns that it no longer exists instead of reaching the experiment.
-func TestOldLabRoutesAreGone(t *testing.T) {
-	backend := &fakeBackend{labStatus: session.LabStatus{Enabled: true}}
+// TestRemovedExperimentRoutesAreGone covers the contract that the monitor lives
+// under the new path only and that the retired settings write endpoint no
+// longer exists: a client still calling either learns that it is gone instead
+// of reaching the experiment.
+func TestRemovedExperimentRoutesAreGone(t *testing.T) {
+	backend := &fakeBackend{}
 	srv := newTestServer(t, backend, nil)
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodGet, "/api/v1/lab", nil),
 		httptest.NewRequest(http.MethodPut, "/api/v1/lab/settings", strings.NewReader(`{"mode":"baseline"}`)),
+		httptest.NewRequest(http.MethodPut, "/api/v1/experiments/upload/settings", strings.NewReader(`{"mode":"baseline"}`)),
 	} {
 		rec := do(t, srv, request)
 		if rec.Code != http.StatusNotFound {

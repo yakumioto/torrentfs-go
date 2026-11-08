@@ -75,10 +75,7 @@ type fakeBackend struct {
 	setUploadRateSettingsErr error
 	uploadRateSettingsCalls  int
 
-	labStatus         session.LabStatus
-	setLabSettings    session.LabSettings
-	setLabSettingsErr error
-	labSettingsCalls  int
+	labStatus session.LabStatus
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -222,19 +219,6 @@ func (f *fakeBackend) LabStatus() session.LabStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.labStatus
-}
-
-func (f *fakeBackend) SetLabSettings(_ context.Context, settings session.LabSettings) (session.LabSettings, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.labSettingsCalls++
-	f.setLabSettings = settings
-	if f.setLabSettingsErr != nil {
-		return session.LabSettings{}, f.setLabSettingsErr
-	}
-	f.labStatus.Enabled = true
-	f.labStatus.Settings = settings
-	return settings, nil
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {

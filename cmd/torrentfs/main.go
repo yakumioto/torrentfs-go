@@ -175,6 +175,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"log_format", logFormat,
 	)
 	warnPlaintextPassword(logger, cfg, sources)
+
 	logEffectiveConfig(logger, cfg, sources)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
@@ -208,6 +209,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// New returns, which keeps the construction order one way.
 		configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
 		if err := configController.RegisterApplier(logging.NewLevelApplier(logLevelVar)); err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+			sequence.run()
+			return 1
+		}
+		if err := configController.RegisterApplier(session.NewExperimentApplier(sess)); err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 			sequence.run()
 			return 1
