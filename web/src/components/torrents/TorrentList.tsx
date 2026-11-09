@@ -1,8 +1,8 @@
 import { Button, Skeleton } from '@mantine/core';
 import { IconChevronDown, IconChevronUp, IconInbox, IconRefresh, IconSearch } from '@tabler/icons-react';
-import type { LabView, Torrent } from '../../types/api';
+import type { ExperimentView, Torrent } from '../../types/api';
 import type { SortDirection, TorrentSort, TorrentSortKey } from '../../queries/sort';
-import { indexLabTorrentStats } from '../../utils/lab';
+import { indexExperimentTorrentStats } from '../../utils/experiments';
 import styles from './TorrentList.module.css';
 import { TorrentRow } from './TorrentRow';
 
@@ -15,7 +15,7 @@ const SORT_FIELDS: Array<{ key: TorrentSortKey; label: string }> = [
 
 export function TorrentList({
   torrents,
-  lab,
+  experiment,
   loading,
   error,
   onRetry,
@@ -28,8 +28,8 @@ export function TorrentList({
   onSortDirectionToggle,
 }: {
   torrents?: Torrent[];
-  /** Live lab view; per-torrent reported/overreported values appear when enabled. */
-  lab?: LabView;
+  /** Live experiment view; per-torrent reported/overreported values appear once it is loaded. */
+  experiment?: ExperimentView;
   loading: boolean;
   error: unknown;
   onRetry: () => void;
@@ -41,8 +41,8 @@ export function TorrentList({
   onSortKeyChange: (key: TorrentSortKey) => void;
   onSortDirectionToggle: () => void;
 }) {
-  const labEnabled = lab?.enabled === true;
-  const labStats = indexLabTorrentStats(lab);
+  const showExperiment = experiment !== undefined;
+  const experimentStats = indexExperimentTorrentStats(experiment);
 
   if (loading && torrents === undefined) {
     return (
@@ -133,8 +133,8 @@ export function TorrentList({
         <TorrentRow
           key={torrent.id}
           torrent={torrent}
-          labEnabled={labEnabled}
-          labStat={labStats.get(torrent.info_hash)}
+          showExperiment={showExperiment}
+          experimentStat={experimentStats.get(torrent.info_hash)}
         />
       ))}
     </div>

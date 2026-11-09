@@ -73,8 +73,9 @@ func (s *Server) handleUploadSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload)
-	if err := r.ParseMultipartForm(s.maxUpload); err != nil {
+	limit := s.maxUploadBytes()
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseMultipartForm(limit); err != nil {
 		if isTooLarge(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
@@ -100,7 +101,7 @@ func (s *Server) handleUploadSubtitle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = file.Close() }()
 
-	result, err := s.backend.UploadSubtitle(r.Context(), r.PathValue("id"), videoPath, header.Filename, file, s.maxUpload)
+	result, err := s.backend.UploadSubtitle(r.Context(), r.PathValue("id"), videoPath, header.Filename, file, limit)
 	if err != nil {
 		writeSubtitleError(w, err)
 		return

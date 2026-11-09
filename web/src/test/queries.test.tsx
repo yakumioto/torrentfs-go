@@ -3,17 +3,16 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
-import { operationRefetchInterval, useAddTorrentFiles, useLab, useOperation, useSetLabSettings } from '../queries/hooks';
+import { operationRefetchInterval, useAddTorrentFiles, useExperiment, useOperation } from '../queries/hooks';
 import { queryKeys } from '../queries/keys';
 import { retryDelay, shouldRetry } from '../queries/retry';
-import type { LabView, Operation } from '../types/api';
+import type { ExperimentView, Operation } from '../types/api';
 
-function labView(overrides: Partial<LabView> = {}): LabView {
+function experimentView(overrides: Partial<ExperimentView> = {}): ExperimentView {
   return {
-    enabled: true,
     settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 42,
-    announce_log: '/var/log/torrentfs/lab.jsonl',
+    announce_log: '/var/log/torrentfs/experiment.jsonl',
     peer_sample_interval_seconds: 5,
     totals: {
       real_uploaded_bytes: 5_000_000,
@@ -38,8 +37,7 @@ describe('query contracts', () => {
     expect(queryKeys.torrents).toEqual(['torrents']);
     expect(queryKeys.categories).toEqual(['categories']);
     expect(queryKeys.runtimeStats).toEqual(['runtime-stats']);
-    expect(queryKeys.uploadRateSettings).toEqual(['upload-rate-settings']);
-    expect(queryKeys.lab).toEqual(['lab']);
+    expect(queryKeys.experiments).toEqual(['experiments']);
     expect(queryKeys.torrent('abc')).toEqual(['torrent', 'abc']);
     expect(queryKeys.torrentStatus('abc')).toEqual(['torrent-status', 'abc']);
     expect(queryKeys.operation('op-1')).toEqual(['operation', 'op-1']);
@@ -139,41 +137,22 @@ describe('query contracts', () => {
     expect(addTorrent).toHaveBeenCalledOnce();
   });
 
-  it('polls the live lab view only while enabled', async () => {
-    const api = { getLab: vi.fn().mockResolvedValue(labView()) } as unknown as ApiClient;
+  it('polls the live experiment view only while the page is visible', async () => {
+    const api = { getExperiment: vi.fn().mockResolvedValue(experimentView()) } as unknown as ApiClient;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 
-    const disabled = renderHook(() => useLab(api, false), { wrapper });
+    const disabled = renderHook(() => useExperiment(api, false), { wrapper });
     expect(disabled.result.current.fetchStatus).toBe('idle');
-    expect(api.getLab).not.toHaveBeenCalled();
+    expect(api.getExperiment).not.toHaveBeenCalled();
     disabled.unmount();
 
-    const enabled = renderHook(() => useLab(api, true), { wrapper });
+    const enabled = renderHook(() => useExperiment(api, true), { wrapper });
     await waitFor(() => expect(enabled.result.current.data?.totals.reported_uploaded_bytes).toBe(4_197_247));
-    expect(api.getLab).toHaveBeenCalledOnce();
+    expect(api.getExperiment).toHaveBeenCalledOnce();
 
     enabled.unmount();
     queryClient.clear();
   });
 
-  it('stores the applied lab view returned by the settings write', async () => {
-    const applied = labView({
-      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 3, jitter_percent: 20, cap_bytes: 0 },
-    });
-    const api = { setLabSettings: vi.fn().mockResolvedValue(applied) } as unknown as ApiClient;
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
-    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-    const hook = renderHook(() => useSetLabSettings(api), { wrapper });
-
-    await act(async () => {
-      await hook.result.current.mutateAsync({ settings: { mode: 'amplify', multiplier: 3 } });
-    });
-
-    expect(api.setLabSettings).toHaveBeenCalledWith({ mode: 'amplify', multiplier: 3 }, undefined);
-    expect(queryClient.getQueryData(queryKeys.lab)).toEqual(applied);
-
-    hook.unmount();
-    queryClient.clear();
-  });
 });

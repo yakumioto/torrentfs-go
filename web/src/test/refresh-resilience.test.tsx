@@ -59,10 +59,9 @@ function makeRuntimeStats() {
   };
 }
 
-function disabledLab() {
+function baselineExperiment() {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -123,8 +122,8 @@ describe('background refresh resilience', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+      if (url.endsWith('/experiments/upload')) {
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       listRequests += 1;
       return Promise.resolve(listRequests === 1 ? jsonResponse([torrent]) : failingResponse());
@@ -156,8 +155,8 @@ describe('background refresh resilience', () => {
         statusRequests += 1;
         return Promise.resolve(statusRequests === 1 ? jsonResponse(makeStatus(torrent)) : failingResponse());
       }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+      if (url.endsWith('/experiments/upload')) {
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       return Promise.resolve(jsonResponse(torrent));
     });

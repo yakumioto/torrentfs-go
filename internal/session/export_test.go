@@ -250,6 +250,12 @@ func MarkReadingForTest(st *Torrent) (restore func()) {
 	}
 }
 
+// MarkUploadActivityForTest records an observed upload at now, so a test can
+// drive the uploading allowance without a real peer connection. Test-only.
+func MarkUploadActivityForTest(st *Torrent, now time.Time) {
+	st.lastUploadAt.Store(now.UnixNano())
+}
+
 // ConnectionAllowanceForTest reports the peer connection allowance the
 // allocator last applied to the torrent. Test-only.
 func ConnectionAllowanceForTest(st *Torrent) int {
@@ -272,6 +278,16 @@ func MetadataStageConnectionsForTest() int {
 // AllocateConnectionsForTest runs one connection allocation pass. Test-only.
 func AllocateConnectionsForTest(s *Session) {
 	s.allocateConnections()
+}
+
+// WithConnectionAllocatorPassLockForTest runs fn while no allocation pass can
+// run. A test changes the fake clock through it, so every pass sees either the
+// whole change or none of it and a stale plan cannot land after a newer one.
+// Test-only.
+func WithConnectionAllocatorPassLockForTest(s *Session, fn func()) {
+	s.connAlloc.passMu.Lock()
+	defer s.connAlloc.passMu.Unlock()
+	fn()
 }
 
 // SetConnectionAllocatorClockForTest replaces the allocator clock so a test can
@@ -343,8 +359,8 @@ func (s *Session) UploadRateLimitForTest() (rate.Limit, *rate.Limiter) {
 }
 
 // SetUploadRatePolicyForTest installs policy and applies the limit in force at
-// when, exactly as a boundary or a settings update does, without touching the
-// persisted sidecar. It lets a test pin a policy to a fixed clock. Test-only.
+// when, exactly as a boundary or a settings update does, without going through
+// the configuration. It lets a test pin a policy to a fixed clock. Test-only.
 func (s *Session) SetUploadRatePolicyForTest(settings UploadRateSettings, when time.Time) error {
 	normalized, policy, err := validateUploadRateSettings(settings)
 	if err != nil {
@@ -355,15 +371,6 @@ func (s *Session) SetUploadRatePolicyForTest(settings UploadRateSettings, when t
 	s.uploadRateSettings = normalized
 	s.uploadRate.setPolicy(policy, when)
 	return nil
-}
-
-// SetUploadRateDirSyncHookForTest makes the directory sync that follows the
-// atomic rename fail, so a test can exercise the published-but-unconfirmed
-// path. It returns a restore function. Test-only.
-func SetUploadRateDirSyncHookForTest(fn func(string) error) func() {
-	previous := atomicSyncDirectoryHook
-	atomicSyncDirectoryHook = fn
-	return func() { atomicSyncDirectoryHook = previous }
 }
 
 // EvictPiecesForTest drops every piece of the torrent except the ones in keep

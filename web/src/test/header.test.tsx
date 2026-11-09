@@ -40,10 +40,9 @@ function makeRuntimeStats() {
   };
 }
 
-function disabledLab() {
+function baselineExperiment() {
   return {
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -120,8 +119,8 @@ describe('Header refresh control', () => {
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+      if (url.endsWith('/experiments/upload')) {
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       listRequests += 1;
       if (listRequests === 1) {
@@ -157,39 +156,6 @@ describe('Header refresh control', () => {
     expect(navigationError.mock.calls.flat().some((value) => String(value).includes('Not implemented: navigation'))).toBe(false);
   });
 
-  it('opens the upload rate settings dialog from the header gear', async () => {
-    const torrent = makeTorrent();
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      void init;
-      const url = String(input);
-      if (url.endsWith('/stats')) {
-        return Promise.resolve(jsonResponse(makeRuntimeStats()));
-      }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
-      }
-      if (url.endsWith('/settings/upload-rate')) {
-        return Promise.resolve(jsonResponse({ rate_limit_bytes_per_second: 0, schedule: null }));
-      }
-      if (url.endsWith('/torrents')) {
-        return Promise.resolve(jsonResponse([torrent]));
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-
-    renderApp('/', fetchMock);
-    await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
-
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '上传限速设置' }));
-
-    const dialog = await screen.findByRole('dialog');
-    expect(dialog).toHaveTextContent('上传限速设置');
-    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/settings/upload-rate'))).toBe(true);
-    // The settings entry is a dialog, not a route.
-    expect(window.location.pathname).toBe('/');
-  });
-
   it('refreshes only the active status query on detail pages', async () => {
     const torrent = makeTorrent({ name: 'Detail torrent', cached_bytes: 100 });
     const status = makeStatus(torrent);
@@ -199,8 +165,8 @@ describe('Header refresh control', () => {
       if (url.endsWith('/status')) {
         return Promise.resolve(jsonResponse(status));
       }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+      if (url.endsWith('/experiments/upload')) {
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       if (url.endsWith('/torrent-1')) {
         return Promise.resolve(jsonResponse(torrent));
@@ -226,15 +192,15 @@ describe('Header refresh control', () => {
     expect(window.location.pathname).toBe('/torrents/torrent-1');
   });
 
-  it('opens the lab settings page from the header flask link', async () => {
+  it('opens the experiments monitor from the header flask link', async () => {
     const torrent = makeTorrent();
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/stats')) {
         return Promise.resolve(jsonResponse(makeRuntimeStats()));
       }
-      if (url.endsWith('/lab')) {
-        return Promise.resolve(jsonResponse(disabledLab()));
+      if (url.endsWith('/experiments/upload')) {
+        return Promise.resolve(jsonResponse(baselineExperiment()));
       }
       if (url.endsWith('/torrents')) {
         return Promise.resolve(jsonResponse([torrent]));
@@ -245,11 +211,11 @@ describe('Header refresh control', () => {
     renderApp('/', fetchMock);
     await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
 
-    const link = screen.getByRole('link', { name: '上传实验设置' });
-    expect(link).toHaveAttribute('href', '/lab');
+    const link = screen.getByRole('link', { name: '上传实验监控' });
+    expect(link).toHaveAttribute('href', '/experiments');
     fireEvent.click(link);
 
-    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验设置' })).toBeInTheDocument());
-    expect(screen.getByText('上传实验未启用')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('基线（真实上报）').length).toBeGreaterThan(0));
   });
 });

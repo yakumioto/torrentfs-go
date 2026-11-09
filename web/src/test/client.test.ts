@@ -43,28 +43,6 @@ describe('ApiClient', () => {
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('/api/v1/stats');
   });
 
-  it('reads upload rate settings from the settings endpoint', async () => {
-    const settings = { rate_limit_bytes_per_second: 1048576, schedule: { start: '08:00', end: '22:00' } };
-    vi.mocked(fetch).mockResolvedValue(response(settings));
-    const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.getUploadRateSettings()).resolves.toEqual(settings);
-    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/settings/upload-rate');
-    expect(request.method ?? 'GET').toBe('GET');
-  });
-
-  it('writes upload rate settings as JSON with the bearer header', async () => {
-    const settings = { rate_limit_bytes_per_second: 0, schedule: null };
-    vi.mocked(fetch).mockResolvedValue(response(settings));
-    const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.setUploadRateSettings(settings)).resolves.toEqual(settings);
-    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/settings/upload-rate');
-    expect(request.method).toBe('PUT');
-    expect(request.body).toBe(JSON.stringify(settings));
-    expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
-  });
-
   it('lets fetch set multipart boundaries', async () => {
     vi.mocked(fetch).mockResolvedValue(response({ id: 'a' }));
     const api = new ApiClient({ getToken: () => 'opaque' });
@@ -74,12 +52,11 @@ describe('ApiClient', () => {
     expect(request.body).toBeInstanceOf(FormData);
   });
 
-  it('reads the lab view from the lab endpoint', async () => {
-    const lab = {
-      enabled: true,
+  it('reads the experiment view from the experiment endpoint', async () => {
+    const experiment = {
       settings: { mode: 'inject', rate_bytes_per_second: 2_097_152, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
       seed: 42,
-      announce_log: '/var/log/torrentfs/lab.jsonl',
+      announce_log: '/var/log/torrentfs/experiment.jsonl',
       peer_sample_interval_seconds: 5,
       totals: {
         real_uploaded_bytes: 5_000_000,
@@ -96,51 +73,13 @@ describe('ApiClient', () => {
         last_announce_at: '2026-11-05T15:12:00.123456Z',
       }],
     };
-    vi.mocked(fetch).mockResolvedValue(response(lab));
+    vi.mocked(fetch).mockResolvedValue(response(experiment));
     const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.getLab()).resolves.toEqual(lab);
+    await expect(api.getExperiment()).resolves.toEqual(experiment);
     const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/lab');
+    expect(url).toBe('/api/v1/experiments/upload');
     expect(request.method ?? 'GET').toBe('GET');
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
-  });
-
-  it('writes lab settings as JSON to the lab settings endpoint', async () => {
-    const applied = {
-      enabled: true,
-      settings: { mode: 'amplify', rate_bytes_per_second: 0, multiplier: 3, jitter_percent: 20, cap_bytes: 0 },
-      seed: 42,
-      announce_log: '',
-      peer_sample_interval_seconds: 5,
-      totals: {
-        real_uploaded_bytes: 0,
-        real_uploaded_at_last_announce_bytes: 0,
-        reported_uploaded_bytes: 0,
-        overreported_bytes: 0,
-        pending_real_upload_bytes: 0,
-      },
-      torrents: [],
-    };
-    const update = { mode: 'amplify' as const, multiplier: 3, jitter_percent: 20, cap_bytes: 0 };
-    vi.mocked(fetch).mockResolvedValue(response(applied));
-    const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.setLabSettings(update)).resolves.toEqual(applied);
-    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/v1/lab/settings');
-    expect(request.method).toBe('PUT');
-    expect(request.body).toBe(JSON.stringify(update));
-    expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
-  });
-
-  it('exposes the lab failure code from a rejected settings write', async () => {
-    vi.mocked(fetch).mockResolvedValue(
-      response({ error: '上传实验未启用', code: 'lab_disabled', applied: false }, { status: 409, statusText: 'Conflict' }),
-    );
-    const api = new ApiClient({ getToken: () => 'opaque' });
-    await expect(api.setLabSettings({ mode: 'inject', rate_bytes_per_second: 1024 })).rejects.toMatchObject({
-      status: 409,
-      code: 'lab_disabled',
-    });
   });
 
   it('reports WWW-Authenticate and invokes the unauthorized hook only for management calls', async () => {
@@ -250,5 +189,41 @@ describe('ApiClient category calls', () => {
     await api.setTorrentCategory('abc/def', '');
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('/api/v1/torrents/abc%2Fdef/category');
     expect((vi.mocked(fetch).mock.calls[1][1] as RequestInit).body).toBe(JSON.stringify({ category: '' }));
+  });
+});
+
+describe('ApiClient configuration save', () => {
+  it('writes a sparse patch with the baseline and the bearer header', async () => {
+    const result = { applied: ['log.level'], restart_required: [], persisted: true };
+    vi.mocked(fetch).mockResolvedValue(response(result));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+
+    await expect(api.saveConfig({ baseline: 'digest', patch: { 'log.level': 'debug' } })).resolves.toEqual(result);
+
+    const [url, request] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/config');
+    expect(request.method).toBe('PUT');
+    expect(request.body).toBe(JSON.stringify({ baseline: 'digest', patch: { 'log.level': 'debug' } }));
+    expect(new Headers(request.headers).get('Authorization')).toBe('Bearer opaque');
+  });
+
+  it('keeps the structured failure payload of a rejected save', async () => {
+    vi.mocked(fetch).mockResolvedValue(response({
+      error: '配置校验失败',
+      code: 'invalid',
+      field_errors: [{ path: 'log.level', message: 'must be one of debug, info, warn, error' }],
+      applied: [],
+      restart_required: [],
+      persisted: false,
+    }, { status: 400, statusText: 'Bad Request' }));
+    const api = new ApiClient();
+
+    await expect(api.saveConfig({ baseline: 'digest', patch: { 'log.level': 'verbose' } })).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid',
+      payload: {
+        field_errors: [{ path: 'log.level', message: 'must be one of debug, info, warn, error' }],
+      },
+    });
   });
 });

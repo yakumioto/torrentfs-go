@@ -52,9 +52,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # The example configuration, the image configuration and the reference
-      # in the README are generated from the configuration schema. A hand edit
-      # to one of them is a change the generator does not know about.
+      # The example configuration, the image configuration, the reference in
+      # the README and the schema documentation embedded in the binary are
+      # generated from the configuration schema. A hand edit to one of them is
+      # a change the generator does not know about.
       - run: ./scripts/config-docs-check.sh
 
   docker-config:

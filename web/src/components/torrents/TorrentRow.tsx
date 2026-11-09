@@ -2,14 +2,14 @@ import { ActionIcon, Badge, Menu, Tooltip } from '@mantine/core';
 import { IconDots, IconExternalLink, IconFolder, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { LabTorrentStat, Torrent } from '../../types/api';
+import type { ExperimentTorrentStat, Torrent } from '../../types/api';
 import { useAuth } from '../../app/auth-context';
 import { useSetFavorite } from '../../queries/hooks';
 import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
-import { formatSignedBytes, labOverreportedBytes, labPendingRealUploadBytes } from '../../utils/lab';
+import { formatSignedBytes, experimentOverreportedBytes, experimentPendingRealUploadBytes } from '../../utils/experiments';
 import { StateBadge } from './StateBadge';
 
 /**
@@ -19,22 +19,22 @@ import { StateBadge } from './StateBadge';
  * so the usually large live-vs-reported gap is explained instead of looking
  * like a reporting bug.
  */
-function labRowTitle(labStat: LabTorrentStat | undefined): string {
-  if (labStat === undefined) {
+function experimentRowTitle(experimentStat: ExperimentTorrentStat | undefined): string {
+  if (experimentStat === undefined) {
     return '上传实验：这个种子还没有向 tracker 上报过上传量。';
   }
-  const pending = labPendingRealUploadBytes(
-    labStat.real_uploaded_bytes,
-    labStat.real_uploaded_at_last_announce_bytes,
+  const pending = experimentPendingRealUploadBytes(
+    experimentStat.real_uploaded_bytes,
+    experimentStat.real_uploaded_at_last_announce_bytes,
   );
   return `相对上次上报时真实量；待上报 ${formatBytes(pending)} 尚未计入`;
 }
 
-export function TorrentRow({ torrent, labEnabled = false, labStat }: {
+export function TorrentRow({ torrent, showExperiment = false, experimentStat }: {
   torrent: Torrent;
-  /** When the experiment is running, each row also shows reported/overreported bytes. */
-  labEnabled?: boolean;
-  labStat?: LabTorrentStat;
+  /** When the experiment view is loaded, each row also shows reported/overreported bytes. */
+  showExperiment?: boolean;
+  experimentStat?: ExperimentTorrentStat;
 }) {
   const auth = useAuth();
   const navigate = useNavigate();
@@ -67,14 +67,14 @@ export function TorrentRow({ torrent, labEnabled = false, labStat }: {
         <div className={`${styles.upload} text-mono`}>
           <span className={styles.mobileLabel}>上传量</span>
           <span>{formatBytes(torrent.uploaded_bytes)}</span>
-          {labEnabled && (
+          {showExperiment && (
             <span
-              className={styles.labValues}
-              title={labRowTitle(labStat)}
+              className={styles.experimentValues}
+              title={experimentRowTitle(experimentStat)}
             >
-              上报 {labStat === undefined ? '—' : formatBytes(labStat.reported_uploaded_bytes)}
+              上报 {experimentStat === undefined ? '—' : formatBytes(experimentStat.reported_uploaded_bytes)}
               {' · '}
-              虚报 {labStat === undefined ? '—' : formatSignedBytes(labOverreportedBytes(labStat.reported_uploaded_bytes, labStat.real_uploaded_at_last_announce_bytes))}
+              虚报 {experimentStat === undefined ? '—' : formatSignedBytes(experimentOverreportedBytes(experimentStat.reported_uploaded_bytes, experimentStat.real_uploaded_at_last_announce_bytes))}
             </span>
           )}
         </div>

@@ -3,15 +3,16 @@ import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/errors';
 import type {
   Category,
-  LabSettingsUpdate,
-  LabView,
+  ConfigSaveRequest,
+  ConfigSaveResult,
+  ConfigView,
+  ExperimentView,
   Operation,
   PruneResult,
   RuntimeStats,
   SubtitleUploadResponse,
   Torrent,
   TorrentStatus,
-  UploadRateSettings,
 } from '../types/api';
 import { queryKeys } from './keys';
 import { retryDelay, shouldRetry } from './retry';
@@ -61,6 +62,51 @@ export function useRuntimeStats(api: ApiClient, enabled: boolean) {
     refetchIntervalInBackground: false,
     retry: shouldRetry,
     retryDelay,
+  });
+}
+
+/**
+ * How often the configuration page refreshes the view while it is visible.
+ *
+ * The process watches the configuration file every two seconds, so a refresh
+ * on the same order surfaces the automatic reload status (and a file error)
+ * without the reader reloading the page. A hidden tab and a background page
+ * do not poll: the process keeps watching, and the next visible read catches
+ * up.
+ */
+export const CONFIG_POLL_INTERVAL = 2200;
+
+/**
+ * The configuration view is a live snapshot of the process and the file while
+ * the page is visible, so an accepted external reload reaches the page
+ * without a manual refresh. The view still seeds the form only once; polling
+ * never replaces unsaved drafts or the baseline they were typed against.
+ */
+export function useConfig(api: ApiClient, enabled: boolean) {
+  return useQuery<ConfigView>({
+    queryKey: queryKeys.config,
+    queryFn: ({ signal }) => api.getConfig(signal),
+    enabled,
+    refetchInterval: enabled ? CONFIG_POLL_INTERVAL : false,
+    refetchIntervalInBackground: false,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+/**
+ * Saves a sparse configuration patch and refreshes the view on success, so
+ * the next save sends the new baseline. A conflict deliberately does not
+ * refresh: the page keeps the baseline it edited from until the user reloads,
+ * instead of silently rebasing local edits onto a file it never read.
+ */
+export function useSaveConfig(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation<ConfigSaveResult, Error, ConfigSaveRequest>({
+    mutationFn: (request) => api.saveConfig(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.config });
+    },
   });
 }
 
@@ -320,56 +366,20 @@ export function usePruneTorrents(api: ApiClient) {
   });
 }
 
-export function useUploadRateSettings(api: ApiClient, enabled: boolean) {
-  return useQuery<UploadRateSettings>({
-    queryKey: queryKeys.uploadRateSettings,
-    queryFn: ({ signal }) => api.getUploadRateSettings(signal),
-    enabled,
-    retry: shouldRetry,
-    retryDelay,
-  });
-}
-
-export function useSetUploadRateSettings(api: ApiClient) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ settings, signal }: { settings: UploadRateSettings; signal?: AbortSignal }) =>
-      api.setUploadRateSettings(settings, signal),
-    onSuccess: (saved: UploadRateSettings) => {
-      // The daemon returns the normalized value it applied, so the cache holds
-      // what a later read would return instead of the request echo.
-      queryClient.setQueryData(queryKeys.uploadRateSettings, saved);
-    },
-  });
-}
-
 /**
  * Live view of the experimental synthetic-upload harness. The counters grow
  * with every tracker announce, so the dashboard polls faster than the torrent
  * list to keep the displayed totals close to what the tracker just received.
  */
-export function useLab(api: ApiClient, enabled: boolean) {
-  return useQuery<LabView>({
-    queryKey: queryKeys.lab,
-    queryFn: ({ signal }) => api.getLab(signal),
+export function useExperiment(api: ApiClient, enabled: boolean) {
+  return useQuery<ExperimentView>({
+    queryKey: queryKeys.experiments,
+    queryFn: ({ signal }) => api.getExperiment(signal),
     enabled,
     refetchInterval: 2000,
     refetchIntervalInBackground: false,
     retry: shouldRetry,
     retryDelay,
-  });
-}
-
-export function useSetLabSettings(api: ApiClient) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ settings, signal }: { settings: LabSettingsUpdate; signal?: AbortSignal }) =>
-      api.setLabSettings(settings, signal),
-    onSuccess: (saved: LabView) => {
-      // The response is the post-apply view, so it already contains both the
-      // normalized settings and the refreshed totals.
-      queryClient.setQueryData(queryKeys.lab, saved);
-    },
   });
 }
 

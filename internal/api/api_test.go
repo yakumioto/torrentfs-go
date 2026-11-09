@@ -70,15 +70,7 @@ type fakeBackend struct {
 	runtimeStats session.RuntimeStatsView
 	ops          map[string]session.Operation
 
-	uploadRateSettings       session.UploadRateSettings
-	setUploadRateSettings    session.UploadRateSettings
-	setUploadRateSettingsErr error
-	uploadRateSettingsCalls  int
-
-	labStatus         session.LabStatus
-	setLabSettings    session.LabSettings
-	setLabSettingsErr error
-	labSettingsCalls  int
+	experimentStatus session.ExperimentStatus
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -200,41 +192,10 @@ func (f *fakeBackend) RuntimeStats() session.RuntimeStatsView {
 	return f.runtimeStats
 }
 
-func (f *fakeBackend) UploadRateSettings() session.UploadRateSettings {
+func (f *fakeBackend) ExperimentStatus() session.ExperimentStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.uploadRateSettings
-}
-
-func (f *fakeBackend) SetUploadRateSettings(_ context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.uploadRateSettingsCalls++
-	f.setUploadRateSettings = settings
-	if f.setUploadRateSettingsErr != nil {
-		return session.UploadRateSettings{}, f.setUploadRateSettingsErr
-	}
-	f.uploadRateSettings = settings
-	return settings, nil
-}
-
-func (f *fakeBackend) LabStatus() session.LabStatus {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.labStatus
-}
-
-func (f *fakeBackend) SetLabSettings(_ context.Context, settings session.LabSettings) (session.LabSettings, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.labSettingsCalls++
-	f.setLabSettings = settings
-	if f.setLabSettingsErr != nil {
-		return session.LabSettings{}, f.setLabSettingsErr
-	}
-	f.labStatus.Enabled = true
-	f.labStatus.Settings = settings
-	return settings, nil
+	return f.experimentStatus
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {

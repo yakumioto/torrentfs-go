@@ -31,10 +31,9 @@ function runtimeStatsResponse(): Response {
   });
 }
 
-function disabledLabResponse(): Response {
+function baselineExperimentResponse(): Response {
   return jsonResponse({
-    enabled: false,
-    settings: null,
+    settings: { mode: 'baseline', rate_bytes_per_second: 0, multiplier: 0, jitter_percent: 20, cap_bytes: 0 },
     seed: 0,
     announce_log: '',
     peer_sample_interval_seconds: 0,
@@ -75,7 +74,7 @@ function renderApp() {
 
 /**
  * URL-aware fetch double. The authenticated dashboard now issues three
- * independent queries (list, runtime stats, lab status), so a fixed response
+ * independent queries (list, runtime stats, experiment status), so a fixed response
  * sequence would make these tests depend on query start order.
  */
 function mockFetch(handler: (url: string, request?: RequestInit) => Response | Promise<Response>) {
@@ -103,8 +102,8 @@ function dashboardHandler(options: {
     if (url.endsWith('/stats')) {
       return runtimeStatsResponse();
     }
-    if (url.endsWith('/lab')) {
-      return disabledLabResponse();
+    if (url.endsWith('/experiments/upload')) {
+      return baselineExperimentResponse();
     }
     throw new Error(`Unexpected request: ${url}`);
   };

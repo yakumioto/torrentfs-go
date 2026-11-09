@@ -71,7 +71,7 @@
   display: none;
 }
 
-.labValues {
+.experimentValues {
   display: block;
   margin-top: 0.2rem;
   color: var(--text-subtle);

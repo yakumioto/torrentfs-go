@@ -80,7 +80,7 @@ func (s *Session) StreamURL(hash metainfo.Hash, path string) (string, error) {
 	if _, _, err := s.streamFileLocked(hash, path); err != nil {
 		return "", err
 	}
-	return stream.BuildURL(s.cfg.STRM.BaseURL, hash, s.streamSigner.Sign(hash, path), path)
+	return stream.BuildURL(s.streamBaseURL, hash, s.streamSigner.Sign(hash, path), path)
 }
 
 // OpenStream validates a file-scoped capability before opening the same reader

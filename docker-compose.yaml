@@ -21,14 +21,26 @@ services:
       - "6881:6881/tcp"
       - "6881:6881/udp"
     volumes:
+      # The configuration page writes its changes back to
+      # /etc/torrentfs/torrentfs.toml. This named volume is seeded from the
+      # image's writable configuration and keeps the changes across container
+      # recreation; delete it to return to the image defaults.
+      - type: volume
+        source: torrentfs-config
+        target: /etc/torrentfs
       - type: bind
         source: ./torrents
         target: /torrents
         bind:
           create_host_path: false
-      # Optional custom TOML; backend can also be selected there.
-      # Remove the corresponding environment override below when using TOML.
-      # - ./torrentfs.toml:/etc/torrentfs/torrentfs.toml:ro
+      # To manage the TOML yourself, remove the volume above and mount your
+      # own file instead; backend can also be selected there. Remove the
+      # corresponding environment override below when using TOML. A read-only
+      # file leaves the configuration page read-only.
+      # - type: bind
+      #   source: ./torrentfs.toml
+      #   target: /etc/torrentfs/torrentfs.toml
+      #   read_only: true
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
@@ -49,3 +61,8 @@ services:
       # TORRENTFS_CONNECTIONS_LISTEN_PORT: "6881"
       # TORRENTFS_CACHE_CAPACITY: "2GiB"
       # TORRENTFS_FILESYSTEM_READ_TIMEOUT: "30s"
+# The configuration volume keeps the ownership of the image (1000:1000). With
+# a different PUID/PGID, chown the volume once or the configuration page
+# degrades to read-only.
+volumes:
+  torrentfs-config:

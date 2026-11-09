@@ -224,58 +224,58 @@ var historicalEnvironmentCases = []struct {
 		want: STRMOff,
 	},
 	{
-		path: "lab.upload_mode",
-		name: "TORRENTFS_LAB_UPLOAD_MODE",
-		file: "[lab]\nupload_mode = \"baseline\"\n",
+		path: "experiments.upload.mode",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_MODE",
+		file: "[experiments.upload]\nmode = \"baseline\"\n",
 		env:  "amplify",
 		want: "amplify",
 	},
 	{
-		path: "lab.upload_rate",
-		name: "TORRENTFS_LAB_UPLOAD_RATE",
-		file: "[lab]\nupload_rate = \"1MiB/s\"\n",
+		path: "experiments.upload.rate",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_RATE",
+		file: "[experiments.upload]\nrate = \"1MiB/s\"\n",
 		env:  "2MiB/s",
 		want: ByteRate(2 << 20),
 	},
 	{
-		path: "lab.upload_multiplier",
-		name: "TORRENTFS_LAB_UPLOAD_MULTIPLIER",
-		file: "[lab]\nupload_multiplier = \"2\"\n",
+		path: "experiments.upload.multiplier",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_MULTIPLIER",
+		file: "[experiments.upload]\nmultiplier = \"2\"\n",
 		env:  "3",
 		want: Ratio(3),
 	},
 	{
-		path: "lab.upload_jitter",
-		name: "TORRENTFS_LAB_UPLOAD_JITTER",
-		file: "[lab]\nupload_jitter = \"10\"\n",
+		path: "experiments.upload.jitter",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_JITTER",
+		file: "[experiments.upload]\njitter = \"10\"\n",
 		env:  "20",
 		want: Percent(20),
 	},
 	{
-		path: "lab.upload_cap",
-		name: "TORRENTFS_LAB_UPLOAD_CAP",
-		file: "[lab]\nupload_cap = \"1MiB\"\n",
+		path: "experiments.upload.cap",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_CAP",
+		file: "[experiments.upload]\ncap = \"1MiB\"\n",
 		env:  "2MiB",
 		want: OptionalByteQuantity(2 << 20),
 	},
 	{
-		path: "lab.upload_seed",
-		name: "TORRENTFS_LAB_UPLOAD_SEED",
-		file: "[lab]\nupload_seed = 1\n",
+		path: "experiments.upload.seed",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_SEED",
+		file: "[experiments.upload]\nseed = 1\n",
 		env:  "42",
 		want: int64(42),
 	},
 	{
-		path: "lab.announce_log",
-		name: "TORRENTFS_LAB_ANNOUNCE_LOG",
-		file: "[lab]\nannounce_log = \"/tmp/file.jsonl\"\n",
+		path: "experiments.upload.announce_log",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG",
+		file: "[experiments.upload]\nannounce_log = \"/tmp/file.jsonl\"\n",
 		env:  "/tmp/env.jsonl",
 		want: "/tmp/env.jsonl",
 	},
 	{
-		path: "lab.peer_sample_interval",
-		name: "TORRENTFS_LAB_PEER_SAMPLE_INTERVAL",
-		file: "[lab]\npeer_sample_interval = \"10s\"\n",
+		path: "experiments.upload.peer_sample_interval",
+		name: "TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL",
+		file: "[experiments.upload]\npeer_sample_interval = \"10s\"\n",
 		env:  "5s",
 		want: OptionalDuration(5 * time.Second),
 	},
@@ -549,9 +549,9 @@ func TestEnvironmentBackendIsAPlainConfigurationKey(t *testing.T) {
 // discover them without reading the source code.
 func TestEnumeratedConfigurationKeysListTheirValues(t *testing.T) {
 	want := map[string][]string{
-		"backend":         {"none", "fuse", "smb"},
-		"smb.strm":        {"auto", "on", "off"},
-		"lab.upload_mode": {"", "baseline", "inject", "amplify"},
+		"backend":                 {"none", "fuse", "smb"},
+		"smb.strm":                {"auto", "on", "off"},
+		"experiments.upload.mode": {"baseline", "inject", "amplify"},
 	}
 	for _, key := range Schema() {
 		values, ok := want[key.Path]
@@ -604,6 +604,38 @@ func TestEnvironmentFUSEMountpointDoesNotSelectBackend(t *testing.T) {
 	if cfg.Backend != BackendNone {
 		t.Fatalf("backend = %q, want the default %q",
 			cfg.Backend, BackendNone)
+	}
+}
+
+// TestSchemaKindsAreCanonicalWireValues covers the contract that a kind is a
+// stable machine-readable value shared with the configuration page. The page
+// maps the kind onto its editor and label, so a kind with a space or a
+// different spelling silently falls back to a generic editor.
+func TestSchemaKindsAreCanonicalWireValues(t *testing.T) {
+	canonical := map[string]bool{
+		"string":        true,
+		"bool":          true,
+		"int":           true,
+		"int64":         true,
+		"duration":      true,
+		"byte_quantity": true,
+		"byte_rate":     true,
+		"percent":       true,
+		"ratio":         true,
+		"list":          true,
+		"enum":          true,
+	}
+	seen := map[string]bool{}
+	for _, key := range Schema() {
+		if !canonical[key.Kind] {
+			t.Errorf("the configuration key %q has the non-canonical kind %q", key.Path, key.Kind)
+		}
+		seen[key.Kind] = true
+	}
+	for _, kind := range []string{"byte_quantity", "byte_rate"} {
+		if !seen[kind] {
+			t.Errorf("the schema never reports the kind %q", kind)
+		}
 	}
 }
 

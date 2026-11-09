@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +22,7 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 	"github.com/yakumioto/torrentfs-go/internal/config"
-	"github.com/yakumioto/torrentfs-go/internal/lab"
+	"github.com/yakumioto/torrentfs-go/internal/experiments"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/piecestore"
 	"github.com/yakumioto/torrentfs-go/internal/stream"
@@ -43,13 +42,9 @@ type Option func(*sessionOptions)
 
 type sessionOptions struct {
 	logger *slog.Logger
-	// announceRequestDirector, when non-nil, rewrites each HTTP tracker
-	// announce request after the client fills in its parameters. Only the
-	// experimental synthetic-upload harness sets it; see internal/lab.
-	announceRequestDirector func(*http.Request) error
-	// labSettings, when non-nil, enables the session-owned experiment, which
-	// supersedes announceRequestDirector when both are set.
-	labSettings *lab.Settings
+	// experimentSettings, when non-nil, overrides the experiment settings the
+	// session starts with. The experiment itself is always on.
+	experimentSettings *experiments.Settings
 }
 
 // WithLogger routes session and anacrolix client logs to l.
@@ -59,27 +54,21 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithAnnounceRequestDirector installs a hook that may rewrite each HTTP(S)
-// tracker announce request after the client fills in uploaded, downloaded,
-// left, event, and the other announce parameters. It exists for the
-// experimental synthetic-upload harness (internal/lab), which fabricates
-// announce statistics to exercise tracker-side anomaly detection; a normal
-// deployment never sets it. UDP tracker announces and DHT announcements bypass
-// the hook.
-func WithAnnounceRequestDirector(director func(*http.Request) error) Option {
-	return func(options *sessionOptions) {
-		options.announceRequestDirector = director
-	}
-}
-
 // Session owns the anacrolix client and the set of registered torrents.
 type Session struct {
-	cl        *torrent.Client
-	cfg       config.Config
+	cl *torrent.Client
+	// config is the current configuration snapshot. Runtime read paths load it
+	// through configSnapshot.load; construction-time consumers keep the
+	// validated configuration New was given. See Config and SetConfig.
+	config    configSnapshot
 	logger    *slog.Logger
 	startedAt time.Time
-	// streamSigner is immutable after startup; nil keeps content streaming off.
-	streamSigner *stream.Signer
+	// streamSigner and streamBaseURL are immutable after startup; a nil signer
+	// keeps content streaming off. strm.base_url is restart-only: the signer
+	// and every link already handed to a player belong to the startup
+	// configuration, so a replacement must not change new links either.
+	streamSigner  *stream.Signer
+	streamBaseURL string
 
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
@@ -114,9 +103,9 @@ type Session struct {
 	// second process cannot manage the same directory.
 	instanceLock *os.File
 
-	// lab is nil unless the session was created with WithLabExperiment. It is
-	// guarded by mu; the reporter behind it is safe for concurrent use.
-	lab *labState
+	// experiment is the always-on experiment state. It is guarded by mu; the
+	// reporter behind it is safe for concurrent use.
+	experiment *experimentState
 
 	// dhtRecorder keeps the last per-family bootstrap outcome for the status
 	// API and for transition-only DHT logging.
@@ -230,55 +219,41 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		logInitFailure("acquire-instance-lock", err)
 		return nil, err
 	}
-	// Upload settings are read before anything else is opened: a sidecar that
-	// cannot be understood must fail startup rather than start with a limit the
-	// operator believes is in force.
-	uploadSettings, uploadPolicy, err := loadUploadRateSettings(metadataDir)
+	// The upload limit comes from the configuration, which the loaders have
+	// already validated: the session does not read the retired .metadata
+	// sidecar. The startup migration folds a legacy sidecar into the
+	// configuration before the session is created.
+	uploadSettings, err := UploadRateSettingsFromConfig(cfg)
 	if err != nil {
 		releaseInstanceLock(instanceLock)
-		logInitFailure("load-upload-rate-settings", err)
+		logInitFailure("upload-rate-configuration", err)
 		return nil, err
 	}
-	// The experiment runtime settings are restored before the client is created
-	// so the first announce already uses the persisted mode. A sidecar that
-	// cannot be understood fails startup, like the upload-rate settings.
-	var (
-		labRuntime          lab.RuntimeSettings
-		labRuntimePersisted bool
-		labReporter         *lab.Reporter
-		labRecorder         *lab.Recorder
-	)
-	if options.labSettings != nil {
-		labRuntime, labRuntimePersisted, err = loadLabSettings(metadataDir, options.labSettings.RuntimeSettings)
+	uploadPolicy := compileUploadRatePolicy(uploadSettings)
+	// The upload statistics experiment is always on: the session always owns a
+	// reporter, and an unconfigured experiment is the baseline arm. Only an
+	// announce log named by the configuration opens a recorder and starts the
+	// peer sampler.
+	experimentSettings := experiments.DefaultSettings()
+	if options.experimentSettings != nil {
+		experimentSettings = *options.experimentSettings
+	}
+	var experimentRecorder *experiments.Recorder
+	if experimentSettings.AnnounceLogPath != "" {
+		experimentRecorder, err = experiments.OpenRecorder(experimentSettings.AnnounceLogPath, logger)
 		if err != nil {
 			releaseInstanceLock(instanceLock)
-			logInitFailure("load-lab-settings", err)
-			return nil, err
+			logInitFailure("open-experiment-announce-log", err)
+			return nil, fmt.Errorf("session: experiment announce log: %w", err)
 		}
-		if options.labSettings.AnnounceLogPath != "" {
-			labRecorder, err = lab.OpenRecorder(options.labSettings.AnnounceLogPath, logger)
-			if err != nil {
-				releaseInstanceLock(instanceLock)
-				logInitFailure("open-lab-announce-log", err)
-				return nil, fmt.Errorf("session: lab experiment: %w", err)
+		defer func() {
+			if retErr != nil {
+				_ = experimentRecorder.Close()
 			}
-			defer func() {
-				if retErr != nil {
-					_ = labRecorder.Close()
-				}
-			}()
-			labRecorder.WriteSettings(lab.Settings{
-				RuntimeSettings:    labRuntime,
-				Seed:               options.labSettings.Seed,
-				AnnounceLogPath:    options.labSettings.AnnounceLogPath,
-				PeerSampleInterval: options.labSettings.PeerSampleInterval,
-			})
-		}
-		labReporter = lab.NewReporter(lab.Settings{
-			RuntimeSettings: labRuntime,
-			Seed:            options.labSettings.Seed,
-		}, labRecorder)
+		}()
+		experimentRecorder.WriteSettings(experimentSettings)
 	}
+	experimentReporter := experiments.NewReporter(experimentSettings, experimentRecorder)
 	var streamSigner *stream.Signer
 	if cfg.STRM.BaseURL != "" {
 		streamSigner, err = resolveStreamSigner(metadataDir)
@@ -347,13 +322,9 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if customize != nil {
 		customize(cc)
 	}
-	if options.announceRequestDirector != nil {
-		cc.HttpRequestDirector = options.announceRequestDirector
-	}
-	if labReporter != nil {
-		// The session-owned experiment supersedes the raw director option.
-		cc.HttpRequestDirector = labReporter.Director
-	}
+	// The always-on experiment observes every announce. Baseline passes the
+	// request through unchanged; a rewriting mode replaces only "uploaded".
+	cc.HttpRequestDirector = experimentReporter.Director
 	// The peer ID is resolved after customize so an explicitly injected client
 	// config always wins, and before NewClient so the durable identity is the
 	// one this client announces with.
@@ -379,10 +350,11 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	}
 	s := &Session{
 		cl:              cl,
-		cfg:             cfg,
+		config:          configSnapshot{cfg: cloneConfig(cfg)},
 		logger:          logger,
 		startedAt:       startedAt,
 		streamSigner:    streamSigner,
+		streamBaseURL:   cfg.STRM.BaseURL,
 		pieceCache:      pieceCache,
 		pieceStore:      pieceStore,
 		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),
@@ -415,25 +387,13 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	// and waits before the client is torn down.
 	s.uploadRate.start(s.bgCtx, &s.bgMu, &s.bgWg)
 	s.startConnectionAllocator()
-	if labReporter != nil {
-		state := &labState{
-			settings: *options.labSettings,
-			reporter: labReporter,
-			recorder: labRecorder,
-		}
-		s.lab = state
-		s.startLabSampler(state)
-		logger.Warn("lab upload experiment enabled; only use this build against a tracker you operate",
-			"mode", labRuntime.Mode,
-			"rate_bytes_per_second", labRuntime.RateBytesPerSecond,
-			"multiplier", labRuntime.Multiplier,
-			"jitter_percent", labRuntime.JitterFraction*100,
-			"cap_bytes", labRuntime.CapBytes,
-			"announce_log", options.labSettings.AnnounceLogPath,
-			"peer_sample_interval", options.labSettings.PeerSampleInterval.String(),
-			"restored_from_sidecar", labRuntimePersisted,
-		)
+	experimentState := &experimentState{
+		settings: experimentSettings,
+		reporter: experimentReporter,
+		recorder: experimentRecorder,
 	}
+	s.experiment = experimentState
+	s.startExperimentSampler(experimentState)
 	startup := []struct {
 		stage string
 		fn    func() error
@@ -523,9 +483,9 @@ func (s *Session) Close(ctx context.Context) error {
 	storageCloser := s.storageCloser
 	instanceLock := s.instanceLock
 	subtitleStore := s.subtitleStore
-	var labRecorder *lab.Recorder
-	if s.lab != nil {
-		labRecorder = s.lab.recorder
+	var experimentRecorder *experiments.Recorder
+	if s.experiment != nil {
+		experimentRecorder = s.experiment.recorder
 	}
 	s.mu.Unlock()
 	s.logger.Info("session closing")
@@ -565,9 +525,9 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	// The sampler is already stopped, so the announce log is idle and can be
 	// closed after the client has sent its final stopped announces.
-	if labRecorder != nil {
-		if err := labRecorder.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close lab announce log: %w", err))
+	if experimentRecorder != nil {
+		if err := experimentRecorder.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close experiment announce log: %w", err))
 		}
 	}
 	if storageCloser != nil {

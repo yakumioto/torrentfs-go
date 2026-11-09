@@ -38,34 +38,34 @@ const (
 	// smbSTRMPath is the configuration key that switches the STRM share of
 	// the SMB output on or off.
 	smbSTRMPath = "smb.strm"
-	// labUploadModePath is the configuration key that selects the reporting
-	// model of the upload statistics experiment.
-	labUploadModePath = "lab.upload_mode"
+	// experimentsUploadModePath is the configuration key that selects the
+	// reporting model of the upload statistics experiment.
+	experimentsUploadModePath = "experiments.upload.mode"
 )
 
 // Filesystem groups the settings that describe the file output as a whole.
 type Filesystem struct {
 	// ReadTimeout bounds a single read of a piece from the torrent.
-	ReadTimeout Duration `toml:"read_timeout"`
+	ReadTimeout Duration `toml:"read_timeout" component:"filesystem"`
 }
 
 // FUSE groups the settings of the read-only FUSE file output.
 type FUSE struct {
 	// Mountpoint is the directory the file tree is mounted on.
-	Mountpoint string `toml:"mountpoint"`
+	Mountpoint string `toml:"mountpoint" component:"fuse"`
 	// STRMMountpoint is the directory the signed-streaming view is mounted on.
-	STRMMountpoint string `toml:"strm_mountpoint"`
+	STRMMountpoint string `toml:"strm_mountpoint" component:"fuse"`
 	// AllowOther passes allow_other to the kernel, lifting FUSE's default
 	// restriction that only the mounting user may access the mount.
-	AllowOther bool `toml:"allow_other"`
+	AllowOther bool `toml:"allow_other" component:"fuse"`
 }
 
 // SMB groups the settings of the built-in read-only SMB file output.
 type SMB struct {
 	// ListenAddr is the address the SMB service binds.
-	ListenAddr string `toml:"listen_addr"`
+	ListenAddr string `toml:"listen_addr" component:"smb"`
 	// STRM switches the STRM share of the SMB output: auto, on, or off.
-	STRM STRMSwitch `toml:"strm" enum:"auto,on,off"`
+	STRM STRMSwitch `toml:"strm" enum:"auto,on,off" component:"smb"`
 }
 
 // validateEnum reports whether a value is one of the accepted values of an

@@ -60,6 +60,36 @@ no_port_forwarding = true
 # client's built-in bootstrap list.
 bootstrap_nodes = []
 
+[experiments.upload]
+# Mode selects the reporting model: baseline, inject, or amplify. It
+# defaults to baseline, the control arm that reports the real counters.
+# There is no inference: a rate or multiplier needs its mode or the
+# experiment refuses to start.
+mode = "baseline"
+# Rate is the average synthetic growth of the reported upload in inject
+# mode.
+rate = ""
+# Multiplier grows the reported upload by this factor of the real payload
+# bytes in amplify mode.
+multiplier = "0"
+# Jitter is the per-announce deviation from the nominal increment, in
+# percent. It defaults to 20 percent; zero disables the deviation.
+jitter = "20"
+# Cap is the per-torrent ceiling on the cumulative reported upload.
+cap = "0B"
+# Seed fixes the random jitter sequence for reproducible runs. Zero lets
+# the process choose one. The seed is fixed at startup; a new value takes
+# effect after a restart.
+seed = 0
+# AnnounceLog is the JSON Lines file that receives one record per tracker
+# announce. Empty disables it. The file is opened at startup; a new value
+# takes effect after a restart.
+announce_log = ""
+# PeerSampleInterval is how often peer activity is sampled into the
+# announce log. It is read at startup; a new value takes effect after a
+# restart.
+peer_sample_interval = "0s"
+
 [filesystem]
 # ReadTimeout bounds a single read of a piece from the torrent.
 read_timeout = "30s"
@@ -97,31 +127,6 @@ peer_id_prefix = "-qB4400-"
 # ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
 extended_handshake_client_version = "qBittorrent/4.4.0"
 
-[lab]
-# UploadMode selects the reporting model: baseline, inject, or amplify.
-# Empty infers the mode from the other settings.
-upload_mode = ""
-# UploadRate is the average synthetic growth of the reported upload in
-# inject mode.
-upload_rate = ""
-# UploadMultiplier grows the reported upload by this factor of the real
-# payload bytes in amplify mode.
-upload_multiplier = "0"
-# UploadJitter is the per-announce deviation from the nominal increment,
-# in percent.
-upload_jitter = "0"
-# UploadCap is the per-torrent ceiling on the cumulative reported upload.
-upload_cap = "0B"
-# UploadSeed fixes the random jitter sequence for reproducible runs. Zero
-# lets the process choose one.
-upload_seed = 0
-# AnnounceLog is the JSON Lines file that receives one record per tracker
-# announce. Empty disables it.
-announce_log = ""
-# PeerSampleInterval is how often peer activity is sampled into the
-# announce log.
-peer_sample_interval = "0s"
-
 [log]
 # Level is the minimum level of a log record: debug, info, warn, or
 # error. Debug is disabled by default.
@@ -146,3 +151,18 @@ strm = "auto"
 # BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
 # proxy path prefix. Empty disables signed streaming links.
 base_url = ""
+
+[upload_rate]
+# Limit is the aggregate payload upload rate across every torrent and
+# peer. The empty value disables upload limiting. A window requires a
+# positive limit.
+limit = ""
+# ScheduleStart is the start of the daily window in strict 24-hour HH:MM
+# (local time). Both boundaries empty means the limit applies around the
+# clock. It must be set together with ScheduleEnd and must be earlier
+# than it.
+schedule_start = ""
+# ScheduleEnd is the end of the daily window in strict 24-hour HH:MM
+# (local time), excluded from the window. Both boundaries empty means the
+# limit applies around the clock.
+schedule_end = ""

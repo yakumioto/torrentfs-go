@@ -4,7 +4,17 @@
 #
 # The fragments are derived from the schema and from the comments of the
 # configuration structure, so a hand edit to one of them is a change the
-# generator does not know about. The check keeps the files honest.
+# generator does not know about. The check keeps the files honest. The
+# embedded schema documentation is checked the same way, so a container
+# deployment without the source code shows the same documentation as the
+# source tree.
+#
+# The write-back renderer has golden documents too. They are test fixtures
+# rather than shipped files, because rendering one needs a file configuration
+# and the keys the caller changed. The test compares them byte for byte, and
+# this check runs the test so the same job guards both families of generated
+# configuration documents.
+
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -23,13 +33,14 @@ fail() {
 
 check() {
 	local fragment="$1" target="$2"
+	local regenerate="${3:-go run ./internal/config/cmd/config-doc $fragment > $target}"
 	local generated
 	generated="$(mktemp)"
 	trap 'rm -f "$generated"' RETURN
 	"${DOC[@]}" "$fragment" >"$generated"
 	if ! diff -u "$target" "$generated" >/dev/null; then
 		printf 'config docs: %s is out of date; regenerate it with:\n' "$target" >&2
-		printf '  go run ./internal/config/cmd/config-doc %s > %s\n' "$fragment" "$target" >&2
+		printf '  %s\n' "$regenerate" >&2
 		diff -u "$target" "$generated" >&2 || true
 		exit 1
 	fi
@@ -37,6 +48,11 @@ check() {
 
 check example-toml torrentfs.example.toml
 check image-overlay docker/torrentfs.toml
+# The artifact is embedded by the configuration package, so redirecting the
+# generator output over it would truncate the file before the generator is
+# built; it is regenerated in place instead.
+check schema-documentation internal/config/schema-documentation.json \
+	'go run ./internal/config/cmd/config-doc write-schema-documentation internal/config/schema-documentation.json'
 
 # The README holds a generated block. The block is checked by writing it into
 # a copy of the README and comparing the copy with the original: a hand edit
@@ -52,4 +68,13 @@ if ! diff -u README.md "$README_COPY" >/dev/null; then
 	exit 1
 fi
 
-printf 'config docs: the generated configuration files match the schema\n'
+# The write-back golden documents are rendered from the same schema comments
+# and writer order as the shipped files. The scenarios live in the test that
+# builds the input file layer, so the test is the generator.
+if ! go test ./internal/config -run '^TestWriteBackGolden$' -count=1; then
+	printf 'config docs: the write-back golden documents are out of date; regenerate them with:\n' >&2
+	printf '  go test ./internal/config -run TestWriteBackGolden -update -count=1\n' >&2
+	exit 1
+fi
+
+printf 'config docs: the generated configuration files, embedded schema documentation and write-back documents match the schema\n'

@@ -7,14 +7,20 @@ export class ApiError extends Error {
    * this rather than on server text, which is display-only.
    */
   readonly code: string;
+  /**
+   * The decoded response body when the error response carried one. Structured
+   * failures use it to carry the per-field details a display message cannot.
+   */
+  readonly payload: unknown;
 
-  constructor(status: number, message: string, wwwAuthenticate = '', code = '') {
+  constructor(status: number, message: string, wwwAuthenticate = '', code = '', payload?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.serverMessage = message;
     this.wwwAuthenticate = wwwAuthenticate;
     this.code = code;
+    this.payload = payload;
   }
 
   get unauthorized(): boolean {
@@ -30,9 +36,10 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
   const body = await response.text();
   let message = response.statusText || 'Request failed';
   let code = '';
+  let parsed: unknown;
   if (body !== '') {
     try {
-      const parsed: unknown = JSON.parse(body);
+      parsed = JSON.parse(body);
       if (typeof parsed === 'object' && parsed !== null) {
         if ('error' in parsed) {
           const error = parsed.error;
@@ -51,7 +58,7 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
       message = body;
     }
   }
-  return new ApiError(response.status, message, response.headers.get('WWW-Authenticate') ?? '', code);
+  return new ApiError(response.status, message, response.headers.get('WWW-Authenticate') ?? '', code, parsed);
 }
 
 export function errorMessage(error: unknown, fallback = 'The daemon could not complete that request.'): string {

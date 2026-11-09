@@ -1,7 +1,9 @@
 import type {
   Category,
-  LabSettingsUpdate,
-  LabView,
+  ConfigSaveRequest,
+  ConfigSaveResult,
+  ConfigView,
+  ExperimentView,
   LoginResponse,
   Operation,
   PruneResult,
@@ -9,7 +11,6 @@ import type {
   SubtitleUploadResponse,
   Torrent,
   TorrentStatus,
-  UploadRateSettings,
 } from '../types/api';
 import { apiErrorFromResponse } from './errors';
 
@@ -85,6 +86,18 @@ export class ApiClient {
     return this.request<RuntimeStats>('/stats', { signal });
   }
 
+  getConfig(signal?: AbortSignal): Promise<ConfigView> {
+    return this.request<ConfigView>('/config', { signal });
+  }
+
+  saveConfig(request: ConfigSaveRequest, signal?: AbortSignal): Promise<ConfigSaveResult> {
+    return this.request<ConfigSaveResult>('/config', {
+      method: 'PUT',
+      body: JSON.stringify(request),
+      signal,
+    });
+  }
+
   getTorrent(id: string, signal?: AbortSignal): Promise<Torrent> {
     return this.request<Torrent>(`/torrents/${encodeURIComponent(id)}`, { signal });
   }
@@ -145,28 +158,8 @@ export class ApiClient {
     return this.request<Operation>(`/operations/${encodeURIComponent(operationId)}`, { signal });
   }
 
-  getUploadRateSettings(signal?: AbortSignal): Promise<UploadRateSettings> {
-    return this.request<UploadRateSettings>('/settings/upload-rate', { signal });
-  }
-
-  setUploadRateSettings(settings: UploadRateSettings, signal?: AbortSignal): Promise<UploadRateSettings> {
-    return this.request<UploadRateSettings>('/settings/upload-rate', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-      signal,
-    });
-  }
-
-  getLab(signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/lab', { signal });
-  }
-
-  setLabSettings(settings: LabSettingsUpdate, signal?: AbortSignal): Promise<LabView> {
-    return this.request<LabView>('/lab/settings', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-      signal,
-    });
+  getExperiment(signal?: AbortSignal): Promise<ExperimentView> {
+    return this.request<ExperimentView>('/experiments/upload', { signal });
   }
 
   private async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {

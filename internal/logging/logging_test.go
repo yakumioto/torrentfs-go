@@ -207,3 +207,34 @@ func TestNewRedactsURLAnyValuesIncludingNestedGroups(t *testing.T) {
 		t.Fatalf("JSON log output lost URL host: %q", output)
 	}
 }
+
+// TestLevelApplierAppliesTheConfiguredLevel covers the first hot-apply item:
+// saving log.level reaches the running logger through the level controller
+// New returned, and a rejected level leaves the current level in force.
+func TestLevelApplierAppliesTheConfiguredLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger, level, err := logging.New(config.Log{Level: "info", Format: "text"}, &buf)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	applier := logging.NewLevelApplier(level)
+	if keys := applier.Keys(); len(keys) != 1 || keys[0] != "log.level" {
+		t.Fatalf("applier keys = %v, want [log.level]", keys)
+	}
+
+	if err := applier.Apply(config.Config{Log: config.Log{Level: "debug"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	logger.Debug("visible-after-apply")
+	if !strings.Contains(buf.String(), "msg=visible-after-apply") {
+		t.Fatalf("the applied level did not reach the logger: %q", buf.String())
+	}
+
+	if err := applier.Apply(config.Config{Log: config.Log{Level: "verbose"}}); err == nil {
+		t.Fatal("Apply accepted an invalid level")
+	}
+	logger.Debug("still-visible")
+	if !strings.Contains(buf.String(), "msg=still-visible") {
+		t.Errorf("the rejected level changed the current level: %q", buf.String())
+	}
+}

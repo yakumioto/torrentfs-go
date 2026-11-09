@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/auth"
@@ -34,10 +35,7 @@ type Backend interface {
 	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
 	RuntimeStats() session.RuntimeStatsView
-	UploadRateSettings() session.UploadRateSettings
-	SetUploadRateSettings(ctx context.Context, settings session.UploadRateSettings) (session.UploadRateSettings, error)
-	LabStatus() session.LabStatus
-	SetLabSettings(ctx context.Context, settings session.LabSettings) (session.LabSettings, error)
+	ExperimentStatus() session.ExperimentStatus
 }
 
 // CategoryBackend is the optional category management surface. Keeping it
@@ -53,7 +51,9 @@ type CategoryBackend interface {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	logger *slog.Logger
+	logger       *slog.Logger
+	configViewer ConfigViewer
+	configSaver  ConfigSaver
 }
 
 // WithLogger routes API lifecycle and authentication logs to l.
@@ -64,13 +64,14 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 type Server struct {
-	backend   Backend
-	auth      *auth.Service
-	tokenTTL  time.Duration
-	maxUpload int64
-	logger    *slog.Logger
-	handler   http.Handler
-	http      *http.Server
+	backend      Backend
+	auth         *auth.Service
+	maxUpload    atomic.Int64
+	logger       *slog.Logger
+	configViewer ConfigViewer
+	configSaver  ConfigSaver
+	handler      http.Handler
+	http         *http.Server
 
 	mu       sync.RWMutex
 	listener net.Listener
@@ -96,11 +97,12 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	}
 	s := &Server{
 		backend:       backend,
-		tokenTTL:      time.Duration(cfg.HTTP.Auth.TokenTTL),
-		maxUpload:     cfg.HTTP.MaxUploadBytes.Int64(),
 		logger:        logger,
+		configViewer:  options.configViewer,
+		configSaver:   options.configSaver,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
+	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
 	if cfg.HTTP.Auth.Enabled {
 		hash, err := cfg.PasswordHash()
 		if err != nil {
@@ -124,10 +126,9 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/categories", s.handleListCategories)
 	mux.HandleFunc("POST /api/v1/categories", s.handleCreateCategory)
 	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
-	mux.HandleFunc("GET /api/v1/settings/upload-rate", s.handleGetUploadRateSettings)
-	mux.HandleFunc("PUT /api/v1/settings/upload-rate", s.handleSetUploadRateSettings)
-	mux.HandleFunc("GET /api/v1/lab", s.handleGetLab)
-	mux.HandleFunc("PUT /api/v1/lab/settings", s.handleSetLabSettings)
+	mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)
+	mux.HandleFunc("PUT /api/v1/config", s.handleSaveConfig)
+	mux.HandleFunc("GET /api/v1/experiments/upload", s.handleGetExperiment)
 	mux.HandleFunc("GET /api/v1/torrents/{id}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)

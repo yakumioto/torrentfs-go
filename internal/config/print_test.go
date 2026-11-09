@@ -192,3 +192,42 @@ func TestSummaryRedactsTheSecret(t *testing.T) {
 		t.Errorf("the log does not name the configuration keys: %s", buffer.String())
 	}
 }
+
+// TestValueTextRendersAValueForTheConfigurationPage covers the value text the
+// configuration page shows: a person reads the value, so it has the shape the
+// configuration file uses, not a TOML quoted literal.
+func TestValueTextRendersAValueForTheConfigurationPage(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cache.CapacityBytes = config.ByteQuantity(32 * 1000 * 1000)
+	cfg.Log.Level = "debug"
+	cfg.Log.AddSource = true
+	cfg.Connections.ListenPort = 51413
+	cfg.UploadRate.Limit = config.ByteRate(1 << 20)
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"cache.capacity", "32MB"},
+		{"log.level", "debug"},
+		{"log.add_source", "true"},
+		{"connections.listen_port", "51413"},
+		{"http.auth.token_ttl", "30m0s"},
+		{"upload_rate.limit", "1MiB/s"},
+		{"upload_rate.schedule_start", ""},
+	}
+	for _, test := range tests {
+		got, ok := config.ValueText(cfg, test.path)
+		if !ok {
+			t.Errorf("ValueText(%q) reports an unknown key", test.path)
+			continue
+		}
+		if got != test.want {
+			t.Errorf("ValueText(%q) = %q, want %q", test.path, got, test.want)
+		}
+	}
+
+	if _, ok := config.ValueText(cfg, "no.such.key"); ok {
+		t.Error("ValueText reports an unknown key as known")
+	}
+}

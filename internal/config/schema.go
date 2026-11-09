@@ -20,6 +20,17 @@ const enumTag = "enum"
 // is printed.
 const secretTag = "secret"
 
+// componentTag names the tag that names the process component that owns a
+// configuration key. The component is where a hot-applied value reaches the
+// running process, so the configuration page can attribute and group the key
+// without a second hand-maintained table.
+const componentTag = "component"
+
+// hotApplyTag names the tag that marks a configuration key whose new value
+// can be applied to the running process without a restart. A key without the
+// tag takes effect at the next start.
+const hotApplyTag = "hotapply"
+
 // SchemaKey describes one configuration key of the configuration schema.
 type SchemaKey struct {
 	// Path is the dot path of the configuration key, such as
@@ -33,7 +44,7 @@ type SchemaKey struct {
 	// configuration key.
 	Overridable bool
 	// Kind names the type of the value: string, bool, int, int64, duration,
-	// byte quantity, byte rate, percent, ratio, list, or enum.
+	// byte_quantity, byte_rate, percent, ratio, list, or enum.
 	Kind string
 	// Values lists the accepted values of an enumerated configuration key.
 	// It is empty for every other kind.
@@ -42,6 +53,19 @@ type SchemaKey struct {
 	// disclosed. A caller that prints configuration values redacts the
 	// secret ones.
 	Secret bool
+	// Component names the process component that owns the configuration key.
+	// The component is where a hot-applied value is applied, so a key the
+	// component cannot replace at run time is restart-required.
+	Component string
+	// HotApply reports whether a new value of the configuration key reaches
+	// the running process without a restart. A key that does not report it
+	// takes effect at the next start.
+	HotApply bool
+	// Documentation is the documentation of the configuration key, as written
+	// above its field in the configuration structure. It comes from the
+	// artifact embedded in the binary, so a deployment without the source
+	// code can show the same documentation as the source tree.
+	Documentation string
 }
 
 // Schema returns the configuration schema: every configuration key of the
@@ -53,12 +77,15 @@ func Schema() []SchemaKey {
 	keys := make([]SchemaKey, 0, len(configSchema))
 	for _, item := range configSchema {
 		keys = append(keys, SchemaKey{
-			Path:        item.path,
-			Environment: item.environment,
-			Overridable: item.overridable,
-			Kind:        item.kind,
-			Values:      item.values,
-			Secret:      item.secret,
+			Path:          item.path,
+			Environment:   item.environment,
+			Overridable:   item.overridable,
+			Kind:          item.kind,
+			Values:        item.values,
+			Secret:        item.secret,
+			Component:     item.component,
+			HotApply:      item.hotApply,
+			Documentation: schemaDocumentation[item.path],
 		})
 	}
 	return keys
@@ -102,6 +129,11 @@ type schemaItem struct {
 	values []string
 	// secret reports whether the value of the key must not be disclosed.
 	secret bool
+	// component names the process component that owns the key.
+	component string
+	// hotApply reports whether the key reaches the running process without a
+	// restart.
+	hotApply bool
 	// index is the field index path from the root configuration.
 	index []int
 	// parse turns an environment value into a value of the field type. It is
@@ -157,6 +189,8 @@ func collectSchema(structType reflect.Type, index []int, prefix string, items *[
 			kind:        kind,
 			values:      values,
 			secret:      isSecret(field),
+			component:   field.Tag.Get(componentTag),
+			hotApply:    isHotApply(field),
 			index:       fieldIndex,
 			parse:       parse,
 			overridable: ok,
@@ -179,6 +213,13 @@ func enumValues(field reflect.StructField) []string {
 // the user expects to read.
 func isSecret(field reflect.StructField) bool {
 	return field.Tag.Get(secretTag) == "true"
+}
+
+// isHotApply reports whether a configuration key is hot-applicable. Only the
+// exact value "true" marks a key, so a mistyped tag never promises a restart
+// the component cannot avoid.
+func isHotApply(field reflect.StructField) bool {
+	return field.Tag.Get(hotApplyTag) == "true"
 }
 
 // schemaEnumValues returns the accepted values of the enumerated configuration
@@ -332,19 +373,26 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 				return nil, err
 			}
 			return ByteQuantity(value), nil
-		}, "byte quantity", true
+		}, "byte_quantity", true
 	case reflect.TypeOf([]string(nil)):
 		return func(raw string) (any, error) { return parseEnvList(raw), nil }, "list", true
 	case reflect.TypeOf(ByteRate(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				// The empty value is the "not set" state of a rate.
+				return ByteRate(0), nil
+			}
 			value, err := ParseByteRate(raw)
 			if err != nil {
 				return nil, err
 			}
 			return ByteRate(value), nil
-		}, "byte rate", true
+		}, "byte_rate", true
 	case reflect.TypeOf(Percent(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return Percent(0), nil
+			}
 			value, err := ParsePercent(raw)
 			if err != nil {
 				return nil, err
@@ -353,6 +401,9 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 		}, "percent", true
 	case reflect.TypeOf(Ratio(0)):
 		return func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				return Ratio(0), nil
+			}
 			value, err := ParseRatio(raw)
 			if err != nil {
 				return nil, err
@@ -377,7 +428,7 @@ func environmentParser(fieldType reflect.Type) (func(string) (any, error), strin
 				return nil, err
 			}
 			return OptionalByteQuantity(value), nil
-		}, "byte quantity", true
+		}, "byte_quantity", true
 	case reflect.TypeOf(OptionalDuration(0)):
 		return func(raw string) (any, error) {
 			if strings.TrimSpace(raw) == "" {

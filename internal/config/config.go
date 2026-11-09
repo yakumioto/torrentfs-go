@@ -107,14 +107,14 @@ func ParseLogLevel(raw string) (slog.Level, error) {
 // Config holds torrentfs runtime settings.
 type Config struct {
 	// Backend selects the output backend: none, fuse, or smb.
-	Backend Backend `toml:"backend" enum:"none,fuse,smb"`
+	Backend Backend `toml:"backend" enum:"none,fuse,smb" component:"process"`
 	// Username is the login name the SMB output accepts. The HTTP login does
 	// not check a user name, so the key is only required for the SMB output.
-	Username string `toml:"username"`
+	Username string `toml:"username" component:"auth"`
 	// Password is the plaintext password shared by the SMB output and the
 	// HTTP login. It is required for the SMB output and for enabled HTTP
 	// authentication, and it has no default.
-	Password string `toml:"password" secret:"true"`
+	Password string `toml:"password" secret:"true" component:"auth"`
 	// Connections groups the network settings of the torrent session.
 	Connections Connections `toml:"connections"`
 	// Proxy groups the optional outbound proxy settings.
@@ -135,74 +135,89 @@ type Config struct {
 	FUSE FUSE `toml:"fuse"`
 	// SMB groups the settings of the built-in read-only SMB file output.
 	SMB SMB `toml:"smb"`
-	// Lab groups the settings of the upload statistics experiment.
-	Lab Lab `toml:"lab"`
+	// UploadRate groups the session-wide aggregate upload limit and its
+	// optional daily window.
+	UploadRate UploadRate `toml:"upload_rate"`
+	// Experiments groups the settings of the experimental features.
+	Experiments Experiments `toml:"experiments"`
 }
 
-// Lab groups the settings of the upload statistics experiment.
+// Experiments groups the settings of the experimental features.
+type Experiments struct {
+	// Upload groups the settings of the upload statistics experiment.
+	Upload UploadExperiment `toml:"upload"`
+}
+
+// UploadExperiment groups the settings of the upload statistics experiment.
 //
-// The experiment rewrites the upload counter reported to trackers so that the
-// anomaly detection of a tracker can be exercised. It is off unless a mode is
-// configured, and it belongs to a tracker the operator runs: pointing it at a
-// third-party tracker misreports that tracker's statistics.
+// The experiment is always on. Its baseline mode reports the client's real
+// counters and records ground truth, so there is no configuration switch that
+// turns the experiment off. It belongs to a tracker the operator runs: pointing
+// a rewriting mode at a third-party tracker misreports that tracker's
+// statistics.
 //
 // The rules that relate one setting to another live in the experiment
 // package. The configuration holds the values and checks their shape.
-type Lab struct {
-	// UploadMode selects the reporting model: baseline, inject, or amplify.
-	// Empty infers the mode from the other settings.
-	UploadMode string `toml:"upload_mode" enum:",baseline,inject,amplify"`
-	// UploadRate is the average synthetic growth of the reported upload in
-	// inject mode.
-	UploadRate ByteRate `toml:"upload_rate"`
-	// UploadMultiplier grows the reported upload by this factor of the real
-	// payload bytes in amplify mode.
-	UploadMultiplier Ratio `toml:"upload_multiplier"`
-	// UploadJitter is the per-announce deviation from the nominal increment,
-	// in percent.
-	UploadJitter Percent `toml:"upload_jitter"`
-	// UploadCap is the per-torrent ceiling on the cumulative reported upload.
-	UploadCap OptionalByteQuantity `toml:"upload_cap"`
-	// UploadSeed fixes the random jitter sequence for reproducible runs. Zero
-	// lets the process choose one.
-	UploadSeed int64 `toml:"upload_seed"`
+type UploadExperiment struct {
+	// Mode selects the reporting model: baseline, inject, or amplify. It
+	// defaults to baseline, the control arm that reports the real counters.
+	// There is no inference: a rate or multiplier needs its mode or the
+	// experiment refuses to start.
+	Mode string `toml:"mode" enum:"baseline,inject,amplify" component:"experiment" hotapply:"true"`
+	// Rate is the average synthetic growth of the reported upload in inject
+	// mode.
+	Rate ByteRate `toml:"rate" component:"experiment" hotapply:"true"`
+	// Multiplier grows the reported upload by this factor of the real payload
+	// bytes in amplify mode.
+	Multiplier Ratio `toml:"multiplier" component:"experiment" hotapply:"true"`
+	// Jitter is the per-announce deviation from the nominal increment, in
+	// percent. It defaults to 20 percent; zero disables the deviation.
+	Jitter Percent `toml:"jitter" component:"experiment" hotapply:"true"`
+	// Cap is the per-torrent ceiling on the cumulative reported upload.
+	Cap OptionalByteQuantity `toml:"cap" component:"experiment" hotapply:"true"`
+	// Seed fixes the random jitter sequence for reproducible runs. Zero lets
+	// the process choose one. The seed is fixed at startup; a new value takes
+	// effect after a restart.
+	Seed int64 `toml:"seed" component:"experiment"`
 	// AnnounceLog is the JSON Lines file that receives one record per tracker
-	// announce. Empty disables it.
-	AnnounceLog string `toml:"announce_log"`
+	// announce. Empty disables it. The file is opened at startup; a new value
+	// takes effect after a restart.
+	AnnounceLog string `toml:"announce_log" component:"experiment"`
 	// PeerSampleInterval is how often peer activity is sampled into the
-	// announce log.
-	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval"`
+	// announce log. It is read at startup; a new value takes effect after a
+	// restart.
+	PeerSampleInterval OptionalDuration `toml:"peer_sample_interval" component:"experiment"`
 }
 
 // HTTP groups the optional torrent-management HTTP service settings.
 type HTTP struct {
 	// ListenAddr is the address the HTTP service binds. Empty disables the
 	// service. The default binds loopback only.
-	ListenAddr string `toml:"listen_addr"`
+	ListenAddr string `toml:"listen_addr" component:"api"`
 	// Auth configures the optional single-user HTTP authentication service.
 	Auth Auth `toml:"auth"`
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
-	MaxUploadBytes ByteQuantity `toml:"max_upload_size"`
+	MaxUploadBytes ByteQuantity `toml:"max_upload_size" component:"api" hotapply:"true"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
 type STRM struct {
 	// BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse
 	// proxy path prefix. Empty disables signed streaming links.
-	BaseURL string `toml:"base_url"`
+	BaseURL string `toml:"base_url" component:"stream"`
 }
 
 // Log groups the process log settings.
 type Log struct {
 	// Level is the minimum level of a log record: debug, info, warn, or
 	// error. Debug is disabled by default.
-	Level string `toml:"level"`
+	Level string `toml:"level" component:"logging" hotapply:"true"`
 	// Format is the shape of a log record: text for humans or json for log
 	// collectors.
-	Format string `toml:"format"`
+	Format string `toml:"format" component:"logging"`
 	// AddSource adds the source file and line to every log record.
-	AddSource bool `toml:"add_source"`
+	AddSource bool `toml:"add_source" component:"logging"`
 }
 
 // Duration is a time.Duration decoded from a TOML duration string.
@@ -231,70 +246,70 @@ func (d Duration) String() string {
 type Auth struct {
 	// Enabled turns on the HTTP login. It is required for a listener that is
 	// not bound to the loopback address.
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" component:"auth"`
 	// TokenTTL is the inactivity window of a login token. A valid request
 	// slides the window; the tokens live in memory and die with the process.
-	TokenTTL Duration `toml:"token_ttl"`
+	TokenTTL Duration `toml:"token_ttl" component:"auth" hotapply:"true"`
 }
 
 // Connections groups network settings of the torrent session.
 type Connections struct {
 	// ListenHost is the address the session listens on for peer
 	// connections. Empty lets the client pick its default.
-	ListenHost string `toml:"listen_host"`
+	ListenHost string `toml:"listen_host" component:"session"`
 	// ListenPort is the TCP/UDP port for incoming peer connections.
 	// 0 selects a random free port.
-	ListenPort int `toml:"listen_port"`
+	ListenPort int `toml:"listen_port" component:"session"`
 	// ReadingConns is the peer connection allowance for a torrent that is
 	// being read: a file handle is open, or one was open within ReadGrace.
 	// A torrent whose whole content is already in the piece cache does not use
 	// it, because playback is served from the cache. It must be at least 1.
-	ReadingConns int `toml:"reading_conns"`
+	ReadingConns int `toml:"reading_conns" component:"session" hotapply:"true"`
 	// UploadingConns is the peer connection allowance while a torrent is
 	// uploading but nobody is reading it. There is no session-wide budget;
 	// every torrent's allowance is decided independently. A value of 0 disables
 	// the uploading allowance, leaving a cached torrent its probe connection.
-	UploadingConns int `toml:"uploading_conns"`
+	UploadingConns int `toml:"uploading_conns" component:"session" hotapply:"true"`
 	// ReadGrace is how long a torrent keeps its reading allowance after its
 	// last file handle closes. It covers a seek, a pause or a player reconnect
 	// without dropping the peer connections. It must be positive.
-	ReadGrace Duration `toml:"read_grace"`
+	ReadGrace Duration `toml:"read_grace" component:"session" hotapply:"true"`
 	// DisableIPv4 turns off every IPv4 listener, dialer, and DHT server.
-	DisableIPv4 bool `toml:"disable_ipv4"`
+	DisableIPv4 bool `toml:"disable_ipv4" component:"session"`
 	// DisableIPv6 turns off every IPv6 listener, dialer, and DHT server.
 	// Only one family may be disabled: disabling both leaves no transport.
-	DisableIPv6 bool `toml:"disable_ipv6"`
+	DisableIPv6 bool `toml:"disable_ipv6" component:"session"`
 	// NoPortForwarding disables UPnP/NAT-PMP port mapping. It defaults to true
 	// so a deployment with no UPnP device behaves the same as one that has a
 	// device but no mapping rule.
-	NoPortForwarding bool `toml:"no_port_forwarding"`
+	NoPortForwarding bool `toml:"no_port_forwarding" component:"session"`
 	// BootstrapNodes overrides the default DHT bootstrap hosts with explicit
 	// host:port entries. Entries are resolved per address family and filtered
 	// to the family of the socket that asks for them. Empty uses the
 	// client's built-in bootstrap list.
-	BootstrapNodes []string `toml:"bootstrap_nodes"`
+	BootstrapNodes []string `toml:"bootstrap_nodes" component:"session"`
 }
 
 // Proxy groups optional outbound proxy settings.
 type Proxy struct {
 	// Socks5URL is an optional SOCKS5 or SOCKS5H endpoint.
-	Socks5URL string `toml:"socks5_url"`
+	Socks5URL string `toml:"socks5_url" component:"session"`
 }
 
 // Cache groups in-memory piece cache settings.
 type Cache struct {
 	// CapacityBytes is the maximum number of bytes retained in memory.
-	CapacityBytes ByteQuantity `toml:"capacity"`
+	CapacityBytes ByteQuantity `toml:"capacity" component:"cache"`
 }
 
 // Identity groups the client identity values sent to trackers and peers.
 type Identity struct {
 	// TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.
-	TrackerUserAgent string `toml:"tracker_user_agent"`
+	TrackerUserAgent string `toml:"tracker_user_agent" component:"session"`
 	// PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.
-	PeerIDPrefix string `toml:"peer_id_prefix"`
+	PeerIDPrefix string `toml:"peer_id_prefix" component:"session"`
 	// ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.
-	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version"`
+	ExtendedHandshakeClientVersion string `toml:"extended_handshake_client_version" component:"session"`
 }
 
 // Default returns the default configuration: an ephemeral listen port, an
@@ -334,9 +349,10 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Filesystem: Filesystem{ReadTimeout: defaultReadTimeout},
-		FUSE:       FUSE{AllowOther: false},
-		SMB:        SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
+		Filesystem:  Filesystem{ReadTimeout: defaultReadTimeout},
+		FUSE:        FUSE{AllowOther: false},
+		SMB:         SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
+		Experiments: Experiments{Upload: UploadExperiment{Mode: "baseline", Jitter: 20}},
 	}
 }
 
@@ -369,7 +385,7 @@ func (c Config) Validate() error {
 func (c Config) validateSyntax(collector *validationCollector) {
 	collector.add(validateEnum(backendPath, string(c.Backend)))
 	collector.add(validateEnum(smbSTRMPath, string(c.SMB.STRM)))
-	collector.add(validateEnum(labUploadModePath, strings.ToLower(strings.TrimSpace(c.Lab.UploadMode))))
+	collector.add(validateEnum(experimentsUploadModePath, strings.ToLower(strings.TrimSpace(c.Experiments.Upload.Mode))))
 	if c.Filesystem.ReadTimeout <= 0 {
 		collector.add(invalid("filesystem.read_timeout", errPositive))
 	}
@@ -431,27 +447,38 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	collector.add(c.validateCredentialShape())
 	collector.add(c.validateSMBShape())
-	collector.add(c.validateLabShape())
+	collector.add(c.validateUploadRateShape())
+	collector.add(c.validateUploadExperimentShape())
 }
 
-// validateLabShape checks the shape of the upload statistics experiment
-// settings.
+// validateUploadExperimentShape checks the shape of the upload statistics
+// experiment settings.
 //
 // The rules that relate one setting to another live in the experiment
 // package: they decide what a set of settings means, not whether a value is
 // usable on its own.
-func (c Config) validateLabShape() error {
-	if c.Lab.UploadRate < 0 {
-		return invalid("lab.upload_rate", errPositive)
+func (c Config) validateUploadExperimentShape() error {
+	return c.Experiments.Upload.ValidateShape()
+}
+
+// ValidateShape checks the value ranges of the upload statistics experiment.
+//
+// The rules that relate one setting to another (which mode a rate or a
+// multiplier belongs to) live in the experiment package, because they decide
+// what a set of settings means. The experiment settings mapping calls this
+// function too, so the value ranges are written down once.
+func (u UploadExperiment) ValidateShape() error {
+	if u.Rate < 0 {
+		return invalid("experiments.upload.rate", errPositive)
 	}
-	if c.Lab.UploadJitter < 0 || c.Lab.UploadJitter > 100 {
-		return invalid("lab.upload_jitter", errors.New("must be between 0 and 100 percent"))
+	if u.Jitter < 0 || u.Jitter > 100 {
+		return invalid("experiments.upload.jitter", errors.New("must be between 0 and 100 percent"))
 	}
-	if c.Lab.UploadMultiplier != 0 && c.Lab.UploadMultiplier <= 1 {
-		return invalid("lab.upload_multiplier", errors.New("must be greater than 1"))
+	if u.Multiplier != 0 && u.Multiplier <= 1 {
+		return invalid("experiments.upload.multiplier", errors.New("must be greater than 1"))
 	}
-	if c.Lab.PeerSampleInterval < 0 {
-		return invalid("lab.peer_sample_interval", errPositive)
+	if u.PeerSampleInterval < 0 {
+		return invalid("experiments.upload.peer_sample_interval", errPositive)
 	}
 	return nil
 }
@@ -513,10 +540,17 @@ func (c Config) validateSMBShape() error {
 }
 
 func validateAuth(auth Auth) error {
-	if auth.TokenTTL <= 0 {
+	return ValidateTokenTTL(time.Duration(auth.TokenTTL))
+}
+
+// ValidateTokenTTL checks a login-token lifetime against the configuration and
+// the authentication service. Both entry points call it, so a lifetime the
+// configuration page saves is the lifetime the running service accepts.
+func ValidateTokenTTL(ttl time.Duration) error {
+	if ttl <= 0 {
 		return invalid("http.auth.token_ttl", errPositive)
 	}
-	if time.Duration(auth.TokenTTL) > 24*time.Hour {
+	if ttl > 24*time.Hour {
 		return invalid("http.auth.token_ttl", errAuthTokenTTLMax)
 	}
 	return nil

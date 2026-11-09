@@ -20,6 +20,9 @@ import (
 
 	"github.com/yakumioto/torrentfs-go/internal/api"
 	"github.com/yakumioto/torrentfs-go/internal/config"
+	"github.com/yakumioto/torrentfs-go/internal/configcheck"
+	"github.com/yakumioto/torrentfs-go/internal/configctl"
+	"github.com/yakumioto/torrentfs-go/internal/configmigrate"
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/logging"
 	"github.com/yakumioto/torrentfs-go/internal/session"
@@ -144,11 +147,50 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	httpEnabled := cfg.HTTP.ListenAddr != ""
 
-	logger, _, err := logging.New(cfg.Log, stderr)
+	logger, logLevelVar, err := logging.New(cfg.Log, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize logging: %v\n", err)
 		return 2
 	}
+	// The retired experiment sidecar is imported before the session starts, so
+	// the first announce already uses the migrated values. A merge into the
+	// configuration file changes the effective configuration, which is loaded
+	// again; a read-only deployment keeps the sidecar as a runtime fallback.
+	experimentSidecar, experimentErr := migrateLegacyExperimentSettings(configFile, torrentsDir, logger)
+	if experimentErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", experimentErr)
+		return 2
+	}
+	if experimentSidecar.Migrated {
+		cfg, sources, err = loadConfig(configFile)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+			return 2
+		}
+	}
+	// The retired upload-rate sidecar is folded into the configuration before
+	// the session reads it. It runs after the experiment migration because that
+	// migration may reload the configuration file; running it first would drop
+	// the in-memory fallback a read-only deployment keeps for this run. A
+	// read-only deployment keeps the sidecar value for this run and the
+	// migration warns; the next start after a successful write-back archives it.
+	uploadRateMigration, err := configmigrate.MigrateUploadRate(configmigrate.Options{
+		ConfigPath:  configFile,
+		TorrentsDir: torrentsDir,
+		Config:      cfg,
+		Sources:     sources,
+		Logger:      logger,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
+		return 2
+	}
+	cfg, sources = uploadRateMigration.Config, uploadRateMigration.Sources
+	// A read-only deployment keeps the retired experiment sidecar as its
+	// runtime values. Overlay them on the same configuration the HTTP
+	// controller receives (the environment keeps its precedence), so the page
+	// reports the effective values and sources the session actually runs.
+	sources = applyLegacyExperimentRuntime(&cfg, sources, experimentSidecar.Runtime)
 	logLevel := cfg.Log.Level
 	if logLevel == "" {
 		logLevel = "info"
@@ -181,14 +223,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	labOptions, labErr := labSessionOptions(cfg, logger)
-	if labErr != nil {
-		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", labErr)
+	experimentOptions, experimentErr := experimentSessionOptions(cfg, logger)
+	if experimentErr != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", experimentErr)
 		return 2
 	}
 
 	sess, err := session.New(cfg, torrentsDir,
-		append([]session.Option{session.WithLogger(logger)}, labOptions...)...)
+		append([]session.Option{session.WithLogger(logger)}, experimentOptions...)...)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: %v\n", err)
 		if errors.Is(err, config.ErrInvalid) {
@@ -198,9 +240,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sequence := shutdownSequence{logger: logger, sess: sess}
+	// The configuration controller is built whether or not HTTP is enabled:
+	// the poll reloads a configuration file in a headless deployment too. The
+	// log level and session appliers are independent of the server, so they are
+	// registered before api.New; an applier that needs a server handle is
+	// registered after New returns, which keeps the construction order one way.
+	configController := configctl.New(configFile, cfg, sources, configctl.WithLogger(logger))
+	registerAppliers := func(appliers ...configctl.Applier) error {
+		for _, applier := range appliers {
+			if err := configController.RegisterApplier(applier); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := registerAppliers(
+		logging.NewLevelApplier(logLevelVar),
+		session.NewConfigApplier(sess),
+		session.NewUploadRateApplier(sess),
+		session.NewExperimentApplier(sess),
+	); err != nil {
+		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+		sequence.run()
+		return 1
+	}
 	var apiServer *api.Server
 	if httpEnabled {
-		apiServer, err = api.New(cfg, sess, api.WithLogger(logger))
+		apiServer, err = api.New(cfg, sess,
+			api.WithLogger(logger),
+			api.WithConfigViewer(configController),
+			api.WithConfigSaver(configController),
+		)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
 			sequence.run()
@@ -210,6 +280,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		sequence.api = apiServer
+		if err := registerAppliers(
+			api.NewMaxUploadApplier(apiServer),
+			api.NewTokenTTLApplier(apiServer),
+		); err != nil {
+			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
+			sequence.run()
+			return 1
+		}
 	}
 
 	requests := []mountRequest{{mountpoint: mountpoint, backend: sess}}
@@ -261,12 +339,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 		go func() { serveErr <- unexpectedServeResult("http", apiServer.Serve(rootCtx, cfg.HTTP.ListenAddr)) }()
 	}
 
+	// A deployment that started without a configuration file has nothing to
+	// watch. The poll runs beside the servers, and is stopped before the
+	// shutdown sequence so a reload cannot race a closing component.
+	var stopWatch context.CancelFunc
+	var watchDone chan struct{}
+	if configFile != "" {
+		watchCtx, cancelWatch := context.WithCancel(rootCtx)
+		stopWatch = cancelWatch
+		watchDone = make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			configController.Watch(watchCtx)
+		}()
+	}
+
 	var serveFailure error
 	select {
 	case <-signals:
 	case serveFailure = <-serveErr:
 	}
 
+	if stopWatch != nil {
+		stopWatch()
+		<-watchDone
+	}
 	shutdown := sequence.run()
 	cancel()
 
@@ -570,7 +667,7 @@ func logEffectiveConfig(logger *slog.Logger, cfg config.Config, sources config.S
 // loadConfig loads the configuration and reports where every effective value
 // came from.
 func loadConfig(path string) (config.Config, config.Sources, error) {
-	cfg, sources, err := loadAndCheck(path)
+	cfg, sources, err := configcheck.Load(path)
 	if err != nil {
 		if path == "" {
 			return cfg, sources, fmt.Errorf("load config: %w", err)
