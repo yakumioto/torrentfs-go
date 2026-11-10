@@ -73,6 +73,29 @@ fork, release, or upstream contribution is implied by this directory.
   independent-client regression queries StandardInformation through SeekEnd and
   AllInformation through Stat before closing the pipe. Windows server-root
   browsing and media playback still require post-fix real-client validation.
+- **Named-pipe DCERPC WRITE/READ transport.** The pipe backend implemented only
+  `FSCTL_PIPE_TRANSCEIVE`, so any client carrying DCE/RPC with a separate SMB2
+  WRITE and READ received `STATUS_NOT_SUPPORTED`. That is exactly what Apple's
+  `smbx` client does when iOS Files connects to `smb://host` and enumerates
+  shares (NEGOTIATE, NTLMv2, TREE_CONNECT `IPC$` and CREATE `srvsvc` succeed,
+  then WRITE of the 72-byte no-auth RPC Bind is rejected and Files reports an
+  input/output error); impacket behaves the same way, while `smbclient -L`
+  uses IOCTL transceive and was unaffected. `dcerpc/server.PipeHandler` now
+  keeps a per-open byte stream: WRITE buffers a PDU split across several
+  WRITEs (or several back-to-back PDUs in one WRITE) and dispatches each
+  complete PDU in stream order through the same dispatcher as Transceive,
+  which is unchanged; READ drains the queued response bytes, returning at most
+  the requested length and retaining the rest for the next READ. A READ issued
+  before its WRITE blocks until the WRITE queues a response, the request
+  context is cancelled (`STATUS_CANCELLED`), or the handle is closed
+  (`STATUS_FILE_CLOSED`). Wire-level unit tests in `dcerpc/server` cover
+  bind/request round trips, partial-PDU buffering, multi-PDU writes,
+  fragmented READs, blocking/wakeup, cancellation, close and malformed
+  `frag_length`. The independent-client regression in `internal/smb`
+  (`TestIndependentClientPipeWriteReadShareEnumeration`) performs
+  WRITE(Bind)/READ(BindAck)/WRITE(NetrShareEnumAll opnum 15 level 1)/
+  READ(Response) over `IPC$\srvsvc` and asserts the virtual shares are
+  returned.
 
 The application registers only authenticated, read-only virtual shares and the
 existing srvsvc share-enumeration implementation. It does not enable relay,
@@ -87,16 +110,21 @@ of complete Samba equivalence or a comprehensive protocol security audit.
 From the repository root:
 
 ```sh
-go test -race ./internal/smb -count=1 -timeout=90s
-go -C third_party/go-smb test -mod=readonly -race ./ntlmssp ./spnego ./smb/server -count=1 -timeout=90s
+go test -race ./internal/smb -count=1 -timeout=180s
+go -C third_party/go-smb test -mod=readonly -race ./dcerpc/... ./smb/server ./smb -count=1 -timeout=180s
+go -C third_party/go-smb test -mod=readonly -race ./ntlmssp ./spnego -count=1 -timeout=180s
 ```
 
 Root tests perform actual NTLM handshakes, signed SMB2 and required-encryption
 SMB3 reads, related CREATE/READ/CLOSE compounds, cancellation, file/tree/session
 teardown, shared-connection saturation, framing limits, and independent-client
-read-only/directory-enumeration checks. Deterministic in-module wire tests inject
-an authenticated session to pause a late CREATE result across tree/session
-teardown; those tests do not substitute for the real authentication tests.
+read-only/directory-enumeration checks. `TestIndependentClientPipeWriteReadShareEnumeration`
+drives the DCERPC-over-pipe WRITE+READ transport (Bind then NetrShareEnumAll on
+`IPC$\srvsvc`) the way Apple's smbx / impacket do; the in-module
+`dcerpc/server` tests pin the same transport at the PDU level without a network
+peer. Deterministic in-module wire tests inject an authenticated session to
+pause a late CREATE result across tree/session teardown; those tests do not
+substitute for the real authentication tests.
 
 The upstream idle-deadline test now negotiates once and uses ECHO for later
 keepalives: repeated NEGOTIATE on an established connection is no longer accepted

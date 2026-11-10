@@ -82,6 +82,13 @@ type boundCtx struct {
 // single named-pipe open. One PipeHandler instance per pipe open; it
 // maintains the bind state (context id -> Service) for the life of the
 // open.
+//
+// Two transports are supported. Clients that frame each request/response in
+// an FSCTL_PIPE_TRANSCEIVE use Transceive. Clients that write a PDU with one
+// SMB2 WRITE and read the reply with an SMB2 READ (Apple's smbx, impacket,
+// and other stream-oriented RPC clients) use Write/Read: the handler keeps a
+// per-open byte stream, dispatches every complete PDU, and queues the
+// responses for subsequent READs.
 type PipeHandler struct {
 	// pipeName is reported in the BindAck SecAddr ("\PIPE\<pipeName>\0").
 	// Optional — empty produces SecAddrLen=0, which is also valid on the
@@ -91,8 +98,22 @@ type PipeHandler struct {
 	// services keyed by abstract-syntax UUID (lower-case canonical form).
 	services map[string]Service
 
+	// mu guards contexts. Bind / Request handling takes it only to look up
+	// or add a context; it is not held while a Service.Dispatch runs.
 	mu       sync.Mutex
 	contexts map[uint16]*boundCtx
+
+	// qmu serialises the WRITE/READ stream state below. A dispatch always
+	// runs with qmu held so the response order follows the inbound byte
+	// stream; Service.Dispatch is expected to be pure computation and never
+	// call back into the handler, so Read cannot be starved indefinitely.
+	// Lock order is qmu before mu.
+	qmu      sync.Mutex
+	inBuf    []byte        // partial / buffered inbound stream
+	outBuf   []byte        // dispatched responses not yet consumed by Read
+	notify   chan struct{} // cap 1, edge-triggered wakeup for blocked Read
+	closed   chan struct{} // closed exactly once by Close
+	isClosed bool
 }
 
 // NewPipeHandler builds a PipeHandler that exposes the given services. The
@@ -104,6 +125,8 @@ func NewPipeHandler(pipeName string, services ...Service) *PipeHandler {
 		pipeName: pipeName,
 		services: make(map[string]Service, len(services)),
 		contexts: make(map[uint16]*boundCtx),
+		notify:   make(chan struct{}, 1),
+		closed:   make(chan struct{}),
 	}
 	for _, svc := range services {
 		h.services[strings.ToLower(svc.InterfaceUUID())] = svc
@@ -111,9 +134,15 @@ func NewPipeHandler(pipeName string, services ...Service) *PipeHandler {
 	return h
 }
 
-// Transceive implements smb/server.PipeBackend. It parses the inbound PDU
-// type and dispatches accordingly.
+// Transceive implements smb/server.PipeBackend for FSCTL_PIPE_TRANSCEIVE
+// clients: one complete request PDU in, one complete response PDU out.
 func (h *PipeHandler) Transceive(ctx context.Context, in []byte) ([]byte, uint32, error) {
+	return h.dispatchPDU(ctx, in)
+}
+
+// dispatchPDU parses one inbound PDU and dispatches it. It is shared by
+// Transceive and by the Write/Read stream path.
+func (h *PipeHandler) dispatchPDU(ctx context.Context, in []byte) ([]byte, uint32, error) {
 	if len(in) < dcerpc.PDUHeaderCommonSize {
 		return nil, smb.StatusInvalidParameter, fmt.Errorf("PDU too short (%d bytes)", len(in))
 	}
@@ -143,20 +172,132 @@ func (h *PipeHandler) Transceive(ctx context.Context, in []byte) ([]byte, uint32
 	}
 }
 
-// Read / Write are not supported. Most clients use Transceive; the few that
-// split request/response across separate WRITE+READ are uncommon for the
-// services we host (srvsvc, wkssvc).
-func (h *PipeHandler) Read(_ context.Context, _ int) ([]byte, uint32, error) {
-	return nil, smb.StatusNotSupported, nil
+// Write implements smb/server.PipeBackend for stream-oriented clients. data
+// is appended to the per-open inbound stream; every complete PDU now in the
+// stream is dispatched and its response bytes are queued for Read. data may
+// be a fragment of a PDU (the rest is buffered across WRITEs) or contain
+// several back-to-back PDUs.
+//
+// The status convention matches Transceive: a Dispatch failure returns the
+// queued/partial output with StatusOk plus the error, while a malformed
+// inbound frame is reported as StatusInvalidParameter.
+func (h *PipeHandler) Write(ctx context.Context, data []byte) (int, uint32, error) {
+	h.qmu.Lock()
+	defer h.qmu.Unlock()
+	if h.isClosed {
+		return 0, smb.StatusFileClosed, nil
+	}
+	h.inBuf = append(h.inBuf, data...)
+	for {
+		if len(h.inBuf) < dcerpc.PDUHeaderCommonSize {
+			break
+		}
+		var hdr dcerpc.Header
+		if err := hdr.UnmarshalBinary(h.inBuf[:dcerpc.PDUHeaderCommonSize]); err != nil {
+			h.inBuf = nil
+			return 0, smb.StatusInvalidParameter, nil
+		}
+		fragLen := int(hdr.FragLength)
+		if fragLen < dcerpc.PDUHeaderCommonSize {
+			// frag_length must at least cover the common header.
+			h.inBuf = nil
+			return 0, smb.StatusInvalidParameter, nil
+		}
+		if fragLen > len(h.inBuf) {
+			// PDU continues in a later WRITE; keep the fragment buffered.
+			break
+		}
+		out, status, err := h.dispatchPDU(ctx, h.inBuf[:fragLen])
+		h.inBuf = h.inBuf[fragLen:]
+		if len(h.inBuf) == 0 {
+			h.inBuf = nil
+		}
+		if len(out) > 0 {
+			h.outBuf = append(h.outBuf, out...)
+			h.wake()
+		}
+		if err != nil {
+			return len(data), smb.StatusOk, err
+		}
+		if status != smb.StatusOk {
+			return 0, status, nil
+		}
+	}
+	return len(data), smb.StatusOk, nil
 }
 
-func (h *PipeHandler) Write(_ context.Context, _ []byte) (int, uint32, error) {
-	return 0, smb.StatusNotSupported, nil
+// Read implements smb/server.PipeBackend for stream-oriented clients. It
+// returns up to max bytes of queued response data (Read itself is allowed to
+// return fewer bytes than max, as a pipe READ does). When no response is
+// queued it blocks until Write queues one, ctx is cancelled, or Close is
+// called. A cancelled ctx returns ctx.Err() so smb/server/read.go maps it to
+// STATUS_CANCELLED.
+func (h *PipeHandler) Read(ctx context.Context, max int) ([]byte, uint32, error) {
+	if max <= 0 {
+		return nil, smb.StatusInvalidParameter, nil
+	}
+	for {
+		h.qmu.Lock()
+		if h.isClosed {
+			h.qmu.Unlock()
+			return nil, smb.StatusFileClosed, nil
+		}
+		if len(h.outBuf) > 0 {
+			n := max
+			if len(h.outBuf) < n {
+				n = len(h.outBuf)
+			}
+			out := make([]byte, n)
+			copy(out, h.outBuf[:n])
+			h.outBuf = h.outBuf[n:]
+			if len(h.outBuf) == 0 {
+				h.outBuf = nil
+			}
+			more := len(h.outBuf) > 0
+			h.qmu.Unlock()
+			if more {
+				// Let another blocked READ (if any) consume the remainder.
+				h.wake()
+			}
+			return out, smb.StatusOk, nil
+		}
+		h.qmu.Unlock()
+
+		select {
+		case <-h.notify:
+			// A response may have been queued; re-check.
+		case <-h.closed:
+			return nil, smb.StatusFileClosed, nil
+		case <-ctx.Done():
+			return nil, smb.StatusOk, ctx.Err()
+		}
+	}
 }
 
+// wake emits an edge-triggered wakeup without blocking. Sending a second
+// token while one is pending is harmless: Read re-checks outBuf on every
+// wakeup.
+func (h *PipeHandler) wake() {
+	select {
+	case h.notify <- struct{}{}:
+	default:
+	}
+}
+
+// Close implements smb/server.PipeBackend. It wakes blocked Reads with
+// STATUS_FILE_CLOSED, drops buffered bytes and bound contexts, and is safe to
+// call more than once (pipeHandle also guards it with closeOnce).
 func (h *PipeHandler) Close(_ context.Context) error {
+	h.qmu.Lock()
+	if !h.isClosed {
+		h.isClosed = true
+		close(h.closed)
+		h.inBuf = nil
+		h.outBuf = nil
+	}
+	h.qmu.Unlock()
 	h.mu.Lock()
-	h.contexts = nil
+	h.contexts = make(map[uint16]*boundCtx)
 	h.mu.Unlock()
 	return nil
 }
