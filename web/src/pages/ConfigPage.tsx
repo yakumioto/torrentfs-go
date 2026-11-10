@@ -93,6 +93,14 @@ const KIND_LABELS: Record<string, string> = {
   enum: '枚举',
 };
 
+/**
+ * Schema kinds whose editor control already conveys the expected format
+ * (a dropdown, a switch, a number field), so the kind badge next to the path
+ * would only repeat what the control already shows. Every other kind edits
+ * through a plain text field and keeps the badge to say what format it wants.
+ */
+const STRUCTURED_KINDS = new Set(['enum', 'bool', 'int']);
+
 /** Chinese names of the process components that own a configuration key. */
 const COMPONENT_LABELS: Record<string, string> = {
   process: '进程',
@@ -106,6 +114,78 @@ const COMPONENT_LABELS: Record<string, string> = {
   session: '会话',
   smb: 'SMB',
   stream: '流媒体',
+};
+
+/**
+ * Chinese translations of each configuration key's documentation, by its dot
+ * path. The schema documentation is generated from the English doc comments
+ * of the configuration struct (see internal/config/schema_documentation.go),
+ * so translating it here keeps the change inside the web package instead of
+ * editing the Go source comments, following the same path/label pattern
+ * already used for SECTION_LABELS, SOURCE_LABELS, KIND_LABELS and
+ * COMPONENT_LABELS above. A path without a translation falls back to the
+ * documentation the API returned, so a later schema addition still shows
+ * something rather than nothing.
+ */
+const DOCUMENTATION_LABELS: Record<string, string> = {
+  backend: '后端（backend）选择输出方式：none（不输出）、fuse 或 smb。',
+  'cache.capacity': '缓存容量是内存中最多保留的字节数。',
+  'connections.bootstrap_nodes':
+    '引导节点（bootstrap nodes）用显式的 host:port 列表覆盖默认的 DHT 引导主机。每个条目按地址族解析，并按发起请求的 socket 所属地址族过滤。留空则使用客户端内置的引导列表。',
+  'connections.disable_ipv4': '关闭 IPv4 后，所有 IPv4 的监听、拨号与 DHT 服务都会停用。',
+  'connections.disable_ipv6':
+    '关闭 IPv6 后，所有 IPv6 的监听、拨号与 DHT 服务都会停用。两个地址族只能二选一禁用：同时禁用会导致没有可用的传输方式。',
+  'connections.listen_host': '监听地址是会话用于接受 peer 连接的地址。留空则由客户端选择默认值。',
+  'connections.listen_port': '监听端口是接受 peer 连接的 TCP/UDP 端口。设为 0 会随机选择一个空闲端口。',
+  'connections.no_port_forwarding':
+    '禁用端口转发会关闭 UPnP/NAT-PMP 端口映射。默认值为 true，这样没有 UPnP 设备的部署，和有设备但未配置映射规则的部署行为一致。',
+  'connections.read_grace':
+    '读取宽限期是种子在最后一个文件句柄关闭后，仍保留读取连接配额的时长，用于覆盖跳转、暂停或播放器重连等场景，避免因此断开 peer 连接。该值必须为正数。',
+  'connections.reading_conns':
+    '读取连接数是正在被读取的种子（文件句柄处于打开状态，或在读取宽限期内曾经打开过）可使用的 peer 连接配额。如果种子的全部内容已在分片缓存中，则不会用到该配额，因为播放直接由缓存提供。该值至少为 1。',
+  'connections.uploading_conns':
+    '上传连接数是种子在没有被读取、仅处于上传状态时可使用的 peer 连接配额。没有全局配额上限，每个种子的配额独立计算。设为 0 会关闭上传配额，已缓存的种子只保留一条探测连接。',
+  'experiments.upload.announce_log':
+    'Announce 日志是每次向 tracker 上报时写入一条记录的 JSON Lines 文件。留空则禁用。文件在启动时打开，修改后的值需要重启才能生效。',
+  'experiments.upload.cap': '上报上限是单个种子累计上报上传量的上限。',
+  'experiments.upload.jitter': '抖动百分比是每次上报相对标准增量的偏差幅度，默认 20%；设为 0 则不加入偏差。',
+  'experiments.upload.mode':
+    '实验模式选择上报方式：baseline（基线）、inject（注入）或 amplify（放大）。默认是 baseline，即如实上报真实计数的对照组。不会自动推断模式：配置了速率或倍率时，必须同时指定对应的模式，否则实验无法启动。',
+  'experiments.upload.multiplier': '放大倍率是在 amplify 模式下，按真实传输字节数的多少倍放大上报的上传量。',
+  'experiments.upload.peer_sample_interval':
+    'Peer 采样间隔是多久把一次 peer 活动采样写入 announce 日志。该值在启动时读取，修改后需要重启才能生效。',
+  'experiments.upload.rate': '虚报速率是在 inject 模式下，上报上传量的平均虚增速度。',
+  'experiments.upload.seed':
+    '随机种子用于固定抖动序列，便于复现实验结果。设为 0 则由进程自行选择。种子在启动时确定，修改后需要重启才能生效。',
+  'filesystem.read_timeout': '读取超时限制单次从种子读取一个分片所允许的最长时间。',
+  'fuse.allow_other':
+    '允许其他用户会向内核传递 allow_other 选项，解除 FUSE 默认只允许挂载用户访问挂载点的限制。',
+  'fuse.mountpoint': '挂载点是文件树挂载到的目录。',
+  'fuse.strm_mountpoint': 'STRM 挂载点是签名流媒体视图挂载到的目录。',
+  'http.auth.enabled': '启用后会开启 HTTP 登录认证。当监听地址不是回环地址时，必须启用该项。',
+  'http.auth.token_ttl':
+    '登录令牌有效期是令牌允许的最长空闲时间，每次有效请求都会顺延该窗口；令牌只保存在内存中，随进程退出而失效。',
+  'http.listen_addr': '监听地址是 HTTP 服务绑定的地址。留空则禁用该服务，默认只绑定回环地址。',
+  'http.max_upload_size': '最大上传大小限制任何上传请求体的体积，包括 .torrent 文件上传和字幕文件托管上传。',
+  'identity.extended_handshake_client_version':
+    '扩展握手客户端版本会作为 BEP 10 扩展握手的 v 字段发送。',
+  'identity.peer_id_prefix': 'Peer ID 前缀是生成的 20 字节 BitTorrent peer ID 的前缀部分。',
+  'identity.tracker_user_agent': 'Tracker User-Agent 会作为 HTTP tracker announce 请求的 User-Agent 请求头发送。',
+  'log.add_source': '添加来源信息后，每条日志都会附带源码文件名和行号。',
+  'log.format': '日志格式决定日志记录的样式：text 面向人工阅读，json 面向日志采集系统。',
+  'log.level': '日志级别是记录日志的最低等级：debug、info、warn 或 error。debug 默认关闭。',
+  password: '密码是 SMB 输出与 HTTP 登录共用的明文密码。启用 SMB 输出或开启 HTTP 认证时都必须设置，且没有默认值。',
+  'proxy.socks5_url': 'SOCKS5 地址是可选的 SOCKS5 或 SOCKS5H 代理端点。',
+  'smb.listen_addr': '监听地址是 SMB 服务绑定的地址。',
+  'smb.strm': 'STRM 开关控制 SMB 输出里 STRM 共享的状态：auto（自动）、on（开启）或 off（关闭）。',
+  'strm.base_url':
+    '基础 URL 是播放器可访问的 HTTP(S) 地址，可以带反向代理的路径前缀。留空则禁用签名流媒体链接。',
+  'upload_rate.limit': '限速值是所有种子和 peer 合计的上传速率上限。留空则不限速。设置限速时间窗口时，该值必须为正数。',
+  'upload_rate.schedule_end':
+    '结束时间是每日限速时间窗口的结束点，使用严格的 24 小时制 HH:MM（本地时间），该时刻本身不计入窗口内。起止时间都留空表示全天都限速。',
+  'upload_rate.schedule_start':
+    '开始时间是每日限速时间窗口的起点，使用严格的 24 小时制 HH:MM（本地时间）。起止时间都留空表示全天都限速。设置该值时必须同时设置结束时间，且开始时间要早于结束时间。',
+  username: '用户名是 SMB 输出接受的登录名。HTTP 登录不校验用户名，因此该项只在使用 SMB 输出时才需要设置。',
 };
 
 function sectionLabel(section: string): string {
@@ -124,6 +204,11 @@ function componentLabel(component: string): string {
   return COMPONENT_LABELS[component] ?? component;
 }
 
+/** The documentation a reader sees: the Chinese translation, or the API's text when a path has none yet. */
+function documentationLabel(key: ConfigKey): string {
+  return DOCUMENTATION_LABELS[key.path] ?? key.documentation;
+}
+
 /** The value a reader sees; a secret is never rendered and an empty value has a label. */
 function displayValue(key: ConfigKey, value: string): string {
   if (key.secret) {
@@ -140,6 +225,7 @@ function matchesSearch(key: ConfigKey, term: string): boolean {
     sectionLabel(key.section),
     key.kind,
     key.documentation,
+    documentationLabel(key),
     key.default,
     key.file_value,
     key.effective_value,
@@ -171,7 +257,12 @@ function groupConfigKeys(keys: ConfigKey[]): ConfigSection[] {
   const sections: ConfigSection[] = [];
   const byID = new Map<string, ConfigSection>();
   for (const key of keys) {
-    const id = key.section === '' ? 'root' : key.section;
+    // 'basics' is a deliberate stand-in for the unsectioned keys, chosen to
+    // avoid colliding with the app's own `<div id="root">` mount point: the
+    // literal id 'root' used to pick up that div's global `min-height: 100vh`
+    // rule (web/src/styles/global.css) and stretch this section to the full
+    // viewport height.
+    const id = key.section === '' ? 'basics' : key.section;
     let section = byID.get(id);
     if (section === undefined) {
       section = { id, label: sectionLabel(key.section), keys: [] };
@@ -189,14 +280,14 @@ function groupConfigKeys(keys: ConfigKey[]): ConfigSection[] {
  * later experiment subsection, while a plain section is its own category.
  */
 function categoryID(sectionID: string): string {
-  if (sectionID === 'root') {
-    return 'root';
+  if (sectionID === 'basics') {
+    return 'basics';
   }
   return sectionID.split('.')[0] ?? sectionID;
 }
 
 function categoryLabel(id: string): string {
-  return id === 'root' ? '基础' : sectionLabel(id);
+  return id === 'basics' ? '基础' : sectionLabel(id);
 }
 
 /** Groups the sections into the first-level categories of the page. */
@@ -512,12 +603,22 @@ function KeyCard({
   onChange: (value: string) => void;
   error?: string;
 }) {
+  // The input already shows the value a reader is editing (the file layer,
+  // per the config write-back model), so "customized" compares that live
+  // value against the default instead of re-stating a source label. A file
+  // value that merely repeats the default does not count: the reader cares
+  // whether the outcome differs, not whether the file happens to spell it
+  // out.
+  const customized = draft !== configKey.default;
+
   return (
     <article className={`panel panel--padding ${styles.key}`} aria-label={configKey.path}>
       <div className={styles.keyHeader}>
         <code className={styles.path}>{configKey.path}</code>
         <Group gap={6} wrap="wrap">
-          <Badge variant="outline" color="gray">{kindLabel(configKey.kind)}</Badge>
+          {!STRUCTURED_KINDS.has(configKey.kind) && (
+            <Badge variant="outline" color="gray">{kindLabel(configKey.kind)}</Badge>
+          )}
           <Badge variant="light" color={configKey.hot_apply ? 'teal' : 'gray'}>
             {configKey.hot_apply ? '立即生效' : '重启生效'}
           </Badge>
@@ -531,45 +632,35 @@ function KeyCard({
       </div>
 
       {configKey.documentation !== '' && (
-        <p className={styles.documentation}>{configKey.documentation}</p>
+        <p className={styles.documentation}>{documentationLabel(configKey)}</p>
       )}
 
-      <dl className={styles.values}>
-        <div>
-          <dt>生效值</dt>
-          <dd data-testid="config-effective-value">{displayValue(configKey, configKey.effective_value)}</dd>
-        </div>
-        <div>
-          <dt>文件值</dt>
-          <dd data-testid="config-file-value">{displayValue(configKey, configKey.file_value)}</dd>
-        </div>
-        <div>
-          <dt>默认值</dt>
-          <dd data-testid="config-default-value">{displayValue(configKey, configKey.default)}</dd>
-        </div>
-        <div>
-          <dt>来源</dt>
-          <dd data-testid="config-source">{sourceLabel(configKey.source)}</dd>
-        </div>
-      </dl>
-
-      {configKey.values.length > 0 && (
-        <p className={styles.meta}>可选值：{configKey.values.filter((value) => value !== '').join(' / ')}</p>
-      )}
       {configKey.component !== '' && (
         <p className={styles.meta}>所属组件：{componentLabel(configKey.component)}</p>
       )}
 
       {!configKey.secret && (
         <div className={styles.editor}>
-          <span className={styles.editorLabel}>新值</span>
+          <span className={styles.editorLabel}>当前值</span>
           <KeyControl configKey={configKey} draft={draft} editable={editable} onChange={onChange} />
+          {customized && (
+            <button
+              type="button"
+              className={styles.resetLink}
+              onClick={() => onChange(configKey.default)}
+              disabled={!editable}
+            >
+              已自定义 · 恢复默认（{displayValue(configKey, configKey.default)}）
+            </button>
+          )}
         </div>
       )}
 
       {configKey.read_only_reason === 'environment_override' && (
         <p className={styles.readOnlyNote}>
-          该项由环境变量 <code className={styles.code}>{configKey.environment}</code> 覆盖，配置文件中的值不会生效。
+          该项由环境变量 <code className={styles.code}>{configKey.environment}</code> 覆盖，当前生效值为{' '}
+          <code className={styles.code}>{displayValue(configKey, configKey.effective_value)}</code>
+          ，配置文件中的值不会生效。
         </p>
       )}
       {configKey.read_only_reason === 'secret' && (
@@ -998,7 +1089,7 @@ export function ConfigPage() {
           <p className="eyebrow">设置</p>
           <h1 className={styles.title} id="config-title">配置</h1>
           <p className={styles.subtitle}>
-            按配置节查看并编辑后台服务的配置项：文件值、生效值、来源与生效方式一目了然。
+            按配置节查看并编辑后台服务的配置项。被环境变量覆盖或偏离默认值的项会单独提示，其余项只显示当前值。
             保存时整体校验、写回配置文件，并把能立即生效的配置项应用到运行中的进程。
           </p>
         </div>

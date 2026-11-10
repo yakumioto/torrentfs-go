@@ -297,7 +297,7 @@ afterEach(() => {
 });
 
 describe('ConfigPage', () => {
-  it('renders every key grouped by section with values, source, documentation and apply badges', async () => {
+  it('renders every key grouped by section, documentation, apply badges and customization hints', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
     renderPage(fetchMock);
 
@@ -310,22 +310,33 @@ describe('ConfigPage', () => {
     expect(within(content).getByText('缓存')).toBeInTheDocument();
     expect(within(content).getByText('上传实验')).toBeInTheDocument();
 
+    // An environment-overridden key folds its effective value into the
+    // override note instead of a separate, always-present row.
     const level = screen.getByRole('article', { name: 'log.level' });
-    expect(within(level).getByTestId('config-effective-value')).toHaveTextContent('debug');
-    expect(within(level).getByTestId('config-file-value')).toHaveTextContent('info');
-    expect(within(level).getByTestId('config-default-value')).toHaveTextContent('info');
-    expect(within(level).getByTestId('config-source')).toHaveTextContent('环境变量');
+    expect(within(level).getByText('环境变量覆盖')).toBeInTheDocument();
+    expect(within(level).getByText('TORRENTFS_LOG_LEVEL')).toBeInTheDocument();
+    expect(within(level).getByText('debug')).toBeInTheDocument();
     expect(within(level).getByText('立即生效')).toBeInTheDocument();
-    expect(within(level).getByText(/minimum level of a log record/)).toBeInTheDocument();
+    // The page shows the Chinese translation of the schema documentation,
+    // not the English text the API returned in this fixture.
+    expect(within(level).getByText(/日志级别/)).toBeInTheDocument();
+    // Its file value equals its default, so there is nothing to reset.
+    expect(within(level).queryByText(/已自定义/)).not.toBeInTheDocument();
 
+    // A key whose file value equals its default shows no "customized" hint,
+    // even though cache.capacity is a byte_quantity (so it still keeps its
+    // kind badge: that control is free text, unlike enum/bool/int).
     const capacity = screen.getByRole('article', { name: 'cache.capacity' });
-    expect(within(capacity).getByTestId('config-effective-value')).toHaveTextContent('2GiB');
-    expect(within(capacity).getByTestId('config-source')).toHaveTextContent('内置默认');
+    expect(within(capacity).getByText('字节量')).toBeInTheDocument();
+    expect(within(capacity).queryByText(/已自定义/)).not.toBeInTheDocument();
     expect(within(capacity).getByText('重启生效')).toBeInTheDocument();
 
+    // A key whose file value diverges from its default offers a one-click
+    // reset instead of a passive "source: file" label. backend is an enum,
+    // so it also has no kind badge: the dropdown already shows the format.
     const backend = screen.getByRole('article', { name: 'backend' });
-    expect(within(backend).getByTestId('config-source')).toHaveTextContent('配置文件');
-    expect(within(backend).getByTestId('config-default-value')).toHaveTextContent('none');
+    expect(within(backend).queryByText('枚举')).not.toBeInTheDocument();
+    expect(within(backend).getByRole('button', { name: '已自定义 · 恢复默认（none）' })).toBeInTheDocument();
 
     const [url, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('/api/v1/config');
@@ -339,6 +350,29 @@ describe('ConfigPage', () => {
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
     // The page never offers a process restart or exit control.
     expect(screen.queryByRole('button', { name: /重启服务|重启进程|退出进程|退出程序/ })).not.toBeInTheDocument();
+  });
+
+  it('resets a customized key to its default value when the reset action is used', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'backend' });
+    const backend = screen.getByRole('article', { name: 'backend' });
+    expect(screen.getByRole('combobox', { name: 'backend' })).toHaveValue('smb');
+
+    fireEvent.click(within(backend).getByRole('button', { name: '已自定义 · 恢复默认（none）' }));
+
+    expect(screen.getByRole('combobox', { name: 'backend' })).toHaveValue('none');
+    expect(within(backend).queryByText(/已自定义/)).not.toBeInTheDocument();
+  });
+
+  it('disables the reset action for a customized key when the page itself is read-only', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView({ read_only_reason: 'file_not_writable' }))));
+    renderPage(fetchMock);
+
+    await screen.findByRole('article', { name: 'backend' });
+    const backend = screen.getByRole('article', { name: 'backend' });
+    expect(within(backend).getByRole('button', { name: '已自定义 · 恢复默认（none）' })).toBeDisabled();
   });
 
   it('maps every schema kind to its editor control and saves the edited text', async () => {
@@ -652,7 +686,6 @@ describe('ConfigPage', () => {
     await screen.findByRole('article', { name: 'upload_rate.limit' });
     expect(within(screen.getByTestId('config-content')).getByText('上传限速')).toBeInTheDocument();
     const limit = screen.getByRole('article', { name: 'upload_rate.limit' });
-    expect(within(limit).getByTestId('config-effective-value')).toHaveTextContent('1MiB/s');
     expect(within(limit).getByText('立即生效')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'upload_rate.limit' })).toHaveValue('1MiB/s');
     expect(screen.getByRole('textbox', { name: 'upload_rate.schedule_start' })).toHaveValue('08:00');
@@ -690,7 +723,6 @@ describe('ConfigPage', () => {
 
     const password = screen.getByRole('article', { name: 'password' });
     expect(within(password).getByText('口令只读')).toBeInTheDocument();
-    expect(within(password).getByTestId('config-effective-value')).toHaveTextContent('••••••');
     expect(within(password).getByText(/不会在页面上显示/)).toBeInTheDocument();
     expect(screen.queryByText('s3cr3t')).not.toBeInTheDocument();
   });
@@ -1564,10 +1596,10 @@ describe('ConfigPage reread reseeding', () => {
     await screen.findByText('保存成功');
 
     // The renderer reports the bytes it wrote; the next save must use that
-    // baseline instead of conflicting with our own write.
-    await waitFor(() => expect(
-      within(screen.getByRole('article', { name: 'cache.capacity' })).getByTestId('config-file-value'),
-    ).toHaveTextContent('1GiB'));
+    // baseline instead of conflicting with our own write. The card no longer
+    // echoes the file value as its own row, so wait on the refetch that
+    // carries the new baseline instead.
+    await waitFor(() => expect(configGets).toBe(2));
 
     fireEvent.change(screen.getByRole('textbox', { name: 'cache.capacity' }), { target: { value: '2GiB' } });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
