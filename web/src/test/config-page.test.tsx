@@ -302,10 +302,13 @@ describe('ConfigPage', () => {
     renderPage(fetchMock);
 
     await screen.findByRole('article', { name: 'log.level' });
-    expect(screen.getByText('基础')).toBeInTheDocument();
-    expect(screen.getByText('日志')).toBeInTheDocument();
-    expect(screen.getByText('缓存')).toBeInTheDocument();
-    expect(screen.getByText('上传实验')).toBeInTheDocument();
+    // Category names also appear in the sidebar nav, so scope to the content
+    // area to query the unique, non-interactive section heading.
+    const content = screen.getByTestId('config-content');
+    expect(within(content).getByText('基础')).toBeInTheDocument();
+    expect(within(content).getByText('日志')).toBeInTheDocument();
+    expect(within(content).getByText('缓存')).toBeInTheDocument();
+    expect(within(content).getByText('上传实验')).toBeInTheDocument();
 
     const level = screen.getByRole('article', { name: 'log.level' });
     expect(within(level).getByTestId('config-effective-value')).toHaveTextContent('debug');
@@ -520,6 +523,40 @@ describe('ConfigPage', () => {
     }
   });
 
+  it('scrolls to and highlights a category when its sidebar nav item is clicked', async () => {
+    const originalScrollIntoView = (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+    try {
+      const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(configView())));
+      renderPage(fetchMock);
+
+      await screen.findByRole('article', { name: 'experiments.upload.mode' });
+      const navItem = screen.getByTestId('config-nav-experiments');
+      const category = screen.getByTestId('config-category-experiments');
+
+      expect(navItem).not.toHaveAttribute('aria-current');
+      fireEvent.click(navItem);
+
+      expect(scrollIntoView.mock.instances.at(-1)).toBe(category);
+      expect(navItem).toHaveAttribute('aria-current', 'true');
+    } finally {
+      if (originalScrollIntoView === undefined) {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      } else {
+        Object.defineProperty(Element.prototype, 'scrollIntoView', {
+          configurable: true,
+          writable: true,
+          value: originalScrollIntoView,
+        });
+      }
+    }
+  });
+
   it('lists every upload experiment key and saves hot and restart-required edits', async () => {
     const view = configView({ keys: uploadExperimentKeys() });
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -613,7 +650,7 @@ describe('ConfigPage', () => {
     renderPage(fetchMock);
 
     await screen.findByRole('article', { name: 'upload_rate.limit' });
-    expect(screen.getByText('上传限速')).toBeInTheDocument();
+    expect(within(screen.getByTestId('config-content')).getByText('上传限速')).toBeInTheDocument();
     const limit = screen.getByRole('article', { name: 'upload_rate.limit' });
     expect(within(limit).getByTestId('config-effective-value')).toHaveTextContent('1MiB/s');
     expect(within(limit).getByText('立即生效')).toBeInTheDocument();
@@ -707,8 +744,8 @@ describe('ConfigPage change preview', () => {
     const preview = screen.getByTestId('config-diff-preview');
     expect(within(preview).getByText('cache.capacity')).toBeInTheDocument();
     expect(within(preview).getByText('1GiB')).toBeInTheDocument();
-    // Unchanged keys and the previous value are deliberately absent.
-    expect(within(preview).queryByText('2GiB')).not.toBeInTheDocument();
+    // The preview now shows the previous value too, for before/after comparison.
+    expect(within(preview).getByText('2GiB')).toBeInTheDocument();
     expect(within(preview).queryByText('backend')).not.toBeInTheDocument();
     expect(within(preview).queryByText('baseline')).not.toBeInTheDocument();
 
@@ -1020,6 +1057,16 @@ describe('ConfigPage unsaved changes', () => {
       if (url === '/api/v1/experiments/upload') {
         return Promise.resolve(jsonResponse(disabledExperiment()));
       }
+      if (url === '/api/v1/torrents') {
+        return Promise.resolve(jsonResponse([]));
+      }
+      if (url === '/api/v1/stats') {
+        return Promise.resolve(jsonResponse({
+          started_at: '2026-01-01T00:00:00Z',
+          cache: { used_bytes: 0, capacity_bytes: 0 },
+          transfer: { downloaded_bytes: 0, uploaded_bytes: 0 },
+        }));
+      }
       throw new Error(`Unexpected request: ${url}`);
     });
     renderAppAt(fetchMock);
@@ -1032,7 +1079,7 @@ describe('ConfigPage unsaved changes', () => {
     expect(screen.getByTestId('config-dirty-count')).toHaveTextContent('未保存 1 项');
     expect(beforeUnloadEvent().defaultPrevented).toBe(true);
 
-    fireEvent.click(screen.getByRole('link', { name: '上传实验监控' }));
+    fireEvent.click(screen.getByRole('link', { name: '返回 TorrentFS 任务列表' }));
     const stayDialog = await screen.findByRole('dialog');
     expect(stayDialog).toHaveTextContent('离开配置页面');
     expect(stayDialog).toHaveTextContent('1 项未保存的改动');
@@ -1042,11 +1089,11 @@ describe('ConfigPage unsaved changes', () => {
     expect(screen.getByRole('article', { name: 'cache.capacity' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'cache.capacity' })).toHaveValue('1GiB');
 
-    fireEvent.click(screen.getByRole('link', { name: '上传实验监控' }));
+    fireEvent.click(screen.getByRole('link', { name: '返回 TorrentFS 任务列表' }));
     const leaveDialog = await screen.findByRole('dialog');
     fireEvent.click(within(leaveDialog).getByRole('button', { name: '放弃改动并离开' }));
 
-    await screen.findByRole('heading', { name: '上传实验监控' });
+    await screen.findByRole('heading', { name: '任务列表' });
     expect(screen.queryByRole('article', { name: 'cache.capacity' })).not.toBeInTheDocument();
   });
 

@@ -1,5 +1,5 @@
 import { ActionIcon, Button, Tooltip } from '@mantine/core';
-import { IconAdjustments, IconBox, IconFlask, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
+import { IconAdjustments, IconBox, IconLogout, IconPlus, IconRefresh } from '@tabler/icons-react';
 import type { MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -47,17 +47,6 @@ export function Header({ onAdd }: { onAdd: () => void }) {
               aria-label="配置"
             >
               <IconAdjustments size={18} />
-            </ActionIcon>
-          </Tooltip>
-          <Tooltip label="上传实验监控">
-            <ActionIcon
-              component={Link}
-              to="/experiments"
-              variant="subtle"
-              color="gray"
-              aria-label="上传实验监控"
-            >
-              <IconFlask size={18} />
             </ActionIcon>
           </Tooltip>
           <Tooltip label="添加任务">

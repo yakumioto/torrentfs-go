@@ -123,7 +123,7 @@ export function DashboardPage() {
         </div>
       )}
 
-      {experimentQuery.data !== undefined && <ExperimentSummaryCard view={experimentQuery.data} />}
+      <ExperimentSummaryCard query={experimentQuery} />
 
       <section aria-label="任务摘要" className={styles.summary}>
         <div className={styles.summaryCard}>

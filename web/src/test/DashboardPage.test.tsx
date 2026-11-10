@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
@@ -8,7 +8,6 @@ import { queryKeys } from '../queries/keys';
 import { AuthContext, type AuthContextValue } from '../app/auth-context';
 import { AppLayout } from '../components/layout/AppLayout';
 import { DashboardPage } from '../pages/DashboardPage';
-import { ExperimentsPage } from '../pages/ExperimentsPage';
 import { theme } from '../styles/theme';
 import type { ExperimentView, RuntimeStats, Torrent } from '../types/api';
 
@@ -124,7 +123,6 @@ function renderDashboard(
             <Routes>
               <Route element={<AppLayout />}>
                 <Route path="/" element={<DashboardPage />} />
-                <Route path="/experiments" element={<ExperimentsPage />} />
               </Route>
             </Routes>
           </MemoryRouter>
@@ -274,7 +272,7 @@ describe('DashboardPage', () => {
     renderDashboard([torrent({ uploaded_bytes: 1000 })], runtimeStats(), 200, undefined, injectExperiment());
 
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
-    const card = screen.getByRole('link', { name: '上传实验：打开上传实验监控' });
+    const card = screen.getByTestId('experiment-summary-card');
     expect(card).toHaveTextContent('上传实验');
     expect(card).toHaveTextContent('注入虚报');
     expect(card).toHaveTextContent('实时真实上传');
@@ -283,14 +281,21 @@ describe('DashboardPage', () => {
     expect(card).toHaveTextContent('待上报真实增量');
     expect(card).toHaveTextContent('+4.0 MiB');
     expect(card).toHaveTextContent('上报值只在 tracker announce 时更新');
+    // Fields that used to live only on the removed /experiments page.
+    expect(card).toHaveTextContent('虚报速率');
+    expect(card).toHaveTextContent('抖动百分比');
+    expect(card).toHaveTextContent('随机种子');
+    expect(card).toHaveTextContent('/var/log/torrentfs/experiment.jsonl');
+
+    // The card is no longer itself a link; it has its own, independent action.
+    expect(screen.queryByRole('link', { name: '上传实验：打开上传实验监控' })).not.toBeInTheDocument();
+    const settingsLink = within(card).getByRole('link', { name: '修改实验设置' });
+    expect(settingsLink).toHaveAttribute('href', '/config#experiments');
 
     const row = screen.getByRole('listitem');
     expect(row).toHaveTextContent('上报 4.0 MiB · 虚报 +4.0 MiB');
     // The row explains that the live-vs-reported gap is pending, not a bug.
     expect(screen.getByTitle('相对上次上报时真实量；待上报 4.8 MiB 尚未计入')).toBeInTheDocument();
-
-    fireEvent.click(card);
-    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
   });
 
   it('renders a dash for torrents without experiment counters and shows the baseline card', async () => {
@@ -302,8 +307,8 @@ describe('DashboardPage', () => {
     cleanup();
     renderDashboard([torrent()]);
     await waitFor(() => expect(screen.getByText('Alpha archive')).toBeInTheDocument());
-    const baselineCard = screen.getByRole('link', { name: '上传实验：打开上传实验监控' });
+    const baselineCard = screen.getByTestId('experiment-summary-card');
     expect(baselineCard).toHaveTextContent('基线（真实上报）');
-    expect(baselineCard).toHaveAttribute('href', '/experiments');
+    expect(within(baselineCard).getByRole('link', { name: '修改实验设置' })).toHaveAttribute('href', '/config#experiments');
   });
 });

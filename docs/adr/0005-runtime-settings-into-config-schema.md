@@ -1,5 +1,7 @@
 # 运行时设置并入配置 schema，实验常驻并改名 experiments
 
+> **旁注**：本 ADR 第 15 行"`/experiments` 保留为实验监控页"这一决定已被 [ADR-0006](0006-remove-experiments-monitor-page.md) 反转——`/experiments` 页面已删除，其内容并入仪表盘实验摘要卡。以下正文保持原样，记录当时的决定与权衡。
+
 ## 背景
 
 上传限速与上传统计实验是仅有的两组运行时可调设置。上传限速只有 `<torrents-dir>/.metadata/upload_rate.json` 一个持久化位置，没有任何配置键；上传统计实验同时存在 `[lab]` 配置节与 `.metadata/lab_settings.json` 侧车，侧车覆盖配置节。两者都通过独立 API 与页面管理，与 ADR-0001 的"配置 schema 是唯一真相源、配置只从默认值/文件/环境变量三个来源合并"不一致；实验是否启用还取决于启动时的 `[lab]`，后续新增实验无处安放。用户决定把所有设置收敛到一个配置页面共同维护。
