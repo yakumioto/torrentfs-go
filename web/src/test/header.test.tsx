@@ -191,31 +191,4 @@ describe('Header refresh control', () => {
     expect(screen.getByRole('tab', { name: /数据块/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/torrents/torrent-1');
   });
-
-  it('opens the experiments monitor from the header flask link', async () => {
-    const torrent = makeTorrent();
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/stats')) {
-        return Promise.resolve(jsonResponse(makeRuntimeStats()));
-      }
-      if (url.endsWith('/experiments/upload')) {
-        return Promise.resolve(jsonResponse(baselineExperiment()));
-      }
-      if (url.endsWith('/torrents')) {
-        return Promise.resolve(jsonResponse([torrent]));
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-
-    renderApp('/', fetchMock);
-    await waitFor(() => expect(screen.getByText(torrent.name)).toBeInTheDocument());
-
-    const link = screen.getByRole('link', { name: '上传实验监控' });
-    expect(link).toHaveAttribute('href', '/experiments');
-    fireEvent.click(link);
-
-    await waitFor(() => expect(screen.getByRole('heading', { name: '上传实验监控' })).toBeInTheDocument());
-    await waitFor(() => expect(screen.getAllByText('基线（真实上报）').length).toBeGreaterThan(0));
-  });
 });

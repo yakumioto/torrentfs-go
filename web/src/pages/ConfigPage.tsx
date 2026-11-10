@@ -1,5 +1,4 @@
 import {
-  Accordion,
   Alert,
   Badge,
   Button,
@@ -695,6 +694,9 @@ export function ConfigPage() {
   // The hash the page already scrolled to; a background refetch must not pull
   // the reader away from wherever they scrolled to after following the link.
   const scrolledHash = useRef('');
+  // The category currently highlighted in the sidebar: the one nearest the
+  // top of the viewport while scrolling, or the one a nav click targeted.
+  const [activeCategoryID, setActiveCategoryID] = useState('');
 
   const view = query.data;
   const refetch = query.refetch;
@@ -849,7 +851,11 @@ export function ConfigPage() {
       }
     }
   }
-  const changes = Object.entries(patch).map(([path, value]) => ({ path, value }));
+  const changes = Object.entries(patch).map(([path, value]) => ({
+    path,
+    value,
+    oldValue: saved[path] ?? '',
+  }));
   const dangerousChanges = dangerousConfigChanges(changes.map((change) => change.path));
   const dirtyCount = changes.length;
   // Unit and duration syntax is checked before the request, with the same
@@ -944,6 +950,46 @@ export function ConfigPage() {
     ? view?.keys ?? []
     : view.keys.filter((key) => matchesSearch(key, term));
   const categories = groupConfigCategories(filtered);
+  const categoryIDs = categories.map((category) => category.id).join('|');
+
+  // Highlights the sidebar entry for whichever category is nearest the top
+  // of the viewport, so scrolling through the page keeps the nav in sync
+  // without requiring a click. IntersectionObserver is unavailable in some
+  // test environments, so the effect is a no-op highlight-only enhancement.
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined' || categoryIDs === '') {
+      return;
+    }
+    const elements = categoryIDs
+      .split('|')
+      .map((id) => document.getElementById(id))
+      .filter((element): element is HTMLElement => element !== null);
+    if (elements.length === 0) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting);
+        if (visible.length === 0) {
+          return;
+        }
+        const topmost = visible.reduce((closest, entry) => (
+          entry.boundingClientRect.top < closest.boundingClientRect.top ? entry : closest
+        ));
+        setActiveCategoryID(topmost.target.id);
+      },
+      { rootMargin: '-15% 0px -70% 0px', threshold: [0, 1] },
+    );
+    for (const element of elements) {
+      observer.observe(element);
+    }
+    return () => observer.disconnect();
+  }, [categoryIDs]);
+
+  const scrollToCategory = (id: string) => {
+    setActiveCategoryID(id);
+    document.getElementById(id)?.scrollIntoView?.({ block: 'start' });
+  };
 
   return (
     <div className={styles.page}>
@@ -1073,7 +1119,7 @@ export function ConfigPage() {
                 <div>
                   <p className={styles.diffTitle}>改动预览</p>
                   <p className={styles.diffHint}>
-                    保存后只写入以下 {changes.length} 项改动；旧值不会出现在配置文件中。
+                    保存后将写入以下 {changes.length} 项改动；红色删除线为旧值，仅用于对照，不会写入配置文件。
                   </p>
                 </div>
                 <Badge variant="light" color="yellow">{changes.length} 项</Badge>
@@ -1084,8 +1130,17 @@ export function ConfigPage() {
                   return (
                     <li key={change.path} className={styles.diffItem}>
                       <code className={styles.code}>{change.path}</code>
-                      <span className={styles.diffArrow} aria-hidden="true">→</span>
-                      <code className={styles.diffValue}>{change.value === '' ? '（空）' : change.value}</code>
+                      <span className={styles.diffValues}>
+                        <code className={`${styles.diffValue} ${styles.diffValueOld}`}>
+                          <span aria-hidden="true">− </span>
+                          {change.oldValue === '' ? '（空）' : change.oldValue}
+                        </code>
+                        <span className={styles.diffArrow} aria-hidden="true">→</span>
+                        <code className={`${styles.diffValue} ${styles.diffValueNew}`}>
+                          <span aria-hidden="true">+ </span>
+                          {change.value === '' ? '（空）' : change.value}
+                        </code>
+                      </span>
                       {dangerous !== undefined && (
                         <Badge variant="light" color="red">{dangerousCategoryLabel(dangerous.category)}</Badge>
                       )}
@@ -1102,32 +1157,47 @@ export function ConfigPage() {
             </div>
           )}
 
-          <Accordion
-            multiple
-            variant="separated"
-            defaultValue={categories.map((category) => category.id)}
-            className={styles.accordion}
-          >
-            {categories.map((category) => (
-              <Accordion.Item
-                key={category.id}
-                value={category.id}
-                id={category.id}
-                className={styles.section}
-                data-testid={`config-category-${category.id}`}
-              >
-                <Accordion.Control>
-                  <Group justify="space-between" pr="md" wrap="nowrap">
+          <div className={styles.layout}>
+            <nav className={styles.nav} aria-label="配置分类导航" data-testid="config-nav">
+              {categories.map((category) => (
+                <button
+                  key={category.id}
+                  type="button"
+                  className={
+                    category.id === activeCategoryID
+                      ? `${styles.navItem} ${styles.navItemActive}`
+                      : styles.navItem
+                  }
+                  aria-current={category.id === activeCategoryID ? 'true' : undefined}
+                  data-testid={`config-nav-${category.id}`}
+                  onClick={() => scrollToCategory(category.id)}
+                >
+                  <span className={styles.navItemLabel}>{category.label}</span>
+                  <Badge variant="light" color="gray" size="sm">{categoryKeyCount(category)}</Badge>
+                </button>
+              ))}
+            </nav>
+
+            <div className={styles.content} data-testid="config-content">
+              {categories.map((category) => (
+                <section
+                  key={category.id}
+                  id={category.id}
+                  className={styles.section}
+                  data-testid={`config-category-${category.id}`}
+                  aria-labelledby={`config-category-heading-${category.id}`}
+                >
+                  <div className={styles.sectionHeader}>
                     <span className={styles.sectionHeading}>
-                      <span className={styles.sectionTitle}>{category.label}</span>
+                      <h2 className={styles.sectionTitle} id={`config-category-heading-${category.id}`}>
+                        {category.label}
+                      </h2>
                       {category.description !== '' && (
                         <span className={styles.sectionDescription}>{category.description}</span>
                       )}
                     </span>
                     <Badge variant="light" color="gray">{categoryKeyCount(category)} 项</Badge>
-                  </Group>
-                </Accordion.Control>
-                <Accordion.Panel>
+                  </div>
                   {category.sections.map((section) => (
                     <section
                       key={section.id}
@@ -1152,10 +1222,10 @@ export function ConfigPage() {
                       </div>
                     </section>
                   ))}
-                </Accordion.Panel>
-              </Accordion.Item>
-            ))}
-          </Accordion>
+                </section>
+              ))}
+            </div>
+          </div>
 
           <DangerousSaveDialog
             opened={dangerOpen}
