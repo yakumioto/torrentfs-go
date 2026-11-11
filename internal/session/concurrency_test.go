@@ -904,4 +904,10 @@ func TestSessionClosingStateRejectsOperations(t *testing.T) {
 	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{MagnetURI: "magnet:?xt=urn:btih:" + strings.Repeat("a", 40)}); !errors.Is(err, filesystem.ErrClosed) {
 		t.Errorf("AddTorrentAndPersist after Close = %v, want ErrClosed", err)
 	}
+	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []session.PieceRange{{Start: 0, End: 1}}, 0); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("StartPieceDownload after Close = %v, want ErrClosed", err)
+	}
+	if _, err := sess.PieceDownloadStatus(hash.HexString()); !errors.Is(err, filesystem.ErrClosed) {
+		t.Errorf("PieceDownloadStatus after Close = %v, want ErrClosed", err)
+	}
 }

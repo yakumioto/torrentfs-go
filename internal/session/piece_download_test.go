@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -535,5 +536,209 @@ func TestPieceDownloadStatusNeverStarted(t *testing.T) {
 	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
 	if _, err := seeder.PieceDownloadStatus(hash.HexString()); !errors.Is(err, session.ErrNoPieceDownload) {
 		t.Fatalf("PieceDownloadStatus with no piece download ever started = %v, want ErrNoPieceDownload", err)
+	}
+}
+
+// TestPieceDownloadCancelledAndDiscardedWhenTorrentDeleted covers the
+// delete-time teardown: a piece download with no reachable peer would hang
+// forever, but deleting its torrent does not wait for it. Deletion
+// completes, the deleted hash no longer has a piece download to query
+// (ErrUnknownTorrent, not a leftover record), and re-adding the same
+// torrent starts from a clean slate instead of resurrecting the discarded
+// one.
+func TestPieceDownloadCancelledAndDiscardedWhenTorrentDeleted(t *testing.T) {
+	ctx := testTimeout(t)
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	sess := newManageSession(t, torrentsDir)
+	content := bytes.Repeat([]byte{12}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	added, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
+	if err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	hashHex := hash.HexString()
+
+	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 0)
+	if err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if status.State != session.PieceDownloadRunning {
+		t.Fatalf("state = %q, want running (no peer can have served it yet)", status.State)
+	}
+
+	op, err := sess.DeleteTorrent(ctx, added.ID)
+	if err != nil {
+		t.Fatalf("DeleteTorrent: %v", err)
+	}
+	final := waitOperation(t, sess, op.ID)
+	if final.State != session.StateDeleted {
+		t.Fatalf("delete state = %s (%s), want deleted; a piece download with no peer must not block it", final.State, final.Error)
+	}
+
+	if _, err := sess.PieceDownloadStatus(hashHex); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("PieceDownloadStatus after delete = %v, want ErrUnknownTorrent", err)
+	}
+
+	readded, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
+	if err != nil {
+		t.Fatalf("re-add after delete: %v", err)
+	}
+	if _, err := sess.PieceDownloadStatus(readded.ID); !errors.Is(err, session.ErrNoPieceDownload) {
+		t.Fatalf("PieceDownloadStatus on the re-added torrent = %v, want ErrNoPieceDownload (the discarded download must not resurface)", err)
+	}
+}
+
+// TestPieceDownloadInFlightReleasesGoroutinesAndFileDescriptorsOnDelete
+// mirrors TestDeleteReleasesGoroutinesAndFileDescriptors with a piece
+// download in flight at delete time: its background fetch loop must not
+// outlive the torrent it was fetching for.
+func TestPieceDownloadInFlightReleasesGoroutinesAndFileDescriptorsOnDelete(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("file descriptor accounting requires /proc")
+	}
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	content := bytes.Repeat([]byte{13}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	hashHex := hash.HexString()
+
+	baselineGoroutines := runtime.NumGoroutine()
+	baselineFDs := openFDCount(t)
+
+	settle := func() (int, int) {
+		deadline := time.Now().Add(5 * time.Second)
+		var goroutines, fds int
+		for {
+			runtime.GC()
+			goroutines = runtime.NumGoroutine()
+			fds = openFDCount(t)
+			if time.Now().After(deadline) {
+				return goroutines, fds
+			}
+			if goroutines <= baselineGoroutines+2 && fds <= baselineFDs+2 {
+				return goroutines, fds
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	sess, err := session.New(testConfig(), testTorrentDir(t, filepath.Join(work, "data")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	view, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 0); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	} else if status.State != session.PieceDownloadRunning {
+		t.Fatalf("state = %q, want running (no peer can have served it yet)", status.State)
+	}
+	op, err := sess.DeleteTorrent(ctx, view.ID)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if final := waitOperation(t, sess, op.ID); final.State != session.StateDeleted {
+		t.Fatalf("delete state = %s (%s), want deleted", final.State, final.Error)
+	}
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	goroutines, fds := settle()
+	if goroutines > baselineGoroutines+2 {
+		t.Fatalf("goroutines after add/piece-download/delete/close = %d, baseline %d", goroutines, baselineGoroutines)
+	}
+	if fds > baselineFDs+2 {
+		t.Fatalf("open file descriptors after add/piece-download/delete/close = %d, baseline %d", fds, baselineFDs)
+	}
+}
+
+// TestPieceDownloadInFlightDoesNotBlockSessionClose covers the session-level
+// teardown: a piece download with no reachable peer would hang forever, but
+// closing the session does not wait for it, returns promptly, and leaves
+// nothing running. A fresh session opened on the same directory afterwards
+// (standing in for a process restart) resumes the torrent but has no memory
+// of the piece download: it was never persisted.
+func TestPieceDownloadInFlightDoesNotBlockSessionClose(t *testing.T) {
+	ctx := testTimeout(t)
+	work := t.TempDir()
+	torrentsDir := testTorrentDir(t, filepath.Join(work, "data"))
+	content := bytes.Repeat([]byte{14}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	hashHex := hash.HexString()
+
+	checkFDs := runtime.GOOS == "linux"
+	baselineGoroutines := runtime.NumGoroutine()
+	var baselineFDs int
+	if checkFDs {
+		baselineFDs = openFDCount(t)
+	}
+
+	sess, err := session.New(testConfig(), torrentsDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 0)
+	if err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if status.State != session.PieceDownloadRunning {
+		t.Fatalf("state = %q, want running (no peer can have served it yet)", status.State)
+	}
+
+	closed := make(chan error, 1)
+	start := time.Now()
+	go func() { closed <- sess.Close(context.Background()) }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close with a piece download in flight did not return within 5s")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Close took %s with a piece download in flight, want it to not wait for a hung download", elapsed)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runtime.GC()
+		goroutines := runtime.NumGoroutine()
+		fds := baselineFDs
+		if checkFDs {
+			fds = openFDCount(t)
+		}
+		if goroutines <= baselineGoroutines+2 && fds <= baselineFDs+2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines/fds after closing with a piece download in flight = %d/%d, baseline %d/%d", goroutines, fds, baselineGoroutines, baselineFDs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	restarted, err := session.New(testConfig(), torrentsDir)
+	if err != nil {
+		t.Fatalf("New on restart: %v", err)
+	}
+	defer func() {
+		if err := restarted.Close(context.Background()); err != nil {
+			t.Errorf("restarted Close: %v", err)
+		}
+	}()
+	var statusErr error
+	if err := waitFor(ctx, func() bool {
+		_, statusErr = restarted.PieceDownloadStatus(hashHex)
+		return !errors.Is(statusErr, session.ErrUnknownTorrent)
+	}); err != nil {
+		t.Fatalf("torrent never resumed after restart: %v", err)
+	}
+	if !errors.Is(statusErr, session.ErrNoPieceDownload) {
+		t.Fatalf("PieceDownloadStatus after restart = %v, want ErrNoPieceDownload (no persisted record)", statusErr)
 	}
 }
