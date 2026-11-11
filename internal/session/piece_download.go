@@ -38,6 +38,9 @@ const (
 	// PieceDownloadCompleted is a piece download whose every requested piece
 	// has been fetched or was already resident in the cache.
 	PieceDownloadCompleted PieceDownloadState = "completed"
+	// PieceDownloadCancelled is a piece download CancelPieceDownload stopped,
+	// or that a later StartPieceDownload replaced, before it completed.
+	PieceDownloadCancelled PieceDownloadState = "cancelled"
 )
 
 // PieceDownloadStatus is the management API's snapshot of one torrent's most
@@ -66,6 +69,11 @@ type pieceDownload struct {
 	startedAt  time.Time
 	finishedAt time.Time
 	err        string
+	// cancel stops this task's background fetch loop. It is nil for a task
+	// that completed synchronously at start (every piece was already
+	// cached), set once before the goroutine starts otherwise, and never
+	// reassigned, so reading it without the mutex is safe.
+	cancel context.CancelFunc
 }
 
 func (p *pieceDownload) snapshot() PieceDownloadStatus {
@@ -87,11 +95,33 @@ func (p *pieceDownload) incDone() {
 	p.mu.Unlock()
 }
 
-func (p *pieceDownload) complete() {
+// finish moves the task to a terminal state if it is still running, and
+// reports whether it did. A task already in a terminal state is left
+// untouched: whichever of a natural completion and an explicit cancel gets
+// there first wins, and the other becomes a no-op instead of overwriting it.
+func (p *pieceDownload) finish(state PieceDownloadState, errMsg string) bool {
 	p.mu.Lock()
-	p.state = PieceDownloadCompleted
+	defer p.mu.Unlock()
+	if p.state != PieceDownloadRunning {
+		return false
+	}
+	p.state = state
+	p.err = errMsg
 	p.finishedAt = time.Now().UTC()
-	p.mu.Unlock()
+	return true
+}
+
+// stop cancels task's background fetch loop if finish still found it running,
+// moving it to state. A task with no background loop (cancel is nil, because
+// every requested piece was already cached at start) only needed the state
+// change.
+func (p *pieceDownload) stop(state PieceDownloadState) {
+	if !p.finish(state, "") {
+		return
+	}
+	if p.cancel != nil {
+		p.cancel()
+	}
 }
 
 // StartPieceDownload fetches the pieces named by ranges into the piece cache
@@ -162,10 +192,24 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 		task.finishedAt = task.startedAt
 	}
 
+	var taskCtx context.Context
+	var taskCancel context.CancelFunc
+	if len(remaining) > 0 {
+		taskCtx, taskCancel = context.WithCancel(s.bgCtx)
+		task.cancel = taskCancel
+	}
+
 	st.mu.Lock()
+	previous := st.pieceDL
 	st.pieceDL = task
 	loader := st.ensurePieceLoaderLocked()
 	st.mu.Unlock()
+	// Replacing a running download stops it: only one piece download per
+	// torrent exists at a time, and the pointer swap above already made this
+	// one the one GET and a future replace will see.
+	if previous != nil {
+		previous.stop(PieceDownloadCancelled)
+	}
 
 	if len(remaining) == 0 {
 		return task.snapshot(), nil
@@ -180,12 +224,13 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 	s.bgMu.Unlock()
 	go func() {
 		defer s.bgWg.Done()
+		defer taskCancel()
 		defer func() {
 			st.pieceDownloadActive.Add(-1)
 			st.noteReadActivity()
 		}()
 		for _, index := range remaining {
-			if err := s.bgCtx.Err(); err != nil {
+			if err := taskCtx.Err(); err != nil {
 				return
 			}
 			size := pieceByteSize(index, pieceLength, torrentLength)
@@ -194,15 +239,49 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 				continue
 			}
 			buf := make([]byte, size)
-			if _, err := loader.ReadAtContext(s.bgCtx, buf, int64(index)*pieceLength, 0); err != nil {
+			if _, err := loader.ReadAtContext(taskCtx, buf, int64(index)*pieceLength, 0); err != nil {
 				return
 			}
 			task.incDone()
 		}
-		task.complete()
+		task.finish(PieceDownloadCompleted, "")
 	}()
 
 	return task.snapshot(), nil
+}
+
+// CancelPieceDownload stops one torrent's in-flight piece download. It is
+// idempotent: a torrent with no piece download, or whose download already
+// reached a terminal state, is left untouched and reports no error. Pieces
+// already fetched before the cancel remain in the cache.
+func (s *Session) CancelPieceDownload(id string) error {
+	hash, err := parseInfoHash(id)
+	if err != nil {
+		return ErrUnknownTorrent
+	}
+
+	s.mu.RLock()
+	activeErr := s.ensureActiveLocked()
+	entry := s.states[hash]
+	st := s.torrents[hash]
+	s.mu.RUnlock()
+	if activeErr != nil {
+		return activeErr
+	}
+	if entry == nil {
+		return ErrUnknownTorrent
+	}
+	if st == nil {
+		return nil
+	}
+	st.mu.Lock()
+	task := st.pieceDL
+	st.mu.Unlock()
+	if task == nil {
+		return nil
+	}
+	task.stop(PieceDownloadCancelled)
+	return nil
 }
 
 // PieceDownloadStatus returns the current or most recent piece download of

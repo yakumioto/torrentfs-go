@@ -259,6 +259,129 @@ func TestPieceDownloadRejectedWhileAdding(t *testing.T) {
 	}
 }
 
+// TestCancelPieceDownloadStopsInFlightDownload covers the cancel path: a
+// download with no reachable peer hangs until explicitly cancelled, and
+// cancelling resolves it synchronously without waiting on the background
+// fetch loop to notice.
+func TestCancelPieceDownloadStopsInFlightDownload(t *testing.T) {
+	ctx := testTimeout(t)
+	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+	content := bytes.Repeat([]byte{1}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	hashHex := hash.HexString()
+
+	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}})
+	if err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if status.State != session.PieceDownloadRunning {
+		t.Fatalf("state = %q, want running (no peer can have served it yet)", status.State)
+	}
+
+	if err := sess.CancelPieceDownload(hashHex); err != nil {
+		t.Fatalf("CancelPieceDownload: %v", err)
+	}
+	final, err := sess.PieceDownloadStatus(hashHex)
+	if err != nil {
+		t.Fatalf("PieceDownloadStatus: %v", err)
+	}
+	if final.State != session.PieceDownloadCancelled {
+		t.Fatalf("state = %q, want cancelled", final.State)
+	}
+	if final.DonePieces != 0 {
+		t.Fatalf("done_pieces = %d, want 0 (no peer ever served a piece)", final.DonePieces)
+	}
+	if final.FinishedAt.IsZero() {
+		t.Fatal("finished_at is zero after cancelling")
+	}
+}
+
+// TestCancelPieceDownloadIsIdempotent covers both idempotent cases: a torrent
+// with no piece download, and one whose download already reached a terminal
+// state before the cancel arrived.
+func TestCancelPieceDownloadIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	work := t.TempDir()
+	content := bytes.Repeat([]byte{2}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	hashHex := hash.HexString()
+	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
+
+	if err := seeder.CancelPieceDownload(hashHex); err != nil {
+		t.Fatalf("cancel with no piece download ever started = %v, want nil", err)
+	}
+
+	if _, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	status, err := seeder.PieceDownloadStatus(hashHex)
+	if err != nil || status.State != session.PieceDownloadCompleted {
+		t.Fatalf("status = %+v, err = %v; want an immediately completed download", status, err)
+	}
+
+	if err := seeder.CancelPieceDownload(hashHex); err != nil {
+		t.Fatalf("cancel after completion = %v, want nil", err)
+	}
+	after, err := seeder.PieceDownloadStatus(hashHex)
+	if err != nil {
+		t.Fatalf("PieceDownloadStatus: %v", err)
+	}
+	if after.State != session.PieceDownloadCompleted {
+		t.Fatalf("state after cancelling a completed download = %q, want the terminal state left untouched", after.State)
+	}
+}
+
+// TestCancelPieceDownloadUnknownTorrent covers the one case cancel is not
+// idempotent about: an id with no registered torrent or deletion at all.
+func TestCancelPieceDownloadUnknownTorrent(t *testing.T) {
+	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+	if err := sess.CancelPieceDownload(strings.Repeat("ab", 20)); !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("Cancel unknown torrent = %v, want ErrUnknownTorrent", err)
+	}
+}
+
+// TestStartPieceDownloadReplacesInFlightDownload covers the replace rule: a
+// second start on the same torrent stops the first and the status reported
+// afterwards is the new request's, not a merge of the two.
+func TestStartPieceDownloadReplacesInFlightDownload(t *testing.T) {
+	ctx := testTimeout(t)
+	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+	content := bytes.Repeat([]byte{4}, 3*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	hashHex := hash.HexString()
+
+	first, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 3}})
+	if err != nil {
+		t.Fatalf("first StartPieceDownload: %v", err)
+	}
+	if first.RequestedPieces != 3 || first.State != session.PieceDownloadRunning {
+		t.Fatalf("first status = %+v, want running with 3 requested", first)
+	}
+
+	second, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}})
+	if err != nil {
+		t.Fatalf("second StartPieceDownload: %v", err)
+	}
+	if second.RequestedPieces != 1 {
+		t.Fatalf("second status = %+v, want 1 requested", second)
+	}
+
+	status, err := sess.PieceDownloadStatus(hashHex)
+	if err != nil {
+		t.Fatalf("PieceDownloadStatus: %v", err)
+	}
+	if status.RequestedPieces != 1 {
+		t.Fatalf("status after replacement = %+v, want the second request's 1, not a merge with the first", status)
+	}
+}
+
 // TestPieceDownloadStatusNeverStarted covers a ready torrent nobody has ever
 // asked to piece-download: the status is absent, not an empty running record.
 func TestPieceDownloadStatusNeverStarted(t *testing.T) {

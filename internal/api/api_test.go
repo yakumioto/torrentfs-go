@@ -80,6 +80,9 @@ type fakeBackend struct {
 	pieceDownloadStatusID  string
 	pieceDownloadStatusVal session.PieceDownloadStatus
 	pieceDownloadStatusErr error
+
+	cancelPieceDownloadID  string
+	cancelPieceDownloadErr error
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -226,6 +229,13 @@ func (f *fakeBackend) PieceDownloadStatus(id string) (session.PieceDownloadStatu
 		return session.PieceDownloadStatus{}, f.pieceDownloadStatusErr
 	}
 	return f.pieceDownloadStatusVal, nil
+}
+
+func (f *fakeBackend) CancelPieceDownload(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelPieceDownloadID = id
+	return f.cancelPieceDownloadErr
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {

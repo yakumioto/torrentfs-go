@@ -19,6 +19,10 @@ type PieceDownloadBackend interface {
 	// PieceDownloadStatus returns the current or most recent piece download
 	// of one torrent.
 	PieceDownloadStatus(id string) (session.PieceDownloadStatus, error)
+	// CancelPieceDownload stops a torrent's in-flight piece download. It is
+	// idempotent: no piece download, or one already in a terminal state,
+	// is not an error.
+	CancelPieceDownload(id string) error
 }
 
 // pieceRangeBody is the wire form of a half-open piece index range.
@@ -104,4 +108,17 @@ func (s *Server) handleGetPieceDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, newPieceDownloadResponse(status))
+}
+
+func (s *Server) handleCancelPieceDownload(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.backend.(PieceDownloadBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "piece download unavailable")
+		return
+	}
+	if err := backend.CancelPieceDownload(r.PathValue("id")); err != nil {
+		writeSessionError(w, "cancel piece download", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

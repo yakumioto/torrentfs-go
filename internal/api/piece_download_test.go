@@ -287,6 +287,38 @@ func TestPieceDownloadRoutesWiredToRealSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status after start = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
+
+	rec = do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+added+"/piece-download", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("cancel status = %d, want 204; body %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+added+"/piece-download", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("repeated cancel status = %d, want 204 (idempotent); body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCancelPieceDownloadReturnsNoContent(t *testing.T) {
+	backend := &fakeBackend{}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc/piece-download", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body.String())
+	}
+	if backend.cancelPieceDownloadID != "abc" {
+		t.Fatalf("backend saw id %q, want abc", backend.cancelPieceDownloadID)
+	}
+}
+
+func TestCancelPieceDownloadMapsUnknownTorrentToNotFound(t *testing.T) {
+	backend := &fakeBackend{cancelPieceDownloadErr: session.ErrUnknownTorrent}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc/piece-download", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestPieceDownloadRoutesRequireAuth(t *testing.T) {
@@ -302,5 +334,10 @@ func TestPieceDownloadRoutesRequireAuth(t *testing.T) {
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/torrents/abc/piece-download", nil)
 	if rec := do(t, srv, getReq); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET without token status = %d, want 401; body %s", rec.Code, rec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/abc/piece-download", nil)
+	if rec := do(t, srv, deleteReq); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("DELETE without token status = %d, want 401; body %s", rec.Code, rec.Body.String())
 	}
 }
