@@ -59,10 +59,10 @@ type Torrent struct {
 	// definition in GLOSSARY.md. Guarded by atomics for the same reason as
 	// the fields above: the allocator reads it without t.mu.
 	pieceDownloadActive atomic.Int32
-	// pieceDL is this torrent's current or most recently finished piece
-	// download, replaced wholesale by the next start. Guarded by t.mu; never
-	// persisted.
-	pieceDL *pieceDownload
+	// pieceDownload is this torrent's current or most recently finished
+	// piece download, replaced wholesale by the next start. Guarded by t.mu;
+	// never persisted.
+	pieceDownload *pieceDownload
 
 	// Metadata-stage bookkeeping: a magnet without metadata rotates its peers
 	// so a peer that cannot serve metadata cannot hold the allowance forever.
@@ -318,11 +318,6 @@ func (t *Torrent) CachedBytes() int64 {
 	return t.cache.SizeOf(t.InfoHash().HexString())
 }
 
-// readerFor returns a handle on the file with the given display path. The
-// heavy reader state (fetcher, coordinator, read window) is shared by every
-// open of that path; the returned handle is cheap and idempotently closable, so
-// the filesystem's release path can drop it without disturbing other opens.
-// Once the last handle closes, the shared forward window is released.
 // ensurePieceLoaderLocked returns this torrent's shared piece source,
 // creating it on first use. The caller must hold t.mu. Both readerFor and
 // StartPieceDownload share the one loader so a piece either side is waiting
@@ -334,6 +329,24 @@ func (t *Torrent) ensurePieceLoaderLocked() pieceSource {
 	return t.loader
 }
 
+// stopPieceDownload moves this torrent's piece download, if still running, to
+// state. It reports whether it won the transition and returns the download it
+// looked at, nil when the torrent never had one.
+func (t *Torrent) stopPieceDownload(state PieceDownloadState) (*pieceDownload, bool) {
+	t.mu.Lock()
+	task := t.pieceDownload
+	t.mu.Unlock()
+	if task == nil {
+		return nil, false
+	}
+	return task, task.stop(state)
+}
+
+// readerFor returns a handle on the file with the given display path. The
+// heavy reader state (fetcher, coordinator, read window) is shared by every
+// open of that path; the returned handle is cheap and idempotently closable, so
+// the filesystem's release path can drop it without disturbing other opens.
+// Once the last handle closes, the shared forward window is released.
 func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -363,7 +363,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		pieceCache:          pieceCache,
 		pieceStore:          pieceStore,
 		prefetchBudget:      newPrefetchBudget(defaultPrefetchPieces),
-		pieceDownloadBudget: newPieceDownloadBudget(pieceDownloadConcurrency),
+		pieceDownloadBudget: newPieceDownloadBudget(),
 		closeDone:           make(chan struct{}),
 		torrents:            make(map[metainfo.Hash]*Torrent),
 		torrentsDir:         torrentsDir,
@@ -514,6 +514,13 @@ func (s *Session) Close(ctx context.Context) error {
 
 	var errs []error
 	for _, t := range torrents {
+		// A piece download is part of the session's background work; its
+		// fetch loop has already exited (bgWg.Wait above), so moving a still
+		// running record to cancelled here gives it a truthful terminal state
+		// instead of leaving it as running forever.
+		if task, stopped := t.stopPieceDownload(PieceDownloadCancelled); stopped {
+			s.logPieceDownloadEnd("piece download cancelled", t.InfoHash().HexString(), "session closing", task)
+		}
 		if err := t.close(); err != nil {
 			errs = append(errs, err)
 		}

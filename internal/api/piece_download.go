@@ -74,10 +74,20 @@ func newPieceDownloadResponse(status session.PieceDownloadStatus) pieceDownloadR
 	return out
 }
 
-func (s *Server) handleStartPieceDownload(w http.ResponseWriter, r *http.Request) {
+// pieceDownloadBackend returns the session behind this server as a piece
+// download backend, or answers 503 when the backend does not implement it.
+func (s *Server) pieceDownloadBackend(w http.ResponseWriter) (PieceDownloadBackend, bool) {
 	backend, ok := s.backend.(PieceDownloadBackend)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "piece download unavailable")
+		return nil, false
+	}
+	return backend, true
+}
+
+func (s *Server) handleStartPieceDownload(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.pieceDownloadBackend(w)
+	if !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes())
@@ -117,9 +127,8 @@ func (s *Server) handleStartPieceDownload(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleGetPieceDownload(w http.ResponseWriter, r *http.Request) {
-	backend, ok := s.backend.(PieceDownloadBackend)
+	backend, ok := s.pieceDownloadBackend(w)
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "piece download unavailable")
 		return
 	}
 	status, err := backend.PieceDownloadStatus(r.PathValue("id"))
@@ -131,9 +140,8 @@ func (s *Server) handleGetPieceDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleCancelPieceDownload(w http.ResponseWriter, r *http.Request) {
-	backend, ok := s.backend.(PieceDownloadBackend)
+	backend, ok := s.pieceDownloadBackend(w)
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "piece download unavailable")
 		return
 	}
 	if err := backend.CancelPieceDownload(r.PathValue("id")); err != nil {

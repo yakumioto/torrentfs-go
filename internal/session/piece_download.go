@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
+
 	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
 
@@ -38,11 +40,8 @@ type pieceDownloadBudget struct {
 	sem chan struct{}
 }
 
-func newPieceDownloadBudget(limit int) *pieceDownloadBudget {
-	if limit < 1 {
-		limit = 1
-	}
-	return &pieceDownloadBudget{sem: make(chan struct{}, limit)}
+func newPieceDownloadBudget() *pieceDownloadBudget {
+	return &pieceDownloadBudget{sem: make(chan struct{}, pieceDownloadConcurrency)}
 }
 
 // acquire blocks until a slot is free or ctx ends, whichever comes first. A
@@ -167,17 +166,22 @@ func (p *pieceDownload) finish(state PieceDownloadState, errMsg string) bool {
 	return true
 }
 
-// stop cancels task's background fetch loop if finish still found it running,
-// moving it to state. A task with no background loop (cancel is nil, because
-// every requested piece was already cached at start) only needed the state
-// change.
-func (p *pieceDownload) stop(state PieceDownloadState) {
+// stop cancels a running download's background fetch loop if finish still
+// found it running, moving it to state. A download with no background loop
+// (cancel is nil, because every requested piece was already cached at start)
+// only needed the state change.
+//
+// stop moves a running download to a terminal state and unblocks its fetch
+// loop. It reports whether it won the transition; a download already in a
+// terminal state is left untouched.
+func (p *pieceDownload) stop(state PieceDownloadState) bool {
 	if !p.finish(state, "") {
-		return
+		return false
 	}
 	if p.cancel != nil {
 		p.cancel()
 	}
+	return true
 }
 
 // StartPieceDownload fetches the pieces named by ranges into the piece cache
@@ -190,6 +194,10 @@ func (p *pieceDownload) stop(state PieceDownloadState) {
 //
 // Starting a new piece download replaces any previous one this torrent had;
 // see CancelPieceDownload for stopping one without replacing it.
+//
+// ctx bounds only this call: once the request is accepted the fetch runs on
+// the session's background context, so a caller that disconnects does not
+// abort it. Use CancelPieceDownload or timeout to stop a download.
 //
 // timeout bounds how long the download may run before it is cut off and
 // moved to the expired state; pieces already fetched by then stay cached.
@@ -204,24 +212,9 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 	if err := ctx.Err(); err != nil {
 		return PieceDownloadStatus{}, err
 	}
-	hash, err := parseInfoHash(id)
+	hash, entry, st, err := s.lookupPieceDownloadTarget(id)
 	if err != nil {
-		return PieceDownloadStatus{}, ErrUnknownTorrent
-	}
-
-	s.mu.RLock()
-	activeErr := s.ensureActiveLocked()
-	entry := s.states[hash]
-	st := s.torrents[hash]
-	s.mu.RUnlock()
-	if activeErr != nil {
-		return PieceDownloadStatus{}, activeErr
-	}
-	if entry == nil {
-		return PieceDownloadStatus{}, ErrUnknownTorrent
-	}
-	if entry.State == StateDeleting || entry.State == StateDeleteFailed {
-		return PieceDownloadStatus{}, ErrDeleting
+		return PieceDownloadStatus{}, err
 	}
 	if entry.State != StateReady || st == nil || st.Info() == nil {
 		return PieceDownloadStatus{}, ErrTorrentNotReady
@@ -272,18 +265,21 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 	}
 
 	st.mu.Lock()
-	previous := st.pieceDL
-	st.pieceDL = task
+	previous := st.pieceDownload
+	st.pieceDownload = task
 	loader := st.ensurePieceLoaderLocked()
 	st.mu.Unlock()
 	// Replacing a running download stops it: only one piece download per
 	// torrent exists at a time, and the pointer swap above already made this
 	// one the one GET and a future replace will see.
-	if previous != nil {
-		previous.stop(PieceDownloadCancelled)
+	if previous != nil && previous.stop(PieceDownloadCancelled) {
+		s.logPieceDownloadEnd("piece download cancelled", torrentKey, "replaced", previous)
 	}
+	s.logger.Info("piece download started", "hash", torrentKey,
+		"requested_pieces", task.requested, "cached_pieces", doneNow, "timeout", timeout)
 
 	if len(remaining) == 0 {
+		s.logPieceDownloadEnd("piece download completed", torrentKey, "", task)
 		return task.snapshot(), nil
 	}
 
@@ -306,11 +302,13 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 		// piece's worker, so at most pieceDownloadConcurrency fetches are
 		// ever in flight across every torrent's piece download at once.
 		var wg sync.WaitGroup
+		completed := true
 		for _, index := range remaining {
 			if taskCtx.Err() != nil {
+				completed = false
 				break
 			}
-			size := pieceByteSize(index, pieceLength, torrentLength)
+			size := pieceSizeAt(index, pieceLength, torrentLength)
 			if size <= 0 {
 				task.incDone()
 				continue
@@ -319,6 +317,7 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 				// The task was cancelled or expired while this piece waited
 				// for a slot: nothing was fetched for it, and there is no
 				// slot to release.
+				completed = false
 				break
 			}
 			index := index
@@ -345,7 +344,13 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 			}()
 		}
 		wg.Wait()
-		task.finish(PieceDownloadCompleted, "")
+		// Only an uninterrupted run may claim completion. A cancel, expiry
+		// or session teardown that cut the dispatch short already claimed its
+		// own terminal state, or (for teardown) leaves the record to
+		// stopPieceDownload on the way out.
+		if completed && task.finish(PieceDownloadCompleted, "") {
+			s.logPieceDownloadEnd("piece download completed", torrentKey, "", task)
+		}
 	}()
 
 	return task.snapshot(), nil
@@ -356,32 +361,23 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 // reached a terminal state, is left untouched and reports no error. Pieces
 // already fetched before the cancel remain in the cache.
 func (s *Session) CancelPieceDownload(id string) error {
-	hash, err := parseInfoHash(id)
+	hash, _, st, err := s.lookupPieceDownloadTarget(id)
 	if err != nil {
-		return ErrUnknownTorrent
-	}
-
-	s.mu.RLock()
-	activeErr := s.ensureActiveLocked()
-	entry := s.states[hash]
-	st := s.torrents[hash]
-	s.mu.RUnlock()
-	if activeErr != nil {
-		return activeErr
-	}
-	if entry == nil {
-		return ErrUnknownTorrent
+		if errors.Is(err, ErrDeleting) {
+			// A cancel racing a deletion has nothing left to stop; the
+			// deletion owns the teardown.
+			return nil
+		}
+		return err
 	}
 	if st == nil {
 		return nil
 	}
-	st.mu.Lock()
-	task := st.pieceDL
-	st.mu.Unlock()
-	if task == nil {
+	task, stopped := st.stopPieceDownload(PieceDownloadCancelled)
+	if !stopped {
 		return nil
 	}
-	task.stop(PieceDownloadCancelled)
+	s.logPieceDownloadEnd("piece download cancelled", hash.HexString(), "", task)
 	return nil
 }
 
@@ -389,32 +385,60 @@ func (s *Session) CancelPieceDownload(id string) error {
 // one torrent. It reports ErrNoPieceDownload when the torrent exists but no
 // piece download has ever been started on it in this process.
 func (s *Session) PieceDownloadStatus(id string) (PieceDownloadStatus, error) {
+	_, _, st, err := s.lookupPieceDownloadTarget(id)
+	if err != nil {
+		return PieceDownloadStatus{}, err
+	}
+	if st == nil {
+		return PieceDownloadStatus{}, ErrNoPieceDownload
+	}
+	st.mu.Lock()
+	task := st.pieceDownload
+	st.mu.Unlock()
+	if task == nil {
+		return PieceDownloadStatus{}, ErrNoPieceDownload
+	}
+	return task.snapshot(), nil
+}
+
+// lookupPieceDownloadTarget resolves a piece download id to the torrent's
+// registry entry and live torrent under one lock, applying the checks every
+// piece download operation shares: the session must be active, the torrent
+// must be known, and a torrent held by a deletion reports ErrDeleting rather
+// than "never started".
+func (s *Session) lookupPieceDownloadTarget(id string) (metainfo.Hash, *registryEntry, *Torrent, error) {
 	hash, err := parseInfoHash(id)
 	if err != nil {
-		return PieceDownloadStatus{}, ErrUnknownTorrent
+		return metainfo.Hash{}, nil, nil, ErrUnknownTorrent
 	}
-
 	s.mu.RLock()
 	activeErr := s.ensureActiveLocked()
 	entry := s.states[hash]
 	st := s.torrents[hash]
 	s.mu.RUnlock()
 	if activeErr != nil {
-		return PieceDownloadStatus{}, activeErr
+		return metainfo.Hash{}, nil, nil, activeErr
 	}
 	if entry == nil {
-		return PieceDownloadStatus{}, ErrUnknownTorrent
+		return metainfo.Hash{}, nil, nil, ErrUnknownTorrent
 	}
-	if st == nil {
-		return PieceDownloadStatus{}, ErrNoPieceDownload
+	if entry.State == StateDeleting || entry.State == StateDeleteFailed {
+		return metainfo.Hash{}, nil, nil, ErrDeleting
 	}
-	st.mu.Lock()
-	task := st.pieceDL
-	st.mu.Unlock()
-	if task == nil {
-		return PieceDownloadStatus{}, ErrNoPieceDownload
+	return hash, entry, st, nil
+}
+
+// logPieceDownloadEnd records a terminal transition with the seed hash and
+// piece counts required by the API contract. reason distinguishes a replace
+// or a teardown from a plain cancel and is omitted when empty.
+func (s *Session) logPieceDownloadEnd(msg, torrentKey, reason string, task *pieceDownload) {
+	status := task.snapshot()
+	attrs := []any{"hash", torrentKey,
+		"requested_pieces", status.RequestedPieces, "done_pieces", status.DonePieces}
+	if reason != "" {
+		attrs = append(attrs, "reason", reason)
 	}
-	return task.snapshot(), nil
+	s.logger.Info(msg, attrs...)
 }
 
 // normalizePieceRanges validates ranges against pieceCount and returns the
@@ -438,15 +462,4 @@ func normalizePieceRanges(ranges []PieceRange, pieceCount int) ([]int, error) {
 		}
 	}
 	return ordered, nil
-}
-
-// pieceByteSize returns the byte size of piece index, which is shorter than
-// pieceLength only for the torrent's final piece.
-func pieceByteSize(index int, pieceLength, torrentLength int64) int64 {
-	start := int64(index) * pieceLength
-	remaining := torrentLength - start
-	if remaining < pieceLength {
-		return remaining
-	}
-	return pieceLength
 }

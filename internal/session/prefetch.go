@@ -1070,12 +1070,7 @@ func (c *prefetchCoordinator) pieceSizeLocked(index int) int64 {
 	if c.anchor.pieceLength <= 0 {
 		return 0
 	}
-	start := int64(index) * c.anchor.pieceLength
-	remaining := c.anchor.torrentSize - start
-	if remaining < c.anchor.pieceLength {
-		return remaining
-	}
-	return c.anchor.pieceLength
+	return pieceSizeAt(index, c.anchor.pieceLength, c.anchor.torrentSize)
 }
 
 func (c *prefetchCoordinator) key(index int) cache.Key {

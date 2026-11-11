@@ -243,6 +243,26 @@ func TestPieceDownloadRejectedWhileDeletionHoldsTorrent(t *testing.T) {
 	}
 }
 
+// TestPieceDownloadStatusWhileDeletionHoldsTorrent covers the deletion window
+// for the status read: with the torrent held by the deletion path the record is
+// on its way out, so the read reports the conflict (which the HTTP layer maps to
+// 409) rather than the "never started" absence, mirroring the start path.
+func TestPieceDownloadStatusWhileDeletionHoldsTorrent(t *testing.T) {
+	torrentsDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	hash := favoriteRegistryHash(0x04)
+	writeFavoriteRegistry(t, torrentsDir, hash, string(session.StateDeleteFailed), time.Now().UTC(), false)
+	restore := session.SetSubtitleCleanupHook(func(metainfo.Hash) error { return errors.New("cleanup still failing") })
+	defer restore()
+
+	sess := newManageSession(t, torrentsDir)
+	if _, err := sess.PieceDownloadStatus(hash.HexString()); !errors.Is(err, session.ErrDeleting) {
+		t.Fatalf("PieceDownloadStatus while deletion holds the torrent = %v, want ErrDeleting", err)
+	}
+	if err := sess.CancelPieceDownload(hash.HexString()); err != nil {
+		t.Fatalf("CancelPieceDownload while deletion holds the torrent = %v, want nil", err)
+	}
+}
+
 // TestPieceDownloadRejectedWhileAdding covers a magnet whose metadata has not
 // arrived yet: it is known but not ready.
 func TestPieceDownloadRejectedWhileAdding(t *testing.T) {

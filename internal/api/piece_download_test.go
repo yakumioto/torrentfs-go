@@ -192,6 +192,19 @@ func TestGetPieceDownloadMapsNoRecordToNotFound(t *testing.T) {
 	}
 }
 
+// TestGetPieceDownloadMapsDeletingToConflict covers the deletion window: the
+// record is on its way out with the torrent, which is a conflict, not the
+// "never started" absence.
+func TestGetPieceDownloadMapsDeletingToConflict(t *testing.T) {
+	backend := &fakeBackend{pieceDownloadStatusErr: session.ErrDeleting}
+	srv := newTestServer(t, backend, nil)
+
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/abc/piece-download", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetPieceDownloadMapsUnknownTorrentToNotFound(t *testing.T) {
 	backend := &fakeBackend{pieceDownloadStatusErr: session.ErrUnknownTorrent}
 	srv := newTestServer(t, backend, nil)

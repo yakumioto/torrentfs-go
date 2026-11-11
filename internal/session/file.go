@@ -775,9 +775,15 @@ func (f *raFile) protectWindow(window []cache.Key) {
 }
 
 func (f *raFile) pieceSize(index int) int64 {
-	start := int64(index) * f.pieceLength
-	if remaining := f.torrentSize - start; remaining < f.pieceLength {
+	return pieceSizeAt(index, f.pieceLength, f.torrentSize)
+}
+
+// pieceSizeAt returns the byte size of piece index, which is shorter than
+// pieceLength only for the torrent's final piece.
+func pieceSizeAt(index int, pieceLength, torrentSize int64) int64 {
+	start := int64(index) * pieceLength
+	if remaining := torrentSize - start; remaining < pieceLength {
 		return remaining
 	}
-	return f.pieceLength
+	return pieceLength
 }

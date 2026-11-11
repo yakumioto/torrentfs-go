@@ -363,3 +363,147 @@ func TestPieceDownloadExpiryReturnsBudgetSlots(t *testing.T) {
 		t.Fatalf("done_pieces = %d, want all %d", final.DonePieces, pieces)
 	}
 }
+
+// syncLogBuffer is a concurrency-safe writer for capturing session logs: the
+// session logs from background goroutines (DHT, trackers, fetch loops) while a
+// test reads what has been written so far.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestPieceDownloadLogsStartAndFinish covers the log contract: the start and
+// the end of a piece download are recorded with the seed hash and piece
+// counts, for both a natural completion and a cancel.
+func TestPieceDownloadLogsStartAndFinish(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := bytes.Repeat([]byte{7}, 2*internalTestPieceLength)
+	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
+
+	logs := &syncLogBuffer{}
+	sess, err := New(internalTestConfig(), internalTestTorrentDir(t, dataDir), WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if err := sess.AddTorrent(ctx, Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	st := sess.torrents[hash]
+	st.mu.Lock()
+	st.loader = &controlledPieceSource{failIndex: -1}
+	st.mu.Unlock()
+
+	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []PieceRange{{Start: 0, End: 2}}, 0); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if err := waitForStatus(ctx, sess, hash.HexString(), PieceDownloadCompleted); err != nil {
+		t.Fatalf("waitForStatus: %v", err)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "piece download started") {
+		t.Fatalf("logs = %q, want the start recorded", output)
+	}
+	if !strings.Contains(output, "piece download completed") {
+		t.Fatalf("logs = %q, want the completion recorded", output)
+	}
+	if !strings.Contains(output, hash.HexString()) {
+		t.Fatalf("logs = %q, want the seed hash", output)
+	}
+	if !strings.Contains(output, "requested_pieces=2") || !strings.Contains(output, "done_pieces=2") {
+		t.Fatalf("logs = %q, want the piece counts", output)
+	}
+
+	// A second download over a source that never serves anything stays
+	// running until cancelled, and the cancel is logged the same way.
+	logs.Reset()
+	st.mu.Lock()
+	st.loader = &controlledPieceSource{failIndex: -1, sleepOnOther: 10 * time.Second}
+	st.mu.Unlock()
+	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []PieceRange{{Start: 0, End: 2}}, 0); err != nil {
+		t.Fatalf("second StartPieceDownload: %v", err)
+	}
+	if err := sess.CancelPieceDownload(hash.HexString()); err != nil {
+		t.Fatalf("CancelPieceDownload: %v", err)
+	}
+	output = logs.String()
+	if !strings.Contains(output, "piece download cancelled") {
+		t.Fatalf("logs = %q, want the cancel recorded", output)
+	}
+}
+
+// TestPieceDownloadSessionCloseMarksRecordCancelled covers the terminal state
+// of a download cut short by session teardown: the fetch loop never finished,
+// so it must not be recorded as completed. The session is closed directly and
+// the torrent's record inspected afterwards, since a closed session refuses all
+// public status reads.
+func TestPieceDownloadSessionCloseMarksRecordCancelled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	dataDir := filepath.Join(work, "data")
+	content := bytes.Repeat([]byte{3}, 2*internalTestPieceLength)
+	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
+
+	sess, err := New(internalTestConfig(), internalTestTorrentDir(t, dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sess.AddTorrent(ctx, Source{MetainfoPath: torrentPath}); err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	st := sess.torrents[hash]
+	st.mu.Lock()
+	st.loader = &controlledPieceSource{failIndex: -1, sleepOnOther: 10 * time.Second}
+	st.mu.Unlock()
+
+	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []PieceRange{{Start: 0, End: 2}}, 0); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	st.mu.Lock()
+	task := st.pieceDownload
+	st.mu.Unlock()
+	if task == nil {
+		t.Fatal("torrent lost its piece download record")
+	}
+	status := task.snapshot()
+	if status.State != PieceDownloadCancelled {
+		t.Fatalf("state after session close = %q, want cancelled", status.State)
+	}
+	if status.FinishedAt.IsZero() {
+		t.Fatal("finished_at is zero for the download cut short by session close")
+	}
+}
