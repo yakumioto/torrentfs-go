@@ -71,6 +71,19 @@ type fakeBackend struct {
 	ops          map[string]session.Operation
 
 	experimentStatus session.ExperimentStatus
+
+	pieceDownloadID      string
+	pieceDownloadRanges  []session.PieceRange
+	pieceDownloadTimeout time.Duration
+	pieceDownloadStatus  session.PieceDownloadStatus
+	pieceDownloadErr     error
+
+	pieceDownloadStatusID  string
+	pieceDownloadStatusVal session.PieceDownloadStatus
+	pieceDownloadStatusErr error
+
+	cancelPieceDownloadID  string
+	cancelPieceDownloadErr error
 }
 
 func (f *fakeBackend) AddTorrentAndPersist(_ context.Context, src session.Source) (*session.TorrentView, error) {
@@ -196,6 +209,35 @@ func (f *fakeBackend) ExperimentStatus() session.ExperimentStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.experimentStatus
+}
+
+func (f *fakeBackend) StartPieceDownload(_ context.Context, id string, ranges []session.PieceRange, timeout time.Duration) (session.PieceDownloadStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pieceDownloadID = id
+	f.pieceDownloadRanges = ranges
+	f.pieceDownloadTimeout = timeout
+	if f.pieceDownloadErr != nil {
+		return session.PieceDownloadStatus{}, f.pieceDownloadErr
+	}
+	return f.pieceDownloadStatus, nil
+}
+
+func (f *fakeBackend) PieceDownloadStatus(id string) (session.PieceDownloadStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pieceDownloadStatusID = id
+	if f.pieceDownloadStatusErr != nil {
+		return session.PieceDownloadStatus{}, f.pieceDownloadStatusErr
+	}
+	return f.pieceDownloadStatusVal, nil
+}
+
+func (f *fakeBackend) CancelPieceDownload(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelPieceDownloadID = id
+	return f.cancelPieceDownloadErr
 }
 
 func newTestServer(t *testing.T, backend api.Backend, tune func(*config.Config)) *api.Server {

@@ -511,6 +511,12 @@ func writeSessionError(w http.ResponseWriter, action string, err error) {
 		writeError(w, http.StatusBadRequest, "invalid category name")
 	case errors.Is(err, session.ErrDeleting):
 		writeError(w, http.StatusConflict, "torrent is being deleted")
+	case errors.Is(err, session.ErrTorrentNotReady):
+		writeError(w, http.StatusConflict, "torrent is not ready")
+	case errors.Is(err, session.ErrNoPieceDownload):
+		writeError(w, http.StatusNotFound, "no piece download for torrent")
+	case errors.Is(err, session.ErrInvalidPieceDownloadRequest):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, session.ErrSubtitleNamespaceConflict):
 		// The add is refused because it would move or shadow an existing managed
 		// subtitle. The code is what the client acts on; the reason stays out of

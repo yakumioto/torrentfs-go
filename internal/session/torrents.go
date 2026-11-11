@@ -53,6 +53,17 @@ type Torrent struct {
 	probeSince       atomic.Int64
 	probePausedUntil atomic.Int64
 
+	// pieceDownloadActive counts the piece downloads currently fetching
+	// pieces for this torrent. A positive value makes readingActivity report
+	// true even without an open file handle, matching the "读取状态"
+	// definition in GLOSSARY.md. Guarded by atomics for the same reason as
+	// the fields above: the allocator reads it without t.mu.
+	pieceDownloadActive atomic.Int32
+	// pieceDownload is this torrent's current or most recently finished
+	// piece download, replaced wholesale by the next start. Guarded by t.mu;
+	// never persisted.
+	pieceDownload *pieceDownload
+
 	// Metadata-stage bookkeeping: a magnet without metadata rotates its peers
 	// so a peer that cannot serve metadata cannot hold the allowance forever.
 	metadataRotatedAt   atomic.Int64
@@ -307,6 +318,30 @@ func (t *Torrent) CachedBytes() int64 {
 	return t.cache.SizeOf(t.InfoHash().HexString())
 }
 
+// ensurePieceLoaderLocked returns this torrent's shared piece source,
+// creating it on first use. The caller must hold t.mu. Both readerFor and
+// StartPieceDownload share the one loader so a piece either side is waiting
+// on is fetched exactly once.
+func (t *Torrent) ensurePieceLoaderLocked() pieceSource {
+	if t.loader == nil {
+		t.loader = newPieceFetcher(t.tor, t.cache)
+	}
+	return t.loader
+}
+
+// stopPieceDownload moves this torrent's piece download, if still running, to
+// state. It reports whether it won the transition and returns the download it
+// looked at, nil when the torrent never had one.
+func (t *Torrent) stopPieceDownload(state PieceDownloadState) (*pieceDownload, bool) {
+	t.mu.Lock()
+	task := t.pieceDownload
+	t.mu.Unlock()
+	if task == nil {
+		return nil, false
+	}
+	return task, task.stop(state)
+}
+
 // readerFor returns a handle on the file with the given display path. The
 // heavy reader state (fetcher, coordinator, read window) is shared by every
 // open of that path; the returned handle is cheap and idempotently closable, so
@@ -332,9 +367,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	if info == nil {
 		return nil, fmt.Errorf("session: torrent info is not ready: %w", vfs.ErrNotFound)
 	}
-	if t.loader == nil {
-		t.loader = newPieceFetcher(t.tor, t.cache)
-	}
+	t.ensurePieceLoaderLocked()
 	if t.coordinator == nil {
 		t.coordinator = newPrefetchCoordinator(t.session, t.tor, t.cache)
 	}
