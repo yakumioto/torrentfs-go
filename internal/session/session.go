@@ -73,15 +73,20 @@ type Session struct {
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
 	prefetchBudget *prefetchBudget
-	mu             sync.RWMutex
-	state          lifecycle
-	closeDone      chan struct{}
-	closeErr       error
-	torrents       map[metainfo.Hash]*Torrent
-	torrentsDir    string
-	metadataDir    string
-	subtitleRoot   string
-	subtitles      map[metainfo.Hash]map[string]managedSubtitle
+	// pieceDownloadBudget bounds how many pieces, summed across every
+	// torrent's piece download, may be fetched at once. It is independent
+	// of prefetchBudget: playback prefetch and piece downloads never
+	// compete for the same slots.
+	pieceDownloadBudget *pieceDownloadBudget
+	mu                  sync.RWMutex
+	state               lifecycle
+	closeDone           chan struct{}
+	closeErr            error
+	torrents            map[metainfo.Hash]*Torrent
+	torrentsDir         string
+	metadataDir         string
+	subtitleRoot        string
+	subtitles           map[metainfo.Hash]map[string]managedSubtitle
 	// subtitleStore is the persistent trusted handle for the subtitle tree. It
 	// is opened once at startup instead of being re-derived from the path on
 	// every operation, so a swap of the store's own path cannot redirect a
@@ -349,36 +354,37 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		cl.AddDialer(peerDialer)
 	}
 	s := &Session{
-		cl:              cl,
-		config:          configSnapshot{cfg: cloneConfig(cfg)},
-		logger:          logger,
-		startedAt:       startedAt,
-		streamSigner:    streamSigner,
-		streamBaseURL:   cfg.STRM.BaseURL,
-		pieceCache:      pieceCache,
-		pieceStore:      pieceStore,
-		prefetchBudget:  newPrefetchBudget(defaultPrefetchPieces),
-		closeDone:       make(chan struct{}),
-		torrents:        make(map[metainfo.Hash]*Torrent),
-		torrentsDir:     torrentsDir,
-		metadataDir:     metadataDir,
-		subtitleRoot:    subtitleRoot,
-		subtitleStore:   subtitleStore,
-		subtitles:       make(map[metainfo.Hash]map[string]managedSubtitle),
-		storageCloser:   pieceStore,
-		instanceLock:    instanceLock,
-		dhtRecorder:     dhtRecorder,
-		stateDir:        stateDir,
-		categoriesPath:  filepath.Join(metadataDir, "categories.json"),
-		categories:      make(map[string]CategoryView),
-		states:          make(map[metainfo.Hash]*registryEntry),
-		operations:      make(map[string]*Operation),
-		activeOps:       make(map[metainfo.Hash]string),
-		lastOps:         make(map[metainfo.Hash]string),
-		opLocks:         make(map[metainfo.Hash]*sync.Mutex),
-		metadataFetches: make(map[metainfo.Hash]*metadataFetch),
-		uploadRate:      uploadRate,
-		connAlloc:       newConnectionAllocator(),
+		cl:                  cl,
+		config:              configSnapshot{cfg: cloneConfig(cfg)},
+		logger:              logger,
+		startedAt:           startedAt,
+		streamSigner:        streamSigner,
+		streamBaseURL:       cfg.STRM.BaseURL,
+		pieceCache:          pieceCache,
+		pieceStore:          pieceStore,
+		prefetchBudget:      newPrefetchBudget(defaultPrefetchPieces),
+		pieceDownloadBudget: newPieceDownloadBudget(pieceDownloadConcurrency),
+		closeDone:           make(chan struct{}),
+		torrents:            make(map[metainfo.Hash]*Torrent),
+		torrentsDir:         torrentsDir,
+		metadataDir:         metadataDir,
+		subtitleRoot:        subtitleRoot,
+		subtitleStore:       subtitleStore,
+		subtitles:           make(map[metainfo.Hash]map[string]managedSubtitle),
+		storageCloser:       pieceStore,
+		instanceLock:        instanceLock,
+		dhtRecorder:         dhtRecorder,
+		stateDir:            stateDir,
+		categoriesPath:      filepath.Join(metadataDir, "categories.json"),
+		categories:          make(map[string]CategoryView),
+		states:              make(map[metainfo.Hash]*registryEntry),
+		operations:          make(map[string]*Operation),
+		activeOps:           make(map[metainfo.Hash]string),
+		lastOps:             make(map[metainfo.Hash]string),
+		opLocks:             make(map[metainfo.Hash]*sync.Mutex),
+		metadataFetches:     make(map[metainfo.Hash]*metadataFetch),
+		uploadRate:          uploadRate,
+		connAlloc:           newConnectionAllocator(),
 
 		uploadRateSettings: uploadSettings,
 	}

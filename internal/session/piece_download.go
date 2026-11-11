@@ -23,6 +23,44 @@ var (
 	ErrNoPieceDownload = errors.New("session: no piece download for torrent")
 )
 
+// pieceDownloadConcurrency bounds how many pieces, summed across every
+// torrent's piece download, may be fetched at once. It is a constant, not a
+// configuration field: 8 is a starting point with no measurement behind it
+// yet.
+const pieceDownloadConcurrency = 8
+
+// pieceDownloadBudget is a session-wide, blocking semaphore shared by every
+// torrent's piece download. Unlike prefetchBudget (which drops speculative
+// work when it is full), a piece download must eventually fetch every piece
+// it was asked for, so acquire blocks until a slot is free instead of
+// failing fast.
+type pieceDownloadBudget struct {
+	sem chan struct{}
+}
+
+func newPieceDownloadBudget(limit int) *pieceDownloadBudget {
+	if limit < 1 {
+		limit = 1
+	}
+	return &pieceDownloadBudget{sem: make(chan struct{}, limit)}
+}
+
+// acquire blocks until a slot is free or ctx ends, whichever comes first. A
+// caller that gets a nil error must call release exactly once; one that gets
+// ctx's error acquired nothing and must not call release.
+func (b *pieceDownloadBudget) acquire(ctx context.Context) error {
+	select {
+	case b.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *pieceDownloadBudget) release() {
+	<-b.sem
+}
+
 // PieceRange is a half-open range of piece indexes [Start, End).
 type PieceRange struct {
 	Start int
@@ -145,7 +183,8 @@ func (p *pieceDownload) stop(state PieceDownloadState) {
 // StartPieceDownload fetches the pieces named by ranges into the piece cache
 // without opening a file reader. A piece already resident in the cache counts
 // as done immediately and is never refetched; the rest are fetched in the
-// background in the order ranges were given. The returned status reflects the
+// background, concurrently, under a session-wide budget shared with every
+// other piece download (see pieceDownloadConcurrency). The returned status reflects the
 // state at the moment of the call: a request fully satisfied by the cache
 // completes synchronously.
 //
@@ -262,29 +301,50 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 			st.pieceDownloadActive.Add(-1)
 			st.noteReadActivity()
 		}()
+		// Pieces are fetched concurrently, bounded by the session-wide
+		// budget: dispatch blocks on acquire before starting the next
+		// piece's worker, so at most pieceDownloadConcurrency fetches are
+		// ever in flight across every torrent's piece download at once.
+		var wg sync.WaitGroup
 		for _, index := range remaining {
-			if err := taskCtx.Err(); err != nil {
-				return
+			if taskCtx.Err() != nil {
+				break
 			}
 			size := pieceByteSize(index, pieceLength, torrentLength)
 			if size <= 0 {
 				task.incDone()
 				continue
 			}
-			buf := make([]byte, size)
-			if _, err := loader.ReadAtContext(taskCtx, buf, int64(index)*pieceLength, 0); err != nil {
-				// A context error here means a cancel or an expiry already
-				// claimed the terminal state (and cancelled taskCtx to
-				// unblock this read); this is not a fetch failure. Anything
-				// else is a genuine fetch error: stop here and do not try
-				// the remaining pieces anyway.
-				if taskCtx.Err() == nil && task.finish(PieceDownloadFailed, err.Error()) {
-					s.logger.Error("piece download failed", "hash", hash.HexString(), "piece", index, "err", err)
-				}
-				return
+			if err := s.pieceDownloadBudget.acquire(taskCtx); err != nil {
+				// The task was cancelled or expired while this piece waited
+				// for a slot: nothing was fetched for it, and there is no
+				// slot to release.
+				break
 			}
-			task.incDone()
+			index := index
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer s.pieceDownloadBudget.release()
+				buf := make([]byte, size)
+				if _, err := loader.ReadAtContext(taskCtx, buf, int64(index)*pieceLength, 0); err != nil {
+					// A context error here means a cancel or an expiry
+					// already claimed the terminal state (and cancelled
+					// taskCtx to unblock this read); this is not a fetch
+					// failure. Anything else is a genuine fetch error: claim
+					// the failed state and cancel taskCtx ourselves so every
+					// other piece this download is waiting on, in flight or
+					// still queued for a budget slot, stops too.
+					if taskCtx.Err() == nil && task.finish(PieceDownloadFailed, err.Error()) {
+						s.logger.Error("piece download failed", "hash", hash.HexString(), "piece", index, "err", err)
+						taskCancel()
+					}
+					return
+				}
+				task.incDone()
+			}()
 		}
+		wg.Wait()
 		task.finish(PieceDownloadCompleted, "")
 	}()
 

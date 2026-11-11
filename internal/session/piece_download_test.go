@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"path/filepath"
 	"runtime"
@@ -740,5 +741,223 @@ func TestPieceDownloadInFlightDoesNotBlockSessionClose(t *testing.T) {
 	}
 	if !errors.Is(statusErr, session.ErrNoPieceDownload) {
 		t.Fatalf("PieceDownloadStatus after restart = %v, want ErrNoPieceDownload (no persisted record)", statusErr)
+	}
+}
+
+// TestPieceDownloadTwoTorrentsCompleteConcurrently covers a session-wide
+// budget under real contention: two downloads whose pieces together exceed
+// the budget must both make progress and finish, neither starving the other.
+func TestPieceDownloadTwoTorrentsCompleteConcurrently(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	type feed struct {
+		name    string
+		content []byte
+		hash    metainfo.Hash
+		hashHex string
+		peers   []torrent.PeerInfo
+	}
+	feeds := make([]feed, 0, 2)
+	for i, name := range []string{"first.bin", "second.bin"} {
+		content := bytes.Repeat([]byte{byte(20 + i)}, 6*testPieceLength)
+		torrentBytes, hash := buildSingleFileTorrentBytes(t, name, content, nil)
+		seeder := seederFor(t, ctx, filepath.Join(work, name+"-seeder"), torrentBytes, hash, content)
+		feeds = append(feeds, feed{
+			name:    name,
+			content: content,
+			hash:    hash,
+			hashHex: hash.HexString(),
+			peers: []torrent.PeerInfo{
+				{Addr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(seeder.EffectiveListenPort()))},
+			},
+		})
+	}
+
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), filepath.Join(work, "leecher"),
+		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
+	for _, f := range feeds {
+		torrentBytes, _ := buildSingleFileTorrentBytes(t, f.name, f.content, nil)
+		if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+			t.Fatalf("%s leecher AddTorrent: %v", f.name, err)
+		}
+		state, ok := leecher.Torrent(f.hash)
+		if !ok {
+			t.Fatalf("%s was not registered", f.name)
+		}
+		session.UnderlyingTorrentForTest(state).AddPeers(f.peers)
+	}
+
+	for _, f := range feeds {
+		if _, err := leecher.StartPieceDownload(ctx, f.hashHex, []session.PieceRange{{Start: 0, End: 6}}, 0); err != nil {
+			t.Fatalf("%s StartPieceDownload: %v", f.name, err)
+		}
+	}
+	for _, f := range feeds {
+		f := f
+		if err := waitFor(ctx, func() bool {
+			status, err := leecher.PieceDownloadStatus(f.hashHex)
+			if err != nil {
+				t.Fatalf("%s PieceDownloadStatus: %v", f.name, err)
+			}
+			return status.State == session.PieceDownloadCompleted
+		}); err != nil {
+			t.Fatalf("%s download never completed alongside the other: %v", f.name, err)
+		}
+		state, ok := leecher.Torrent(f.hash)
+		if !ok {
+			t.Fatalf("%s disappeared", f.name)
+		}
+		if got, want := state.CachedBytes(), state.Length(); got != want {
+			t.Fatalf("%s cached %d bytes, want %d", f.name, got, want)
+		}
+	}
+}
+
+// TestPieceDownloadConcurrentWithReadingTheSameFile covers the shared-flight
+// path: reading a file while a piece download for the same torrent is in
+// flight returns the original content, because both go through the same piece
+// fetcher and a piece in flight is fetched once for every waiter.
+func TestPieceDownloadConcurrentWithReadingTheSameFile(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	content := bytes.Repeat([]byte{42}, 4*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "shared.bin", content, nil)
+
+	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), filepath.Join(work, "leecher"),
+		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
+	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("leecher AddTorrent: %v", err)
+	}
+	state, ok := leecher.Torrent(hash)
+	if !ok {
+		t.Fatal("leecher did not register the torrent")
+	}
+	session.UnderlyingTorrentForTest(state).AddPeers([]torrent.PeerInfo{
+		{Addr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(seeder.EffectiveListenPort()))},
+	})
+
+	if _, err := leecher.StartPieceDownload(ctx, hash.HexString(), []session.PieceRange{{Start: 0, End: 4}}, 0); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	file, err := leecher.OpenFile(hash, "shared.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer func() { _ = file.(io.Closer).Close() }()
+	got := make([]byte, len(content))
+	for off := 0; off < len(got); off += 32 << 10 {
+		end := off + 32<<10
+		if end > len(got) {
+			end = len(got)
+		}
+		if _, err := file.ReadAt(got[off:end], int64(off)); err != nil && err != io.EOF {
+			t.Fatalf("ReadAt(%d): %v", off, err)
+		}
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("reading during a piece download returned content that differs from the original")
+	}
+	if err := waitFor(ctx, func() bool {
+		status, err := leecher.PieceDownloadStatus(hash.HexString())
+		if err != nil {
+			t.Fatalf("PieceDownloadStatus: %v", err)
+		}
+		return status.State == session.PieceDownloadCompleted
+	}); err != nil {
+		t.Fatalf("download never completed: %v", err)
+	}
+}
+
+// TestPieceDownloadDoesNotConsumeThePlaybackReadBudget covers the separation
+// between the two budgets: one torrent's piece download holds every slot of
+// its own budget while another torrent's file is read, and the read still
+// finishes with the original content. Cancelling the download then frees the
+// slots, which a second real download on the read torrent proves by
+// completing.
+func TestPieceDownloadDoesNotConsumeThePlaybackReadBudget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	noPeerContent := bytes.Repeat([]byte{7}, 9*testPieceLength)
+	noPeerBytes, noPeerHash := buildSingleFileTorrentBytes(t, "no-peer.bin", noPeerContent, nil)
+	readContent := bytes.Repeat([]byte{8}, 3*testPieceLength)
+	readBytes, readHash := buildSingleFileTorrentBytes(t, "read.bin", readContent, nil)
+
+	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), readBytes, readHash, readContent)
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), filepath.Join(work, "leecher"),
+		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
+	for _, metainfoBytes := range [][]byte{noPeerBytes, readBytes} {
+		if err := leecher.AddTorrent(ctx, session.Source{Metainfo: metainfoBytes}); err != nil {
+			t.Fatalf("leecher AddTorrent: %v", err)
+		}
+	}
+	readState, ok := leecher.Torrent(readHash)
+	if !ok {
+		t.Fatal("leecher did not register the read torrent")
+	}
+	session.UnderlyingTorrentForTest(readState).AddPeers([]torrent.PeerInfo{
+		{Addr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(seeder.EffectiveListenPort()))},
+	})
+
+	// Nine pieces against a budget of eight: every slot is held by fetches
+	// that will never finish, since this torrent has no peer.
+	if _, err := leecher.StartPieceDownload(ctx, noPeerHash.HexString(), []session.PieceRange{{Start: 0, End: 9}}, 0); err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+
+	file, err := leecher.OpenFile(readHash, "read.bin")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	got := make([]byte, len(readContent))
+	readDone := make(chan error, 1)
+	go func() {
+		defer func() { _ = file.(io.Closer).Close() }()
+		for off := 0; off < len(got); off += 32 << 10 {
+			end := off + 32<<10
+			if end > len(got) {
+				end = len(got)
+			}
+			if _, err := file.ReadAt(got[off:end], int64(off)); err != nil && err != io.EOF {
+				readDone <- err
+				return
+			}
+		}
+		readDone <- nil
+	}()
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("read while the piece download budget was saturated: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("read stalled while another torrent's piece download saturated its own budget")
+	}
+	if !bytes.Equal(got, readContent) {
+		t.Fatal("read returned content that differs from the original")
+	}
+
+	// Cancelling the download must return every slot it held, so a real
+	// download on the read torrent can then take the whole budget.
+	if err := leecher.CancelPieceDownload(noPeerHash.HexString()); err != nil {
+		t.Fatalf("CancelPieceDownload: %v", err)
+	}
+	if _, err := leecher.StartPieceDownload(ctx, readHash.HexString(), []session.PieceRange{{Start: 0, End: 3}}, 0); err != nil {
+		t.Fatalf("second StartPieceDownload: %v", err)
+	}
+	if err := waitFor(ctx, func() bool {
+		status, err := leecher.PieceDownloadStatus(readHash.HexString())
+		if err != nil {
+			t.Fatalf("PieceDownloadStatus: %v", err)
+		}
+		return status.State == session.PieceDownloadCompleted
+	}); err != nil {
+		t.Fatalf("budget slots were not returned after cancel: %v", err)
 	}
 }
