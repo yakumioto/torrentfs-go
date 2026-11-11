@@ -48,7 +48,7 @@ func TestPieceDownloadFetchesOnlyRequestedPiecesAndGrantsReadingAllowance(t *tes
 	}
 	session.UnderlyingTorrentForTest(state).AddPeers([]torrent.PeerInfo{seederAddr})
 
-	status, err := leecher.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}})
+	status, err := leecher.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}, 0)
 	if err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestPieceDownloadAlreadyCachedPiecesCompleteImmediately(t *testing.T) {
 
 	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
 
-	status, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}})
+	status, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 0)
 	if err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestPieceDownloadMergesOverlappingRanges(t *testing.T) {
 	status, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{
 		{Start: 0, End: 2},
 		{Start: 1, End: 3},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestPieceDownloadRejectsInvalidRanges(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := seeder.StartPieceDownload(ctx, hashHex, tt.ranges)
+			_, err := seeder.StartPieceDownload(ctx, hashHex, tt.ranges, 0)
 			if !errors.Is(err, session.ErrInvalidPieceDownloadRequest) {
 				t.Fatalf("StartPieceDownload(%v) error = %v, want ErrInvalidPieceDownloadRequest", tt.ranges, err)
 			}
@@ -212,7 +212,7 @@ func TestPieceDownloadUnknownTorrent(t *testing.T) {
 	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
 
 	bogus := strings.Repeat("ab", 20)
-	if _, err := sess.StartPieceDownload(ctx, bogus, []session.PieceRange{{Start: 0, End: 1}}); !errors.Is(err, session.ErrUnknownTorrent) {
+	if _, err := sess.StartPieceDownload(ctx, bogus, []session.PieceRange{{Start: 0, End: 1}}, 0); !errors.Is(err, session.ErrUnknownTorrent) {
 		t.Fatalf("StartPieceDownload unknown = %v, want ErrUnknownTorrent", err)
 	}
 	if _, err := sess.PieceDownloadStatus(bogus); !errors.Is(err, session.ErrUnknownTorrent) {
@@ -236,7 +236,7 @@ func TestPieceDownloadRejectedWhileDeletionHoldsTorrent(t *testing.T) {
 	defer restore()
 
 	sess := newManageSession(t, torrentsDir)
-	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []session.PieceRange{{Start: 0, End: 1}}); !errors.Is(err, session.ErrDeleting) {
+	if _, err := sess.StartPieceDownload(ctx, hash.HexString(), []session.PieceRange{{Start: 0, End: 1}}, 0); !errors.Is(err, session.ErrDeleting) {
 		t.Fatalf("StartPieceDownload while deletion holds the torrent = %v, want ErrDeleting", err)
 	}
 }
@@ -254,7 +254,7 @@ func TestPieceDownloadRejectedWhileAdding(t *testing.T) {
 	if added.State != session.StateAdding {
 		t.Fatalf("state = %s, want adding", added.State)
 	}
-	if _, err := sess.StartPieceDownload(ctx, added.ID, []session.PieceRange{{Start: 0, End: 1}}); !errors.Is(err, session.ErrTorrentNotReady) {
+	if _, err := sess.StartPieceDownload(ctx, added.ID, []session.PieceRange{{Start: 0, End: 1}}, 0); !errors.Is(err, session.ErrTorrentNotReady) {
 		t.Fatalf("StartPieceDownload while adding = %v, want ErrTorrentNotReady", err)
 	}
 }
@@ -273,7 +273,7 @@ func TestCancelPieceDownloadStopsInFlightDownload(t *testing.T) {
 	}
 	hashHex := hash.HexString()
 
-	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}})
+	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 0)
 	if err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestCancelPieceDownloadIsIdempotent(t *testing.T) {
 		t.Fatalf("cancel with no piece download ever started = %v, want nil", err)
 	}
 
-	if _, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}); err != nil {
+	if _, err := seeder.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}, 0); err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
 	}
 	status, err := seeder.PieceDownloadStatus(hashHex)
@@ -357,7 +357,7 @@ func TestStartPieceDownloadReplacesInFlightDownload(t *testing.T) {
 	}
 	hashHex := hash.HexString()
 
-	first, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 3}})
+	first, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 3}}, 0)
 	if err != nil {
 		t.Fatalf("first StartPieceDownload: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestStartPieceDownloadReplacesInFlightDownload(t *testing.T) {
 		t.Fatalf("first status = %+v, want running with 3 requested", first)
 	}
 
-	second, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}})
+	second, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}, 0)
 	if err != nil {
 		t.Fatalf("second StartPieceDownload: %v", err)
 	}
@@ -379,6 +379,146 @@ func TestStartPieceDownloadReplacesInFlightDownload(t *testing.T) {
 	}
 	if status.RequestedPieces != 1 {
 		t.Fatalf("status after replacement = %+v, want the second request's 1, not a merge with the first", status)
+	}
+}
+
+// TestPieceDownloadExpiresWhenTimeoutElapsesWithNoPeer covers the time
+// limit: a download with no reachable peer is cut off by its own deadline
+// instead of hanging forever, moves to the expired terminal state, and the
+// torrent's reading allowance falls back the same way it does once a
+// download completes.
+func TestPieceDownloadExpiresWhenTimeoutElapsesWithNoPeer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg := testConfig()
+	sess := newManageSession(t, testTorrentDir(t, filepath.Join(t.TempDir(), "data")))
+	_, advance := fakeConnectionClock(t, sess)
+	content := bytes.Repeat([]byte{7}, 2*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	if _, err := sess.AddTorrentAndPersist(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("AddTorrentAndPersist: %v", err)
+	}
+	hashHex := hash.HexString()
+	state, ok := sess.Torrent(hash)
+	if !ok {
+		t.Fatal("torrent did not register")
+	}
+
+	status, err := sess.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 2}}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	if status.State != session.PieceDownloadRunning {
+		t.Fatalf("state = %q, want running", status.State)
+	}
+
+	if err := waitFor(ctx, func() bool {
+		s, err := sess.PieceDownloadStatus(hashHex)
+		return err == nil && s.State == session.PieceDownloadExpired
+	}); err != nil {
+		t.Fatalf("piece download never expired: %v", err)
+	}
+	final, err := sess.PieceDownloadStatus(hashHex)
+	if err != nil {
+		t.Fatalf("PieceDownloadStatus: %v", err)
+	}
+	if final.DonePieces != 0 {
+		t.Fatalf("done_pieces = %d, want 0 (no peer ever served a piece)", final.DonePieces)
+	}
+	if final.FinishedAt.IsZero() {
+		t.Fatal("finished_at is zero after expiry")
+	}
+
+	// The reading allowance an expired download held while running must
+	// fall back once it is no longer in flight: still reading right after
+	// (the grace window is still open), then idle once it elapses, since
+	// nothing was ever fetched into the cache to justify a probe connection.
+	session.AllocateConnectionsForTest(sess)
+	if got := session.ConnectionStateForTest(state); got != "reading" {
+		t.Fatalf("torrent right after its piece download expired is in state %q, want reading", got)
+	}
+	advance(time.Duration(cfg.Connections.ReadGrace) + time.Second)
+	session.AllocateConnectionsForTest(sess)
+	if got := session.ConnectionStateForTest(state); got != "idle" {
+		t.Fatalf("torrent past the read grace after its piece download expired is in state %q, want idle (nothing was ever cached)", got)
+	}
+}
+
+// TestPieceDownloadExpiresPreservesPartiallyFetchedPieces covers the other
+// half of the time limit rule: a piece genuinely fetched over the wire
+// before the peer goes away stays done, and stays cached, once the rest of
+// the request expires.
+func TestPieceDownloadExpiresPreservesPartiallyFetchedPieces(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	content := bytes.Repeat([]byte{11}, 3*testPieceLength)
+	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
+	hashHex := hash.HexString()
+
+	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
+	seederAddr := torrent.PeerInfo{
+		Addr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(seeder.EffectiveListenPort())),
+	}
+
+	leecher := newLoopbackSessionWithCustomize(t, testConfig(), filepath.Join(work, "leecher"),
+		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
+	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
+		t.Fatalf("leecher AddTorrent: %v", err)
+	}
+	state, ok := leecher.Torrent(hash)
+	if !ok {
+		t.Fatal("leecher did not register the torrent")
+	}
+	session.UnderlyingTorrentForTest(state).AddPeers([]torrent.PeerInfo{seederAddr})
+
+	// Fetch piece 0 for real while the seeder is still reachable.
+	if _, err := leecher.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 1}}, 0); err != nil {
+		t.Fatalf("first StartPieceDownload: %v", err)
+	}
+	if err := waitFor(ctx, func() bool {
+		s, err := leecher.PieceDownloadStatus(hashHex)
+		return err == nil && s.State == session.PieceDownloadCompleted
+	}); err != nil {
+		t.Fatalf("piece 0 never completed: %v", err)
+	}
+
+	// Take the only peer away: with no tracker the leecher cannot find
+	// another, so the next request has nothing left to serve the rest.
+	if err := seeder.Close(context.Background()); err != nil {
+		t.Fatalf("seeder Close: %v", err)
+	}
+
+	status, err := leecher.StartPieceDownload(ctx, hashHex, []session.PieceRange{{Start: 0, End: 3}}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("second StartPieceDownload: %v", err)
+	}
+	if status.RequestedPieces != 3 || status.DonePieces != 1 {
+		t.Fatalf("status right after starting = %+v, want 1 already done of 3 requested", status)
+	}
+
+	if err := waitFor(ctx, func() bool {
+		s, err := leecher.PieceDownloadStatus(hashHex)
+		return err == nil && s.State == session.PieceDownloadExpired
+	}); err != nil {
+		t.Fatalf("piece download never expired: %v", err)
+	}
+	final, err := leecher.PieceDownloadStatus(hashHex)
+	if err != nil {
+		t.Fatalf("PieceDownloadStatus: %v", err)
+	}
+	if final.DonePieces != 1 {
+		t.Fatalf("done_pieces after expiry = %d, want 1 (the piece fetched before the peer went away)", final.DonePieces)
+	}
+
+	statusView, err := leecher.TorrentStatusFor(hashHex)
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if !statusView.Pieces[0].Cached {
+		t.Fatal("piece 0 is no longer cached after the download expired")
 	}
 }
 

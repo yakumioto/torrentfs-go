@@ -41,6 +41,13 @@ const (
 	// PieceDownloadCancelled is a piece download CancelPieceDownload stopped,
 	// or that a later StartPieceDownload replaced, before it completed.
 	PieceDownloadCancelled PieceDownloadState = "cancelled"
+	// PieceDownloadExpired is a piece download its own timeout cut off
+	// before it completed. Pieces already fetched remain in the cache.
+	PieceDownloadExpired PieceDownloadState = "expired"
+	// PieceDownloadFailed is a piece download a genuine, non-cancellation
+	// fetch error stopped. Error names the cause; the remaining requested
+	// pieces were never attempted.
+	PieceDownloadFailed PieceDownloadState = "failed"
 )
 
 // PieceDownloadStatus is the management API's snapshot of one torrent's most
@@ -74,6 +81,14 @@ type pieceDownload struct {
 	// cached), set once before the goroutine starts otherwise, and never
 	// reassigned, so reading it without the mutex is safe.
 	cancel context.CancelFunc
+	// timer fires stop(PieceDownloadExpired) when the requested timeout
+	// elapses. It is nil when no timeout was requested or the task
+	// completed synchronously, set once before the goroutine starts
+	// otherwise, and never reassigned, so reading it without the mutex is
+	// safe. finish stops it on every terminal transition, whichever one
+	// gets there first, so it never fires uselessly after the task is
+	// already done.
+	timer *time.Timer
 }
 
 func (p *pieceDownload) snapshot() PieceDownloadStatus {
@@ -108,6 +123,9 @@ func (p *pieceDownload) finish(state PieceDownloadState, errMsg string) bool {
 	p.state = state
 	p.err = errMsg
 	p.finishedAt = time.Now().UTC()
+	if p.timer != nil {
+		p.timer.Stop()
+	}
 	return true
 }
 
@@ -133,7 +151,14 @@ func (p *pieceDownload) stop(state PieceDownloadState) {
 //
 // Starting a new piece download replaces any previous one this torrent had;
 // see CancelPieceDownload for stopping one without replacing it.
-func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []PieceRange) (PieceDownloadStatus, error) {
+//
+// timeout bounds how long the download may run before it is cut off and
+// moved to the expired state; pieces already fetched by then stay cached.
+// timeout <= 0 means no deadline. This method accepts any precision, so a
+// test can use a millisecond-scale timeout instead of waiting out a real
+// one; translating an external, second-granularity contract (with its own
+// default and bounds) into this duration is a caller concern.
+func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []PieceRange, timeout time.Duration) (PieceDownloadStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -197,6 +222,14 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 	if len(remaining) > 0 {
 		taskCtx, taskCancel = context.WithCancel(s.bgCtx)
 		task.cancel = taskCancel
+		if timeout > 0 {
+			task.timer = time.AfterFunc(timeout, func() {
+				task.stop(PieceDownloadExpired)
+				snapshot := task.snapshot()
+				s.logger.Warn("piece download expired", "hash", hash.HexString(),
+					"timeout", timeout, "requested_pieces", snapshot.RequestedPieces, "done_pieces", snapshot.DonePieces)
+			})
+		}
 	}
 
 	st.mu.Lock()
@@ -240,6 +273,14 @@ func (s *Session) StartPieceDownload(ctx context.Context, id string, ranges []Pi
 			}
 			buf := make([]byte, size)
 			if _, err := loader.ReadAtContext(taskCtx, buf, int64(index)*pieceLength, 0); err != nil {
+				// A context error here means a cancel or an expiry already
+				// claimed the terminal state (and cancelled taskCtx to
+				// unblock this read); this is not a fetch failure. Anything
+				// else is a genuine fetch error: stop here and do not try
+				// the remaining pieces anyway.
+				if taskCtx.Err() == nil && task.finish(PieceDownloadFailed, err.Error()) {
+					s.logger.Error("piece download failed", "hash", hash.HexString(), "piece", index, "err", err)
+				}
 				return
 			}
 			task.incDone()

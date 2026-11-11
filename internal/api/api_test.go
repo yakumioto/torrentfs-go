@@ -72,10 +72,11 @@ type fakeBackend struct {
 
 	experimentStatus session.ExperimentStatus
 
-	pieceDownloadID     string
-	pieceDownloadRanges []session.PieceRange
-	pieceDownloadStatus session.PieceDownloadStatus
-	pieceDownloadErr    error
+	pieceDownloadID      string
+	pieceDownloadRanges  []session.PieceRange
+	pieceDownloadTimeout time.Duration
+	pieceDownloadStatus  session.PieceDownloadStatus
+	pieceDownloadErr     error
 
 	pieceDownloadStatusID  string
 	pieceDownloadStatusVal session.PieceDownloadStatus
@@ -210,11 +211,12 @@ func (f *fakeBackend) ExperimentStatus() session.ExperimentStatus {
 	return f.experimentStatus
 }
 
-func (f *fakeBackend) StartPieceDownload(_ context.Context, id string, ranges []session.PieceRange) (session.PieceDownloadStatus, error) {
+func (f *fakeBackend) StartPieceDownload(_ context.Context, id string, ranges []session.PieceRange, timeout time.Duration) (session.PieceDownloadStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pieceDownloadID = id
 	f.pieceDownloadRanges = ranges
+	f.pieceDownloadTimeout = timeout
 	if f.pieceDownloadErr != nil {
 		return session.PieceDownloadStatus{}, f.pieceDownloadErr
 	}

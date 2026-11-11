@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -14,8 +15,9 @@ import (
 type PieceDownloadBackend interface {
 	// StartPieceDownload fetches ranges into the torrent's piece cache
 	// without opening a file reader, replacing any previous piece download
-	// for the same torrent.
-	StartPieceDownload(ctx context.Context, id string, ranges []session.PieceRange) (session.PieceDownloadStatus, error)
+	// for the same torrent. timeout bounds how long it may run before it is
+	// cut off and moved to the expired state.
+	StartPieceDownload(ctx context.Context, id string, ranges []session.PieceRange, timeout time.Duration) (session.PieceDownloadStatus, error)
 	// PieceDownloadStatus returns the current or most recent piece download
 	// of one torrent.
 	PieceDownloadStatus(id string) (session.PieceDownloadStatus, error)
@@ -32,10 +34,18 @@ type pieceRangeBody struct {
 }
 
 // pieceDownloadRequestBody is the PUT /api/v1/torrents/{id}/piece-download
-// request contract.
+// request contract. TimeoutSeconds is a pointer so an omitted field (use the
+// default) is distinguishable from an explicit, invalid 0.
 type pieceDownloadRequestBody struct {
-	Ranges []pieceRangeBody `json:"ranges"`
+	Ranges         []pieceRangeBody `json:"ranges"`
+	TimeoutSeconds *int             `json:"timeout_seconds"`
 }
+
+const (
+	defaultPieceDownloadTimeoutSeconds = 600
+	minPieceDownloadTimeoutSeconds     = 1
+	maxPieceDownloadTimeoutSeconds     = 3600
+)
 
 // pieceDownloadResponse is the wire form of a piece download's status.
 // FinishedAt is omitted while the download is running, so a client can branch
@@ -84,11 +94,21 @@ func (s *Server) handleStartPieceDownload(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "ranges is required and must not be empty")
 		return
 	}
+	timeoutSeconds := defaultPieceDownloadTimeoutSeconds
+	if body.TimeoutSeconds != nil {
+		timeoutSeconds = *body.TimeoutSeconds
+	}
+	if timeoutSeconds < minPieceDownloadTimeoutSeconds || timeoutSeconds > maxPieceDownloadTimeoutSeconds {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"timeout_seconds must be between %d and %d", minPieceDownloadTimeoutSeconds, maxPieceDownloadTimeoutSeconds))
+		return
+	}
 	ranges := make([]session.PieceRange, 0, len(body.Ranges))
 	for _, raw := range body.Ranges {
 		ranges = append(ranges, session.PieceRange{Start: raw.Start, End: raw.End})
 	}
-	status, err := backend.StartPieceDownload(r.Context(), r.PathValue("id"), ranges)
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	status, err := backend.StartPieceDownload(r.Context(), r.PathValue("id"), ranges, timeout)
 	if err != nil {
 		writeSessionError(w, "start piece download", err)
 		return

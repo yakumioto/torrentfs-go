@@ -298,6 +298,61 @@ func TestPieceDownloadRoutesWiredToRealSession(t *testing.T) {
 	}
 }
 
+func TestStartPieceDownloadDefaultsTimeoutSecondsTo600(t *testing.T) {
+	backend := &fakeBackend{}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/abc/piece-download",
+		strings.NewReader(`{"ranges":[{"start":0,"end":1}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := do(t, srv, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body %s", rec.Code, rec.Body.String())
+	}
+	if backend.pieceDownloadTimeout != 600*time.Second {
+		t.Fatalf("backend saw timeout %s, want the 600s default", backend.pieceDownloadTimeout)
+	}
+}
+
+func TestStartPieceDownloadAcceptsExplicitTimeoutSeconds(t *testing.T) {
+	backend := &fakeBackend{}
+	srv := newTestServer(t, backend, nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/abc/piece-download",
+		strings.NewReader(`{"ranges":[{"start":0,"end":1}],"timeout_seconds":30}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := do(t, srv, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body %s", rec.Code, rec.Body.String())
+	}
+	if backend.pieceDownloadTimeout != 30*time.Second {
+		t.Fatalf("backend saw timeout %s, want 30s", backend.pieceDownloadTimeout)
+	}
+}
+
+func TestStartPieceDownloadRejectsInvalidTimeoutSeconds(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"zero", `{"ranges":[{"start":0,"end":1}],"timeout_seconds":0}`},
+		{"negative", `{"ranges":[{"start":0,"end":1}],"timeout_seconds":-1}`},
+		{"above max", `{"ranges":[{"start":0,"end":1}],"timeout_seconds":3601}`},
+		{"non-integer", `{"ranges":[{"start":0,"end":1}],"timeout_seconds":1.5}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeBackend{}, nil)
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/torrents/abc/piece-download", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := do(t, srv, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestCancelPieceDownloadReturnsNoContent(t *testing.T) {
 	backend := &fakeBackend{}
 	srv := newTestServer(t, backend, nil)
