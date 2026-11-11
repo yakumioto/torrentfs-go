@@ -15,6 +15,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/yakumioto/torrentfs-go/internal/config"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -848,7 +849,11 @@ func TestPieceDownloadConcurrentWithReadingTheSameFile(t *testing.T) {
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "shared.bin", content, nil)
 
 	seeder := seederFor(t, ctx, filepath.Join(work, "seeder"), torrentBytes, hash, content)
-	leecher := newLoopbackSessionWithCustomize(t, testConfig(), filepath.Join(work, "leecher"),
+	// The assertion here is content correctness under overlap, not latency, so
+	// give a single read room for a slow CI scheduler and a slow handshake.
+	cfg := testConfig()
+	cfg.Filesystem.ReadTimeout = config.Duration(60 * time.Second)
+	leecher := newLoopbackSessionWithCustomize(t, cfg, filepath.Join(work, "leecher"),
 		func(cc *session.TorrentClientConfig) { cc.DropMutuallyCompletePeers = false })
 	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: torrentBytes}); err != nil {
 		t.Fatalf("leecher AddTorrent: %v", err)
@@ -863,6 +868,15 @@ func TestPieceDownloadConcurrentWithReadingTheSameFile(t *testing.T) {
 
 	if _, err := leecher.StartPieceDownload(ctx, hash.HexString(), []session.PieceRange{{Start: 0, End: 4}}, 0); err != nil {
 		t.Fatalf("StartPieceDownload: %v", err)
+	}
+	// AddPeers only queues the address, and an idle torrent holds no
+	// connection allowance, so the handshake cannot land until the download
+	// (which counts as reading activity) starts. Wait for it before reading:
+	// a read that starts before the peer is up could sit on a stalled fetch
+	// until its timeout. The download is still in flight, so the read below
+	// still overlaps with it.
+	if err := waitFor(ctx, func() bool { return totalActivePeers(leecher) >= 1 }); err != nil {
+		t.Fatalf("the leecher never connected to the seeder: %v", err)
 	}
 	file, err := leecher.OpenFile(hash, "shared.bin")
 	if err != nil {

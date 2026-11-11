@@ -106,8 +106,11 @@ func TestPieceDownloadFailsOnFetchError(t *testing.T) {
 	content := bytes.Repeat([]byte{9}, 2*internalTestPieceLength)
 	torrentPath, hash := buildInternalTestTorrent(t, dataDir, work, content)
 
-	var logs bytes.Buffer
-	sess, err := New(internalTestConfig(), internalTestTorrentDir(t, dataDir), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	// The failure log is written by the fetch worker while this goroutine
+	// polls the status and later reads the buffer, so the capture has to be
+	// concurrency-safe.
+	logs := &syncLogBuffer{}
+	sess, err := New(internalTestConfig(), internalTestTorrentDir(t, dataDir), WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
