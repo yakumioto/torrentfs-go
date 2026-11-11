@@ -53,6 +53,17 @@ type Torrent struct {
 	probeSince       atomic.Int64
 	probePausedUntil atomic.Int64
 
+	// pieceDownloadActive counts the piece downloads currently fetching
+	// pieces for this torrent. A positive value makes readingActivity report
+	// true even without an open file handle, matching the "读取状态"
+	// definition in GLOSSARY.md. Guarded by atomics for the same reason as
+	// the fields above: the allocator reads it without t.mu.
+	pieceDownloadActive atomic.Int32
+	// pieceDL is this torrent's current or most recently finished piece
+	// download, replaced wholesale by the next start. Guarded by t.mu; never
+	// persisted.
+	pieceDL *pieceDownload
+
 	// Metadata-stage bookkeeping: a magnet without metadata rotates its peers
 	// so a peer that cannot serve metadata cannot hold the allowance forever.
 	metadataRotatedAt   atomic.Int64
@@ -312,6 +323,17 @@ func (t *Torrent) CachedBytes() int64 {
 // open of that path; the returned handle is cheap and idempotently closable, so
 // the filesystem's release path can drop it without disturbing other opens.
 // Once the last handle closes, the shared forward window is released.
+// ensurePieceLoaderLocked returns this torrent's shared piece source,
+// creating it on first use. The caller must hold t.mu. Both readerFor and
+// StartPieceDownload share the one loader so a piece either side is waiting
+// on is fetched exactly once.
+func (t *Torrent) ensurePieceLoaderLocked() pieceSource {
+	if t.loader == nil {
+		t.loader = newPieceFetcher(t.tor, t.cache)
+	}
+	return t.loader
+}
+
 func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -332,9 +354,7 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 	if info == nil {
 		return nil, fmt.Errorf("session: torrent info is not ready: %w", vfs.ErrNotFound)
 	}
-	if t.loader == nil {
-		t.loader = newPieceFetcher(t.tor, t.cache)
-	}
+	t.ensurePieceLoaderLocked()
 	if t.coordinator == nil {
 		t.coordinator = newPrefetchCoordinator(t.session, t.tor, t.cache)
 	}

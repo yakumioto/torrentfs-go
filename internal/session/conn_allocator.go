@@ -406,10 +406,12 @@ func (t *Torrent) applyConnectionPlan(now time.Time, plan connectionPlan, conn c
 	t.tor.SetMaxEstablishedConns(plan.Allowance)
 }
 
-// readingActivity reports whether a file handle is open or the torrent was read
-// within the configured grace window.
+// readingActivity reports whether a file handle is open, a piece download is
+// in flight, or the torrent was read within the configured grace window. A
+// piece download counts the same as an open handle: see the "读取状态" entry
+// in GLOSSARY.md.
 func (t *Torrent) readingActivity(now time.Time, conn config.Connections) bool {
-	if t.readersOpen.Load() > 0 {
+	if t.readersOpen.Load() > 0 || t.pieceDownloadActive.Load() > 0 {
 		return true
 	}
 	lastRead := timeFromUnixNano(t.lastReadAt.Load())
