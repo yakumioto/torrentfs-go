@@ -52,6 +52,15 @@ runs:
         go-version-file: go.mod
         cache: true
 
+    - name: Check image publishing contract
+      if: ${{ inputs.mode == 'test' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m venv "$RUNNER_TEMP/workflow-tests"
+        "$RUNNER_TEMP/workflow-tests/bin/pip" install PyYAML==6.0.2
+        "$RUNNER_TEMP/workflow-tests/bin/python" -B -m unittest discover -s .github/tests -p 'test_*.py' -v
+
     - name: Build
       if: ${{ inputs.mode == 'test' }}
       shell: bash

@@ -240,6 +240,7 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_REPOSITORY }}:${{ steps.metadata.outputs.tag }}
+            ${{ env.IMAGE_REPOSITORY }}:nightly
           provenance: false
           sbom: false
           labels: |
