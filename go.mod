@@ -119,7 +119,13 @@ require (
 // request before returning from a failed storage read, preserving the
 // unreadPeerRequests invariant during shutdown (MIO-62).
 //
+// v1.61.0-bep27.4 additionally preserves pending nonzero timer wakeups received
+// while the announce callback is running, preventing a stale callback result
+// from disarming the shared scheduler. It also skips terminal zero-time records
+// when selecting a tracker head, so a successful stopped announce cannot hide
+// the remaining live torrents. Both fixes carry regression tests in the fork.
+//
 // Drop this replace once upstream publishes a release containing all changes.
-replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.3
+replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.4
 
 replace github.com/jfjallid/go-smb => ./third_party/go-smb
