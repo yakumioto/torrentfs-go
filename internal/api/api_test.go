@@ -596,7 +596,7 @@ func TestDeleteUnknownTorrent(t *testing.T) {
 
 func TestOperationLookup(t *testing.T) {
 	backend := &fakeBackend{ops: map[string]session.Operation{
-		"op-1": {ID: "op-1", TorrentID: "abc", State: session.StateDeleted},
+		"op-1": {ID: "op-1", TorrentID: "abc", State: session.StateDeleted, Warning: "stopped announce: tracker unavailable"},
 	}}
 	srv := newTestServer(t, backend, nil)
 
@@ -610,6 +610,9 @@ func TestOperationLookup(t *testing.T) {
 	}
 	if got["operation_id"] != "op-1" || got["state"] != "deleted" {
 		t.Fatalf("operation = %v, want op-1/deleted", got)
+	}
+	if got["warning"] != "stopped announce: tracker unavailable" {
+		t.Fatalf("operation warning = %v, want the non-fatal flush warning", got["warning"])
 	}
 
 	rec = do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/operations/missing", nil))

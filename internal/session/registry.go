@@ -71,6 +71,10 @@ type Operation struct {
 	Error     string
 	// ErrorCode is the stable machine-readable reason for a failed operation.
 	ErrorCode string
+	// Warning describes a non-fatal loss observed while completing a
+	// successful operation, such as a stopped announce the tracker never
+	// received. It never changes State.
+	Warning   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

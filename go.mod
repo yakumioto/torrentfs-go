@@ -125,7 +125,13 @@ require (
 // when selecting a tracker head, so a successful stopped announce cannot hide
 // the remaining live torrents. Both fixes carry regression tests in the fork.
 //
+// v1.61.0-bep27.6 adds Torrent.AnnounceStopped: a synchronous stopped announce
+// for every regular tracker, bounded by the caller's context. Deletion uses it
+// before Drop so the tracker receives the final cumulative upload while the
+// torrent, its announce state and its counters still exist. bep27.6 reports
+// each announce error to the flush caller directly.
+//
 // Drop this replace once upstream publishes a release containing all changes.
-replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.4
+replace github.com/anacrolix/torrent => github.com/yakumioto/torrent v1.61.0-bep27.6
 
 replace github.com/jfjallid/go-smb => ./third_party/go-smb

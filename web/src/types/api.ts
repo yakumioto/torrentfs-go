@@ -88,6 +88,8 @@ export interface Operation {
   state: string;
   error?: string;
   error_code?: string;
+  /** Non-fatal loss on a successful operation, such as a missed stopped announce. */
+  warning?: string;
 }
 
 export interface PruneFailure {

@@ -45,7 +45,15 @@ type sessionOptions struct {
 	// experimentSettings, when non-nil, overrides the experiment settings the
 	// session starts with. The experiment itself is always on.
 	experimentSettings *experiments.Settings
+	// deleteFlushTimeout bounds the synchronous stopped announce a deletion
+	// sends before dropping the torrent. Zero means the default.
+	deleteFlushTimeout time.Duration
 }
+
+// defaultDeleteFlushTimeout bounds how long a deletion waits for trackers to
+// accept the final stopped announce. The announce is a courtesy to tracker
+// bookkeeping; it must not hold the operation open for long.
+const defaultDeleteFlushTimeout = 15 * time.Second
 
 // WithLogger routes session and anacrolix client logs to l.
 func WithLogger(l *slog.Logger) Option {
@@ -154,6 +162,10 @@ type Session struct {
 
 	opMu    sync.Mutex
 	opLocks map[metainfo.Hash]*sync.Mutex
+
+	// deleteFlushTimeout bounds the stopped announce performDelete sends before
+	// dropping a torrent. It is fixed at construction.
+	deleteFlushTimeout time.Duration
 }
 
 // metadataFetch is one in-flight magnet metadata-persist worker.
@@ -353,6 +365,10 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	if peerDialer != nil {
 		cl.AddDialer(peerDialer)
 	}
+	deleteFlushTimeout := options.deleteFlushTimeout
+	if deleteFlushTimeout <= 0 {
+		deleteFlushTimeout = defaultDeleteFlushTimeout
+	}
 	s := &Session{
 		cl:                  cl,
 		config:              configSnapshot{cfg: cloneConfig(cfg)},
@@ -364,6 +380,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		pieceStore:          pieceStore,
 		prefetchBudget:      newPrefetchBudget(defaultPrefetchPieces),
 		pieceDownloadBudget: newPieceDownloadBudget(),
+		deleteFlushTimeout:  deleteFlushTimeout,
 		closeDone:           make(chan struct{}),
 		torrents:            make(map[metainfo.Hash]*Torrent),
 		torrentsDir:         torrentsDir,

@@ -28,6 +28,24 @@ type loopbackTracker struct {
 	peers     map[string]map[string]struct{} // info hash hex -> "host:port" set
 	announced map[string]int                 // info hash hex -> announce count
 	announces map[string][]trackerAnnounce   // info hash hex -> announce details
+	// stoppedStatus, when non-zero, rejects stopped announces with that HTTP
+	// status. stoppedBlock makes them wait until the client cancels.
+	stoppedStatus int
+	stoppedBlock  bool
+}
+
+// failStopped rejects later stopped announces with status.
+func (tr *loopbackTracker) failStopped(status int) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.stoppedStatus = status
+}
+
+// blockStopped makes later stopped announces hang until the client cancels.
+func (tr *loopbackTracker) blockStopped() {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.stoppedBlock = true
 }
 
 type trackerAnnounce struct {
@@ -116,6 +134,18 @@ func (tr *loopbackTracker) handleAnnounce(w http.ResponseWriter, r *http.Request
 	}
 	addr := net.JoinHostPort(host, port)
 	stopped := query.Get("event") == "stopped"
+	tr.mu.Lock()
+	stoppedStatus := tr.stoppedStatus
+	stoppedBlock := tr.stoppedBlock
+	tr.mu.Unlock()
+	if stopped && stoppedStatus != 0 {
+		http.Error(w, "stopped announce rejected", stoppedStatus)
+		return
+	}
+	if stopped && stoppedBlock {
+		<-r.Context().Done()
+		return
+	}
 	announcePort, err := strconv.Atoi(port)
 	if err != nil {
 		http.Error(w, "bad port", http.StatusBadRequest)
