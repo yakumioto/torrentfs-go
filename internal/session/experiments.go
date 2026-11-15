@@ -94,11 +94,15 @@ type ExperimentTorrentStatus struct {
 
 // ExperimentStatus is the management API's view of the experiment.
 type ExperimentStatus struct {
-	Settings           experiments.RuntimeSettings
-	Seed               int64
-	AnnounceLogPath    string
-	PeerSampleInterval time.Duration
-	Torrents           []ExperimentTorrentStatus
+	// StartupReportedUploadedBytes counts each hash's first announce-reported
+	// value plus later positive increments, including deleted torrents. It is
+	// memory-only, resets on backend restart, and is not tracker-confirmed credit.
+	StartupReportedUploadedBytes int64
+	Settings                     experiments.RuntimeSettings
+	Seed                         int64
+	AnnounceLogPath              string
+	PeerSampleInterval           time.Duration
+	Torrents                     []ExperimentTorrentStatus
 }
 
 // ExperimentStatus returns the experiment configuration and the per-torrent real and
@@ -133,11 +137,12 @@ func (s *Session) ExperimentStatus() ExperimentStatus {
 	}
 	sort.Slice(torrents, func(i, j int) bool { return torrents[i].InfoHash < torrents[j].InfoHash })
 	return ExperimentStatus{
-		Settings:           state.reporter.RuntimeSettings(),
-		Seed:               state.settings.Seed,
-		AnnounceLogPath:    state.settings.AnnounceLogPath,
-		PeerSampleInterval: state.settings.PeerSampleInterval,
-		Torrents:           torrents,
+		StartupReportedUploadedBytes: state.reporter.StartupReportedUploadedBytes(),
+		Settings:                     state.reporter.RuntimeSettings(),
+		Seed:                         state.settings.Seed,
+		AnnounceLogPath:              state.settings.AnnounceLogPath,
+		PeerSampleInterval:           state.settings.PeerSampleInterval,
+		Torrents:                     torrents,
 	}
 }
 

@@ -41,6 +41,21 @@ func TestGetExperimentAlwaysReturnsData(t *testing.T) {
 	}
 }
 
+func TestGetExperimentStartupReportedUploadStartsAtZero(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, nil)
+	rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/experiments/upload", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if value, ok := got["startup_reported_uploaded_bytes"]; !ok || string(value) != "0" {
+		t.Fatalf("startup_reported_uploaded_bytes = %s (present %v), want 0", value, ok)
+	}
+}
+
 func TestGetExperimentReturnsTheLiveComparison(t *testing.T) {
 	backend := &fakeBackend{experimentStatus: session.ExperimentStatus{
 		Settings: session.ExperimentSettings{

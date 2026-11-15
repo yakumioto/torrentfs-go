@@ -44,12 +44,15 @@ type experimentTotalsBody struct {
 // experiment is always on, so the response always carries settings and
 // counters; there is no enabled field.
 type experimentBody struct {
-	Settings                  experimentSettingsBody  `json:"settings"`
-	Seed                      int64                   `json:"seed"`
-	AnnounceLog               string                  `json:"announce_log"`
-	PeerSampleIntervalSeconds float64                 `json:"peer_sample_interval_seconds"`
-	Totals                    experimentTotalsBody    `json:"totals"`
-	Torrents                  []experimentTorrentBody `json:"torrents"`
+	// StartupReportedUploadedBytes counts announce-reported upload since startup,
+	// including deleted torrents; it does not imply tracker-confirmed credit.
+	StartupReportedUploadedBytes int64                   `json:"startup_reported_uploaded_bytes"`
+	Settings                     experimentSettingsBody  `json:"settings"`
+	Seed                         int64                   `json:"seed"`
+	AnnounceLog                  string                  `json:"announce_log"`
+	PeerSampleIntervalSeconds    float64                 `json:"peer_sample_interval_seconds"`
+	Totals                       experimentTotalsBody    `json:"totals"`
+	Torrents                     []experimentTorrentBody `json:"torrents"`
 }
 
 func newExperimentBody(status session.ExperimentStatus) experimentBody {
@@ -62,10 +65,11 @@ func newExperimentBody(status session.ExperimentStatus) experimentBody {
 			JitterPercent:      settings.JitterFraction * 100,
 			CapBytes:           settings.CapBytes,
 		},
-		Seed:                      status.Seed,
-		AnnounceLog:               status.AnnounceLogPath,
-		PeerSampleIntervalSeconds: status.PeerSampleInterval.Seconds(),
-		Torrents:                  []experimentTorrentBody{},
+		StartupReportedUploadedBytes: status.StartupReportedUploadedBytes,
+		Seed:                         status.Seed,
+		AnnounceLog:                  status.AnnounceLogPath,
+		PeerSampleIntervalSeconds:    status.PeerSampleInterval.Seconds(),
+		Torrents:                     []experimentTorrentBody{},
 	}
 	for _, torrent := range status.Torrents {
 		entry := experimentTorrentBody{

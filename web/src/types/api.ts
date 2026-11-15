@@ -159,6 +159,8 @@ export interface ExperimentView {
   seed: number;
   announce_log: string;
   peer_sample_interval_seconds: number;
+  /** Startup-wide reported growth, including deleted torrents; absent on older backends. */
+  startup_reported_uploaded_bytes?: number;
   totals: ExperimentTotals;
   torrents: ExperimentTorrentStat[];
 }

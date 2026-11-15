@@ -37,9 +37,10 @@ type Reporter struct {
 	now func() time.Time
 	rng *rand.Rand
 
-	mu      sync.Mutex
-	runtime RuntimeSettings
-	byHash  map[string]*schedule
+	mu                           sync.Mutex
+	runtime                      RuntimeSettings
+	byHash                       map[string]*schedule
+	startupReportedUploadedBytes int64
 }
 
 type schedule struct {
@@ -108,6 +109,17 @@ func (r *Reporter) ReportedStates() map[string]ReportedState {
 	return states
 }
 
+// StartupReportedUploadedBytes returns the sum of each hash's first reported
+// value and subsequent positive reported increments observed by Director. Equal
+// cumulative values sent to multiple trackers count once; decreases never deduct
+// bytes. The counter is in-memory, includes deleted torrents, and resets with a
+// new Reporter. It measures HTTP(S) announce reports, not tracker-confirmed credit.
+func (r *Reporter) StartupReportedUploadedBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.startupReportedUploadedBytes
+}
+
 // Director is the hook installed through
 // session.WithAnnounceRequestDirector. It rewrites only the "uploaded" query
 // parameter and leaves every other parameter, including its original encoding,
@@ -168,6 +180,9 @@ func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDe
 			current.reported = realUploaded
 		}
 		r.byHash[infoHash] = current
+		if current.reported > 0 {
+			r.startupReportedUploadedBytes += current.reported
+		}
 		return current.reported, 0, 0, mode
 	}
 
@@ -197,7 +212,11 @@ func (r *Reporter) report(infoHash string, realUploaded int64) (reported, realDe
 			current.reported = capBytes
 		}
 	}
-	return current.reported, realDelta, current.reported - previous, mode
+	reportedDelta = current.reported - previous
+	if reportedDelta > 0 {
+		r.startupReportedUploadedBytes += reportedDelta
+	}
+	return current.reported, realDelta, reportedDelta, mode
 }
 
 // jittered applies the configured random deviation to a nominal increment and

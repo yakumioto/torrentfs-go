@@ -86,7 +86,7 @@ export function DashboardPage() {
       <section aria-label="运行时统计" className={styles.runtimeStats}>
         {statsQuery.data === undefined && statsQuery.isPending && (
           <div className={styles.runtimeLoading} role="status" aria-busy="true" aria-label="正在加载运行时统计">
-            {[0, 1, 2].map((item) => <Skeleton key={item} height={94} radius="md" />)}
+            {[0, 1, 2, 3].map((item) => <Skeleton key={item} height={94} radius="md" />)}
           </div>
         )}
         {statsQuery.data !== undefined && (
@@ -105,6 +105,19 @@ export function DashboardPage() {
               label="本次启动上传"
               value={formatBytes(statsQuery.data.transfer.uploaded_bytes)}
               detail={`上传 payload · 自 ${formatDate(statsQuery.data.started_at)}`}
+            />
+            <RuntimeCard
+              label="本次启动上报上传"
+              value={experimentQuery.data?.startup_reported_uploaded_bytes === undefined
+                ? '—'
+                : formatBytes(experimentQuery.data.startup_reported_uploaded_bytes)}
+              detail={experimentQuery.isError
+                ? (experimentQuery.data?.startup_reported_uploaded_bytes === undefined ? '上报统计暂不可用' : '刷新失败，显示上次有效快照')
+                : experimentQuery.isPending
+                  ? '正在加载上报统计…'
+                  : experimentQuery.data?.startup_reported_uploaded_bytes === undefined
+                    ? '当前后端未提供启动累计上报统计'
+                    : `HTTP(S) Tracker announce 累计（请求观测，含已删除任务，非送达或入账确认）· 自 ${formatDate(statsQuery.data.started_at)}`}
             />
           </>
         )}
@@ -198,7 +211,7 @@ function RuntimeCard({ label, value, detail }: { label: string; value: string; d
     <div className={styles.runtimeCard}>
       <span>{label}</span>
       <strong>{value}</strong>
-      <small>{detail}</small>
+      <small title={detail}>{detail}</small>
     </div>
   );
 }
