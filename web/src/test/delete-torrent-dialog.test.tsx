@@ -99,6 +99,26 @@ describe('DeleteTorrentDialog', () => {
     expect(screen.getByText(/由 TorrentFS 管理的字幕文件会一并清理/)).toBeInTheDocument();
   });
 
+  it('reports a non-fatal stopped-announce warning after a successful delete', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/operations/op-1')) {
+        return Promise.resolve(jsonResponse({
+          operation_id: 'op-1',
+          torrent_id: 'torrent-1',
+          state: 'deleted',
+          warning: 'stopped announce: tracker unavailable',
+        }));
+      }
+      return Promise.resolve(jsonResponse({ operation_id: 'op-1', torrent_id: 'torrent-1', state: 'deleting' }));
+    });
+    renderDialog(fetchMock);
+
+    fireEvent.click(screen.getByRole('button', { name: '删除任务' }));
+
+    await waitFor(() => expect(screen.getByText('任务已删除')).toBeInTheDocument());
+    expect(screen.getByText(/停止上报未送达/)).toBeInTheDocument();
+  });
+
   it('explains a subtitle cleanup failure and how to retry', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       if (String(input).endsWith('/operations/op-1')) {

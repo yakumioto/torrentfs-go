@@ -88,6 +88,8 @@ export interface Operation {
   state: string;
   error?: string;
   error_code?: string;
+  /** Non-fatal loss on a successful operation, such as a missed stopped announce. */
+  warning?: string;
 }
 
 export interface PruneFailure {
@@ -157,6 +159,8 @@ export interface ExperimentView {
   seed: number;
   announce_log: string;
   peer_sample_interval_seconds: number;
+  /** Startup-wide reported growth, including deleted torrents; absent on older backends. */
+  startup_reported_uploaded_bytes?: number;
   totals: ExperimentTotals;
   torrents: ExperimentTorrentStat[];
 }

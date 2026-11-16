@@ -13,7 +13,7 @@ export function OperationStatus({ operation, error }: { operation?: Operation; e
     return null;
   }
   if (operation.state === 'deleted') {
-    return <div className={styles.status} role="status"><IconCircleCheck size={19} color="var(--success)" aria-hidden="true" /><div className={styles.copy}><div className={styles.title}>任务已删除</div><div className={styles.detail}>任务、其元数据及由 TorrentFS 管理的字幕文件已从列表中移除。</div></div></div>;
+    return <div className={styles.status} role="status"><IconCircleCheck size={19} color="var(--success)" aria-hidden="true" /><div className={styles.copy}><div className={styles.title}>任务已删除</div><div className={styles.detail}>任务、其元数据及由 TorrentFS 管理的字幕文件已从列表中移除。</div>{operation.warning !== undefined && operation.warning !== '' && <div className={styles.detail}>停止上报未送达 tracker，上传量可能延后结算：{operation.warning}</div>}</div></div>;
   }
   if (operation.state === 'delete_failed') {
     const cleanupFailed = operation.error_code === 'subtitle_cleanup_failed';

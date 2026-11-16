@@ -63,6 +63,9 @@ type operationResponse struct {
 	Error       string `json:"error,omitempty"`
 	// ErrorCode is a stable machine-readable reason for a failed operation.
 	ErrorCode string `json:"error_code,omitempty"`
+	// Warning reports a non-fatal loss on a successful operation, such as a
+	// stopped announce the tracker never received.
+	Warning string `json:"warning,omitempty"`
 }
 
 func newOperationResponse(op session.Operation) operationResponse {
@@ -72,6 +75,7 @@ func newOperationResponse(op session.Operation) operationResponse {
 		State:       string(op.State),
 		Error:       op.Error,
 		ErrorCode:   op.ErrorCode,
+		Warning:     op.Warning,
 	}
 }
 

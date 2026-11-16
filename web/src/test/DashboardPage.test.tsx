@@ -201,6 +201,52 @@ describe('DashboardPage', () => {
     expect(screen.getByRole('button', { name: '按任务排序，当前降序' })).toBeInTheDocument();
   });
 
+  it('shows startup tracker reports after real upload without deriving them from current torrents', async () => {
+    const { queryClient } = renderDashboard([], runtimeStats(), 200, undefined, {
+      ...baselineExperiment(),
+      startup_reported_uploaded_bytes: 8192,
+    });
+
+    const stats = screen.getByRole('region', { name: '运行时统计' });
+    await waitFor(() => expect(within(stats).getByText('本次启动上报上传')).toBeInTheDocument());
+    const uploadCard = within(stats).getByText('本次启动上传').parentElement;
+    const reportedCard = within(stats).getByText('本次启动上报上传').parentElement;
+    expect(uploadCard).toHaveTextContent('1.0 KiB');
+    expect(reportedCard).toHaveTextContent('8.0 KiB');
+    expect(reportedCard).toHaveTextContent('Tracker announce 累计');
+    expect(uploadCard?.nextElementSibling).toBe(reportedCard);
+
+    // A poll replaces the backend's startup counter; it is not added to the previous poll.
+    const updated = { ...baselineExperiment(), startup_reported_uploaded_bytes: 12288 };
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse(updated))));
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: queryKeys.experiments });
+    });
+    await waitFor(() => expect(reportedCard).toHaveTextContent('12 KiB'));
+  });
+
+  it('distinguishes a zero startup report from missing data and retains the last report on refresh failure', async () => {
+    const { queryClient } = renderDashboard([], runtimeStats(), 200, undefined, {
+      ...baselineExperiment(),
+      startup_reported_uploaded_bytes: 0,
+    });
+    const stats = screen.getByRole('region', { name: '运行时统计' });
+    await waitFor(() => expect(within(stats).getByText('本次启动上报上传').parentElement).toHaveTextContent('0 B'));
+
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse({ error: 'not found' }, 404))));
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: queryKeys.experiments });
+    });
+    await waitFor(() => expect(within(stats).getByText('刷新失败，显示上次有效快照')).toBeInTheDocument());
+    expect(within(stats).getByText('本次启动上报上传').parentElement).toHaveTextContent('0 B');
+
+    cleanup();
+    renderDashboard([]);
+    const legacyStats = screen.getByRole('region', { name: '运行时统计' });
+    await waitFor(() => expect(within(legacyStats).getByText('当前后端未提供启动累计上报统计')).toBeInTheDocument());
+    expect(within(legacyStats).getByText('本次启动上报上传').parentElement).toHaveTextContent('—');
+  });
+
   it('updates per-torrent transfer values after a successful poll without changing sort', async () => {
     const initial = [
       torrent({ id: 'older', name: 'Zulu', created_at: '2026-09-16T00:00:00Z', downloaded_bytes: 512, uploaded_bytes: 256 }),

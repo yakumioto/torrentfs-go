@@ -102,6 +102,14 @@ func (s *Session) PendingMetadataFetches() int {
 	return len(s.metadataFetches)
 }
 
+// WithDeleteFlushTimeoutForTest bounds the stopped announce a deletion sends
+// before dropping the torrent. Test-only.
+func WithDeleteFlushTimeoutForTest(timeout time.Duration) Option {
+	return func(options *sessionOptions) {
+		options.deleteFlushTimeout = timeout
+	}
+}
+
 // SetSubtitleCleanupHook installs fn as the forced-failure hook for the
 // subtitle cleanup stage of a deletion and returns a function that restores the
 // previous value. A nil hook clears it. Test-only.

@@ -20,6 +20,41 @@ func testReporter(runtime RuntimeSettings, seed int64) *Reporter {
 	return NewReporter(Settings{RuntimeSettings: runtime, Seed: seed}, nil)
 }
 
+// Exercise the public announce hook, not the schedule implementation: cumulative
+// uploaded values count once, even when another tracker receives the same value.
+func TestReporterStartupReportedUploadCountsOnlyPositiveAnnounceIncrements(t *testing.T) {
+	reporter := testReporter(RuntimeSettings{Mode: ModeBaseline}, 1)
+	if got := reporter.StartupReportedUploadedBytes(); got != 0 {
+		t.Fatalf("before announce = %d, want 0", got)
+	}
+	for _, step := range []struct {
+		hash     string
+		tracker  string
+		uploaded int64
+		want     int64
+	}{
+		{"first", "tracker-one.local", 120, 120},
+		{"first", "tracker-one.local", 120, 120},
+		{"first", "tracker-two.local", 120, 120},
+		{"first", "tracker-one.local", 180, 180},
+		{"first", "tracker-two.local", 180, 180},
+		{"first", "tracker-one.local", 90, 180},
+		{"first", "tracker-one.local", 110, 200},
+		{"second", "tracker-one.local", 50, 250},
+	} {
+		request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/announce?info_hash=%s&uploaded=%d", step.tracker, step.hash, step.uploaded), nil)
+		if err != nil {
+			t.Fatalf("build announce: %v", err)
+		}
+		if err := reporter.Director(request); err != nil {
+			t.Fatalf("Director: %v", err)
+		}
+		if got := reporter.StartupReportedUploadedBytes(); got != step.want {
+			t.Fatalf("after %s to %s with uploaded=%d: startup reported = %d, want %d", step.hash, step.tracker, step.uploaded, got, step.want)
+		}
+	}
+}
+
 func TestReporterInjectGrowsAndCaps(t *testing.T) {
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	reporter := testReporter(RuntimeSettings{

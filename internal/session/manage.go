@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -612,7 +613,7 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, opID string) {
 	if fetch := s.stopMetadataFetch(hash); fetch != nil {
 		<-fetch.done
 	}
-	err := s.performDelete(hash, st)
+	warnings, err := s.performDelete(hash, st)
 	if err != nil {
 		s.logger.Error("torrent deletion failed", "hash", hash.HexString(), "operation_id", opID, "err", err)
 	} else {
@@ -622,6 +623,9 @@ func (s *Session) runDelete(hash metainfo.Hash, st *Torrent, opID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op := s.operations[opID]
+	if op != nil && len(warnings) > 0 {
+		op.Warning = strings.Join(warnings, "; ")
+	}
 	if err != nil {
 		s.failDeleteLocked(hash, op, err)
 		return
@@ -663,14 +667,19 @@ func deleteErrorCode(err error) string {
 	return ""
 }
 
-// performDelete stops the task, releases its resources, and removes only files
-// owned by the registry hash. Every stage is attempted even when an earlier one
-// fails, so one unusable stage never hides the state of the others.
-func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
+// performDelete stops the task, reports a final stopped announce, releases its
+// resources, and removes only files owned by the registry hash. Every stage is
+// attempted even when an earlier one fails, so one unusable stage never hides
+// the state of the others. A stopped-announce failure is returned separately as
+// a warning: the tracker's bookkeeping must never fail a deletion.
+func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) (warnings []string, err error) {
 	var errs []error
 	if st != nil {
 		if err := st.close(); err != nil {
 			errs = append(errs, err)
+		}
+		if warning := s.flushStoppedAnnounce(hash, st); warning != "" {
+			warnings = append(warnings, warning)
 		}
 		st.tor.Drop()
 	}
@@ -683,7 +692,24 @@ func (s *Session) performDelete(hash metainfo.Hash, st *Torrent) error {
 	if err := s.removeManagedSubtitlesForDelete(hash); err != nil {
 		errs = append(errs, err)
 	}
-	return errors.Join(errs...)
+	return warnings, errors.Join(errs...)
+}
+
+// flushStoppedAnnounce sends the torrent's final cumulative upload to every
+// tracker it announced to. It runs while the torrent is still registered
+// because the library otherwise sends stopped only after Drop, by which point
+// the asynchronous dispatcher may have lost the torrent and its counters. The
+// flush is bounded so a slow tracker cannot hold the deletion operation open.
+func (s *Session) flushStoppedAnnounce(hash metainfo.Hash, st *Torrent) string {
+	ctx, cancel := context.WithTimeout(s.bgCtx, s.deleteFlushTimeout)
+	defer cancel()
+	if err := st.tor.AnnounceStopped(ctx); err != nil {
+		s.logger.Warn("stopped announce flush failed",
+			"hash", hash.HexString(),
+			"err", err)
+		return fmt.Sprintf("stopped announce: %v", err)
+	}
+	return ""
 }
 
 // resumeDeletions completes deletions interrupted by a crash, and retries a
