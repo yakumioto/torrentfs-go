@@ -1,7 +1,9 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -88,6 +90,64 @@ func TestDeleteFlushesStoppedAnnounce(t *testing.T) {
 	if got := countStoppedAnnounces(tracker, hashHex); got < 1 {
 		t.Fatalf("tracker saw %d stopped announces, want at least 1", got)
 	}
+}
+
+// Exercise actual peer payload, not just a zero-byte stopped event. The final
+// announce must include bytes transferred since the previous regular announce.
+func TestDeleteFlushesFinalRealUpload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tracker := newLoopbackTracker(t)
+	work := t.TempDir()
+	seeder := newDeleteFlushSession(t, filepath.Join(work, "seeder"))
+	leecher := newDeleteFlushSession(t, filepath.Join(work, "leecher"))
+	content := bytes.Repeat([]byte{0x5a}, 16<<10)
+	meta, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, [][]string{{tracker.url}})
+	hashHex := hash.HexString()
+	if _, err := seeder.AddTorrentAndPersist(ctx, session.Source{Metainfo: meta}); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(ctx, func() bool { return tracker.announceCount(hashHex) >= 1 }); err != nil {
+		t.Fatal(err)
+	}
+	seederID := tracker.announceSnapshot(hashHex)[0].PeerID
+	seedPieces(t, seeder, hash, content)
+	if err := leecher.AddTorrent(ctx, session.Source{Metainfo: meta}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := leecher.OpenFile(hash, "payload.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(content))
+	if _, err := io.ReadFull(io.NewSectionReader(reader, 0, int64(len(got))), got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("peer payload mismatch")
+	}
+	realUploaded := seeder.RuntimeStats().UploadedBytes
+	if realUploaded != int64(len(content)) {
+		t.Fatalf("real uploaded = %d, want %d", realUploaded, len(content))
+	}
+	op, err := seeder.DeleteTorrent(ctx, hashHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitOperation(t, seeder, op.ID)
+	if final.State != session.StateDeleted || final.Warning != "" {
+		t.Fatalf("delete = %+v", final)
+	}
+	for _, announce := range tracker.announceSnapshot(hashHex) {
+		if announce.Event == "stopped" && bytes.Equal(announce.PeerID, seederID) {
+			if announce.Uploaded != realUploaded {
+				t.Fatalf("stopped uploaded = %d, real uploaded = %d", announce.Uploaded, realUploaded)
+			}
+			t.Logf("real uploaded = %d; tracker stopped uploaded = %d", realUploaded, announce.Uploaded)
+			return
+		}
+	}
+	t.Fatal("tracker never received the seeder's final upload")
 }
 
 // A tracker that rejects the stopped announce must not turn a completed
