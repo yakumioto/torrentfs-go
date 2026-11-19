@@ -26,8 +26,10 @@ function unauthorizedResponse(): Response {
 function runtimeStatsResponse(): Response {
   return jsonResponse({
     started_at: '2026-09-23T09:00:00Z',
-    cache: { used_bytes: 1, capacity_bytes: 2 },
+    version: 'dev',
+    cache: { used_bytes: 1, capacity_bytes: 2, hits: 0, misses: 0, evictions: 0, evicted_bytes: 0, put_rejections: 0, pin_reservation_rejections: 0 },
     transfer: { downloaded_bytes: 3, uploaded_bytes: 4 },
+    prefetch: { buffered_bytes: 0, active_pieces: 0, active_bytes: 0 },
   });
 }
 

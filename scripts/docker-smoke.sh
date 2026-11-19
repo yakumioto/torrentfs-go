@@ -3,6 +3,12 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
+
+# The image reports the version baked in at build time. Fall back to "dev" the
+# same way a binary built without ldflags does.
+build_version() {
+	git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || printf 'dev\n'
+}
 readonly FIXTURE_DIR="$ROOT_DIR/examples/docker"
 readonly FIXTURE_TORRENT="$FIXTURE_DIR/example.torrent"
 readonly FIXTURE_PAYLOAD="$FIXTURE_DIR/data/payload.txt"
@@ -442,6 +448,7 @@ else
 	printf 'docker smoke: building %s\n' "$IMAGE"
 	IMAGE_TAGGED=1
 	if ! bounded "$DOCKER_BUILD_TIMEOUT" "docker build" docker build \
+		--build-arg "VERSION=$(build_version)" \
 		--tag "$IMAGE" "$ROOT_DIR"; then
 		fail "docker build failed"
 	fi

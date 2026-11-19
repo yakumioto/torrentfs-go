@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 func TestVersionFlagPrintsBuildVersionAndSkipsTheTorrentsDirectory(t *testing.T) {
@@ -51,5 +53,32 @@ func TestOutputReadinessRequiresConfiguredOutputs(t *testing.T) {
 	smb.setSMBListening(false)
 	if err := smb.check(); err == nil {
 		t.Fatal("stopped smb listener reported ready")
+	}
+}
+
+// TestReadinessRequirementsFollowEffectiveMounts pins the derivation to what
+// will actually be mounted, not to leftover configuration: a non-fuse backend
+// may keep a stale [fuse] mountpoint, and that must not keep /readyz unready.
+func TestReadinessRequirementsFollowEffectiveMounts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		backend    config.Backend
+		mountpoint string
+		strmMount  string
+		wantFuse   bool
+		wantSMB    bool
+	}{
+		{name: "fuse with mountpoint", backend: config.BackendFUSE, mountpoint: "/mnt/a", wantFuse: true},
+		{name: "fuse with strm mountpoint only", backend: config.BackendFUSE, strmMount: "/mnt/s", wantFuse: true},
+		{name: "smb backend with stale mountpoint", backend: config.BackendSMB, mountpoint: "/mnt/a", wantSMB: true},
+		{name: "none backend with stale mountpoint", backend: config.BackendNone, mountpoint: "/mnt/a"},
+		{name: "http only", backend: config.BackendNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fuse, smb := readinessRequirements(tc.backend, tc.mountpoint, tc.strmMount)
+			if fuse != tc.wantFuse || smb != tc.wantSMB {
+				t.Fatalf("requirements = (fuse=%v, smb=%v), want (%v, %v)", fuse, smb, tc.wantFuse, tc.wantSMB)
+			}
+		})
 	}
 }

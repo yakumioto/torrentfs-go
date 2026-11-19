@@ -56,6 +56,8 @@ trap 'rm -rf -- "$work_dir"' EXIT
 binary_path="$work_dir/torrentfs"
 # .git is absent inside the image build, so the version is resolved here and
 # injected; a plain checkout without tags still yields an unambiguous revision.
+# The nightly checkout is shallow (fetch-depth: 1), so tags are usually absent
+# and this degrades to the short commit sha by design.
 build_version="$(git describe --tags --always --dirty 2>/dev/null || printf 'dev')"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-mod=readonly \
   go build -trimpath -ldflags="-s -w -X main.version=${build_version}" -o "$binary_path" ./cmd/torrentfs
@@ -74,6 +76,7 @@ cp -- "$repo_root/LICENSE" "$work_dir/LICENSE"
   printf 'GOOS=linux\n'
   printf 'GOARCH=amd64\n'
   printf 'CGO_ENABLED=0\n'
+  printf 'VERSION=%s\n' "$build_version"
   printf 'GO_VERSION=%s\n' "$go_version"
   printf 'GITHUB_RUN_ID=%s\n' "$GITHUB_RUN_ID"
   printf 'RUN_URL=%s\n' "$GITHUB_RUN_URL"

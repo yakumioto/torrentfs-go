@@ -622,7 +622,10 @@ func (f *raFile) span(ctx context.Context, loader pieceSource, pieceSpan cache.P
 
 func (f *raFile) piece(ctx context.Context, loader pieceSource, index int) ([]byte, error) {
 	key := cache.Key{Torrent: f.torrentKey, Piece: index}
-	if value, ok := f.cache.Get(key); ok {
+	// Peek, not Get: the caller already counted this lookup as a miss, and a
+	// concurrent fill may have landed in between. Counting it again would
+	// double every cold miss in the cache counters exposed by /api/v1/stats.
+	if value, ok := f.cache.Peek(key); ok {
 		return value, nil
 	}
 

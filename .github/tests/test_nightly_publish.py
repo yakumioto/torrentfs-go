@@ -35,6 +35,35 @@ class NightlyPublishTest(unittest.TestCase):
             {platform.strip() for platform in publish["platforms"].split(",")},
             {"linux/amd64", "linux/arm64"},
         )
+        self.assertEqual(
+            publish.get("build-args", "").strip(),
+            "VERSION=${{ steps.metadata.outputs.tag }}",
+            "bake the published tag into the binary so --version matches the image",
+        )
+
+    def test_validation_images_assert_the_injected_version(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+        )
+        build_steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("uses", "").startswith("docker/build-push-action@")
+        ]
+        self.assertTrue(build_steps, "the workflow must build images")
+        for step in build_steps:
+            self.assertEqual(
+                step["with"].get("build-args", "").strip(),
+                "VERSION=${{ steps.metadata.outputs.tag }}",
+                "every image build must inject the version",
+            )
+        scripts = "\n".join(
+            step.get("run", "")
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertIn('"$IMAGE" --version', scripts, "assert the baked-in version")
 
 
 if __name__ == "__main__":

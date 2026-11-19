@@ -4,6 +4,12 @@ IFS=$'\n\t'
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
+
+# The image reports the version baked in at build time. Fall back to "dev" the
+# same way a binary built without ldflags does.
+build_version() {
+	git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || printf 'dev\n'
+}
 readonly IMAGE="${TF_SMOKE_IMAGE:-torrentfs-smb-smoke:${BASHPID}}"
 readonly CLIENT_IMAGE="${TF_SMOKE_CLIENT_IMAGE:-torrentfs-smb-client:${BASHPID}}"
 readonly NETWORK="torrentfs-smb-network-${BASHPID}"
@@ -407,7 +413,7 @@ if [[ -n "${TF_SMOKE_IMAGE:-}" ]]; then
 	probe 'inspect prebuilt application image' docker image inspect "$IMAGE" >/dev/null
 else
 	printf 'docker SMB smoke: building native application image for %s:%s\n' "$SMOKE_UID" "$SMOKE_GID"
-	bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --tag "$IMAGE" "$ROOT_DIR"
+	bounded "$DOCKER_BUILD_TIMEOUT" 'build application image' docker build --build-arg "VERSION=$(build_version)" --tag "$IMAGE" "$ROOT_DIR"
 	image_built=1
 fi
 if [[ -n "${TF_SMOKE_CLIENT_IMAGE:-}" ]]; then

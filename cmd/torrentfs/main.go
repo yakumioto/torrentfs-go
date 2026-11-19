@@ -276,8 +276,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	outputs := &outputReadiness{}
-	outputs.fuseRequired.Store(cfg.FUSE.Mountpoint != "")
-	outputs.smbRequired.Store(cfg.Backend == config.BackendSMB)
+	fuseRequired, smbRequired := readinessRequirements(cfg.Backend, mountpoint, strmMountpoint)
+	outputs.fuseRequired.Store(fuseRequired)
+	outputs.smbRequired.Store(smbRequired)
 	var apiServer *api.Server
 	if httpEnabled {
 		apiServer, err = api.New(cfg, sess,
@@ -413,10 +414,18 @@ type sessionCloser interface {
 	Close(context.Context) error
 }
 
-// mountUnmounter is the narrow FUSE surface the shutdown sequence unmounts.
+// readinessRequirements reports which output backends this process is expected
+// to serve. It follows the effective intent (the mountpoints actually handed to
+// the mounter), not raw configuration: a non-fuse backend may keep a leftover
+// mountpoint in the file, and that must not keep /readyz unready forever.
+func readinessRequirements(backend config.Backend, mountpoint, strmMountpoint string) (fuse, smb bool) {
+	return backend == config.BackendFUSE && (mountpoint != "" || strmMountpoint != ""), backend == config.BackendSMB
+}
+
 // outputReadiness tracks whether the configured output backends can serve.
 // Only hard failures count: a mount that never happened or an SMB listener that
-// stopped are different from a durability warning the user can ignore.
+// stopped are different from a durability warning the user can ignore. Both
+// flags are startup state; check does not re-probe a mount after it was made.
 type outputReadiness struct {
 	fuseMounts   atomic.Int64
 	fuseRequired atomic.Bool
@@ -437,6 +446,7 @@ func (o *outputReadiness) check() error {
 	return nil
 }
 
+// mountUnmounter is the narrow FUSE surface the shutdown sequence unmounts.
 type mountUnmounter interface {
 	Unmount() error
 }

@@ -144,6 +144,8 @@ jobs:
       - name: Build Linux amd64 validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.tag }}
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
@@ -173,6 +175,7 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EXPECTED_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
           docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
+          test "$(docker run --rm --platform "$PLATFORM" "$IMAGE" --version)" = "torrentfs $EXPECTED_TAG"
 
           # Reuse the same non-root, zero-capability configuration gate for
           # both architectures; it does not rebuild or remove the supplied image.
@@ -181,6 +184,8 @@ jobs:
       - name: Build Linux arm64 validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.tag }}
           context: .
           file: ./Dockerfile
           platforms: linux/arm64
@@ -210,6 +215,7 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EXPECTED_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$EXPECTED_TAG"
           docker run --rm --platform "$PLATFORM" "$IMAGE" -h >/dev/null
+          test "$(docker run --rm --platform "$PLATFORM" "$IMAGE" --version)" = "torrentfs $EXPECTED_TAG"
 
           # Reuse the same non-root, zero-capability configuration gate for
           # both architectures; it does not rebuild or remove the supplied image.
@@ -234,6 +240,8 @@ jobs:
       - name: Build and push nightly multi-platform image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.tag }}
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64

@@ -1095,8 +1095,10 @@ describe('ConfigPage unsaved changes', () => {
       if (url === '/api/v1/stats') {
         return Promise.resolve(jsonResponse({
           started_at: '2026-01-01T00:00:00Z',
-          cache: { used_bytes: 0, capacity_bytes: 0 },
+          version: 'dev',
+          cache: { used_bytes: 0, capacity_bytes: 0, hits: 0, misses: 0, evictions: 0, evicted_bytes: 0, put_rejections: 0, pin_reservation_rejections: 0 },
           transfer: { downloaded_bytes: 0, uploaded_bytes: 0 },
+          prefetch: { buffered_bytes: 0, active_pieces: 0, active_bytes: 0 },
         }));
       }
       throw new Error(`Unexpected request: ${url}`);

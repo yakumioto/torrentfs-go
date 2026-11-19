@@ -125,3 +125,32 @@ func TestStatsExposeCachePrefetchAndVersion(t *testing.T) {
 		t.Fatalf("prefetch = %+v", body.Prefetch)
 	}
 }
+
+// TestHealthChecksStayReachableWithoutCredentials pins the deliberate bypass:
+// an orchestrator has no token, so the checks answer before the auth middleware
+// while the management API keeps rejecting anonymous callers.
+func TestHealthChecksStayReachableWithoutCredentials(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, dynamicAuth)
+	for _, path := range []string{"/healthz", "/readyz"} {
+		rec := do(t, srv, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s without a token = %d, want 200", path, rec.Code)
+		}
+	}
+	if rec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous stats = %d, want 401", rec.Code)
+	}
+}
+
+func TestHealthChecksRejectOtherMethods(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, nil)
+	for _, path := range []string{"/healthz", "/readyz"} {
+		rec := do(t, srv, httptest.NewRequest(http.MethodPost, path, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s = %d, want 405", path, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+			t.Fatalf("POST %s Allow = %q, want GET, HEAD", path, got)
+		}
+	}
+}

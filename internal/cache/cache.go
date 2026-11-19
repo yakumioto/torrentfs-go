@@ -126,6 +126,21 @@ func (c *Cache) Has(key Key) bool {
 	return ok
 }
 
+// Peek returns a copy of the cached value without counting a hit or changing
+// LRU order. It exists for callers that already counted the lookup, typically a
+// re-check after a concurrent fill.
+func (c *Cache) Peek(key Key) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	elem, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	value := elem.Value.(*entry).value
+	return append([]byte(nil), value...), true
+}
+
 // Get returns a copy of the cached value and promotes it to most recently used.
 func (c *Cache) Get(key Key) ([]byte, bool) {
 	c.mu.Lock()

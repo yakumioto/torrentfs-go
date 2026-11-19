@@ -61,13 +61,24 @@ type prefetchTotals struct {
 // torrent without a coordinator (metadata still pending) contributes nothing.
 func (s *Session) prefetchTotals() prefetchTotals {
 	s.mu.RLock()
-	coordinators := make([]*prefetchCoordinator, 0, len(s.torrents))
+	torrents := make([]*Torrent, 0, len(s.torrents))
 	for _, t := range s.torrents {
-		if t.coordinator != nil {
-			coordinators = append(coordinators, t.coordinator)
-		}
+		torrents = append(torrents, t)
 	}
 	s.mu.RUnlock()
+
+	// The session lock only guards the registry. Each coordinator pointer is
+	// owned by its torrent and written under that torrent's lock, so it is read
+	// per torrent instead of nesting a registry lock around every entry.
+	coordinators := make([]*prefetchCoordinator, 0, len(torrents))
+	for _, t := range torrents {
+		t.mu.Lock()
+		coordinator := t.coordinator
+		t.mu.Unlock()
+		if coordinator != nil {
+			coordinators = append(coordinators, coordinator)
+		}
+	}
 
 	var totals prefetchTotals
 	for _, coordinator := range coordinators {

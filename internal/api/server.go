@@ -164,15 +164,16 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
-	health := http.NewServeMux()
-	health.HandleFunc("GET /healthz", s.handleHealthz)
-	health.HandleFunc("GET /readyz", s.handleReadyz)
-	s.handler = dispatchAPIAndStatic(health, s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
+	s.handler = s.dispatchRoutes(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// ReadTimeout bounds the whole request including the body. A slow client
+		// uploading at the 10 MiB cap can legitimately take minutes, so only the
+		// header is bounded here and request bodies are capped by MaxBytesReader.
+		// WriteTimeout stays unset on purpose: it would cut off long /stream
+		// responses that are still making progress.
+		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil
 }
@@ -245,13 +246,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdownErr
 }
 
-// dispatchAPIAndStatic routes the probe endpoints before any fallback, so a
-// liveness or readiness probe can never be answered by the single-page app.
-func dispatchAPIAndStatic(healthHandler, apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
+// dispatchRoutes routes the health checks before any fallback, so a liveness or
+// readiness check can never be answered by the single-page app. They bypass the
+// auth middleware on purpose: an orchestrator has no credentials, which matches
+// the signed-URL precedent already used by /stream.
+func (s *Server) dispatchRoutes(apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz":
-			healthHandler.ServeHTTP(w, r)
+		case "/healthz":
+			s.serveHealth(w, r, s.handleHealthz)
+			return
+		case "/readyz":
+			s.serveHealth(w, r, s.handleReadyz)
 			return
 		}
 		if r.URL.Path == "/stream" || strings.HasPrefix(r.URL.Path, "/stream/") {
@@ -264,6 +270,17 @@ func dispatchAPIAndStatic(healthHandler, apiHandler, streamHandler, staticHandle
 		}
 		staticHandler.ServeHTTP(w, r)
 	})
+}
+
+// serveHealth answers a health check with GET or HEAD only, so a POST gets the
+// same 405 the API routes would return instead of a silent 200.
+func (s *Server) serveHealth(w http.ResponseWriter, r *http.Request, handler http.HandlerFunc) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	handler(w, r)
 }
 
 func (s *Server) authenticate(next http.Handler) http.Handler {

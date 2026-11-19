@@ -13,6 +13,8 @@ import (
 // isClientRoute reports whether the single-page app owns the path. Anything
 // else is a real 404: serving index.html for every unknown path made probes
 // such as /healthz or /metrics look healthy before those endpoints existed.
+// Keep this list in sync with the routes in web/src/app/App.tsx: a new
+// top-level route that is missing here turns its deep link into a 404.
 func isClientRoute(requestPath string) bool {
 	switch requestPath {
 	case "", "index.html", "login", "config":

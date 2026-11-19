@@ -407,28 +407,32 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newRuntimeStatsResponse(s.backend.RuntimeStats(), s.version))
 }
 
+// healthResponse is the body of /healthz and /readyz. Reason is only set on a
+// not-ready answer.
+type healthResponse struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // handleHealthz proves only that the process and its HTTP stack are alive. It
-// deliberately touches no subsystem: a probe failure here means restart, not
+// deliberately touches no subsystem: a failed liveness check means restart, not
 // re-check.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
 // handleReadyz reports whether the process can serve reads. Soft state such as
 // an unconfirmed durability status stays out of the decision.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if s.readiness == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		writeJSON(w, http.StatusOK, healthResponse{Status: "ready"})
 		return
 	}
 	if err := s.readiness(); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"status": "not_ready",
-			"reason": err.Error(),
-		})
+		writeJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "not_ready", Reason: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ready"})
 }
 
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {

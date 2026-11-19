@@ -53,12 +53,19 @@ func TestCachedPieceReadHitsCacheOnce(t *testing.T) {
 		want[i] = byte(int64(i) % 251)
 	}
 
+	cold := store.Stats()
+
 	first := make([]byte, pieceLength)
 	if _, err := file.ReadAtContext(context.Background(), first, 0); err != nil {
 		t.Fatalf("priming read: %v", err)
 	}
 	if got := source.fetched(); got != 1 {
 		t.Fatalf("priming read fetched %d pieces, want 1", got)
+	}
+	// A cold read counts exactly one miss: the piece() re-check after the fetch
+	// must not look like a second lookup in the exposed counters.
+	if got := store.Stats().Misses - cold.Misses; got != 1 {
+		t.Fatalf("cold span produced %d cache misses, want 1", got)
 	}
 
 	before := store.Stats()
