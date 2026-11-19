@@ -8,6 +8,7 @@ COPY web ./web
 RUN npm run build --prefix web
 
 FROM golang:1.27 AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY third_party/go-smb ./third_party/go-smb
@@ -16,7 +17,7 @@ COPY . .
 COPY --from=web-build /src/web/dist ./web/dist
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/torrentfs ./cmd/torrentfs
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/torrentfs ./cmd/torrentfs
 
 FROM debian:bookworm-slim
 RUN set -eux; \

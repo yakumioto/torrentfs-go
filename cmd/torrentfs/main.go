@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ and serves a torrent management HTTP API.
 
 Usage:
   torrentfs [-config <file>] <torrents-dir>
+  torrentfs --version
   torrentfs config check [--config <file>]
   torrentfs config print [--config <file>] [--format toml|json] [--sources]
 
@@ -87,6 +89,10 @@ misspelled name is reported instead of ignored. Send SIGINT or SIGTERM for
 bounded shutdown.
 `
 
+// version is injected at build time with
+// -ldflags "-X main.version=$(git describe --tags --always --dirty)".
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -108,13 +114,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.Usage = func() { _, _ = io.WriteString(stderr, usageText) }
 
 	var (
-		configPath = flags.String("config", "", "TOML configuration file")
+		configPath  = flags.String("config", "", "TOML configuration file")
+		showVersion = flags.Bool("version", false, "print the build version and exit")
 	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintf(stdout, "torrentfs %s\n", version)
+		return 0
 	}
 	if len(flags.Args()) != 1 {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: exactly one existing torrents directory is required (got %d positional arguments)\n", len(flags.Args()))
@@ -200,7 +211,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logFormat = "text"
 	}
 	logger.Info("torrentfs starting",
-		"version", "dev",
+		"version", version,
 		"torrents_dir", torrentsDir,
 		"cache_capacity_bytes", cfg.Cache.CapacityBytes,
 		"backend", cfg.Backend,
@@ -264,12 +275,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		sequence.run()
 		return 1
 	}
+	outputs := &outputReadiness{}
+	outputs.fuseRequired.Store(cfg.FUSE.Mountpoint != "")
+	outputs.smbRequired.Store(cfg.Backend == config.BackendSMB)
 	var apiServer *api.Server
 	if httpEnabled {
 		apiServer, err = api.New(cfg, sess,
 			api.WithLogger(logger),
 			api.WithConfigViewer(configController),
 			api.WithConfigSaver(configController),
+			api.WithVersion(version),
+			api.WithReadiness(outputs.check),
 		)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "torrentfs: initialize HTTP API: %v\n", err)
@@ -310,6 +326,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		sequence.run()
 		return 1
 	}
+	outputs.setFuseMounts(len(sequence.mounts))
 
 	serveErr := make(chan error, 2)
 	if cfg.Backend == config.BackendSMB {
@@ -331,8 +348,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		sequence.smb = native
+		outputs.setSMBListening(true)
 		go func() {
-			serveErr <- unexpectedServeResult("smb", native.Serve(listener))
+			err := unexpectedServeResult("smb", native.Serve(listener))
+			outputs.setSMBListening(false)
+			serveErr <- err
 		}()
 	}
 	if apiServer != nil {
@@ -394,6 +414,29 @@ type sessionCloser interface {
 }
 
 // mountUnmounter is the narrow FUSE surface the shutdown sequence unmounts.
+// outputReadiness tracks whether the configured output backends can serve.
+// Only hard failures count: a mount that never happened or an SMB listener that
+// stopped are different from a durability warning the user can ignore.
+type outputReadiness struct {
+	fuseMounts   atomic.Int64
+	fuseRequired atomic.Bool
+	smbUp        atomic.Bool
+	smbRequired  atomic.Bool
+}
+
+func (o *outputReadiness) setFuseMounts(n int)     { o.fuseMounts.Store(int64(n)) }
+func (o *outputReadiness) setSMBListening(up bool) { o.smbUp.Store(up) }
+
+func (o *outputReadiness) check() error {
+	if o.fuseRequired.Load() && o.fuseMounts.Load() <= 0 {
+		return errors.New("fuse mountpoint is not mounted")
+	}
+	if o.smbRequired.Load() && !o.smbUp.Load() {
+		return errors.New("smb listener is not serving")
+	}
+	return nil
+}
+
 type mountUnmounter interface {
 	Unmount() error
 }

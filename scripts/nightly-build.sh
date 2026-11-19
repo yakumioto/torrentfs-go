@@ -54,8 +54,11 @@ trap 'rm -rf -- "$work_dir"' EXIT
 ./scripts/build-web.sh
 
 binary_path="$work_dir/torrentfs"
+# .git is absent inside the image build, so the version is resolved here and
+# injected; a plain checkout without tags still yields an unambiguous revision.
+build_version="$(git describe --tags --always --dirty 2>/dev/null || printf 'dev')"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-mod=readonly \
-  go build -trimpath -ldflags="-s -w" -o "$binary_path" ./cmd/torrentfs
+  go build -trimpath -ldflags="-s -w -X main.version=${build_version}" -o "$binary_path" ./cmd/torrentfs
 
 go_version="$(go version)"
 if [[ -z "$go_version" || "$go_version" == *$'\n'* || "$go_version" == *$'\r'* ]]; then

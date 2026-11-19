@@ -81,13 +81,29 @@ func newOperationResponse(op session.Operation) operationResponse {
 
 type runtimeStatsResponse struct {
 	StartedAt time.Time               `json:"started_at"`
+	Version   string                  `json:"version"`
 	Cache     runtimeCacheResponse    `json:"cache"`
 	Transfer  runtimeTransferResponse `json:"transfer"`
+	Prefetch  runtimePrefetchResponse `json:"prefetch"`
 }
 
 type runtimeCacheResponse struct {
-	UsedBytes     int64 `json:"used_bytes"`
-	CapacityBytes int64 `json:"capacity_bytes"`
+	UsedBytes                int64  `json:"used_bytes"`
+	CapacityBytes            int64  `json:"capacity_bytes"`
+	Hits                     uint64 `json:"hits"`
+	Misses                   uint64 `json:"misses"`
+	Evictions                uint64 `json:"evictions"`
+	EvictedBytes             int64  `json:"evicted_bytes"`
+	PutRejections            uint64 `json:"put_rejections"`
+	PinReservationRejections uint64 `json:"pin_reservation_rejections"`
+}
+
+// runtimePrefetchResponse reports session-wide prefetch gauges. Per-piece
+// indexes stay in the torrent status payload, where callers can scope them.
+type runtimePrefetchResponse struct {
+	BufferedBytes int64 `json:"buffered_bytes"`
+	ActivePieces  int   `json:"active_pieces"`
+	ActiveBytes   int64 `json:"active_bytes"`
 }
 
 type runtimeTransferResponse struct {
@@ -162,16 +178,28 @@ func newTorrentResponse(view session.TorrentView) torrentResponse {
 	}
 }
 
-func newRuntimeStatsResponse(view session.RuntimeStatsView) runtimeStatsResponse {
+func newRuntimeStatsResponse(view session.RuntimeStatsView, version string) runtimeStatsResponse {
 	return runtimeStatsResponse{
 		StartedAt: view.StartedAt,
+		Version:   version,
 		Cache: runtimeCacheResponse{
-			UsedBytes:     view.CacheUsedBytes,
-			CapacityBytes: view.CacheCapacityBytes,
+			UsedBytes:                view.CacheUsedBytes,
+			CapacityBytes:            view.CacheCapacityBytes,
+			Hits:                     view.CacheHits,
+			Misses:                   view.CacheMisses,
+			Evictions:                view.CacheEvictions,
+			EvictedBytes:             view.CacheEvictedBytes,
+			PutRejections:            view.CachePutRejections,
+			PinReservationRejections: view.CachePinReservationRejections,
 		},
 		Transfer: runtimeTransferResponse{
 			DownloadedBytes: view.DownloadedBytes,
 			UploadedBytes:   view.UploadedBytes,
+		},
+		Prefetch: runtimePrefetchResponse{
+			BufferedBytes: view.PrefetchBufferedBytes,
+			ActivePieces:  view.PrefetchActivePieces,
+			ActiveBytes:   view.PrefetchActiveBytes,
 		},
 	}
 }
@@ -376,7 +404,31 @@ func (s *Server) handleSetTorrentCategory(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, newRuntimeStatsResponse(s.backend.RuntimeStats()))
+	writeJSON(w, http.StatusOK, newRuntimeStatsResponse(s.backend.RuntimeStats(), s.version))
+}
+
+// handleHealthz proves only that the process and its HTTP stack are alive. It
+// deliberately touches no subsystem: a probe failure here means restart, not
+// re-check.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReadyz reports whether the process can serve reads. Soft state such as
+// an unconfirmed durability status stays out of the decision.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.readiness == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		return
+	}
+	if err := s.readiness(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {

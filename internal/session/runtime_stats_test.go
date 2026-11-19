@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+
+	"github.com/yakumioto/torrentfs-go/internal/cache"
 )
 
 func TestRuntimeStatsViewUsesUsefulDownloadAndDataUploadCounters(t *testing.T) {
@@ -16,7 +18,8 @@ func TestRuntimeStatsViewUsesUsefulDownloadAndDataUploadCounters(t *testing.T) {
 	connStats.BytesWritten.Add(400)
 	connStats.BytesWrittenData.Add(500)
 
-	got := runtimeStatsView(startedAt, 600, 700, connStats)
+	counters := cache.Stats{Hits: 11, Misses: 2, Evictions: 3, EvictedBytes: 40, PutRejections: 4, PinReservationRejections: 5}
+	got := runtimeStatsView(startedAt, 600, 700, connStats, counters)
 	if !got.StartedAt.Equal(startedAt) {
 		t.Fatalf("StartedAt = %v, want %v", got.StartedAt, startedAt)
 	}
@@ -28,5 +31,9 @@ func TestRuntimeStatsViewUsesUsefulDownloadAndDataUploadCounters(t *testing.T) {
 	}
 	if got.UploadedBytes != 500 {
 		t.Fatalf("UploadedBytes = %d, want data 500", got.UploadedBytes)
+	}
+	if got.CacheHits != 11 || got.CacheMisses != 2 || got.CacheEvictions != 3 ||
+		got.CacheEvictedBytes != 40 || got.CachePutRejections != 4 || got.CachePinReservationRejections != 5 {
+		t.Fatalf("cache counters = %+v, want the cache snapshot", got)
 	}
 }

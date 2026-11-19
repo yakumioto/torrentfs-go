@@ -54,6 +54,21 @@ type serverOptions struct {
 	logger       *slog.Logger
 	configViewer ConfigViewer
 	configSaver  ConfigSaver
+	readiness    func() error
+	version      string
+}
+
+// WithReadiness supplies the output-backend readiness probe behind /readyz.
+// A nil probe means the HTTP surface is the only output and is ready as soon as
+// it can answer, which suits tests and HTTP-only deployments.
+func WithReadiness(probe func() error) Option {
+	return func(options *serverOptions) { options.readiness = probe }
+}
+
+// WithVersion sets the build version echoed by /api/v1/stats and the startup
+// log. It defaults to "dev" for builds that do not inject one.
+func WithVersion(version string) Option {
+	return func(options *serverOptions) { options.version = version }
 }
 
 // WithLogger routes API lifecycle and authentication logs to l.
@@ -66,6 +81,8 @@ func WithLogger(l *slog.Logger) Option {
 type Server struct {
 	backend      Backend
 	auth         *auth.Service
+	readiness    func() error
+	version      string
 	maxUpload    atomic.Int64
 	logger       *slog.Logger
 	configViewer ConfigViewer
@@ -95,11 +112,17 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = logging.Discard()
 	}
+	version := options.version
+	if version == "" {
+		version = "dev"
+	}
 	s := &Server{
 		backend:       backend,
 		logger:        logger,
 		configViewer:  options.configViewer,
 		configSaver:   options.configSaver,
+		readiness:     options.readiness,
+		version:       version,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
@@ -141,10 +164,15 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
-	s.handler = dispatchAPIAndStatic(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
+	health := http.NewServeMux()
+	health.HandleFunc("GET /healthz", s.handleHealthz)
+	health.HandleFunc("GET /readyz", s.handleReadyz)
+	s.handler = dispatchAPIAndStatic(health, s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return s, nil
 }
@@ -217,8 +245,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdownErr
 }
 
-func dispatchAPIAndStatic(apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
+// dispatchAPIAndStatic routes the probe endpoints before any fallback, so a
+// liveness or readiness probe can never be answered by the single-page app.
+func dispatchAPIAndStatic(healthHandler, apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz", "/readyz":
+			healthHandler.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == "/stream" || strings.HasPrefix(r.URL.Path, "/stream/") {
 			streamHandler.ServeHTTP(w, r)
 			return
