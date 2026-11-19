@@ -168,11 +168,12 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	s.http = &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		// ReadTimeout bounds the whole request including the body. A slow client
-		// uploading at the 10 MiB cap can legitimately take minutes, so only the
-		// header is bounded here and request bodies are capped by MaxBytesReader.
-		// WriteTimeout stays unset on purpose: it would cut off long /stream
-		// responses that are still making progress.
+		// ReadTimeout bounds the whole request including the body, so it has to
+		// cover the largest upload: 10 MiB over a 0.3 Mbit/s link still fits in
+		// five minutes, while a slow-drip client cannot hold a connection open
+		// indefinitely. WriteTimeout stays unset on purpose: it would cut off
+		// long /stream responses that are still making progress.
+		ReadTimeout: 5 * time.Minute,
 		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil

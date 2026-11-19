@@ -328,6 +328,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	outputs.setFuseMounts(len(sequence.mounts))
+	outputs.watchMounts(sequence.mounts)
 
 	serveErr := make(chan error, 2)
 	if cfg.Backend == config.BackendSMB {
@@ -428,6 +429,7 @@ func readinessRequirements(backend config.Backend, mountpoint, strmMountpoint st
 // flags are startup state; check does not re-probe a mount after it was made.
 type outputReadiness struct {
 	fuseMounts   atomic.Int64
+	fuseLost     atomic.Bool
 	fuseRequired atomic.Bool
 	smbUp        atomic.Bool
 	smbRequired  atomic.Bool
@@ -436,8 +438,25 @@ type outputReadiness struct {
 func (o *outputReadiness) setFuseMounts(n int)     { o.fuseMounts.Store(int64(n)) }
 func (o *outputReadiness) setSMBListening(up bool) { o.smbUp.Store(up) }
 
+// watchMounts flips readiness to not-ready when a mount ends. Shutdown stops
+// HTTP before unmounting, so a Wait returning during a normal stop happens
+// after the last readiness check; a mount that dies while serving keeps the
+// process alive but unready, which is what the probe is for.
+func (o *outputReadiness) watchMounts(mounts []mountedFilesystem) {
+	for _, mounted := range mounts {
+		waiter, ok := mounted.server.(interface{ Wait() })
+		if !ok {
+			continue
+		}
+		go func() {
+			waiter.Wait()
+			o.fuseLost.Store(true)
+		}()
+	}
+}
+
 func (o *outputReadiness) check() error {
-	if o.fuseRequired.Load() && o.fuseMounts.Load() <= 0 {
+	if o.fuseRequired.Load() && (o.fuseLost.Load() || o.fuseMounts.Load() <= 0) {
 		return errors.New("fuse mountpoint is not mounted")
 	}
 	if o.smbRequired.Load() && !o.smbUp.Load() {

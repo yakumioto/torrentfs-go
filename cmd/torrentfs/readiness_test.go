@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/config"
 )
@@ -81,4 +82,41 @@ func TestReadinessRequirementsFollowEffectiveMounts(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeMount struct {
+	stopped chan struct{}
+}
+
+func (m *fakeMount) Unmount() error { return nil }
+
+func (m *fakeMount) Wait() { <-m.stopped }
+
+// TestReadinessDropsWhenAMountDies covers the only case a probe can observe:
+// the mount succeeded at startup and disappeared later. A mount that fails to
+// start aborts the process instead of serving unready.
+func TestReadinessDropsWhenAMountDies(t *testing.T) {
+	outputs := &outputReadiness{}
+	outputs.fuseRequired.Store(true)
+	mount := &fakeMount{stopped: make(chan struct{})}
+	outputs.setFuseMounts(1)
+	outputs.watchMounts([]mountedFilesystem{{mountpoint: "/mnt/a", server: mount}})
+	if err := outputs.check(); err != nil {
+		t.Fatalf("live mount reported %v", err)
+	}
+
+	close(mount.stopped)
+	waitFor(t, func() bool { return outputs.check() != nil })
+}
+
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition never became true")
 }
