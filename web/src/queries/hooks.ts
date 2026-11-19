@@ -202,6 +202,18 @@ export function useUploadSubtitle(api: ApiClient) {
   });
 }
 
+export function useDeleteSubtitle(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, path, signal }: { id: string; path: string; signal?: AbortSignal }) =>
+      api.deleteSubtitle(id, path, signal),
+    onSuccess: (_result: void, variables) => {
+      // The subtitle list lives only in this torrent's status snapshot.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrentStatus(variables.id) });
+    },
+  });
+}
+
 export function useAddTorrent(api: ApiClient) {
   const queryClient = useQueryClient();
   return useMutation({

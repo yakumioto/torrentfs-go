@@ -50,6 +50,11 @@ type fakeBackend struct {
 	subtitleErr            error
 	subtitleUploadResponse session.SubtitleUploadResponse
 
+	deleteSubtitleID    string
+	deleteSubtitlePath  string
+	deleteSubtitleErr   error
+	deleteSubtitleCalls int
+
 	setFavoriteID    string
 	setFavoriteValue bool
 	setFavoriteView  session.TorrentView
@@ -142,6 +147,15 @@ func (f *fakeBackend) UploadSubtitle(_ context.Context, id, videoPath, fileName 
 		return session.SubtitleUploadResponse{}, err
 	}
 	return f.subtitleUploadResponse, nil
+}
+
+func (f *fakeBackend) DeleteSubtitle(_ context.Context, id, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteSubtitleID = id
+	f.deleteSubtitlePath = path
+	f.deleteSubtitleCalls++
+	return f.deleteSubtitleErr
 }
 
 func (f *fakeBackend) SetFavorite(_ context.Context, id string, favorite bool) (session.TorrentView, error) {

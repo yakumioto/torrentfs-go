@@ -122,6 +122,19 @@ func (s *Server) handleUploadSubtitle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleDeleteSubtitle(w http.ResponseWriter, r *http.Request) {
+	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if err := s.backend.DeleteSubtitle(r.Context(), r.PathValue("id"), relPath); err != nil {
+		writeSubtitleError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // writeSubtitleError maps a subtitle failure onto a status and a stable code.
 // The code is what the web client branches on; the message stays human text.
 func writeSubtitleError(w http.ResponseWriter, err error) {
@@ -130,11 +143,14 @@ func writeSubtitleError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, session.ErrDeleting) || code == session.SubtitleCodeTorrentDeleting:
 		status = http.StatusConflict
+		if code == "" {
+			code = session.SubtitleCodeTorrentDeleting
+		}
 	case errors.Is(err, session.ErrUnknownTorrent):
 		status = http.StatusNotFound
 	case errors.Is(err, session.ErrSubtitleNameMismatch), errors.Is(err, session.ErrSubtitleFormatUnsupported):
 		status = http.StatusUnsupportedMediaType
-	case errors.Is(err, session.ErrSubtitleVideoNotFound):
+	case errors.Is(err, session.ErrSubtitleVideoNotFound), errors.Is(err, session.ErrSubtitleNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, session.ErrSubtitleNameConflict), errors.Is(err, session.ErrSubtitlePayloadConflict):
 		status = http.StatusConflict
@@ -142,8 +158,14 @@ func writeSubtitleError(w http.ResponseWriter, err error) {
 		status = http.StatusRequestEntityTooLarge
 	case errors.Is(err, session.ErrSubtitleStorageFull):
 		status = http.StatusInsufficientStorage
+		if code == "" {
+			code = session.SubtitleCodeStorageFull
+		}
 	case errors.Is(err, session.ErrSubtitleStorageUnavailable):
 		status = http.StatusServiceUnavailable
+		if code == "" {
+			code = session.SubtitleCodeStorageUnavailable
+		}
 	case errors.Is(err, session.ErrSubtitleWriteFailed):
 		status = http.StatusInternalServerError
 	}

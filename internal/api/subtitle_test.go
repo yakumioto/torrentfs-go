@@ -594,3 +594,138 @@ func TestUploadSubtitleEndToEndCarriesCodes(t *testing.T) {
 		t.Fatalf("subtitle store survived the delete: %v", err)
 	}
 }
+
+func postTestTorrent(t *testing.T, srv *api.Server, data []byte) string {
+	t.Helper()
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("file", "payload.torrent")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatalf("write torrent part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := do(t, srv, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add status = %d, want 201; body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode add body: %v", err)
+	}
+	return body.ID
+}
+
+func deleteSubtitleRequest(id, path string) *http.Request {
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+id+"/subtitles", nil)
+	if path != "" {
+		req.URL.RawQuery = "path=" + path
+	}
+	return req
+}
+
+// TestDeleteSubtitleEndToEnd drives the real session so the status codes and
+// the stable code on the wire are the ones the web client branches on.
+func TestDeleteSubtitleEndToEnd(t *testing.T) {
+	torrentsDir := filepath.Join(t.TempDir(), "torrents")
+	if err := os.MkdirAll(torrentsDir, 0o755); err != nil {
+		t.Fatalf("make torrents dir: %v", err)
+	}
+	cfg := config.Default()
+	sess, err := session.New(cfg, torrentsDir)
+	if err != nil {
+		t.Fatalf("session.New: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	srv, err := api.New(cfg, sess)
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+
+	id := postTestTorrent(t, srv, buildTestTorrent(t, "Movie.mkv", []byte("video")))
+	for _, name := range []string{"Movie.srt", "Movie.vtt"} {
+		if rec := do(t, srv, subtitleRequest(t, id, "Movie.mkv", name, "text\n")); rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s status = %d; body %s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	if rec := do(t, srv, deleteSubtitleRequest(id, "Movie.srt")); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204; body %s", rec.Code, rec.Body.String())
+	}
+	statusRec := do(t, srv, httptest.NewRequest(http.MethodGet, "/api/v1/torrents/"+id+"/status", nil))
+	var status struct {
+		Subtitles []struct {
+			Path string `json:"path"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(status.Subtitles) != 1 || status.Subtitles[0].Path != "Movie.vtt" {
+		t.Fatalf("subtitles after delete = %+v, want only Movie.vtt", status.Subtitles)
+	}
+
+	rec := do(t, srv, deleteSubtitleRequest(id, "Movie.srt"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete status = %d, want 404; body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode 404 body: %v", err)
+	}
+	if body["code"] != session.SubtitleCodeNotFound {
+		t.Fatalf("404 body = %v, want code %s", body, session.SubtitleCodeNotFound)
+	}
+
+	if rec := do(t, srv, deleteSubtitleRequest(id, "")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete without path status = %d, want 400; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSubtitleMapsSessionFailures(t *testing.T) {
+	id := strings.Repeat("a", 40)
+	tests := []struct {
+		name     string
+		err      error
+		want     int
+		wantCode string
+	}{
+		{"deleting", session.ErrDeleting, http.StatusConflict, session.SubtitleCodeTorrentDeleting},
+		{"unknown torrent", session.ErrUnknownTorrent, http.StatusNotFound, ""},
+		{"storage unavailable", session.ErrSubtitleStorageUnavailable, http.StatusServiceUnavailable, session.SubtitleCodeStorageUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &fakeBackend{deleteSubtitleErr: tt.err}
+			srv, err := api.New(config.Default(), backend)
+			if err != nil {
+				t.Fatalf("api.New: %v", err)
+			}
+			rec := do(t, srv, deleteSubtitleRequest(id, "Movie.srt"))
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tt.want, rec.Body.String())
+			}
+			if tt.wantCode != "" {
+				var body map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if body["code"] != tt.wantCode {
+					t.Fatalf("body = %v, want code %s", body, tt.wantCode)
+				}
+			}
+		})
+	}
+}

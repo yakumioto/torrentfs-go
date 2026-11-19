@@ -31,6 +31,7 @@ type Backend interface {
 	TorrentStatusFor(id string) (session.TorrentStatusView, error)
 	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
 	UploadSubtitle(ctx context.Context, id, videoPath, fileName string, src io.Reader, maxBytes int64) (session.SubtitleUploadResponse, error)
+	DeleteSubtitle(ctx context.Context, id, path string) error
 	SetFavorite(ctx context.Context, id string, favorite bool) (session.TorrentView, error)
 	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
@@ -159,6 +160,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/subtitles", s.handleUploadSubtitle)
+	mux.HandleFunc("DELETE /api/v1/torrents/{id}/subtitles", s.handleDeleteSubtitle)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/favorite", s.handleSetFavorite)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/category", s.handleSetTorrentCategory)
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
