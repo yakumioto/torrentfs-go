@@ -142,7 +142,7 @@ func TestStreamHTTPRangesAndConditions(t *testing.T) {
 				method = http.MethodGet
 			}
 			req := httptest.NewRequest(method, b.url(t, ""), nil)
-			etag := `"` + b.hash.HexString() + "-" + b.signer.Sign(b.hash, b.filePath) + `"`
+			etag := streamETag(b.hash, b.filePath)
 			for name, value := range tc.headers {
 				req.Header.Set(name, strings.ReplaceAll(value, "{etag}", etag))
 			}
