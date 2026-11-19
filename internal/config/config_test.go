@@ -47,6 +47,9 @@ func TestDefault(t *testing.T) {
 	if cfg.HTTP.MaxUploadBytes != config.ByteQuantity(10<<20) {
 		t.Fatalf("Default max upload = %d, want %d", cfg.HTTP.MaxUploadBytes, 10<<20)
 	}
+	if time.Duration(cfg.HTTP.Stream.LinkTTL) != 720*time.Hour {
+		t.Fatalf("Default stream link TTL = %s, want 720h", cfg.HTTP.Stream.LinkTTL)
+	}
 	if cfg.HTTP.Auth.Enabled {
 		t.Fatal("Default authentication enabled, want disabled")
 	}
@@ -533,6 +536,13 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				cfg.HTTP.MaxUploadBytes = 0
 			},
 			field: "http.max_upload_size",
+		},
+		{
+			name: "non-positive stream link ttl",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Stream.LinkTTL = 0
+			},
+			field: "http.stream.link_ttl",
 		},
 		{
 			name: "non-loopback address without token",

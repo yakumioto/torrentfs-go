@@ -127,6 +127,12 @@ enabled = false
 # slides the window; the tokens live in memory and die with the process.
 token_ttl = "30m0s"
 
+[http.stream]
+# LinkTTL is how long a generated STRM link stays valid. Expiry is part of
+# the signature, so a copied link stops working without any server state.
+# It is read at startup; a new value takes effect after a restart.
+link_ttl = "720h0m0s"
+
 [identity]
 # TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.
 tracker_user_agent = "qBittorrent/4.4.0"

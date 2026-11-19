@@ -43,6 +43,7 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_IDENTITY_EXTENDED_HANDSHAKE_CLIENT_VERSION": "torrentfs-test/1.0",
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE":                       "2048B",
+		"TORRENTFS_HTTP_STREAM_LINK_TTL":                       "12h",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
 		"TORRENTFS_USERNAME":                                   "alice",
 		"TORRENTFS_PASSWORD":                                   "password",
@@ -104,6 +105,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	}
 	if got.Username != "alice" || got.Password != "password" {
 		t.Fatalf("credentials = %q/%q, want the environment values", got.Username, got.Password)
+	}
+	if got.HTTP.Stream.LinkTTL != Duration(12*time.Hour) {
+		t.Fatalf("stream link TTL = %s, want 12h", got.HTTP.Stream.LinkTTL)
 	}
 	if got.HTTP.Auth.TokenTTL != Duration(45*time.Minute) {
 		t.Fatalf("auth token TTL = %s, want 45m", got.HTTP.Auth.TokenTTL)

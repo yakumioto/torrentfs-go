@@ -293,7 +293,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	experimentReporter := experiments.NewReporter(experimentSettings, experimentRecorder)
 	var streamSigner *stream.Signer
 	if cfg.STRM.BaseURL != "" {
-		streamSigner, err = resolveStreamSigner(metadataDir)
+		streamSigner, err = resolveStreamSigner(metadataDir, time.Duration(cfg.HTTP.Stream.LinkTTL))
 		if err != nil {
 			releaseInstanceLock(instanceLock)
 			logInitFailure("resolve-stream-key", err)

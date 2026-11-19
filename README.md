@@ -132,7 +132,7 @@ listen_addr = "0.0.0.0:1445"
 base_url = "http://192.168.1.10:8080"
 ```
 
-`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。
+`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。链接自带过期时间（默认 30 天，`http.stream.link_ttl`），复制到别处或长期保存的副本到期后返回 403，重新读取共享或重新导出即可；`/stream` 同时最多服务 8 条读取，超出返回 503 与 `Retry-After`。
 
 SMB 的 STRM 共享由 `smb.strm` 三态控制，默认 `auto`（配了 `strm.base_url` 就提供）；`on` 强制提供（必须有 `strm.base_url`），`off` 强制不提供：
 
@@ -194,6 +194,7 @@ strm = "off"
 | `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | `false` | Enabled turns on the HTTP login. It is required for a listener that is not bound to the loopback address. |
 | `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `30m0s` | TokenTTL is the inactivity window of a login token. A valid request slides the window; the tokens live in memory and die with the process. |
 | `http.max_upload_size` | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `10MiB` | MaxUploadBytes caps any uploaded request body: a .torrent upload or a managed subtitle file. |
+| `http.stream.link_ttl` | `TORRENTFS_HTTP_STREAM_LINK_TTL` | `720h0m0s` | LinkTTL is how long a generated STRM link stays valid. Expiry is part of the signature, so a copied link stops working without any server state. It is read at startup; a new value takes effect after a restart. |
 | `strm.base_url` | `TORRENTFS_STRM_BASE_URL` | `` | BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse proxy path prefix. Empty disables signed streaming links. |
 | `log.level` | `TORRENTFS_LOG_LEVEL` | `info` | Level is the minimum level of a log record: debug, info, warn, or error. Debug is disabled by default. |
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |

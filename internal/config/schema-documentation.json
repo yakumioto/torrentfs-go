@@ -28,6 +28,7 @@
   "http.auth.token_ttl": "TokenTTL is the inactivity window of a login token. A valid request\nslides the window; the tokens live in memory and die with the process.",
   "http.listen_addr": "ListenAddr is the address the HTTP service binds. Empty disables the\nservice. The default binds loopback only.",
   "http.max_upload_size": "MaxUploadBytes caps any uploaded request body: a .torrent upload or a\nmanaged subtitle file.",
+  "http.stream.link_ttl": "LinkTTL is how long a generated STRM link stays valid. Expiry is part of\nthe signature, so a copied link stops working without any server state.\nIt is read at startup; a new value takes effect after a restart.",
   "identity.extended_handshake_client_version": "ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.",
   "identity.peer_id_prefix": "PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.",
   "identity.tracker_user_agent": "TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.",

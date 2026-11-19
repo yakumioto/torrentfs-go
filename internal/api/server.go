@@ -98,6 +98,7 @@ type Server struct {
 	streamEnabled bool
 	streamCtx     context.Context
 	streamCancel  context.CancelFunc
+	streamSlots   chan struct{}
 	shutdownOnce  sync.Once
 	shutdownErr   error
 }
@@ -168,6 +169,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.loginLimiter = newLoginLimiter(time.Now)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
+	s.streamSlots = make(chan struct{}, maxConcurrentStreams)
 	s.handler = s.dispatchRoutes(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{
 		Handler:           s.handler,

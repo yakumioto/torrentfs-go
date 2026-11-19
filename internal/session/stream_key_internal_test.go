@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 
@@ -16,7 +17,7 @@ import (
 // A generated capability key must be private and survive a restart unchanged.
 func TestStreamKeyPersistsPrivately(t *testing.T) {
 	dir := t.TempDir()
-	first, err := resolveStreamSigner(dir)
+	first, err := resolveStreamSigner(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("resolveStreamSigner: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestStreamKeyPersistsPrivately(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("stream key permissions = %o, want 600", got)
 	}
-	second, err := resolveStreamSigner(dir)
+	second, err := resolveStreamSigner(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("reload stream key: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestStreamKeyRejectsUnsafeFiles(t *testing.T) {
 			dir := t.TempDir()
 			name := filepath.Join(dir, streamKeyFileName)
 			tc.setup(t, name)
-			if _, err := resolveStreamSigner(dir); err == nil || !strings.Contains(err.Error(), "stream key") {
+			if _, err := resolveStreamSigner(dir, time.Hour); err == nil || !strings.Contains(err.Error(), "stream key") {
 				t.Fatalf("resolveStreamSigner error = %v, want a stream key error", err)
 			}
 		})

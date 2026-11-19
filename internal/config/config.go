@@ -45,6 +45,7 @@ const (
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
 	defaultSMBListenAddr            = "0.0.0.0:1445"
 	defaultMaxUploadBytes     int64 = 10 << 20
+	defaultStreamLinkTTL            = 720 * time.Hour
 	// defaultPrefetchWindowBytes is the default read-ahead window: the amount
 	// of the file ahead of the playback cursor the session tries to hold.
 	defaultPrefetchWindowBytes int64 = 32 << 20
@@ -206,6 +207,16 @@ type HTTP struct {
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
 	MaxUploadBytes ByteQuantity `toml:"max_upload_size" component:"api" hotapply:"true"`
+	// Stream groups the signed streaming link settings.
+	Stream Stream `toml:"stream" component:"api"`
+}
+
+// Stream groups the signed streaming link settings.
+type Stream struct {
+	// LinkTTL is how long a generated STRM link stays valid. Expiry is part of
+	// the signature, so a copied link stops working without any server state.
+	// It is read at startup; a new value takes effect after a restart.
+	LinkTTL Duration `toml:"link_ttl" component:"api.stream"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
@@ -346,6 +357,9 @@ func Default() Config {
 				TokenTTL: Duration(30 * time.Minute),
 			},
 			MaxUploadBytes: ByteQuantity(defaultMaxUploadBytes),
+			Stream: Stream{
+				LinkTTL: Duration(defaultStreamLinkTTL),
+			},
 		},
 		Identity: Identity{
 			TrackerUserAgent:               "qBittorrent/4.4.0",
@@ -449,6 +463,9 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
 		collector.add(invalid("http.max_upload_size", errPositive))
+	}
+	if c.HTTP.Stream.LinkTTL <= 0 {
+		collector.add(invalid("http.stream.link_ttl", errPositive))
 	}
 	collector.add(validateAuth(c.HTTP.Auth))
 	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {
