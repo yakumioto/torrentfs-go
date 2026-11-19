@@ -435,7 +435,6 @@ type raFile struct {
 	fileSize    int64
 	pieceLength int64
 	torrentSize int64
-	readahead   int64
 	closed      bool
 	handles     int
 	// window holds the pieces pinned by the most recent read: the requested
@@ -558,7 +557,7 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 			readCtx = ticket.ctx
 		}
 	} else {
-		f.protectWindow(f.windowKeys(request, int64(len(p))+f.readaheadBytes()))
+		f.protectWindow(f.windowKeys(request, int64(len(p))+defaultStreamingReadahead))
 	}
 
 	written := 0
@@ -575,16 +574,12 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 			}
 			return finish(err)
 		}
-		pieceMiss := false
-		if ticket != nil {
-			_, cached := f.cache.Get(cache.Key{Torrent: f.torrentKey, Piece: span.Index})
-			pieceMiss = !cached
-			if pieceMiss {
-				ticket.startPiece(span.Index)
-			}
+		value, cached := f.cache.Get(cache.Key{Torrent: f.torrentKey, Piece: span.Index})
+		if !cached && ticket != nil {
+			ticket.startPiece(span.Index)
 		}
-		data, err := f.span(readCtx, loader, span)
-		if pieceMiss {
+		data, err := f.span(readCtx, loader, span, value, cached)
+		if !cached && ticket != nil {
 			ticket.finishPiece(span.Index)
 		}
 		if err != nil {
@@ -601,23 +596,14 @@ func (f *raFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 	return finish(nil)
 }
 
-func (f *raFile) readaheadBytes() int64 {
-	f.mu.RLock()
-	readahead := f.readahead
-	f.mu.RUnlock()
-	if readahead <= 0 {
-		return defaultStreamingReadahead
-	}
-	return readahead
-}
-
-func (f *raFile) span(ctx context.Context, loader pieceSource, pieceSpan cache.PieceSpan) ([]byte, error) {
+// span returns the requested slice of a piece. value carries the piece when the
+// caller already looked it up, so a resident piece is read from the cache once.
+func (f *raFile) span(ctx context.Context, loader pieceSource, pieceSpan cache.PieceSpan, value []byte, cached bool) ([]byte, error) {
 	end := pieceSpan.Offset + pieceSpan.Length
 	if pieceSpan.Offset < 0 || pieceSpan.Length <= 0 || end < pieceSpan.Offset {
 		return nil, io.ErrUnexpectedEOF
 	}
-	key := cache.Key{Torrent: f.torrentKey, Piece: pieceSpan.Index}
-	if value, ok := f.cache.Get(key); ok {
+	if cached {
 		if end > int64(len(value)) {
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -679,7 +665,7 @@ func (f *raFile) readPiece(ctx context.Context, loader pieceSource, data []byte,
 		err error
 	)
 	for attempt := 1; ; attempt++ {
-		n, err = loader.ReadAtContext(ctx, data, start, f.readaheadBytes())
+		n, err = loader.ReadAtContext(ctx, data, start, defaultStreamingReadahead)
 		if err == nil && n == len(data) {
 			return nil
 		}
