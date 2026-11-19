@@ -70,3 +70,17 @@ func validateSTRM(cfg STRM, listenAddr string) error {
 	}
 	return nil
 }
+
+// validateTrustedProxies checks that every entry is an address or a network in
+// CIDR form. A bare address is accepted and stands for itself.
+func validateTrustedProxies(proxies []string) error {
+	for _, entry := range proxies {
+		if _, err := netip.ParsePrefix(entry); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(entry); err != nil {
+			return errors.New("must be an IP address or a CIDR network")
+		}
+	}
+	return nil
+}

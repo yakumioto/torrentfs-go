@@ -727,7 +727,7 @@ func (s *Session) DeleteSubtitle(ctx context.Context, id, relPath string) error 
 	s.mu.RUnlock()
 
 	if err := ctx.Err(); err != nil {
-		return newSubtitleError(SubtitleCodeWriteFailed, err)
+		return err
 	}
 	store := s.subtitleStore
 	if store == nil {
@@ -751,7 +751,7 @@ func (s *Session) DeleteSubtitle(ctx context.Context, id, relPath string) error 
 		return subtitleStoreError(fmt.Errorf("subtitle path %q is not a regular file", relPath))
 	}
 	if err := store.remove(rel); err != nil {
-		return newSubtitleError(SubtitleCodeCleanupFailed, fmt.Errorf("%w: %v", ErrSubtitleCleanupFailed, err))
+		return newSubtitleError(SubtitleCodeCleanupFailed, fmt.Errorf("%w: %w", ErrSubtitleCleanupFailed, err))
 	}
 	// The unlink already made the subtitle invisible, so a directory sync
 	// failure is a durability warning rather than a failed delete, mirroring

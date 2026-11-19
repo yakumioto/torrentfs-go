@@ -1,7 +1,7 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/client';
 import { DeleteSubtitleDialog } from '../components/dialogs/DeleteSubtitleDialog';
 import { theme } from '../styles/theme';
@@ -40,7 +40,6 @@ function deleteCall(fetchMock: ReturnType<typeof vi.fn>) {
   return fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE');
 }
 
-beforeEach(() => vi.unstubAllGlobals());
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -61,6 +60,18 @@ describe('DeleteSubtitleDialog', () => {
     const request = call?.[1] as RequestInit;
     expect(request.method).toBe('DELETE');
     expect(request.body).toBeUndefined();
+  });
+
+  it('shows the coded message for a subtitle that is already gone', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: 'subtitle was not found', code: 'subtitle_not_found' }),
+      { status: 404, headers: { 'Content-Type': 'application/json' } },
+    ));
+    renderDialog({ fetchMock });
+
+    fireEvent.click(screen.getByRole('button', { name: '删除字幕' }));
+
+    expect(await screen.findByText('字幕不存在或已被删除。')).toBeInTheDocument();
   });
 
   it('keeps the dialog open and explains a torrent that is being deleted', async () => {

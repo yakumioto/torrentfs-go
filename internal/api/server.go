@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,12 +96,13 @@ type Server struct {
 	mu       sync.RWMutex
 	listener net.Listener
 
-	streamEnabled bool
-	streamCtx     context.Context
-	streamCancel  context.CancelFunc
-	streamSlots   chan struct{}
-	shutdownOnce  sync.Once
-	shutdownErr   error
+	streamEnabled  bool
+	streamCtx      context.Context
+	streamCancel   context.CancelFunc
+	streamSlots    chan struct{}
+	trustedProxies []netip.Prefix
+	shutdownOnce   sync.Once
+	shutdownErr    error
 }
 
 // New builds a server for cfg. A listener is created only by Serve.
@@ -129,6 +131,11 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
+	trustedProxies, err := parseTrustedProxies(cfg.HTTP.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("api: invalid trusted proxy: %w", err)
+	}
+	s.trustedProxies = trustedProxies
 	if cfg.HTTP.Auth.Enabled {
 		hash, err := cfg.PasswordHash()
 		if err != nil {

@@ -57,11 +57,11 @@ type Prefetch struct {
 	// WindowBytes is how far ahead of the playback cursor pieces are read. It
 	// also decides which foreground reads count as inside the playback window,
 	// so shrinking it makes more seeks look like new anchor positions.
-	WindowBytes ByteQuantity `toml:"window_bytes" component:"filesystem.prefetch"`
+	WindowBytes ByteQuantity `toml:"window_bytes" component:"filesystem"`
 	// BudgetBytes caps the bytes of concurrent read-ahead downloads summed
 	// across every torrent in the session. At least one piece is always
 	// admitted, so a budget smaller than one piece cannot stall playback.
-	BudgetBytes ByteQuantity `toml:"budget_bytes" component:"filesystem.prefetch"`
+	BudgetBytes ByteQuantity `toml:"budget_bytes" component:"filesystem"`
 }
 
 // FUSE groups the settings of the read-only FUSE file output.

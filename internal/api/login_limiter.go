@@ -3,6 +3,8 @@ package api
 import (
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -117,11 +119,67 @@ func loginBackoff(failures int) time.Duration {
 	return wait
 }
 
-// loginAddress is the counter key for one request.
-func loginAddress(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+// parseTrustedProxies turns the configured entries into networks. A bare
+// address becomes a single-host network.
+func parseTrustedProxies(entries []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for _, entry := range entries {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(entry)
+		if err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
 	}
-	return host
+	return prefixes, nil
+}
+
+// loginAddress is the counter key for one request. A forwarding header is only
+// believed when the immediate peer is a configured proxy: otherwise anyone
+// could choose their own bucket, or pin someone else's. The client is the last
+// hop that is not itself a trusted proxy, which is the only hop the outermost
+// proxy appended to.
+func (s *Server) loginAddress(r *http.Request) string {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peer = host
+	}
+	addr, err := netip.ParseAddr(peer)
+	if err != nil || !s.trustedProxy(addr) {
+		return peer
+	}
+	hops := r.Header.Values("X-Forwarded-For")
+	if len(hops) == 0 {
+		return peer
+	}
+	var chain []string
+	for _, value := range hops {
+		for hop := range strings.SplitSeq(value, ",") {
+			chain = append(chain, strings.TrimSpace(hop))
+		}
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		hopAddr, err := netip.ParseAddr(chain[i])
+		if err != nil {
+			// A malformed hop makes the whole chain unusable: falling back to
+			// the peer keeps one bucket per proxy instead of a spoofable one.
+			return peer
+		}
+		if !s.trustedProxy(hopAddr) {
+			return hopAddr.String()
+		}
+	}
+	return peer
+}
+
+func (s *Server) trustedProxy(addr netip.Addr) bool {
+	for _, prefix := range s.trustedProxies {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }

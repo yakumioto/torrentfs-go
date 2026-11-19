@@ -109,7 +109,7 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 			t.Fatalf("seek %d at piece %d returned different data", index, piece)
 		}
 		snapshot := session.PrefetchSnapshotForTest(leecherHandle)
-		if maxPieces := int(session.PrefetchDefaultBudgetBytesForTest() / int64(pieceLength)); maxPieces > 0 && snapshot.MaxActivePieces > maxPieces {
+		if maxPieces := int(session.PrefetchBudgetLimitForTest(leecher) / int64(pieceLength)); maxPieces > 0 && snapshot.MaxActivePieces > maxPieces {
 			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, maxPieces)
 		}
 		t.Logf("seek=%d piece=%d elapsed=%s generation=%d anchor=%d candidate=%v/%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.PlaybackAnchor, snapshot.CandidatePresent, snapshot.CandidateReads, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)

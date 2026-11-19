@@ -207,6 +207,11 @@ type HTTP struct {
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
 	MaxUploadBytes ByteQuantity `toml:"max_upload_size" component:"api" hotapply:"true"`
+	// TrustedProxies lists the reverse proxies whose forwarding headers are
+	// believed. When the immediate peer is one of these addresses or networks,
+	// the client address is read from the last X-Forwarded-For hop that is not
+	// itself trusted. Empty means the peer address is always the client.
+	TrustedProxies []string `toml:"trusted_proxies" component:"api"`
 	// Stream groups the signed streaming link settings.
 	Stream Stream `toml:"stream" component:"api"`
 }
@@ -216,7 +221,7 @@ type Stream struct {
 	// LinkTTL is how long a generated STRM link stays valid. Expiry is part of
 	// the signature, so a copied link stops working without any server state.
 	// It is read at startup; a new value takes effect after a restart.
-	LinkTTL Duration `toml:"link_ttl" component:"api.stream"`
+	LinkTTL Duration `toml:"link_ttl" component:"stream"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
@@ -466,6 +471,9 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	if c.HTTP.Stream.LinkTTL <= 0 {
 		collector.add(invalid("http.stream.link_ttl", errPositive))
+	}
+	if err := validateTrustedProxies(c.HTTP.TrustedProxies); err != nil {
+		collector.add(invalid("http.trusted_proxies", err))
 	}
 	collector.add(validateAuth(c.HTTP.Auth))
 	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {

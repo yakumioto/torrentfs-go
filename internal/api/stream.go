@@ -26,8 +26,8 @@ type StreamBackend interface {
 // maxConcurrentStreams bounds concurrent signed reads. Each one pins prefetch
 // budget and a connection, so an unbounded fan-out starves playback for
 // everyone else. The cap is a constant on purpose: the prefetch budget it
-// protects is a session-wide constant too, and a configurable cap would only
-// pretend to tune it.
+// protects is fixed at startup, and there is no principled way to derive one
+// from the other, so a configurable cap would only pretend to tune it.
 const maxConcurrentStreams = 8
 
 // streamETag derives the validator from the requested file alone. The link

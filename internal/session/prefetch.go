@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"io"
+	"math"
 	"sort"
 	"sync"
 
@@ -13,15 +14,13 @@ import (
 )
 
 const (
-	defaultPrefetchLow           int64 = 16 << 20
-	defaultPlaybackWindow        int64 = 32 << 20
-	defaultPrefetchHigh                = defaultPlaybackWindow
+	// prefetchLowCeiling caps the low watermark. It is a hysteresis shape, not
+	// a configuration default: the window comes from the configuration, and a
+	// smaller window shrinks the low watermark with it.
+	prefetchLowCeiling           int64 = 16 << 20
 	defaultSeekClearThreshold    int64 = 64 << 20
 	defaultSeekCandidateLocality int64 = 8 << 20
 	defaultSeekConfirmationReads       = 2
-	// defaultPrefetchBudgetBytes is the download budget of the coordinator
-	// when a test builds one without a session.
-	defaultPrefetchBudgetBytes int64 = 16 << 20
 )
 
 type prefetchState uint8
@@ -70,9 +69,9 @@ type seekCandidate struct {
 	successfulReadings int
 }
 
-// prefetchBudget is shared by every torrent in a session. It deliberately uses
-// a count rather than a channel so tests can compare limits without replacing a
-// live coordinator or waking a polling loop.
+// prefetchBudget is the session-wide byte allowance shared by every torrent.
+// It keeps a plain counter guarded by a mutex so the limit can be read without
+// replacing a live coordinator or waking a polling loop.
 type prefetchBudget struct {
 	mu    sync.Mutex
 	limit int64
@@ -268,29 +267,16 @@ type prefetchSnapshot struct {
 	CandidateUniqueBytes int64
 }
 
-// coordinatorWindow resolves the readahead window a new coordinator uses. The
-// session resolves the configuration once at startup; a nil or zero value falls
-// back to the compile-time default so a hand-built session still works.
-func coordinatorWindow(s *Session) int64 {
-	if s != nil && s.prefetchWindow > 0 {
-		return s.prefetchWindow
-	}
-	return defaultPrefetchHigh
-}
-
 func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *prefetchCoordinator {
 	ctx := context.Background()
 	if s != nil && s.bgCtx != nil {
 		ctx = s.bgCtx
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	// The session owns one budget for its whole lifetime. A nil session only
-	// happens for a coordinator built directly by a test.
-	budget := newPrefetchBudget(defaultPrefetchBudgetBytes)
-	if s != nil && s.prefetchBudget != nil {
-		budget = s.prefetchBudget
-	}
-	window := coordinatorWindow(s)
+	// The session owns one budget and one window for its whole lifetime; the
+	// loader already resolved and validated both.
+	budget := s.prefetchBudget
+	window := s.prefetchWindow
 	coordinator := &prefetchCoordinator{
 		torrent:          tor,
 		cache:            c,
@@ -958,7 +944,7 @@ func (c *prefetchCoordinator) computeWatermarksLocked(reservedPrefix int64, rese
 		high = reservedPrefix
 	}
 	c.effectiveHigh = high
-	c.effectiveLow = min64(defaultPrefetchLow, high/2)
+	c.effectiveLow = min64(prefetchLowCeiling, high/2)
 }
 
 // activeLimit is how many pieces this torrent's share of the byte budget can
@@ -1036,6 +1022,12 @@ func (c *prefetchCoordinator) desiredPiecesLocked() []int {
 	}
 	start := c.anchor.fileStart + c.anchor.cursor
 	end := start + c.window
+	if end < start {
+		// A window near MaxInt64 wraps negative. The real end is past every
+		// file, so clamping to the maximum keeps the file bounds in charge
+		// instead of silently disabling read-ahead.
+		end = math.MaxInt64
+	}
 	fileEnd := c.anchor.fileStart + c.anchor.fileSize
 	if end > fileEnd {
 		end = fileEnd

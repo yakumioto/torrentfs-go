@@ -13,6 +13,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/yakumioto/torrentfs-go/internal/cache"
+	"github.com/yakumioto/torrentfs-go/internal/config"
 )
 
 // AddTorrent registers an ephemeral test torrent without writing the managed
@@ -412,7 +413,9 @@ func (s *Session) EvictPiecesForTest(hash metainfo.Hash, keep ...int) error {
 
 // PrefetchDefaultBudgetBytesForTest returns the compiled-in read-ahead byte
 // budget so a test can assert against the implementation's own default. Test-only.
-func PrefetchDefaultBudgetBytesForTest() int64 { return defaultPrefetchBudgetBytes }
+func PrefetchDefaultBudgetBytesForTest() int64 {
+	return int64(config.Default().Filesystem.Prefetch.BudgetBytes)
+}
 
 // SeedPieceForTest loads one verified piece into the session's cache and syncs
 // anacrolix's completion view for it, leaving every other piece missing. A test
@@ -475,6 +478,13 @@ func SameRAFile(a, b io.ReaderAt) (sameFile, sameLoader bool) {
 		return false, false
 	}
 	return first == second, first.loader == second.loader
+}
+
+// PrefetchBudgetLimitForTest reports the byte budget a session resolved from
+// configuration, so tests can pin the config-to-budget binding.
+func PrefetchBudgetLimitForTest(s *Session) int64 {
+	limit, _ := s.prefetchBudget.snapshot()
+	return limit
 }
 
 // PrefetchWindowForTest reports the readahead window the session resolved from

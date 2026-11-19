@@ -120,6 +120,11 @@ listen_addr = "127.0.0.1:8080"
 # MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 # managed subtitle file.
 max_upload_size = "10MiB"
+# TrustedProxies lists the reverse proxies whose forwarding headers are
+# believed. When the immediate peer is one of these addresses or networks,
+# the client address is read from the last X-Forwarded-For hop that is not
+# itself trusted. Empty means the peer address is always the client.
+trusted_proxies = []
 
 [http.auth]
 # Enabled turns on the HTTP login. It is required for a listener that is

@@ -44,6 +44,9 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 		"TORRENTFS_HTTP_LISTEN_ADDR":                           "127.0.0.1:9090",
 		"TORRENTFS_HTTP_MAX_UPLOAD_SIZE":                       "2048B",
 		"TORRENTFS_HTTP_STREAM_LINK_TTL":                       "12h",
+		"TORRENTFS_HTTP_TRUSTED_PROXIES":                       "10.0.0.0/8,192.0.2.10",
+		"TORRENTFS_FILESYSTEM_PREFETCH_WINDOW_BYTES":           "64MiB",
+		"TORRENTFS_FILESYSTEM_PREFETCH_BUDGET_BYTES":           "32MiB",
 		"TORRENTFS_HTTP_AUTH_ENABLED":                          "true",
 		"TORRENTFS_USERNAME":                                   "alice",
 		"TORRENTFS_PASSWORD":                                   "password",
@@ -105,6 +108,12 @@ func TestLoadEnvironmentBindings(t *testing.T) {
 	}
 	if got.Username != "alice" || got.Password != "password" {
 		t.Fatalf("credentials = %q/%q, want the environment values", got.Username, got.Password)
+	}
+	if got.Filesystem.Prefetch.WindowBytes != 64<<20 || got.Filesystem.Prefetch.BudgetBytes != 32<<20 {
+		t.Fatalf("prefetch = %+v, want 64MiB/32MiB", got.Filesystem.Prefetch)
+	}
+	if len(got.HTTP.TrustedProxies) != 2 || got.HTTP.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Fatalf("trusted proxies = %v", got.HTTP.TrustedProxies)
 	}
 	if got.HTTP.Stream.LinkTTL != Duration(12*time.Hour) {
 		t.Fatalf("stream link TTL = %s, want 12h", got.HTTP.Stream.LinkTTL)

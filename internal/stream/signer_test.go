@@ -174,7 +174,7 @@ func TestSignerRejectsMalformedAndTamperedSignatures(t *testing.T) {
 		{name: "space", sig: " " + signature[1:]},
 		{name: "newline", sig: signature[:20] + "\n" + signature[20:]},
 		{name: "carriage return", sig: signature[:20] + "\r" + signature[21:]},
-		{name: "nonzero padding bits", sig: nonCanonicalSignature(signature)},
+		{name: "nonzero padding bits", sig: nonCanonicalSignature(t, signature)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if signer.Verify(hash, path, tt.sig) {
@@ -201,9 +201,13 @@ func TestSignerRejectsATamperedExpiry(t *testing.T) {
 	}
 }
 
-func nonCanonicalSignature(signature string) string {
+func nonCanonicalSignature(t *testing.T, signature string) string {
+	t.Helper()
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 	last := strings.IndexByte(alphabet, signature[len(signature)-1])
+	if last < 0 || last+1 >= len(alphabet) {
+		t.Fatalf("signature %q does not leave a non-canonical replacement", signature)
+	}
 	return signature[:len(signature)-1] + string(alphabet[last+1])
 }
 

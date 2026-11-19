@@ -184,23 +184,6 @@ type metadataFetch struct {
 // directory. The client is configured to seed, registry-backed tasks are
 // restored, and persisted layout checks complete before the session is
 // returned.
-// prefetchBudgetBytes is the session-wide read-ahead budget. A configuration
-// built without defaults falls back to the compiled-in value, so a test that
-// constructs a bare Config keeps the production behaviour.
-func prefetchBudgetBytes(cfg config.Config) int64 {
-	if budget := int64(cfg.Filesystem.Prefetch.BudgetBytes); budget > 0 {
-		return budget
-	}
-	return defaultPrefetchBudgetBytes
-}
-
-func prefetchWindowBytes(cfg config.Config) int64 {
-	if window := int64(cfg.Filesystem.Prefetch.WindowBytes); window > 0 {
-		return window
-	}
-	return defaultPrefetchHigh
-}
-
 func New(cfg config.Config, torrentsDir string, opts ...Option) (*Session, error) {
 	return newWithClientConfig(cfg, torrentsDir, nil, opts...)
 }
@@ -398,8 +381,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		streamBaseURL:       cfg.STRM.BaseURL,
 		pieceCache:          pieceCache,
 		pieceStore:          pieceStore,
-		prefetchBudget:      newPrefetchBudget(prefetchBudgetBytes(cfg)),
-		prefetchWindow:      prefetchWindowBytes(cfg),
+		prefetchBudget:      newPrefetchBudget(int64(cfg.Filesystem.Prefetch.BudgetBytes)),
+		prefetchWindow:      int64(cfg.Filesystem.Prefetch.WindowBytes),
 		pieceDownloadBudget: newPieceDownloadBudget(),
 		deleteFlushTimeout:  deleteFlushTimeout,
 		closeDone:           make(chan struct{}),

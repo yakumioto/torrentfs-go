@@ -155,7 +155,7 @@ func TestBuildURLRejectsMalformedInput(t *testing.T) {
 		{name: "path backslash", base: "http://media.example", path: "dir\\Movie.mkv", sig: signature},
 		{name: "empty signature", base: "http://media.example", path: "Movie.mkv"},
 		{name: "padded signature", base: "http://media.example", path: "Movie.mkv", sig: signature + "="},
-		{name: "noncanonical signature", base: "http://media.example", path: "Movie.mkv", sig: nonCanonicalSignature(signature)},
+		{name: "noncanonical signature", base: "http://media.example", path: "Movie.mkv", sig: nonCanonicalSignature(t, signature)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			want := tt.want
@@ -221,7 +221,7 @@ func TestParsePathRejectsMalformedLocations(t *testing.T) {
 		{name: "short hash", path: "/stream/" + hash[1:] + "/" + signature + "/Movie.mkv"},
 		{name: "invalid hex hash", path: "/stream/" + strings.Repeat("z", 40) + "/" + signature + "/Movie.mkv"},
 		{name: "padded signature", path: "/stream/" + hash + "/" + signature + "=/Movie.mkv"},
-		{name: "noncanonical signature", path: "/stream/" + hash + "/" + nonCanonicalSignature(signature) + "/Movie.mkv"},
+		{name: "noncanonical signature", path: "/stream/" + hash + "/" + nonCanonicalSignature(t, signature) + "/Movie.mkv"},
 		{name: "signature slash", path: "/stream/" + hash + "/%2f" + signature[1:] + "/Movie.mkv"},
 		{name: "empty component", path: prefix + "dir//Movie.mkv"},
 		{name: "trailing slash", path: prefix + "Movie.mkv/"},

@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -627,7 +628,7 @@ func postTestTorrent(t *testing.T, srv *api.Server, data []byte) string {
 func deleteSubtitleRequest(id, path string) *http.Request {
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+id+"/subtitles", nil)
 	if path != "" {
-		req.URL.RawQuery = "path=" + path
+		req.URL.RawQuery = url.Values{"path": {path}}.Encode()
 	}
 	return req
 }
@@ -694,6 +695,13 @@ func TestDeleteSubtitleEndToEnd(t *testing.T) {
 	}
 }
 
+// codedSubtitleError carries only the stable code, which is how the store
+// wraps filesystem failures: the sentinel is not in the error chain.
+type codedSubtitleError struct{ code string }
+
+func (e codedSubtitleError) Error() string     { return "subtitle store: " + e.code }
+func (e codedSubtitleError) ErrorCode() string { return e.code }
+
 func TestDeleteSubtitleMapsSessionFailures(t *testing.T) {
 	id := strings.Repeat("a", 40)
 	tests := []struct {
@@ -705,6 +713,8 @@ func TestDeleteSubtitleMapsSessionFailures(t *testing.T) {
 		{"deleting", session.ErrDeleting, http.StatusConflict, session.SubtitleCodeTorrentDeleting},
 		{"unknown torrent", session.ErrUnknownTorrent, http.StatusNotFound, ""},
 		{"storage unavailable", session.ErrSubtitleStorageUnavailable, http.StatusServiceUnavailable, session.SubtitleCodeStorageUnavailable},
+		{"storage full by code", codedSubtitleError{session.SubtitleCodeStorageFull}, http.StatusInsufficientStorage, session.SubtitleCodeStorageFull},
+		{"cleanup failed by code", codedSubtitleError{session.SubtitleCodeCleanupFailed}, http.StatusInternalServerError, session.SubtitleCodeCleanupFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

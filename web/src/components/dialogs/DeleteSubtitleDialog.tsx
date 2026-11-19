@@ -4,7 +4,7 @@ import type { ApiClient } from '../../api/client';
 import { ApiError } from '../../api/errors';
 import { useDeleteSubtitle } from '../../queries/hooks';
 import type { Subtitle } from '../../types/api';
-import { userFacingError } from '../../utils/user-facing-error';
+import { userFacingSubtitleError } from '../../utils/user-facing-error';
 
 /**
  * Deleting a subtitle unlinks the managed copy on the host and drops it from
@@ -67,7 +67,7 @@ export function DeleteSubtitleDialog({
         </Text>
         {deleting && <div className="error-callout" role="alert"><IconAlertTriangle size={15} aria-hidden="true" /> 任务正在删除，暂时不能修改字幕。</div>}
         {failure !== null && failure !== undefined && !deleting && (
-          <div className="error-callout" role="alert">{userFacingError(failure, '删除字幕请求失败，请稍后重试。')}</div>
+          <div className="error-callout" role="alert">{userFacingSubtitleError(failure, '删除字幕请求失败，请稍后重试。')}</div>
         )}
         <Group justify="flex-end">
           <Button variant="subtle" color="gray" onClick={close} disabled={busy}>取消</Button>

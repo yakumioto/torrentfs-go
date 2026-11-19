@@ -36,7 +36,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	address := loginAddress(r)
+	address := s.loginAddress(r)
 	if wait, allowed := s.loginLimiter.allow(address); !allowed {
 		w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
 		writeError(w, http.StatusTooManyRequests, "too many login attempts")

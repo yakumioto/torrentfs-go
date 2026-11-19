@@ -29,6 +29,7 @@
   "http.listen_addr": "ListenAddr is the address the HTTP service binds. Empty disables the\nservice. The default binds loopback only.",
   "http.max_upload_size": "MaxUploadBytes caps any uploaded request body: a .torrent upload or a\nmanaged subtitle file.",
   "http.stream.link_ttl": "LinkTTL is how long a generated STRM link stays valid. Expiry is part of\nthe signature, so a copied link stops working without any server state.\nIt is read at startup; a new value takes effect after a restart.",
+  "http.trusted_proxies": "TrustedProxies lists the reverse proxies whose forwarding headers are\nbelieved. When the immediate peer is one of these addresses or networks,\nthe client address is read from the last X-Forwarded-For hop that is not\nitself trusted. Empty means the peer address is always the client.",
   "identity.extended_handshake_client_version": "ExtendedHandshakeClientVersion is sent as the BEP 10 extended handshake v field.",
   "identity.peer_id_prefix": "PeerIDPrefix is the prefix of the generated 20-byte BitTorrent peer ID.",
   "identity.tracker_user_agent": "TrackerUserAgent is sent as the User-Agent header on HTTP tracker announces.",

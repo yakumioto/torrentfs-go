@@ -194,6 +194,7 @@ strm = "off"
 | `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | `false` | Enabled turns on the HTTP login. It is required for a listener that is not bound to the loopback address. |
 | `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `30m0s` | TokenTTL is the inactivity window of a login token. A valid request slides the window; the tokens live in memory and die with the process. |
 | `http.max_upload_size` | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `10MiB` | MaxUploadBytes caps any uploaded request body: a .torrent upload or a managed subtitle file. |
+| `http.trusted_proxies` | `TORRENTFS_HTTP_TRUSTED_PROXIES` | `[]` | TrustedProxies lists the reverse proxies whose forwarding headers are believed. When the immediate peer is one of these addresses or networks, the client address is read from the last X-Forwarded-For hop that is not itself trusted. Empty means the peer address is always the client. |
 | `http.stream.link_ttl` | `TORRENTFS_HTTP_STREAM_LINK_TTL` | `720h0m0s` | LinkTTL is how long a generated STRM link stays valid. Expiry is part of the signature, so a copied link stops working without any server state. It is read at startup; a new value takes effect after a restart. |
 | `strm.base_url` | `TORRENTFS_STRM_BASE_URL` | `` | BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse proxy path prefix. Empty disables signed streaming links. |
 | `log.level` | `TORRENTFS_LOG_LEVEL` | `info` | Level is the minimum level of a log record: debug, info, warn, or error. Debug is disabled by default. |
@@ -334,7 +335,7 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 
 ## 安全提示
 
-- HTTP 默认仅监听 loopback；公开监听必须启用认证，并放在 TLS 反向代理之后。
+- HTTP 默认仅监听 loopback；公开监听必须启用认证，并放在 TLS 反向代理之后。代理之后要把代理地址或网段写进 `http.trusted_proxies`，否则登录退避按代理地址计数，一个客户端的失败会连带其他人。
 - 文件输出完全只读：字幕请通过 Web UI/API 上传，不要用 `docker cp` 写入挂载点。
 - SMB 只读、要求签名，不应直接暴露到互联网。
 - SMB / HTTP-only 模式可 `--cap-drop ALL`；只有 FUSE 模式需要 `/dev/fuse`、`SYS_ADMIN` 和宿主挂载传播。

@@ -10,21 +10,21 @@ import (
 
 func TestPrefetchBudgetIsSessionGlobal(t *testing.T) {
 	const cost int64 = 4 << 20
-	budget := newPrefetchBudget(defaultPrefetchBudgetBytes)
-	if limit, used := budget.snapshot(); limit != defaultPrefetchBudgetBytes || used != 0 {
-		t.Fatalf("new budget = (%d, %d), want (%d, 0)", limit, used, defaultPrefetchBudgetBytes)
+	budget := newPrefetchBudget(testPrefetchBudgetBytes)
+	if limit, used := budget.snapshot(); limit != testPrefetchBudgetBytes || used != 0 {
+		t.Fatalf("new budget = (%d, %d), want (%d, 0)", limit, used, testPrefetchBudgetBytes)
 	}
-	capacity := int(defaultPrefetchBudgetBytes / cost)
+	capacity := int(testPrefetchBudgetBytes / cost)
 	for i := 0; i < capacity; i++ {
 		if !budget.tryAcquire(cost) {
 			t.Fatalf("acquire %d of %d was refused", i+1, capacity)
 		}
 	}
 	if budget.tryAcquire(cost) {
-		t.Fatalf("acquired %d bytes, want the limit of %d to hold", defaultPrefetchBudgetBytes+cost, defaultPrefetchBudgetBytes)
+		t.Fatalf("acquired %d bytes, want the limit of %d to hold", testPrefetchBudgetBytes+cost, testPrefetchBudgetBytes)
 	}
-	if _, used := budget.snapshot(); used != defaultPrefetchBudgetBytes {
-		t.Fatalf("used = %d after a refused acquire, want %d", used, defaultPrefetchBudgetBytes)
+	if _, used := budget.snapshot(); used != testPrefetchBudgetBytes {
+		t.Fatalf("used = %d after a refused acquire, want %d", used, testPrefetchBudgetBytes)
 	}
 	budget.release(cost)
 	if !budget.tryAcquire(cost) {
@@ -36,8 +36,8 @@ func TestPrefetchBudgetIsSessionGlobal(t *testing.T) {
 		t.Fatalf("limit = %d after setLimit, want %d", limit, 6*cost)
 	}
 	restore()
-	if limit, _ := budget.snapshot(); limit != defaultPrefetchBudgetBytes {
-		t.Fatalf("limit = %d after restore, want %d", limit, defaultPrefetchBudgetBytes)
+	if limit, _ := budget.snapshot(); limit != testPrefetchBudgetBytes {
+		t.Fatalf("limit = %d after restore, want %d", limit, testPrefetchBudgetBytes)
 	}
 }
 
@@ -58,8 +58,8 @@ func TestPrefetchBudgetAdmitsOneOversizedPiece(t *testing.T) {
 func newTestCoordinator(c *cache.Cache) *prefetchCoordinator {
 	return &prefetchCoordinator{
 		cache:            c,
-		budget:           newPrefetchBudget(defaultPrefetchBudgetBytes),
-		window:           defaultPrefetchHigh,
+		budget:           newPrefetchBudget(testPrefetchBudgetBytes),
+		window:           testPrefetchWindowBytes,
 		torrentKey:       "prefetch-test",
 		refs:             make(map[int]int),
 		windowPins:       make(map[int]struct{}),
@@ -162,8 +162,8 @@ func TestPrefetchWatermarksShrinkWithFileAndBudget(t *testing.T) {
 		{
 			name:       "large file keeps the defaults",
 			bytesToEOF: 512 << 20,
-			wantHigh:   defaultPrefetchHigh,
-			wantLow:    defaultPrefetchLow,
+			wantHigh:   testPrefetchWindowBytes,
+			wantLow:    prefetchLowCeiling,
 		},
 		{
 			name:       "short tail shrinks the window and keeps 1:2 hysteresis",
