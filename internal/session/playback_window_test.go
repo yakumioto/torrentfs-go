@@ -59,8 +59,8 @@ func TestPlaybackWindowClassifiesForegroundReads(t *testing.T) {
 		{name: "same position", offset: 0, want: false},
 		{name: "two megabytes", offset: 2 << 20, want: false},
 		{name: "thirty megabytes", offset: 30 << 20, want: false},
-		{name: "last byte in window", offset: defaultPlaybackWindow - 1, want: false},
-		{name: "exact window end", offset: defaultPlaybackWindow, want: true},
+		{name: "last byte in window", offset: testPrefetchWindowBytes - 1, want: false},
+		{name: "exact window end", offset: testPrefetchWindowBytes, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,10 +74,10 @@ func TestPlaybackWindowClassifiesForegroundReads(t *testing.T) {
 	}
 
 	// A request may cross the nominal end as long as its first byte is inside.
-	request, plan := playbackReadPlan(file, defaultPlaybackWindow-1, 2)
+	request, plan := playbackReadPlan(file, testPrefetchWindowBytes-1, 2)
 	start, end := foregroundRequestRange(request, plan)
-	if start != defaultPlaybackWindow-1 || end != defaultPlaybackWindow+1 {
-		t.Fatalf("foregroundRequestRange = [%d, %d), want [%d, %d)", start, end, defaultPlaybackWindow-1, defaultPlaybackWindow+1)
+	if start != testPrefetchWindowBytes-1 || end != testPrefetchWindowBytes+1 {
+		t.Fatalf("foregroundRequestRange = [%d, %d), want [%d, %d)", start, end, testPrefetchWindowBytes-1, testPrefetchWindowBytes+1)
 	}
 	coordinator.mu.Lock()
 	if coordinator.shouldAdvanceGenerationLocked(file, start) {
@@ -87,9 +87,9 @@ func TestPlaybackWindowClassifiesForegroundReads(t *testing.T) {
 	coordinator.mu.Unlock()
 
 	// An active Piece remains in the same generation even at the half-open end.
-	coordinator.foregroundPieces[int(defaultPlaybackWindow/pieceLength)] = 1
+	coordinator.foregroundPieces[int(testPrefetchWindowBytes/pieceLength)] = 1
 	coordinator.mu.Lock()
-	if coordinator.shouldAdvanceGenerationLocked(file, defaultPlaybackWindow) {
+	if coordinator.shouldAdvanceGenerationLocked(file, testPrefetchWindowBytes) {
 		coordinator.mu.Unlock()
 		t.Fatal("a read in an active Piece was classified as a seek")
 	}
@@ -154,7 +154,7 @@ func TestPlaybackWindowCrossFileCandidateConfirmsAndCleansOldWindow(t *testing.T
 		t.Fatal("could not retain the old window piece")
 	}
 	coordinator.windowPins[0] = struct{}{}
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		coordinator.mu.Unlock()
 		t.Fatal("could not reserve the old window lease")
 	}
@@ -194,8 +194,8 @@ func TestPlaybackWindowCrossFileCandidateConfirmsAndCleansOldWindow(t *testing.T
 	if coordinator.anchor.file != newFile {
 		t.Fatal("cross-file confirmation did not install the candidate file as anchor")
 	}
-	if got := playbackWindowEnd(coordinator.anchor.cursor, coordinator.anchor.fileSize); got != (64<<20)+128+defaultPlaybackWindow {
-		t.Fatalf("new cross-file playback window ends at %d, want %d", got, (64<<20)+128+defaultPlaybackWindow)
+	if got := coordinator.playbackWindowEnd(coordinator.anchor.cursor, coordinator.anchor.fileSize); got != (64<<20)+128+testPrefetchWindowBytes {
+		t.Fatalf("new cross-file playback window ends at %d, want %d", got, (64<<20)+128+testPrefetchWindowBytes)
 	}
 	desired := coordinator.desiredPiecesLocked()
 	if len(desired) == 0 || desired[0] != 192 {
@@ -622,7 +622,7 @@ func TestPlaybackWindowColdStartHoleCleanupAfterLastTicket(t *testing.T) {
 		t.Fatal("could not retain the synthetic old window pin")
 	}
 	coordinator.windowPins[0] = struct{}{}
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		coordinator.mu.Unlock()
 		t.Fatal("could not reserve the synthetic old window lease")
 	}
@@ -777,7 +777,7 @@ func TestPlaybackWindowForegroundStartReleasesNormalLease(t *testing.T) {
 	store := cache.New(1 << 20)
 	coordinator := newTestCoordinator(store)
 	file := playbackTestFile(1<<20, 1<<20, store, coordinator)
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		t.Fatal("could not reserve the test Normal token")
 	}
 	coordinator.active[0] = struct{}{}

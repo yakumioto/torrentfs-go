@@ -76,7 +76,15 @@ func waitPrefetchState(t *testing.T, ctx context.Context, st *session.Torrent, w
 	return last
 }
 
-func defaultTestPrefetchPieces() int { return session.PrefetchDefaultPiecesForTest() }
+// testPrefetchBudgetPieces is the read-ahead budget these tests install,
+// expressed in pieces of testPieceLength. The byte budget is converted into a
+// piece count at the configured piece length, so the tests keep the shape of
+// the old fixed-piece limit while the implementation counts bytes.
+const testPrefetchBudgetPieces = 4
+
+func testPrefetchBudgetBytes() int64 {
+	return int64(testPrefetchBudgetPieces) * int64(testPieceLength)
+}
 
 // seedPrefetchTorrent registers a peerless single-file torrent of the given
 // piece count and seeds just the given pieces, so a read of a seeded piece is a
@@ -114,13 +122,13 @@ func TestPrefetchActivatesWindowUpToGlobalBudget(t *testing.T) {
 	// coordinator may prefetch at most its budget of them.
 	opened.read(t, 0, 64)
 	snapshot := waitPrefetchState(t, ctx, st, "the budget-sized active set", func(s session.PrefetchSnapshot) bool {
-		return s.ActivePieces == defaultTestPrefetchPieces()
+		return s.ActivePieces == testPrefetchBudgetPieces
 	})
-	if snapshot.MaxActivePieces > defaultTestPrefetchPieces() {
-		t.Fatalf("max active pieces = %d, want at most %d", snapshot.MaxActivePieces, defaultTestPrefetchPieces())
+	if snapshot.MaxActivePieces > testPrefetchBudgetPieces {
+		t.Fatalf("max active pieces = %d, want at most %d", snapshot.MaxActivePieces, testPrefetchBudgetPieces)
 	}
-	if _, used := session.PrefetchBudgetUsageForTest(sess); used != defaultTestPrefetchPieces() {
-		t.Fatalf("session background budget used = %d, want %d", used, defaultTestPrefetchPieces())
+	if _, used := session.PrefetchBudgetUsageForTest(sess); used != testPrefetchBudgetBytes() {
+		t.Fatalf("session background budget used = %d, want %d", used, testPrefetchBudgetBytes())
 	}
 	if snapshot.DedupeCount != 0 {
 		t.Fatalf("a single cold read produced %d duplicate piece activations", snapshot.DedupeCount)
@@ -134,8 +142,8 @@ func TestPrefetchActivatesWindowUpToGlobalBudget(t *testing.T) {
 		t.Fatalf("priority adds went %d -> %d for an overlapping read; the window must stay deduped",
 			snapshot.PriorityAdds, after.PriorityAdds)
 	}
-	if after.ActivePieces > defaultTestPrefetchPieces() {
-		t.Fatalf("active pieces = %d after an overlapping read, want at most %d", after.ActivePieces, defaultTestPrefetchPieces())
+	if after.ActivePieces > testPrefetchBudgetPieces {
+		t.Fatalf("active pieces = %d after an overlapping read, want at most %d", after.ActivePieces, testPrefetchBudgetPieces)
 	}
 }
 
@@ -153,7 +161,7 @@ func TestPrefetchBudgetIsGlobalAcrossTorrents(t *testing.T) {
 
 	first.read(t, 0, 64)
 	waitPrefetchState(t, ctx, firstTorrent, "the first torrent to claim the budget", func(s session.PrefetchSnapshot) bool {
-		return s.ActivePieces == defaultTestPrefetchPieces()
+		return s.ActivePieces == testPrefetchBudgetPieces
 	})
 
 	second.read(t, 0, 64)
@@ -178,8 +186,8 @@ func TestPrefetchBudgetIsGlobalAcrossTorrents(t *testing.T) {
 	recovered := waitPrefetchState(t, ctx, secondTorrent, "the second torrent to reuse the freed budget", func(s session.PrefetchSnapshot) bool {
 		return s.ActivePieces > 0
 	})
-	if recovered.ActivePieces > defaultTestPrefetchPieces() {
-		t.Fatalf("second torrent active pieces = %d, want at most %d", recovered.ActivePieces, defaultTestPrefetchPieces())
+	if recovered.ActivePieces > testPrefetchBudgetPieces {
+		t.Fatalf("second torrent active pieces = %d, want at most %d", recovered.ActivePieces, testPrefetchBudgetPieces)
 	}
 	if limit, used := session.PrefetchBudgetUsageForTest(sess); used > limit {
 		t.Fatalf("global background budget used = %d after reuse, want at most %d", used, limit)
@@ -334,8 +342,8 @@ func TestPrefetchRefillsAfterTheWindowDrains(t *testing.T) {
 	if refilled.BufferedBytes >= full.BufferedBytes {
 		t.Fatalf("buffered bytes = %d after the drain, want below the previous %d", refilled.BufferedBytes, full.BufferedBytes)
 	}
-	if refilled.ActivePieces > defaultTestPrefetchPieces() {
-		t.Fatalf("active pieces = %d after refilling, want at most %d", refilled.ActivePieces, defaultTestPrefetchPieces())
+	if refilled.ActivePieces > testPrefetchBudgetPieces {
+		t.Fatalf("active pieces = %d after refilling, want at most %d", refilled.ActivePieces, testPrefetchBudgetPieces)
 	}
 	if refilled.EffectiveLow > refilled.EffectiveHigh {
 		t.Fatalf("effective low %d exceeds effective high %d", refilled.EffectiveLow, refilled.EffectiveHigh)
@@ -421,8 +429,8 @@ func TestPrefetchForegroundOutranksBackgroundLease(t *testing.T) {
 		t.Fatalf("foreground read never completed: %v", ctx.Err())
 	}
 	snapshot := session.PrefetchSnapshotForTest(st)
-	if snapshot.MaxActivePieces > defaultTestPrefetchPieces() {
-		t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, defaultTestPrefetchPieces())
+	if snapshot.MaxActivePieces > testPrefetchBudgetPieces {
+		t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, testPrefetchBudgetPieces)
 	}
 }
 

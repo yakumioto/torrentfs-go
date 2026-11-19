@@ -45,8 +45,16 @@ const (
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
 	defaultSMBListenAddr            = "0.0.0.0:1445"
 	defaultMaxUploadBytes     int64 = 10 << 20
-	defaultLogLevel                 = "info"
-	defaultLogFormat                = "text"
+	defaultStreamLinkTTL            = 720 * time.Hour
+	// defaultPrefetchWindowBytes is the default read-ahead window: the amount
+	// of the file ahead of the playback cursor the session tries to hold.
+	defaultPrefetchWindowBytes int64 = 32 << 20
+	// defaultPrefetchBudgetBytes caps concurrent read-ahead downloads. It
+	// equals four 4 MiB pieces, the limit the fixed piece count used before it
+	// became a byte budget.
+	defaultPrefetchBudgetBytes int64 = 16 << 20
+	defaultLogLevel                  = "info"
+	defaultLogFormat                 = "text"
 	// defaultReadingConns is the connection allowance for a torrent that is
 	// being read. It is generous enough to stream, and is granted per torrent
 	// instead of being taken from a session-wide budget.
@@ -199,6 +207,21 @@ type HTTP struct {
 	// MaxUploadBytes caps any uploaded request body: a .torrent upload or a
 	// managed subtitle file.
 	MaxUploadBytes ByteQuantity `toml:"max_upload_size" component:"api" hotapply:"true"`
+	// TrustedProxies lists the reverse proxies whose forwarding headers are
+	// believed. When the immediate peer is one of these addresses or networks,
+	// the client address is read from the last X-Forwarded-For hop that is not
+	// itself trusted. Empty means the peer address is always the client.
+	TrustedProxies []string `toml:"trusted_proxies" component:"api"`
+	// Stream groups the signed streaming link settings.
+	Stream Stream `toml:"stream" component:"api"`
+}
+
+// Stream groups the signed streaming link settings.
+type Stream struct {
+	// LinkTTL is how long a generated STRM link stays valid. Expiry is part of
+	// the signature, so a copied link stops working without any server state.
+	// It is read at startup; a new value takes effect after a restart.
+	LinkTTL Duration `toml:"link_ttl" component:"stream"`
 }
 
 // STRM groups the optional signed HTTP streaming settings.
@@ -339,6 +362,9 @@ func Default() Config {
 				TokenTTL: Duration(30 * time.Minute),
 			},
 			MaxUploadBytes: ByteQuantity(defaultMaxUploadBytes),
+			Stream: Stream{
+				LinkTTL: Duration(defaultStreamLinkTTL),
+			},
 		},
 		Identity: Identity{
 			TrackerUserAgent:               "qBittorrent/4.4.0",
@@ -349,7 +375,13 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Filesystem:  Filesystem{ReadTimeout: defaultReadTimeout},
+		Filesystem: Filesystem{
+			ReadTimeout: defaultReadTimeout,
+			Prefetch: Prefetch{
+				WindowBytes: ByteQuantity(defaultPrefetchWindowBytes),
+				BudgetBytes: ByteQuantity(defaultPrefetchBudgetBytes),
+			},
+		},
 		FUSE:        FUSE{AllowOther: false},
 		SMB:         SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
 		Experiments: Experiments{Upload: UploadExperiment{Mode: "baseline", Jitter: 20}},
@@ -409,6 +441,12 @@ func (c Config) validateSyntax(collector *validationCollector) {
 			collector.add(invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err)))
 		}
 	}
+	if c.Filesystem.Prefetch.WindowBytes <= 0 {
+		collector.add(invalid("filesystem.prefetch.window_bytes", errPositive))
+	}
+	if c.Filesystem.Prefetch.BudgetBytes <= 0 {
+		collector.add(invalid("filesystem.prefetch.budget_bytes", errPositive))
+	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
 		collector.add(invalid("cache.capacity", errCapacityRange))
 	}
@@ -430,6 +468,12 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	}
 	if c.HTTP.MaxUploadBytes <= 0 {
 		collector.add(invalid("http.max_upload_size", errPositive))
+	}
+	if c.HTTP.Stream.LinkTTL <= 0 {
+		collector.add(invalid("http.stream.link_ttl", errPositive))
+	}
+	if err := validateTrustedProxies(c.HTTP.TrustedProxies); err != nil {
+		collector.add(invalid("http.trusted_proxies", err))
 	}
 	collector.add(validateAuth(c.HTTP.Auth))
 	if err := validateSTRM(c.STRM, c.HTTP.ListenAddr); err != nil {

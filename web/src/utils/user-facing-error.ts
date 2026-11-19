@@ -9,6 +9,7 @@ const STATUS_MESSAGES: Record<number, string> = {
   409: '当前任务仍被其他资源引用，请先解除引用后重试。',
   413: '上传的种子文件超过后台服务的大小限制。',
   415: '后台服务仅接受 .torrent 文件上传或磁力链接请求。',
+  429: '尝试过于频繁，请稍后再试。',
 };
 
 /**
@@ -26,6 +27,8 @@ const SUBTITLE_CODE_MESSAGES: Record<string, string> = {
   subtitle_write_failed: '字幕文件写入失败，请稍后重试。',
   torrent_deleting: '任务正在删除，删除完成后无法再上传字幕。',
   subtitle_upload_too_large: '字幕文件超过后台服务的大小限制。',
+  subtitle_not_found: '字幕不存在或已被删除。',
+  subtitle_cleanup_failed: '字幕文件清理失败，请检查存储权限或空间后重试。',
 };
 
 export function userFacingError(error: unknown, fallback = '后台服务暂时无法完成此操作，请稍后重试。'): string {

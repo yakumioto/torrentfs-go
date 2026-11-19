@@ -1,4 +1,4 @@
-import { Table } from '@mantine/core';
+import { Button, Table } from '@mantine/core';
 import type { Subtitle } from '../../types/api';
 import { formatBytes } from '../../utils/format';
 import styles from './FilesTable.module.css';
@@ -8,7 +8,17 @@ import styles from './FilesTable.module.css';
  * piece range, so folding them into the piece-coverage view would report a
  * coverage state that does not exist.
  */
-export function SubtitlesTable({ subtitles }: { subtitles: Subtitle[] }) {
+export function SubtitlesTable({
+  subtitles,
+  onDelete,
+  deleteDisabled = false,
+  deleteDisabledReason,
+}: {
+  subtitles: Subtitle[];
+  onDelete?: (subtitle: Subtitle) => void;
+  deleteDisabled?: boolean;
+  deleteDisabledReason?: string;
+}) {
   if (subtitles.length === 0) {
     return <div className="empty-state" role="status"><p>还没有由 TorrentFS 管理的字幕。</p></div>;
   }
@@ -22,6 +32,7 @@ export function SubtitlesTable({ subtitles }: { subtitles: Subtitle[] }) {
             <Table.Th>格式</Table.Th>
             <Table.Th>大小</Table.Th>
             <Table.Th>更新时间</Table.Th>
+            {onDelete !== undefined && <Table.Th>操作</Table.Th>}
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
@@ -32,6 +43,21 @@ export function SubtitlesTable({ subtitles }: { subtitles: Subtitle[] }) {
               <Table.Td data-label="格式"><span className="text-mono">.{subtitle.format}</span></Table.Td>
               <Table.Td data-label="大小"><span className="text-mono">{formatBytes(subtitle.size)}</span></Table.Td>
               <Table.Td data-label="更新时间"><span className="text-mono">{new Date(subtitle.updated_at).toLocaleString()}</span></Table.Td>
+              {onDelete !== undefined && (
+                <Table.Td data-label="操作">
+                  <Button
+                    size="compact-sm"
+                    variant="subtle"
+                    color="danger"
+                    onClick={() => onDelete(subtitle)}
+                    disabled={deleteDisabled}
+                    title={deleteDisabled ? deleteDisabledReason : undefined}
+                    aria-label={`删除字幕 ${subtitle.path}`}
+                  >
+                    删除
+                  </Button>
+                </Table.Td>
+              )}
             </Table.Tr>
           ))}
         </Table.Tbody>

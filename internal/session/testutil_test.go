@@ -19,8 +19,13 @@ import (
 
 const testPieceLength = 256 << 10
 
+// testConfig pins the read-ahead budget to four test pieces. Production
+// defaults are a byte budget of 16 MiB, which at testPieceLength would admit
+// far more pieces than the assertions below expect.
 func testConfig() config.Config {
-	return config.Default()
+	cfg := config.Default()
+	cfg.Filesystem.Prefetch.BudgetBytes = config.ByteQuantity(testPrefetchBudgetPieces * testPieceLength)
+	return cfg
 }
 
 func testTorrentDir(t *testing.T, base string) string {

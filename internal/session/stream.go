@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -21,7 +22,7 @@ const streamKeyFileName = "stream_key"
 // resolveStreamSigner runs under the instance lock, before any client resources
 // are opened. A damaged key is never replaced automatically: doing so would
 // silently revoke every previously generated STRM link.
-func resolveStreamSigner(metadataDir string) (*stream.Signer, error) {
+func resolveStreamSigner(metadataDir string, linkTTL time.Duration) (*stream.Signer, error) {
 	name := filepath.Join(metadataDir, streamKeyFileName)
 	info, err := requireRegularFile(name)
 	if errors.Is(err, os.ErrNotExist) {
@@ -32,7 +33,7 @@ func resolveStreamSigner(metadataDir string) (*stream.Signer, error) {
 		if err := writeFileAtomic(name, key); err != nil {
 			return nil, fmt.Errorf("session: persist stream key: %w", err)
 		}
-		return stream.NewSigner(key)
+		return stream.NewSigner(key, linkTTL)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("session: read stream key: %w", err)
@@ -62,7 +63,7 @@ func resolveStreamSigner(metadataDir string) (*stream.Signer, error) {
 	if len(key) != stream.KeySize {
 		return nil, fmt.Errorf("session: stream key must contain exactly %d bytes; remove it only to generate a new key and invalidate existing STRM links", stream.KeySize)
 	}
-	return stream.NewSigner(key)
+	return stream.NewSigner(key, linkTTL)
 }
 
 // StreamURL signs one existing payload file without opening its content. The

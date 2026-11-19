@@ -53,9 +53,11 @@ const SECTION_LABELS: Record<string, string> = {
   identity: '身份',
   http: 'HTTP 服务',
   'http.auth': 'HTTP 认证',
+  'http.stream': '签名直链',
   strm: 'STRM 流媒体',
   log: '日志',
   filesystem: '文件系统',
+  'filesystem.prefetch': '前瞻读取',
   fuse: 'FUSE',
   smb: 'SMB',
   upload_rate: '上传限速',
@@ -157,6 +159,8 @@ const DOCUMENTATION_LABELS: Record<string, string> = {
   'experiments.upload.rate': '虚报速率是在 inject 模式下，上报上传量的平均虚增速度。',
   'experiments.upload.seed':
     '随机种子用于固定抖动序列，便于复现实验结果。设为 0 则由进程自行选择。种子在启动时确定，修改后需要重启才能生效。',
+  'filesystem.prefetch.budget_bytes': '下载预算是会话内所有种子并发前瞻下载的字节上限；预算小于一个分片时仍至少放行一片，避免播放卡死。修改后需要重启才能生效。',
+  'filesystem.prefetch.window_bytes': '前瞻窗口是从播放位置向前读取多远；它同时决定哪些前台读取算在播放窗口内，缩小窗口会让更多 seek 被当作新的锚点。修改后需要重启才能生效。',
   'filesystem.read_timeout': '读取超时限制单次从种子读取一个分片所允许的最长时间。',
   'fuse.allow_other':
     '允许其他用户会向内核传递 allow_other 选项，解除 FUSE 默认只允许挂载用户访问挂载点的限制。',
@@ -167,6 +171,8 @@ const DOCUMENTATION_LABELS: Record<string, string> = {
     '登录令牌有效期是令牌允许的最长空闲时间，每次有效请求都会顺延该窗口；令牌只保存在内存中，随进程退出而失效。',
   'http.listen_addr': '监听地址是 HTTP 服务绑定的地址。留空则禁用该服务，默认只绑定回环地址。',
   'http.max_upload_size': '最大上传大小限制任何上传请求体的体积，包括 .torrent 文件上传和字幕文件托管上传。',
+  'http.stream.link_ttl': '链接有效期是签名直链允许使用的时长。过期时间包含在签名里，复制到别处的链接到期后自动失效；修改该值不会让已发出的链接提前失效，需要重启才能生效。',
+  'http.trusted_proxies': '可信代理列出允许采信转发头的反向代理地址或网段。只有当直连对端属于这些地址时，才会从 X-Forwarded-For 中取最后一个非可信跳作为客户端地址；留空表示始终使用对端地址。',
   'identity.extended_handshake_client_version':
     '扩展握手客户端版本会作为 BEP 10 扩展握手的 v 字段发送。',
   'identity.peer_id_prefix': 'Peer ID 前缀是生成的 20 字节 BitTorrent peer ID 的前缀部分。',

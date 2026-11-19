@@ -6,6 +6,7 @@ import { ApiError } from '../api/errors';
 import { useAuth } from '../app/auth-context';
 import { DeleteTorrentDialog } from '../components/dialogs/DeleteTorrentDialog';
 import { UploadSubtitleDialog } from '../components/dialogs/UploadSubtitleDialog';
+import { DeleteSubtitleDialog } from '../components/dialogs/DeleteSubtitleDialog';
 import { TorrentDetailHeader } from '../components/detail/TorrentDetailHeader';
 import { TorrentFilesPanel } from '../components/detail/TorrentFilesPanel';
 import { TorrentExperimentSummary } from '../components/detail/TorrentExperimentSummary';
@@ -60,8 +61,14 @@ export function TorrentDetailPage() {
   const visible = usePageVisible();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [subtitleOpen, setSubtitleOpen] = useState(false);
+  const [subtitleDeleteOpen, setSubtitleDeleteOpen] = useState(false);
+  const [pendingSubtitleDelete, setPendingSubtitleDelete] = useState<Subtitle | null>(null);
   const openDelete = useCallback(() => setDeleteOpen(true), []);
   const openSubtitle = useCallback(() => setSubtitleOpen(true), []);
+  const openSubtitleDelete = useCallback((subtitle: Subtitle) => {
+    setPendingSubtitleDelete(subtitle);
+    setSubtitleDeleteOpen(true);
+  }, []);
   const enabled = auth.isReady && visible;
   const detail = useTorrentDetail(auth.api, id, enabled);
   const status = useTorrentStatus(auth.api, id, enabled);
@@ -149,7 +156,14 @@ export function TorrentDetailPage() {
           <TorrentOverview torrent={torrent} summary={liveSummary.data} meta={statusMeta.data} />
         </Tabs.Panel>
         <Tabs.Panel value="files" className={styles.tabPanel}>
-          <TorrentFilesPanel files={files} pieces={pieces} subtitles={subtitles} />
+          <TorrentFilesPanel
+            files={files}
+            pieces={pieces}
+            subtitles={subtitles}
+            onDeleteSubtitle={openSubtitleDelete}
+            subtitleDeleteDisabled={torrent.state === 'deleting' || torrent.state === 'delete_failed'}
+            subtitleDeleteDisabledReason="任务正在删除，暂时不能修改字幕。"
+          />
         </Tabs.Panel>
         <Tabs.Panel value="pieces" className={styles.tabPanel}>
           <TorrentPiecesPanel pieces={pieces} pieceLength={statusMeta.data?.pieceLength} />
@@ -163,6 +177,15 @@ export function TorrentDetailPage() {
         subtitles={subtitles}
         opened={subtitleOpen}
         onClose={() => setSubtitleOpen(false)}
+      />
+
+      <DeleteSubtitleDialog
+        api={auth.api}
+        torrentId={id}
+        subtitle={pendingSubtitleDelete}
+        opened={subtitleDeleteOpen}
+        onClose={() => setSubtitleDeleteOpen(false)}
+        onDeleted={() => setSubtitleDeleteOpen(false)}
       />
 
       <DeleteTorrentDialog torrent={torrent} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />

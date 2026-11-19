@@ -47,6 +47,15 @@ func TestDefault(t *testing.T) {
 	if cfg.HTTP.MaxUploadBytes != config.ByteQuantity(10<<20) {
 		t.Fatalf("Default max upload = %d, want %d", cfg.HTTP.MaxUploadBytes, 10<<20)
 	}
+	if cfg.Filesystem.Prefetch.WindowBytes != config.ByteQuantity(32<<20) {
+		t.Fatalf("Default prefetch window = %d, want %d", cfg.Filesystem.Prefetch.WindowBytes, 32<<20)
+	}
+	if cfg.Filesystem.Prefetch.BudgetBytes != config.ByteQuantity(16<<20) {
+		t.Fatalf("Default prefetch budget = %d, want %d", cfg.Filesystem.Prefetch.BudgetBytes, 16<<20)
+	}
+	if time.Duration(cfg.HTTP.Stream.LinkTTL) != 720*time.Hour {
+		t.Fatalf("Default stream link TTL = %s, want 720h", cfg.HTTP.Stream.LinkTTL)
+	}
 	if cfg.HTTP.Auth.Enabled {
 		t.Fatal("Default authentication enabled, want disabled")
 	}
@@ -533,6 +542,34 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 				cfg.HTTP.MaxUploadBytes = 0
 			},
 			field: "http.max_upload_size",
+		},
+		{
+			name: "non-positive prefetch window",
+			setup: func(cfg *config.Config) {
+				cfg.Filesystem.Prefetch.WindowBytes = 0
+			},
+			field: "filesystem.prefetch.window_bytes",
+		},
+		{
+			name: "non-positive prefetch budget",
+			setup: func(cfg *config.Config) {
+				cfg.Filesystem.Prefetch.BudgetBytes = -1
+			},
+			field: "filesystem.prefetch.budget_bytes",
+		},
+		{
+			name: "unparseable trusted proxy",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.TrustedProxies = []string{"not-an-address"}
+			},
+			field: "http.trusted_proxies",
+		},
+		{
+			name: "non-positive stream link ttl",
+			setup: func(cfg *config.Config) {
+				cfg.HTTP.Stream.LinkTTL = 0
+			},
+			field: "http.stream.link_ttl",
 		},
 		{
 			name: "non-loopback address without token",

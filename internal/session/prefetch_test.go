@@ -9,33 +9,47 @@ import (
 )
 
 func TestPrefetchBudgetIsSessionGlobal(t *testing.T) {
-	budget := newPrefetchBudget(defaultPrefetchPieces)
-	if limit, used := budget.snapshot(); limit != defaultPrefetchPieces || used != 0 {
-		t.Fatalf("new budget = (%d, %d), want (%d, 0)", limit, used, defaultPrefetchPieces)
+	const cost int64 = 4 << 20
+	budget := newPrefetchBudget(testPrefetchBudgetBytes)
+	if limit, used := budget.snapshot(); limit != testPrefetchBudgetBytes || used != 0 {
+		t.Fatalf("new budget = (%d, %d), want (%d, 0)", limit, used, testPrefetchBudgetBytes)
 	}
-	for i := 0; i < defaultPrefetchPieces; i++ {
-		if !budget.tryAcquire() {
-			t.Fatalf("acquire %d of %d was refused", i+1, defaultPrefetchPieces)
+	capacity := int(testPrefetchBudgetBytes / cost)
+	for i := 0; i < capacity; i++ {
+		if !budget.tryAcquire(cost) {
+			t.Fatalf("acquire %d of %d was refused", i+1, capacity)
 		}
 	}
-	if budget.tryAcquire() {
-		t.Fatalf("acquired %d tokens, want the limit of %d to hold", defaultPrefetchPieces+1, defaultPrefetchPieces)
+	if budget.tryAcquire(cost) {
+		t.Fatalf("acquired %d bytes, want the limit of %d to hold", testPrefetchBudgetBytes+cost, testPrefetchBudgetBytes)
 	}
-	if _, used := budget.snapshot(); used != defaultPrefetchPieces {
-		t.Fatalf("used = %d after a refused acquire, want %d", used, defaultPrefetchPieces)
+	if _, used := budget.snapshot(); used != testPrefetchBudgetBytes {
+		t.Fatalf("used = %d after a refused acquire, want %d", used, testPrefetchBudgetBytes)
 	}
-	budget.release()
-	if !budget.tryAcquire() {
-		t.Fatal("a released token was not reusable")
+	budget.release(cost)
+	if !budget.tryAcquire(cost) {
+		t.Fatal("released bytes were not reusable")
 	}
 
-	restore := budget.setLimit(6)
-	if limit, _ := budget.snapshot(); limit != 6 {
-		t.Fatalf("limit = %d after setLimit(6), want 6", limit)
+	restore := budget.setLimit(6 * cost)
+	if limit, _ := budget.snapshot(); limit != 6*cost {
+		t.Fatalf("limit = %d after setLimit, want %d", limit, 6*cost)
 	}
 	restore()
-	if limit, _ := budget.snapshot(); limit != defaultPrefetchPieces {
-		t.Fatalf("limit = %d after restore, want %d", limit, defaultPrefetchPieces)
+	if limit, _ := budget.snapshot(); limit != testPrefetchBudgetBytes {
+		t.Fatalf("limit = %d after restore, want %d", limit, testPrefetchBudgetBytes)
+	}
+}
+
+// TestPrefetchBudgetAdmitsOneOversizedPiece pins the "at least one piece"
+// rule: a budget smaller than a single piece must not deadlock playback.
+func TestPrefetchBudgetAdmitsOneOversizedPiece(t *testing.T) {
+	budget := newPrefetchBudget(1 << 20)
+	if !budget.tryAcquire(4 << 20) {
+		t.Fatal("a piece larger than the budget was refused")
+	}
+	if budget.tryAcquire(1) {
+		t.Fatal("a second piece was admitted past an oversized first one")
 	}
 }
 
@@ -44,7 +58,8 @@ func TestPrefetchBudgetIsSessionGlobal(t *testing.T) {
 func newTestCoordinator(c *cache.Cache) *prefetchCoordinator {
 	return &prefetchCoordinator{
 		cache:            c,
-		budget:           newPrefetchBudget(defaultPrefetchPieces),
+		budget:           newPrefetchBudget(testPrefetchBudgetBytes),
+		window:           testPrefetchWindowBytes,
 		torrentKey:       "prefetch-test",
 		refs:             make(map[int]int),
 		windowPins:       make(map[int]struct{}),
@@ -147,8 +162,8 @@ func TestPrefetchWatermarksShrinkWithFileAndBudget(t *testing.T) {
 		{
 			name:       "large file keeps the defaults",
 			bytesToEOF: 512 << 20,
-			wantHigh:   defaultPrefetchHigh,
-			wantLow:    defaultPrefetchLow,
+			wantHigh:   testPrefetchWindowBytes,
+			wantLow:    prefetchLowCeiling,
 		},
 		{
 			name:       "short tail shrinks the window and keeps 1:2 hysteresis",
@@ -376,3 +391,37 @@ func TestPrefetchStaleTicketDoesNotMoveCursor(t *testing.T) {
 
 // ensure the coordinator compiles against the context it is given.
 var _ = context.Background
+
+// TestPrefetchBudgetConvertsBytesToPieces pins the byte semantics: the same
+// budget admits fewer pieces as the piece size grows, and the admitted bytes
+// stay at the budget. A piece larger than the whole budget still gets one
+// slot, because refusing it would stall playback.
+func TestPrefetchBudgetConvertsBytesToPieces(t *testing.T) {
+	const budget = int64(16 << 20)
+	tests := []struct {
+		name  string
+		piece int64
+		want  int
+	}{
+		{"256 KiB pieces", 256 << 10, 64},
+		{"4 MiB pieces", 4 << 20, 4},
+		{"16 MiB pieces", 16 << 20, 1},
+		{"32 MiB pieces", 32 << 20, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			coordinator := &prefetchCoordinator{
+				budget: newPrefetchBudget(budget),
+				anchor: prefetchAnchor{pieceLength: tt.piece},
+			}
+			if got := coordinator.activeLimit(); got != tt.want {
+				t.Fatalf("activeLimit(%d-byte pieces) = %d, want %d", tt.piece, got, tt.want)
+			}
+			// The admitted bytes never exceed the budget once a first piece fits.
+			admitted := int64(coordinator.activeLimit()) * tt.piece
+			if admitted > budget && tt.piece <= budget {
+				t.Fatalf("admitted %d bytes, want at most %d", admitted, budget)
+			}
+		})
+	}
+}

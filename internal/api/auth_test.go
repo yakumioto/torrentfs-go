@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,4 +252,71 @@ func loginForTest(t *testing.T, srv *api.Server) string {
 		t.Fatalf("decode login response: %v", err)
 	}
 	return response.Token
+}
+
+func loginAttempt(t *testing.T, srv *api.Server, remoteAddr, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"password":"`+password+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
+	return do(t, srv, req)
+}
+
+// TestLoginBacksOffAfterRepeatedFailures pins the wire contract: the first
+// four failures answer 401, the fifth arms the backoff, and the sixth request
+// is refused with 429 and Retry-After even when the password is correct.
+func TestLoginBacksOffAfterRepeatedFailures(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, dynamicAuth)
+	const ip = "198.51.100.7:4000"
+	for attempt := 1; attempt <= 5; attempt++ {
+		if rec := loginAttempt(t, srv, ip, "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401; body %s", attempt, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := loginAttempt(t, srv, ip, apiTestPassword)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after five failures = %d, want 429; body %s", rec.Code, rec.Body.String())
+	}
+	retryAfter, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || retryAfter <= 0 || retryAfter > 30 {
+		t.Fatalf("Retry-After = %q, want 1..30 seconds", rec.Header().Get("Retry-After"))
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode 429 body: %v", err)
+	}
+	if _, ok := body["token"]; ok {
+		t.Fatalf("429 response leaked a token: %v", body)
+	}
+
+	// Another source address shares no counter with the blocked one.
+	if other := loginAttempt(t, srv, "203.0.113.9:5000", "wrong"); other.Code != http.StatusUnauthorized {
+		t.Fatalf("other address status = %d, want 401; body %s", other.Code, other.Body.String())
+	}
+}
+
+func TestLoginSuccessResetsTheFailureCounter(t *testing.T) {
+	srv := newTestServer(t, &fakeBackend{}, dynamicAuth)
+	const ip = "198.51.100.8:4000"
+	for attempt := 1; attempt <= 4; attempt++ {
+		if rec := loginAttempt(t, srv, ip, "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401", attempt, rec.Code)
+		}
+	}
+	if rec := loginAttempt(t, srv, ip, apiTestPassword); rec.Code != http.StatusOK {
+		t.Fatalf("login after four failures = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	// The counter is gone, so four more failures still answer 401 and the
+	// fifth failure only arms the backoff rather than tripping it immediately.
+	for attempt := 1; attempt <= 5; attempt++ {
+		if rec := loginAttempt(t, srv, ip, "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("post-reset attempt %d status = %d, want 401", attempt, rec.Code)
+		}
+	}
+	if rec := loginAttempt(t, srv, ip, apiTestPassword); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after the second five failures = %d, want 429", rec.Code)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 
@@ -69,7 +70,7 @@ func TestStreamETagSurvivesSignatureRotation(t *testing.T) {
 	first := do(t, srv, httptest.NewRequest(http.MethodGet, backend.url(t, ""), nil))
 	etag := first.Header().Get("ETag")
 
-	rotatedSigner, err := stream.NewSigner(make([]byte, stream.KeySize))
+	rotatedSigner, err := stream.NewSigner(make([]byte, stream.KeySize), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

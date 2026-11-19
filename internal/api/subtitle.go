@@ -103,7 +103,7 @@ func (s *Server) handleUploadSubtitle(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.backend.UploadSubtitle(r.Context(), r.PathValue("id"), videoPath, header.Filename, file, limit)
 	if err != nil {
-		writeSubtitleError(w, err)
+		writeSubtitleError(w, "upload subtitle", err)
 		return
 	}
 	status := http.StatusCreated
@@ -122,36 +122,77 @@ func (s *Server) handleUploadSubtitle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleDeleteSubtitle(w http.ResponseWriter, r *http.Request) {
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if err := s.backend.DeleteSubtitle(r.Context(), r.PathValue("id"), relPath); err != nil {
+		writeSubtitleError(w, "delete subtitle", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // writeSubtitleError maps a subtitle failure onto a status and a stable code.
 // The code is what the web client branches on; the message stays human text.
-func writeSubtitleError(w http.ResponseWriter, err error) {
+// The action names the endpoint that failed, so a 500 does not claim an upload
+// failed when a delete did.
+func writeSubtitleError(w http.ResponseWriter, action string, err error) {
 	code := session.SubtitleErrorCode(err)
 	status := http.StatusInternalServerError
 	switch {
-	case errors.Is(err, session.ErrDeleting) || code == session.SubtitleCodeTorrentDeleting:
-		status = http.StatusConflict
 	case errors.Is(err, session.ErrUnknownTorrent):
 		status = http.StatusNotFound
-	case errors.Is(err, session.ErrSubtitleNameMismatch), errors.Is(err, session.ErrSubtitleFormatUnsupported):
-		status = http.StatusUnsupportedMediaType
-	case errors.Is(err, session.ErrSubtitleVideoNotFound):
-		status = http.StatusNotFound
-	case errors.Is(err, session.ErrSubtitleNameConflict), errors.Is(err, session.ErrSubtitlePayloadConflict):
+	case errors.Is(err, session.ErrDeleting) || code == session.SubtitleCodeTorrentDeleting:
 		status = http.StatusConflict
-	case errors.Is(err, session.ErrSubtitleUploadTooLarge):
+		code = codeOr(code, session.SubtitleCodeTorrentDeleting)
+	case errors.Is(err, session.ErrSubtitleNotFound) || code == session.SubtitleCodeNotFound:
+		status = http.StatusNotFound
+		code = codeOr(code, session.SubtitleCodeNotFound)
+	case errors.Is(err, session.ErrSubtitleVideoNotFound) || code == session.SubtitleCodeVideoNotFound:
+		status = http.StatusNotFound
+		code = codeOr(code, session.SubtitleCodeVideoNotFound)
+	case errors.Is(err, session.ErrSubtitleNameMismatch) || code == session.SubtitleCodeNameMismatch:
+		status = http.StatusUnsupportedMediaType
+		code = codeOr(code, session.SubtitleCodeNameMismatch)
+	case errors.Is(err, session.ErrSubtitleFormatUnsupported) || code == session.SubtitleCodeFormatUnsupported:
+		status = http.StatusUnsupportedMediaType
+		code = codeOr(code, session.SubtitleCodeFormatUnsupported)
+	case errors.Is(err, session.ErrSubtitleNameConflict) || code == session.SubtitleCodeNameConflict:
+		status = http.StatusConflict
+		code = codeOr(code, session.SubtitleCodeNameConflict)
+	case errors.Is(err, session.ErrSubtitlePayloadConflict) || code == session.SubtitleCodePayloadConflict:
+		status = http.StatusConflict
+		code = codeOr(code, session.SubtitleCodePayloadConflict)
+	case errors.Is(err, session.ErrSubtitleUploadTooLarge) || code == session.SubtitleCodeUploadTooLarge:
 		status = http.StatusRequestEntityTooLarge
-	case errors.Is(err, session.ErrSubtitleStorageFull):
+		code = codeOr(code, session.SubtitleCodeUploadTooLarge)
+	// The store wraps the underlying filesystem error, so the code is the only
+	// reliable signal: the sentinel itself is not in the chain.
+	case errors.Is(err, session.ErrSubtitleStorageFull) || code == session.SubtitleCodeStorageFull:
 		status = http.StatusInsufficientStorage
-	case errors.Is(err, session.ErrSubtitleStorageUnavailable):
+		code = codeOr(code, session.SubtitleCodeStorageFull)
+	case errors.Is(err, session.ErrSubtitleStorageUnavailable) || code == session.SubtitleCodeStorageUnavailable:
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, session.ErrSubtitleWriteFailed):
+		code = codeOr(code, session.SubtitleCodeStorageUnavailable)
+	case errors.Is(err, session.ErrSubtitleCleanupFailed) || code == session.SubtitleCodeCleanupFailed:
 		status = http.StatusInternalServerError
+		code = codeOr(code, session.SubtitleCodeCleanupFailed)
 	}
-	if status == http.StatusInternalServerError {
-		writeSessionError(w, "upload subtitle", err)
+	if code == "" {
+		writeSessionError(w, action, err)
 		return
 	}
 	writeCodedError(w, status, code, err.Error())
+}
+
+func codeOr(code, fallback string) string {
+	if code != "" {
+		return code
+	}
+	return fallback
 }
 
 func writeCodedError(w http.ResponseWriter, status int, code, message string) {

@@ -25,21 +25,22 @@ import (
 
 type streamTestBackend struct {
 	fakeBackend
-	signer   *stream.Signer
-	hash     metainfo.Hash
-	filePath string
-	data     []byte
-	size     int64
-	openErr  error
-	read     func(context.Context, []byte, int64) (int, error)
-	opened   atomic.Int32
-	reads    atomic.Int32
-	closed   atomic.Int32
+	signer     *stream.Signer
+	hash       metainfo.Hash
+	filePath   string
+	data       []byte
+	size       int64
+	openErr    error
+	beforeOpen func()
+	read       func(context.Context, []byte, int64) (int, error)
+	opened     atomic.Int32
+	reads      atomic.Int32
+	closed     atomic.Int32
 }
 
 func newStreamTestBackend(t *testing.T) *streamTestBackend {
 	t.Helper()
-	signer, err := stream.NewSigner(bytes.Repeat([]byte{0x25}, stream.KeySize))
+	signer, err := stream.NewSigner(bytes.Repeat([]byte{0x25}, stream.KeySize), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +52,9 @@ func newStreamTestBackend(t *testing.T) *streamTestBackend {
 }
 
 func (b *streamTestBackend) OpenStream(loc stream.Location) (stream.File, error) {
+	if b.beforeOpen != nil {
+		b.beforeOpen()
+	}
 	if !b.signer.Verify(loc.Hash, loc.Path, loc.Signature) {
 		return stream.File{}, stream.ErrInvalidSignature
 	}

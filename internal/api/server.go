@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ type Backend interface {
 	TorrentStatusFor(id string) (session.TorrentStatusView, error)
 	DeleteTorrent(ctx context.Context, id string) (*session.Operation, error)
 	UploadSubtitle(ctx context.Context, id, videoPath, fileName string, src io.Reader, maxBytes int64) (session.SubtitleUploadResponse, error)
+	DeleteSubtitle(ctx context.Context, id, path string) error
 	SetFavorite(ctx context.Context, id string, favorite bool) (session.TorrentView, error)
 	DeleteUnfavoritedOlderThan(ctx context.Context, olderThan time.Duration) (session.PruneResult, error)
 	Operation(id string) (session.Operation, bool)
@@ -89,15 +91,18 @@ type Server struct {
 	configSaver  ConfigSaver
 	handler      http.Handler
 	http         *http.Server
+	loginLimiter *loginLimiter
 
 	mu       sync.RWMutex
 	listener net.Listener
 
-	streamEnabled bool
-	streamCtx     context.Context
-	streamCancel  context.CancelFunc
-	shutdownOnce  sync.Once
-	shutdownErr   error
+	streamEnabled  bool
+	streamCtx      context.Context
+	streamCancel   context.CancelFunc
+	streamSlots    chan struct{}
+	trustedProxies []netip.Prefix
+	shutdownOnce   sync.Once
+	shutdownErr    error
 }
 
 // New builds a server for cfg. A listener is created only by Serve.
@@ -126,6 +131,11 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
+	trustedProxies, err := parseTrustedProxies(cfg.HTTP.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("api: invalid trusted proxy: %w", err)
+	}
+	s.trustedProxies = trustedProxies
 	if cfg.HTTP.Auth.Enabled {
 		hash, err := cfg.PasswordHash()
 		if err != nil {
@@ -159,11 +169,14 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/torrents/{id}", s.handleDetail)
 	mux.HandleFunc("DELETE /api/v1/torrents/{id}", s.handleDelete)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/subtitles", s.handleUploadSubtitle)
+	mux.HandleFunc("DELETE /api/v1/torrents/{id}/subtitles", s.handleDeleteSubtitle)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/favorite", s.handleSetFavorite)
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/category", s.handleSetTorrentCategory)
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
+	s.loginLimiter = newLoginLimiter(time.Now)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
+	s.streamSlots = make(chan struct{}, maxConcurrentStreams)
 	s.handler = s.dispatchRoutes(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{
 		Handler:           s.handler,

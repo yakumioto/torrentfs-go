@@ -138,6 +138,13 @@ export class ApiClient {
     });
   }
 
+  deleteSubtitle(id: string, path: string, signal?: AbortSignal): Promise<void> {
+    return this.request<void>(`/torrents/${encodeURIComponent(id)}/subtitles?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+      signal,
+    });
+  }
+
   setFavorite(id: string, favorite: boolean, signal?: AbortSignal): Promise<Torrent> {
     return this.request<Torrent>(`/torrents/${encodeURIComponent(id)}/favorite`, {
       method: 'PUT',

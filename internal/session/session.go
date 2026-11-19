@@ -81,6 +81,9 @@ type Session struct {
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
 	prefetchBudget *prefetchBudget
+	// prefetchWindow is the read-ahead window applied to every coordinator.
+	// It is fixed at startup because it sizes the cache pins.
+	prefetchWindow int64
 	// pieceDownloadBudget bounds how many pieces, summed across every
 	// torrent's piece download, may be fetched at once. It is independent
 	// of prefetchBudget: playback prefetch and piece downloads never
@@ -273,7 +276,7 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 	experimentReporter := experiments.NewReporter(experimentSettings, experimentRecorder)
 	var streamSigner *stream.Signer
 	if cfg.STRM.BaseURL != "" {
-		streamSigner, err = resolveStreamSigner(metadataDir)
+		streamSigner, err = resolveStreamSigner(metadataDir, time.Duration(cfg.HTTP.Stream.LinkTTL))
 		if err != nil {
 			releaseInstanceLock(instanceLock)
 			logInitFailure("resolve-stream-key", err)
@@ -378,7 +381,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		streamBaseURL:       cfg.STRM.BaseURL,
 		pieceCache:          pieceCache,
 		pieceStore:          pieceStore,
-		prefetchBudget:      newPrefetchBudget(defaultPrefetchPieces),
+		prefetchBudget:      newPrefetchBudget(int64(cfg.Filesystem.Prefetch.BudgetBytes)),
+		prefetchWindow:      int64(cfg.Filesystem.Prefetch.WindowBytes),
 		pieceDownloadBudget: newPieceDownloadBudget(),
 		deleteFlushTimeout:  deleteFlushTimeout,
 		closeDone:           make(chan struct{}),

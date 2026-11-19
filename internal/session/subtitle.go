@@ -36,6 +36,9 @@ const (
 	// SubtitleCodeNamespaceConflict is reported when an add is refused because it
 	// would break an existing managed subtitle's mount path.
 	SubtitleCodeNamespaceConflict = "subtitle_namespace_conflict"
+	// SubtitleCodeNotFound is reported by a delete whose target the session does
+	// not manage (never uploaded, already deleted, or removed out of band).
+	SubtitleCodeNotFound = "subtitle_not_found"
 )
 
 var (
@@ -52,6 +55,8 @@ var (
 	// ErrSubtitleNamespaceConflict means adding a torrent would change or shadow
 	// an existing managed subtitle's mount path.
 	ErrSubtitleNamespaceConflict = errors.New("subtitle namespace conflict")
+	// ErrSubtitleNotFound means the delete target is not a managed subtitle.
+	ErrSubtitleNotFound = errors.New("subtitle was not found")
 )
 
 var subtitleCodeMessages = map[string]string{
@@ -66,6 +71,7 @@ var subtitleCodeMessages = map[string]string{
 	SubtitleCodeTorrentDeleting:    "任务正在删除，暂时不能上传字幕。",
 	SubtitleCodeCleanupFailed:      "字幕文件清理失败。",
 	SubtitleCodeUploadTooLarge:     "字幕文件超过后台服务的大小限制。",
+	SubtitleCodeNotFound:           "字幕不存在或已被删除。",
 }
 
 // SubtitleTarget describes one server-derived video target.
@@ -681,6 +687,93 @@ func (s *Session) UploadSubtitle(ctx context.Context, id, videoPath, fileName st
 		UpdatedAt: record.UpdatedAt,
 		Replaced:  replacing,
 	}, nil
+}
+
+// DeleteSubtitle removes one managed subtitle. The unlink and the index drop
+// happen under the same per-torrent lock as an upload, so a concurrent upload
+// cannot publish a file whose index entry this delete then removes.
+func (s *Session) DeleteSubtitle(ctx context.Context, id, relPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hash, err := parseInfoHash(id)
+	if err != nil {
+		return ErrUnknownTorrent
+	}
+	s.rootNamespaceMu.Lock()
+	defer s.rootNamespaceMu.Unlock()
+	unlock := s.lockHash(hash)
+	defer unlock()
+
+	s.mu.RLock()
+	if err := s.ensureActiveLocked(); err != nil {
+		s.mu.RUnlock()
+		return err
+	}
+	entry := s.states[hash]
+	if entry == nil {
+		s.mu.RUnlock()
+		return ErrUnknownTorrent
+	}
+	if entry.State == StateDeleting || entry.State == StateDeleteFailed {
+		s.mu.RUnlock()
+		return newSubtitleError(SubtitleCodeTorrentDeleting, ErrDeleting)
+	}
+	_, managed := s.subtitles[hash][relPath]
+	if !managed || validateSubtitleRelativePath(relPath) != nil {
+		s.mu.RUnlock()
+		return newSubtitleError(SubtitleCodeNotFound, ErrSubtitleNotFound)
+	}
+	s.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store := s.subtitleStore
+	if store == nil {
+		return newSubtitleError(SubtitleCodeStorageUnavailable, ErrSubtitleStorageUnavailable)
+	}
+	if err := store.verify(); err != nil {
+		return subtitleStoreError(err)
+	}
+	rel := filepath.Join(subtitleDirName(hash), filepath.FromSlash(relPath))
+	stat, statErr := store.lstat(rel)
+	if errors.Is(statErr, os.ErrNotExist) {
+		// The index survived a file that is already gone; dropping the entry is
+		// the right repair, and the caller still learns the path is not there.
+		s.forgetSubtitle(hash, relPath)
+		return newSubtitleError(SubtitleCodeNotFound, ErrSubtitleNotFound)
+	}
+	if statErr != nil {
+		return subtitleStoreError(statErr)
+	}
+	if stat.Mode&subtitleStoreFileType != subtitleStoreRegular {
+		return subtitleStoreError(fmt.Errorf("subtitle path %q is not a regular file", relPath))
+	}
+	if err := store.remove(rel); err != nil {
+		return newSubtitleError(SubtitleCodeCleanupFailed, fmt.Errorf("%w: %w", ErrSubtitleCleanupFailed, err))
+	}
+	// The unlink already made the subtitle invisible, so a directory sync
+	// failure is a durability warning rather than a failed delete, mirroring
+	// the upload path's post-commit steps.
+	if err := store.syncDir(filepath.Dir(rel)); err != nil {
+		s.logger.Warn("subtitle directory sync failed after delete", "hash", hash.HexString(), "path", relPath, "err", err)
+	}
+	s.forgetSubtitle(hash, relPath)
+	return nil
+}
+
+func (s *Session) forgetSubtitle(hash metainfo.Hash, relPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records := s.subtitles[hash]
+	if records == nil {
+		return
+	}
+	delete(records, relPath)
+	if len(records) == 0 {
+		delete(s.subtitles, hash)
+	}
 }
 
 func validateSubtitleFileName(name string) error {

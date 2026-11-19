@@ -132,7 +132,7 @@ listen_addr = "0.0.0.0:1445"
 base_url = "http://192.168.1.10:8080"
 ```
 
-`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。
+`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。链接自带过期时间（默认 30 天，`http.stream.link_ttl`），复制到别处或长期保存的副本到期后返回 403，重新读取共享或重新导出即可；从早期版本升级时，已导出的链接会立即失效一次（签名格式升级，见 [ADR-0009](docs/adr/0009-strm-links-are-expiring-credentials.md)）；`/stream` 同时最多服务 8 条读取，超出返回 503 与 `Retry-After`。
 
 SMB 的 STRM 共享由 `smb.strm` 三态控制，默认 `auto`（配了 `strm.base_url` 就提供）；`on` 强制提供（必须有 `strm.base_url`），`off` 强制不提供：
 
@@ -194,11 +194,15 @@ strm = "off"
 | `http.auth.enabled` | `TORRENTFS_HTTP_AUTH_ENABLED` | `false` | Enabled turns on the HTTP login. It is required for a listener that is not bound to the loopback address. |
 | `http.auth.token_ttl` | `TORRENTFS_HTTP_AUTH_TOKEN_TTL` | `30m0s` | TokenTTL is the inactivity window of a login token. A valid request slides the window; the tokens live in memory and die with the process. |
 | `http.max_upload_size` | `TORRENTFS_HTTP_MAX_UPLOAD_SIZE` | `10MiB` | MaxUploadBytes caps any uploaded request body: a .torrent upload or a managed subtitle file. |
+| `http.trusted_proxies` | `TORRENTFS_HTTP_TRUSTED_PROXIES` | `[]` | TrustedProxies lists the reverse proxies whose forwarding headers are believed. When the immediate peer is one of these addresses or networks, the client address is read from the last X-Forwarded-For hop that is not itself trusted. Empty means the peer address is always the client. |
+| `http.stream.link_ttl` | `TORRENTFS_HTTP_STREAM_LINK_TTL` | `720h0m0s` | LinkTTL is how long a generated STRM link stays valid. Expiry is part of the signature, so a copied link stops working without any server state. It is read at startup; a new value takes effect after a restart. |
 | `strm.base_url` | `TORRENTFS_STRM_BASE_URL` | `` | BaseURL is the player-reachable HTTP(S) URL, optionally with a reverse proxy path prefix. Empty disables signed streaming links. |
 | `log.level` | `TORRENTFS_LOG_LEVEL` | `info` | Level is the minimum level of a log record: debug, info, warn, or error. Debug is disabled by default. |
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |
 | `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | `false` | AddSource adds the source file and line to every log record. |
 | `filesystem.read_timeout` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `30s` | ReadTimeout bounds a single read of a piece from the torrent. |
+| `filesystem.prefetch.window_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_WINDOW_BYTES` | `32MiB` | WindowBytes is how far ahead of the playback cursor pieces are read. It also decides which foreground reads count as inside the playback window, so shrinking it makes more seeks look like new anchor positions. |
+| `filesystem.prefetch.budget_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_BUDGET_BYTES` | `16MiB` | BudgetBytes caps the bytes of concurrent read-ahead downloads summed across every torrent in the session. At least one piece is always admitted, so a budget smaller than one piece cannot stall playback. |
 | `fuse.mountpoint` | `TORRENTFS_FUSE_MOUNTPOINT` | `` | Mountpoint is the directory the file tree is mounted on. |
 | `fuse.strm_mountpoint` | `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `` | STRMMountpoint is the directory the signed-streaming view is mounted on. |
 | `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |
@@ -331,7 +335,7 @@ torrentfs config print --format json --sources   # 附带每个值的配置来�
 
 ## 安全提示
 
-- HTTP 默认仅监听 loopback；公开监听必须启用认证，并放在 TLS 反向代理之后。
+- HTTP 默认仅监听 loopback；公开监听必须启用认证，并放在 TLS 反向代理之后。代理之后要把代理地址或网段写进 `http.trusted_proxies`，否则登录退避按代理地址计数，一个客户端的失败会连带其他人。
 - 文件输出完全只读：字幕请通过 Web UI/API 上传，不要用 `docker cp` 写入挂载点。
 - SMB 只读、要求签名，不应直接暴露到互联网。
 - SMB / HTTP-only 模式可 `--cap-drop ALL`；只有 FUSE 模式需要 `/dev/fuse`、`SYS_ADMIN` 和宿主挂载传播。

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/yakumioto/torrentfs-go/internal/session"
+	"github.com/yakumioto/torrentfs-go/internal/vfs"
 )
 
 // multiFileTorrentBytes builds a multi-file torrent and returns its metainfo
@@ -1512,5 +1513,106 @@ func TestSubtitleRegistryErrorsStayCoded(t *testing.T) {
 	_, err = sess.UploadSubtitle(context.Background(), "not-a-hash", "Movie.2026.mkv", "Movie.2026.srt", strings.NewReader("x"), 1<<20)
 	if !errors.Is(err, session.ErrUnknownTorrent) {
 		t.Fatalf("malformed id upload = %v, want ErrUnknownTorrent", err)
+	}
+}
+
+func subtitleStoreDir(t *testing.T, torrentDir string, hash metainfo.Hash) string {
+	t.Helper()
+	return filepath.Join(torrentDir, ".metadata", "subtitles", hash.HexString())
+}
+
+func TestSubtitleDeleteRemovesOnlyTheTarget(t *testing.T) {
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{
+		"A.mkv": []byte("video a"),
+		"B.mkv": []byte("video b"),
+	})
+	torrentDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	sess := newManageSession(t, torrentDir)
+	addTorrentBytes(t, sess, data)
+
+	uploadSubtitle(t, sess, hash, "A.mkv", "A.srt", "a srt\n")
+	uploadSubtitle(t, sess, hash, "A.mkv", "A.vtt", "a vtt\n")
+	uploadSubtitle(t, sess, hash, "B.mkv", "B.srt", "b srt\n")
+
+	if err := sess.DeleteSubtitle(context.Background(), hash.HexString(), "A.srt"); err != nil {
+		t.Fatalf("DeleteSubtitle: %v", err)
+	}
+	if _, err := sess.OpenSubtitle(hash, "A.srt"); !errors.Is(err, vfs.ErrNotFound) {
+		t.Fatalf("OpenSubtitle after delete = %v, want vfs.ErrNotFound", err)
+	}
+	if _, err := os.Stat(filepath.Join(subtitleStoreDir(t, torrentDir, hash), "A.srt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted subtitle still on disk: %v", err)
+	}
+	// Siblings and the payload are untouched.
+	if got := readSubtitle(t, sess, hash, "A.vtt"); got != "a vtt\n" {
+		t.Fatalf("sibling subtitle = %q, want it kept", got)
+	}
+	if got := readSubtitle(t, sess, hash, "B.srt"); got != "b srt\n" {
+		t.Fatalf("other video subtitle = %q, want it kept", got)
+	}
+
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 2 {
+		t.Fatalf("subtitles = %+v, want the two remaining", status.Subtitles)
+	}
+	for _, subtitle := range status.Subtitles {
+		if subtitle.Path == "A.srt" {
+			t.Fatalf("deleted subtitle still indexed: %+v", subtitle)
+		}
+	}
+	contents, err := sess.TorrentContents(hash)
+	if err != nil {
+		t.Fatalf("TorrentContents: %v", err)
+	}
+	if len(contents.Files) != 2 || len(contents.Subtitles) != 2 {
+		t.Fatalf("contents = %d files / %d subtitles, want 2/2", len(contents.Files), len(contents.Subtitles))
+	}
+
+	// Re-uploading the same name after a delete is a fresh create.
+	if replaced := uploadSubtitle(t, sess, hash, "A.mkv", "A.srt", "again\n"); replaced.Replaced {
+		t.Fatal("re-upload after delete reported a replacement")
+	}
+}
+
+func TestSubtitleDeleteReportsMissingPaths(t *testing.T) {
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"A.mkv": []byte("video")})
+	torrentDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	sess := newManageSession(t, torrentDir)
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "A.mkv", "A.srt", "a\n")
+
+	if err := sess.DeleteSubtitle(context.Background(), hash.HexString(), "A.srt"); err != nil {
+		t.Fatalf("DeleteSubtitle: %v", err)
+	}
+	for _, path := range []string{"A.srt", "missing.srt", "../A.srt", "/etc/passwd"} {
+		err := sess.DeleteSubtitle(context.Background(), hash.HexString(), path)
+		assertSubtitleCode(t, err, session.SubtitleCodeNotFound)
+	}
+	err := sess.DeleteSubtitle(context.Background(), strings.Repeat("0", 40), "A.srt")
+	if !errors.Is(err, session.ErrUnknownTorrent) {
+		t.Fatalf("unknown torrent = %v, want ErrUnknownTorrent", err)
+	}
+}
+
+func TestSubtitleDeleteDropsAnIndexEntryWhoseFileDisappeared(t *testing.T) {
+	data, hash := multiFileTorrentBytes(t, "Show", map[string][]byte{"A.mkv": []byte("video")})
+	torrentDir := testTorrentDir(t, filepath.Join(t.TempDir(), "data"))
+	sess := newManageSession(t, torrentDir)
+	addTorrentBytes(t, sess, data)
+	uploadSubtitle(t, sess, hash, "A.mkv", "A.srt", "a\n")
+
+	if err := os.Remove(filepath.Join(subtitleStoreDir(t, torrentDir, hash), "A.srt")); err != nil {
+		t.Fatalf("remove subtitle out of band: %v", err)
+	}
+	assertSubtitleCode(t, sess.DeleteSubtitle(context.Background(), hash.HexString(), "A.srt"), session.SubtitleCodeNotFound)
+	status, err := sess.TorrentStatusFor(hash.HexString())
+	if err != nil {
+		t.Fatalf("TorrentStatusFor: %v", err)
+	}
+	if len(status.Subtitles) != 0 {
+		t.Fatalf("subtitles = %+v, want the stale index entry dropped", status.Subtitles)
 	}
 }

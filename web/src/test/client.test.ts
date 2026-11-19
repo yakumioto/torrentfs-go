@@ -130,6 +130,16 @@ describe('ApiClient subtitle upload', () => {
     expect((body.get('file') as File).name).toBe('Movie.2026.srt');
   });
 
+  it('deletes a subtitle by its torrent-relative path', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 204 }));
+    const api = new ApiClient({ getToken: () => 'opaque' });
+    await expect(api.deleteSubtitle('abc/def', 'Season 1/E01.srt')).resolves.toBeUndefined();
+
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(String(call[0])).toBe('/api/v1/torrents/abc%2Fdef/subtitles?path=Season%201%2FE01.srt');
+    expect((call[1] as RequestInit).method).toBe('DELETE');
+  });
+
   it('exposes the stable error code from a rejected upload', async () => {
     vi.mocked(fetch).mockResolvedValue(
       response({ error: '字幕文件名必须与目标视频的名称严格对应。', code: 'subtitle_name_mismatch' }, { status: 415, statusText: 'Unsupported Media Type' }),

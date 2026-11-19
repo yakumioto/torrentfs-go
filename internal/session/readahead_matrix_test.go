@@ -109,8 +109,8 @@ func runRapidSeekCase(t *testing.T, tracker *loopbackTracker, hashHex string, ha
 			t.Fatalf("seek %d at piece %d returned different data", index, piece)
 		}
 		snapshot := session.PrefetchSnapshotForTest(leecherHandle)
-		if snapshot.MaxActivePieces > session.PrefetchDefaultPiecesForTest() {
-			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, session.PrefetchDefaultPiecesForTest())
+		if maxPieces := int(session.PrefetchBudgetLimitForTest(leecher) / int64(pieceLength)); maxPieces > 0 && snapshot.MaxActivePieces > maxPieces {
+			t.Fatalf("max active background pieces = %d, want at most %d", snapshot.MaxActivePieces, maxPieces)
 		}
 		t.Logf("seek=%d piece=%d elapsed=%s generation=%d anchor=%d candidate=%v/%d window=[%d,%d) foreground=%v active=%v cancels=%d stale_spans=%d", index, piece, time.Since(started), snapshot.Generation, snapshot.PlaybackAnchor, snapshot.CandidatePresent, snapshot.CandidateReads, snapshot.WindowStart, snapshot.WindowEnd, snapshot.ForegroundIndexes, snapshot.ActivePieceIndexes, snapshot.ForegroundCancels, snapshot.StaleSpanRejects)
 		if index > 0 && snapshot.Generation < previous.Generation {
@@ -186,7 +186,7 @@ func runPrefetchBudgetCandidate(t *testing.T, tracker *loopbackTracker, hashHex 
 	leecher := newLoopbackSessionWithCustomize(t, testConfig(), dataDir, func(cc *session.TorrentClientConfig) {
 		cc.DownloadRateLimiter = newMatrixLimiter()
 	})
-	restore := session.SetPrefetchBudgetLimitForTest(leecher, limit)
+	restore := session.SetPrefetchBudgetLimitForTest(leecher, int64(limit)*pieceLength)
 	defer restore()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
