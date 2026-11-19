@@ -24,9 +24,9 @@ const (
 	// same quantum produces the same link. Without it the .strm text would
 	// change on each read, and its size is what the virtual file reports.
 	expiryQuantum = time.Hour
-	// clockSkew is how far a verifier's clock may trail an expiry and still
+	// clockSkew is how far a verifier's clock may run past an expiry and still
 	// accept the link. It absorbs a client or container clock that is a little
-	// behind the signer's.
+	// ahead of the signer's.
 	clockSkew = time.Minute
 	// tokenSize is the expiry followed by the HMAC-SHA256 value.
 	tokenSize = 8 + sha256.Size
@@ -81,9 +81,9 @@ func (s *Signer) Sign(hash metainfo.Hash, path string) string {
 	return base64.RawURLEncoding.EncodeToString(token)
 }
 
-// Expiry reports when a verifiable signature stops being accepted. It returns
+// expiry reports when a verifiable signature stops being accepted. It returns
 // false for a malformed, expired, or tampered signature.
-func (s *Signer) Expiry(hash metainfo.Hash, path, signature string) (time.Time, bool) {
+func (s *Signer) expiry(hash metainfo.Hash, path, signature string) (time.Time, bool) {
 	token, ok := decodeSignature(signature)
 	if !ok {
 		return time.Time{}, false
@@ -102,7 +102,7 @@ func (s *Signer) Expiry(hash metainfo.Hash, path, signature string) (time.Time, 
 // Verify checks a canonical unpadded base64url signature using constant-time
 // comparison of the full HMAC-SHA256 value, then enforces its expiry.
 func (s *Signer) Verify(hash metainfo.Hash, path, signature string) bool {
-	_, ok := s.Expiry(hash, path, signature)
+	_, ok := s.expiry(hash, path, signature)
 	return ok
 }
 

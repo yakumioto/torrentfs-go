@@ -268,6 +268,16 @@ type prefetchSnapshot struct {
 	CandidateUniqueBytes int64
 }
 
+// coordinatorWindow resolves the readahead window a new coordinator uses. The
+// session resolves the configuration once at startup; a nil or zero value falls
+// back to the compile-time default so a hand-built session still works.
+func coordinatorWindow(s *Session) int64 {
+	if s != nil && s.prefetchWindow > 0 {
+		return s.prefetchWindow
+	}
+	return defaultPrefetchHigh
+}
+
 func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *prefetchCoordinator {
 	ctx := context.Background()
 	if s != nil && s.bgCtx != nil {
@@ -280,10 +290,7 @@ func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *p
 	if s != nil && s.prefetchBudget != nil {
 		budget = s.prefetchBudget
 	}
-	window := defaultPrefetchHigh
-	if s != nil && s.prefetchWindow > 0 {
-		window = s.prefetchWindow
-	}
+	window := coordinatorWindow(s)
 	coordinator := &prefetchCoordinator{
 		torrent:          tor,
 		cache:            c,

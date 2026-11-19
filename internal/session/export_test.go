@@ -476,3 +476,7 @@ func SameRAFile(a, b io.ReaderAt) (sameFile, sameLoader bool) {
 	}
 	return first == second, first.loader == second.loader
 }
+
+// PrefetchWindowForTest reports the readahead window the session resolved from
+// configuration, so tests can pin the config-to-coordinator binding.
+func PrefetchWindowForTest(s *Session) int64 { return s.prefetchWindow }

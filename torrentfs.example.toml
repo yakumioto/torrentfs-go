@@ -95,7 +95,9 @@ peer_sample_interval = "0s"
 read_timeout = "30s"
 
 [filesystem.prefetch]
-# WindowBytes is how far ahead of the playback cursor pieces are read.
+# WindowBytes is how far ahead of the playback cursor pieces are read. It
+# also decides which foreground reads count as inside the playback window,
+# so shrinking it makes more seeks look like new anchor positions.
 window_bytes = "32MiB"
 # BudgetBytes caps the bytes of concurrent read-ahead downloads summed
 # across every torrent in the session. At least one piece is always

@@ -54,7 +54,9 @@ type Filesystem struct {
 // are restart-only: they size the cache pins and the session-wide download
 // budget, which are fixed when the session starts.
 type Prefetch struct {
-	// WindowBytes is how far ahead of the playback cursor pieces are read.
+	// WindowBytes is how far ahead of the playback cursor pieces are read. It
+	// also decides which foreground reads count as inside the playback window,
+	// so shrinking it makes more seeks look like new anchor positions.
 	WindowBytes ByteQuantity `toml:"window_bytes" component:"filesystem.prefetch"`
 	// BudgetBytes caps the bytes of concurrent read-ahead downloads summed
 	// across every torrent in the session. At least one piece is always

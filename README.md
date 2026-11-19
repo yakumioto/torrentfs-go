@@ -132,7 +132,7 @@ listen_addr = "0.0.0.0:1445"
 base_url = "http://192.168.1.10:8080"
 ```
 
-`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。链接自带过期时间（默认 30 天，`http.stream.link_ttl`），复制到别处或长期保存的副本到期后返回 403，重新读取共享或重新导出即可；`/stream` 同时最多服务 8 条读取，超出返回 503 与 `Retry-After`。
+`.strm` 链接是只读、文件级签名凭据，不需要 Bearer token；常见视频扩展名会转为同名 `.strm`，ISO 转为 `.iso.strm`；基址必须从播放器可达，不要填容器内部的 `localhost`。链接自带过期时间（默认 30 天，`http.stream.link_ttl`），复制到别处或长期保存的副本到期后返回 403，重新读取共享或重新导出即可；从早期版本升级时，已导出的链接会立即失效一次（签名格式升级，见 [ADR-0009](docs/adr/0009-strm-links-are-expiring-credentials.md)）；`/stream` 同时最多服务 8 条读取，超出返回 503 与 `Retry-After`。
 
 SMB 的 STRM 共享由 `smb.strm` 三态控制，默认 `auto`（配了 `strm.base_url` 就提供）；`on` 强制提供（必须有 `strm.base_url`），`off` 强制不提供：
 
@@ -200,7 +200,7 @@ strm = "off"
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |
 | `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | `false` | AddSource adds the source file and line to every log record. |
 | `filesystem.read_timeout` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `30s` | ReadTimeout bounds a single read of a piece from the torrent. |
-| `filesystem.prefetch.window_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_WINDOW_BYTES` | `32MiB` | WindowBytes is how far ahead of the playback cursor pieces are read. |
+| `filesystem.prefetch.window_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_WINDOW_BYTES` | `32MiB` | WindowBytes is how far ahead of the playback cursor pieces are read. It also decides which foreground reads count as inside the playback window, so shrinking it makes more seeks look like new anchor positions. |
 | `filesystem.prefetch.budget_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_BUDGET_BYTES` | `16MiB` | BudgetBytes caps the bytes of concurrent read-ahead downloads summed across every torrent in the session. At least one piece is always admitted, so a budget smaller than one piece cannot stall playback. |
 | `fuse.mountpoint` | `TORRENTFS_FUSE_MOUNTPOINT` | `` | Mountpoint is the directory the file tree is mounted on. |
 | `fuse.strm_mountpoint` | `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `` | STRMMountpoint is the directory the signed-streaming view is mounted on. |

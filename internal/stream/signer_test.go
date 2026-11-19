@@ -3,6 +3,7 @@ package stream_test
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"strings"
 	"testing"
 	"time"
@@ -104,12 +105,13 @@ func TestSignerExpiresLinks(t *testing.T) {
 	hash := testHash()
 	const path = "Movie.mkv"
 	signature := signer.Sign(hash, path)
-	expires, ok := signer.Expiry(hash, path, signature)
-	if !ok {
-		t.Fatal("Expiry rejected a fresh signature")
+	token, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil || len(token) != 40 {
+		t.Fatalf("decode signature: %v", err)
 	}
+	expires := time.Unix(int64(binary.BigEndian.Uint64(token[:8])), 0)
 	if want := fixedNow.Truncate(time.Hour).Add(testTTL); !expires.Equal(want) {
-		t.Fatalf("Expiry = %v, want %v", expires, want)
+		t.Fatalf("expiry = %v, want %v", expires, want)
 	}
 
 	late := testSignerAt(t, testKey(), expires.Add(30*time.Second))
@@ -119,9 +121,6 @@ func TestSignerExpiresLinks(t *testing.T) {
 	tooLate := testSignerAt(t, testKey(), expires.Add(2*time.Minute))
 	if tooLate.Verify(hash, path, signature) {
 		t.Fatal("Verify accepted an expired link")
-	}
-	if _, ok := tooLate.Expiry(hash, path, signature); ok {
-		t.Fatal("Expiry accepted an expired link")
 	}
 }
 
