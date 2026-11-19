@@ -154,7 +154,7 @@ func TestPlaybackWindowCrossFileCandidateConfirmsAndCleansOldWindow(t *testing.T
 		t.Fatal("could not retain the old window piece")
 	}
 	coordinator.windowPins[0] = struct{}{}
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		coordinator.mu.Unlock()
 		t.Fatal("could not reserve the old window lease")
 	}
@@ -194,7 +194,7 @@ func TestPlaybackWindowCrossFileCandidateConfirmsAndCleansOldWindow(t *testing.T
 	if coordinator.anchor.file != newFile {
 		t.Fatal("cross-file confirmation did not install the candidate file as anchor")
 	}
-	if got := playbackWindowEnd(coordinator.anchor.cursor, coordinator.anchor.fileSize); got != (64<<20)+128+defaultPlaybackWindow {
+	if got := coordinator.playbackWindowEnd(coordinator.anchor.cursor, coordinator.anchor.fileSize); got != (64<<20)+128+defaultPlaybackWindow {
 		t.Fatalf("new cross-file playback window ends at %d, want %d", got, (64<<20)+128+defaultPlaybackWindow)
 	}
 	desired := coordinator.desiredPiecesLocked()
@@ -622,7 +622,7 @@ func TestPlaybackWindowColdStartHoleCleanupAfterLastTicket(t *testing.T) {
 		t.Fatal("could not retain the synthetic old window pin")
 	}
 	coordinator.windowPins[0] = struct{}{}
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		coordinator.mu.Unlock()
 		t.Fatal("could not reserve the synthetic old window lease")
 	}
@@ -777,7 +777,7 @@ func TestPlaybackWindowForegroundStartReleasesNormalLease(t *testing.T) {
 	store := cache.New(1 << 20)
 	coordinator := newTestCoordinator(store)
 	file := playbackTestFile(1<<20, 1<<20, store, coordinator)
-	if !coordinator.budget.tryAcquire() {
+	if !coordinator.budget.tryAcquire(coordinator.pieceBytes()) {
 		t.Fatal("could not reserve the test Normal token")
 	}
 	coordinator.active[0] = struct{}{}

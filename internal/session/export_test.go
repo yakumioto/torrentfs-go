@@ -410,9 +410,9 @@ func (s *Session) EvictPiecesForTest(hash metainfo.Hash, keep ...int) error {
 	return nil
 }
 
-// PrefetchDefaultPiecesForTest returns the compiled-in background-piece limit
-// so a test can assert against the implementation's own default. Test-only.
-func PrefetchDefaultPiecesForTest() int { return defaultPrefetchPieces }
+// PrefetchDefaultBudgetBytesForTest returns the compiled-in read-ahead byte
+// budget so a test can assert against the implementation's own default. Test-only.
+func PrefetchDefaultBudgetBytesForTest() int64 { return defaultPrefetchBudgetBytes }
 
 // SeedPieceForTest loads one verified piece into the session's cache and syncs
 // anacrolix's completion view for it, leaving every other piece missing. A test
@@ -454,15 +454,15 @@ func PrefetchSnapshotForTest(st *Torrent) PrefetchSnapshot {
 	return coordinator.snapshot()
 }
 
-// SetPrefetchBudgetLimitForTest changes the session's global background-piece
-// limit and returns a restore function. Test-only.
-func SetPrefetchBudgetLimitForTest(s *Session, limit int) func() {
+// SetPrefetchBudgetLimitForTest changes the session's global read-ahead byte
+// budget and returns a restore function. Test-only.
+func SetPrefetchBudgetLimitForTest(s *Session, limit int64) func() {
 	return s.prefetchBudget.setLimit(limit)
 }
 
-// PrefetchBudgetUsageForTest reports the session's (limit, used) token counts.
+// PrefetchBudgetUsageForTest reports the session's (limit, used) byte counts.
 // Test-only.
-func PrefetchBudgetUsageForTest(s *Session) (limit, used int) {
+func PrefetchBudgetUsageForTest(s *Session) (limit, used int64) {
 	return s.prefetchBudget.snapshot()
 }
 

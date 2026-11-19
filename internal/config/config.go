@@ -45,8 +45,15 @@ const (
 	defaultHTTPListenAddr           = "127.0.0.1:8080"
 	defaultSMBListenAddr            = "0.0.0.0:1445"
 	defaultMaxUploadBytes     int64 = 10 << 20
-	defaultLogLevel                 = "info"
-	defaultLogFormat                = "text"
+	// defaultPrefetchWindowBytes is the default read-ahead window: the amount
+	// of the file ahead of the playback cursor the session tries to hold.
+	defaultPrefetchWindowBytes int64 = 32 << 20
+	// defaultPrefetchBudgetBytes caps concurrent read-ahead downloads. It
+	// equals four 4 MiB pieces, the limit the fixed piece count used before it
+	// became a byte budget.
+	defaultPrefetchBudgetBytes int64 = 16 << 20
+	defaultLogLevel                  = "info"
+	defaultLogFormat                 = "text"
 	// defaultReadingConns is the connection allowance for a torrent that is
 	// being read. It is generous enough to stream, and is granted per torrent
 	// instead of being taken from a session-wide budget.
@@ -349,7 +356,13 @@ func Default() Config {
 			Level:  defaultLogLevel,
 			Format: defaultLogFormat,
 		},
-		Filesystem:  Filesystem{ReadTimeout: defaultReadTimeout},
+		Filesystem: Filesystem{
+			ReadTimeout: defaultReadTimeout,
+			Prefetch: Prefetch{
+				WindowBytes: ByteQuantity(defaultPrefetchWindowBytes),
+				BudgetBytes: ByteQuantity(defaultPrefetchBudgetBytes),
+			},
+		},
 		FUSE:        FUSE{AllowOther: false},
 		SMB:         SMB{ListenAddr: defaultSMBListenAddr, STRM: STRMAuto},
 		Experiments: Experiments{Upload: UploadExperiment{Mode: "baseline", Jitter: 20}},
@@ -408,6 +421,12 @@ func (c Config) validateSyntax(collector *validationCollector) {
 		if err := validateBootstrapNode(node); err != nil {
 			collector.add(invalid("connections.bootstrap_nodes", fmt.Errorf("%q: %w", node, err)))
 		}
+	}
+	if c.Filesystem.Prefetch.WindowBytes <= 0 {
+		collector.add(invalid("filesystem.prefetch.window_bytes", errPositive))
+	}
+	if c.Filesystem.Prefetch.BudgetBytes <= 0 {
+		collector.add(invalid("filesystem.prefetch.budget_bytes", errPositive))
 	}
 	if c.Cache.CapacityBytes <= 0 || c.Cache.CapacityBytes > math.MaxInt64/7 {
 		collector.add(invalid("cache.capacity", errCapacityRange))

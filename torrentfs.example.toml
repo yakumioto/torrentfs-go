@@ -94,6 +94,14 @@ peer_sample_interval = "0s"
 # ReadTimeout bounds a single read of a piece from the torrent.
 read_timeout = "30s"
 
+[filesystem.prefetch]
+# WindowBytes is how far ahead of the playback cursor pieces are read.
+window_bytes = "32MiB"
+# BudgetBytes caps the bytes of concurrent read-ahead downloads summed
+# across every torrent in the session. At least one piece is always
+# admitted, so a budget smaller than one piece cannot stall playback.
+budget_bytes = "16MiB"
+
 [fuse]
 # Mountpoint is the directory the file tree is mounted on.
 mountpoint = ""

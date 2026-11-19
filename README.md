@@ -199,6 +199,8 @@ strm = "off"
 | `log.format` | `TORRENTFS_LOG_FORMAT` | `text` | Format is the shape of a log record: text for humans or json for log collectors. |
 | `log.add_source` | `TORRENTFS_LOG_ADD_SOURCE` | `false` | AddSource adds the source file and line to every log record. |
 | `filesystem.read_timeout` | `TORRENTFS_FILESYSTEM_READ_TIMEOUT` | `30s` | ReadTimeout bounds a single read of a piece from the torrent. |
+| `filesystem.prefetch.window_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_WINDOW_BYTES` | `32MiB` | WindowBytes is how far ahead of the playback cursor pieces are read. |
+| `filesystem.prefetch.budget_bytes` | `TORRENTFS_FILESYSTEM_PREFETCH_BUDGET_BYTES` | `16MiB` | BudgetBytes caps the bytes of concurrent read-ahead downloads summed across every torrent in the session. At least one piece is always admitted, so a budget smaller than one piece cannot stall playback. |
 | `fuse.mountpoint` | `TORRENTFS_FUSE_MOUNTPOINT` | `` | Mountpoint is the directory the file tree is mounted on. |
 | `fuse.strm_mountpoint` | `TORRENTFS_FUSE_STRM_MOUNTPOINT` | `` | STRMMountpoint is the directory the signed-streaming view is mounted on. |
 | `fuse.allow_other` | `TORRENTFS_FUSE_ALLOW_OTHER` | `false` | AllowOther passes allow_other to the kernel, lifting FUSE's default restriction that only the mounting user may access the mount. |

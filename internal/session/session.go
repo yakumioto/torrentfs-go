@@ -81,6 +81,9 @@ type Session struct {
 	pieceCache     *cache.Cache
 	pieceStore     *piecestore.Store
 	prefetchBudget *prefetchBudget
+	// prefetchWindow is the read-ahead window applied to every coordinator.
+	// It is fixed at startup because it sizes the cache pins.
+	prefetchWindow int64
 	// pieceDownloadBudget bounds how many pieces, summed across every
 	// torrent's piece download, may be fetched at once. It is independent
 	// of prefetchBudget: playback prefetch and piece downloads never
@@ -181,6 +184,23 @@ type metadataFetch struct {
 // directory. The client is configured to seed, registry-backed tasks are
 // restored, and persisted layout checks complete before the session is
 // returned.
+// prefetchBudgetBytes is the session-wide read-ahead budget. A configuration
+// built without defaults falls back to the compiled-in value, so a test that
+// constructs a bare Config keeps the production behaviour.
+func prefetchBudgetBytes(cfg config.Config) int64 {
+	if budget := int64(cfg.Filesystem.Prefetch.BudgetBytes); budget > 0 {
+		return budget
+	}
+	return defaultPrefetchBudgetBytes
+}
+
+func prefetchWindowBytes(cfg config.Config) int64 {
+	if window := int64(cfg.Filesystem.Prefetch.WindowBytes); window > 0 {
+		return window
+	}
+	return defaultPrefetchHigh
+}
+
 func New(cfg config.Config, torrentsDir string, opts ...Option) (*Session, error) {
 	return newWithClientConfig(cfg, torrentsDir, nil, opts...)
 }
@@ -378,7 +398,8 @@ func newWithClientConfig(cfg config.Config, torrentsDir string, customize func(*
 		streamBaseURL:       cfg.STRM.BaseURL,
 		pieceCache:          pieceCache,
 		pieceStore:          pieceStore,
-		prefetchBudget:      newPrefetchBudget(defaultPrefetchPieces),
+		prefetchBudget:      newPrefetchBudget(prefetchBudgetBytes(cfg)),
+		prefetchWindow:      prefetchWindowBytes(cfg),
 		pieceDownloadBudget: newPieceDownloadBudget(),
 		deleteFlushTimeout:  deleteFlushTimeout,
 		closeDone:           make(chan struct{}),

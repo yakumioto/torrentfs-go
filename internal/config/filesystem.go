@@ -47,6 +47,19 @@ const (
 type Filesystem struct {
 	// ReadTimeout bounds a single read of a piece from the torrent.
 	ReadTimeout Duration `toml:"read_timeout" component:"filesystem"`
+	Prefetch    Prefetch `toml:"prefetch" component:"filesystem"`
+}
+
+// Prefetch groups the read-ahead settings of the playback path. Both values
+// are restart-only: they size the cache pins and the session-wide download
+// budget, which are fixed when the session starts.
+type Prefetch struct {
+	// WindowBytes is how far ahead of the playback cursor pieces are read.
+	WindowBytes ByteQuantity `toml:"window_bytes" component:"filesystem.prefetch"`
+	// BudgetBytes caps the bytes of concurrent read-ahead downloads summed
+	// across every torrent in the session. At least one piece is always
+	// admitted, so a budget smaller than one piece cannot stall playback.
+	BudgetBytes ByteQuantity `toml:"budget_bytes" component:"filesystem.prefetch"`
 }
 
 // FUSE groups the settings of the read-only FUSE file output.

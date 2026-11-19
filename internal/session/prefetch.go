@@ -19,7 +19,9 @@ const (
 	defaultSeekClearThreshold    int64 = 64 << 20
 	defaultSeekCandidateLocality int64 = 8 << 20
 	defaultSeekConfirmationReads       = 2
-	defaultPrefetchPieces              = 4
+	// defaultPrefetchBudgetBytes is the download budget of the coordinator
+	// when a test builds one without a session.
+	defaultPrefetchBudgetBytes int64 = 16 << 20
 )
 
 type prefetchState uint8
@@ -73,36 +75,50 @@ type seekCandidate struct {
 // live coordinator or waking a polling loop.
 type prefetchBudget struct {
 	mu    sync.Mutex
-	limit int
-	used  int
+	limit int64
+	used  int64
 }
 
-func newPrefetchBudget(limit int) *prefetchBudget {
+func newPrefetchBudget(limit int64) *prefetchBudget {
 	if limit < 1 {
 		limit = 1
 	}
 	return &prefetchBudget{limit: limit}
 }
 
-func (b *prefetchBudget) tryAcquire() bool {
+// tryAcquire reserves cost bytes. It always admits the first piece even when
+// the piece is larger than the whole budget: refusing it would stall playback
+// on a torrent whose piece size exceeds the configured budget.
+func (b *prefetchBudget) tryAcquire(cost int64) bool {
+	if cost < 1 {
+		cost = 1
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.used >= b.limit {
+	if b.used == 0 {
+		b.used = cost
+		return true
+	}
+	if b.used+cost > b.limit {
 		return false
 	}
-	b.used++
+	b.used += cost
 	return true
 }
 
-func (b *prefetchBudget) release() {
+func (b *prefetchBudget) release(cost int64) {
+	if cost < 1 {
+		cost = 1
+	}
 	b.mu.Lock()
-	if b.used > 0 {
-		b.used--
+	b.used -= cost
+	if b.used < 0 {
+		b.used = 0
 	}
 	b.mu.Unlock()
 }
 
-func (b *prefetchBudget) setLimit(limit int) (restore func()) {
+func (b *prefetchBudget) setLimit(limit int64) (restore func()) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -117,7 +133,7 @@ func (b *prefetchBudget) setLimit(limit int) (restore func()) {
 	}
 }
 
-func (b *prefetchBudget) snapshot() (limit, used int) {
+func (b *prefetchBudget) snapshot() (limit, used int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.limit, b.used
@@ -175,6 +191,7 @@ type prefetchCoordinator struct {
 	torrent    *torrent.Torrent
 	cache      *cache.Cache
 	budget     *prefetchBudget
+	window     int64
 	torrentKey string
 
 	ctx    context.Context
@@ -259,14 +276,19 @@ func newPrefetchCoordinator(s *Session, tor *torrent.Torrent, c *cache.Cache) *p
 	ctx, cancel := context.WithCancel(ctx)
 	// The session owns one budget for its whole lifetime. A nil session only
 	// happens for a coordinator built directly by a test.
-	budget := newPrefetchBudget(defaultPrefetchPieces)
+	budget := newPrefetchBudget(defaultPrefetchBudgetBytes)
 	if s != nil && s.prefetchBudget != nil {
 		budget = s.prefetchBudget
+	}
+	window := defaultPrefetchHigh
+	if s != nil && s.prefetchWindow > 0 {
+		window = s.prefetchWindow
 	}
 	coordinator := &prefetchCoordinator{
 		torrent:          tor,
 		cache:            c,
 		budget:           budget,
+		window:           window,
 		torrentKey:       tor.InfoHash().HexString(),
 		ctx:              ctx,
 		cancel:           cancel,
@@ -483,7 +505,7 @@ func (c *prefetchCoordinator) currentWindowRequestLocked(f *raFile, requestStart
 		return false
 	}
 	lower := classificationFloorLocked(c.anchor.cursor)
-	upper := playbackWindowEnd(c.anchor.cursor, c.anchor.fileSize)
+	upper := c.playbackWindowEnd(c.anchor.cursor, c.anchor.fileSize)
 	return requestStart >= lower && requestStart < upper
 }
 
@@ -799,14 +821,14 @@ func foregroundRequestRange(req cache.ReadRequest, plan cache.ReadPlan) (int64, 
 	return start, end
 }
 
-func playbackWindowEnd(start, fileSize int64) int64 {
+func (c *prefetchCoordinator) playbackWindowEnd(start, fileSize int64) int64 {
 	if start < 0 {
 		start = 0
 	}
 	if start >= fileSize {
 		return fileSize
 	}
-	end := start + defaultPlaybackWindow
+	end := start + c.window
 	if end < start || end > fileSize {
 		return fileSize
 	}
@@ -890,7 +912,7 @@ func (c *prefetchCoordinator) reconcile() {
 	}
 
 	for _, index := range desired {
-		if c.bufferedBytes >= c.effectiveHigh || len(c.active) >= c.currentLimit() {
+		if c.bufferedBytes >= c.effectiveHigh || len(c.active) >= c.activeLimit() {
 			break
 		}
 		if c.cache.Has(c.key(index)) || c.foregroundPieces[index] > 0 {
@@ -900,7 +922,7 @@ func (c *prefetchCoordinator) reconcile() {
 			c.dedupe++
 			continue
 		}
-		if !c.budget.tryAcquire() {
+		if !c.budget.tryAcquire(c.pieceBytes()) {
 			c.budgetBlocks++
 			c.state = prefetchBudgetBlocked
 			break
@@ -921,7 +943,7 @@ func (c *prefetchCoordinator) reconcile() {
 // admitted. The 1:2 low/high ratio is preserved when the window shrinks, so a
 // small file or a tight cache still produces hysteresis instead of churn.
 func (c *prefetchCoordinator) computeWatermarksLocked(reservedPrefix int64, reservationBlocked bool) {
-	high := min64(defaultPrefetchHigh, c.anchor.fileSize-c.anchor.cursor)
+	high := min64(c.window, c.anchor.fileSize-c.anchor.cursor)
 	if high < 0 {
 		high = 0
 	}
@@ -932,9 +954,36 @@ func (c *prefetchCoordinator) computeWatermarksLocked(reservedPrefix int64, rese
 	c.effectiveLow = min64(defaultPrefetchLow, high/2)
 }
 
-func (c *prefetchCoordinator) currentLimit() int {
+// activeLimit is how many pieces this torrent's share of the byte budget can
+// hold. It is a per-torrent upper bound: the shared budget still arbitrates
+// between torrents, but without this the fill loop would rescan pieces it has
+// already activated and count them as duplicates.
+func (c *prefetchCoordinator) activeLimit() int {
 	limit, _ := c.budget.snapshot()
-	return limit
+	piece := c.pieceBytes()
+	if piece < 1 {
+		return 1
+	}
+	n := int(limit / piece)
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// pieceBytes is the byte cost one active piece reserves from the session
+// budget. A piece's length is fixed per torrent, so release uses the same
+// value the acquire used.
+func (c *prefetchCoordinator) pieceBytes() int64 {
+	if c.anchor.pieceLength > 0 {
+		return c.anchor.pieceLength
+	}
+	if c.torrent != nil {
+		if info := c.torrent.Info(); info != nil && info.PieceLength > 0 {
+			return info.PieceLength
+		}
+	}
+	return 1
 }
 
 func (c *prefetchCoordinator) completeActiveLocked() {
@@ -948,7 +997,7 @@ func (c *prefetchCoordinator) completeActiveLocked() {
 		}
 		c.priorityCancels++
 		delete(c.active, index)
-		c.budget.release()
+		c.budget.release(c.pieceBytes())
 	}
 }
 
@@ -971,7 +1020,7 @@ func (c *prefetchCoordinator) cancelLeaseLocked(index int) {
 	c.priorityCancels++
 	c.cancelled++
 	delete(c.active, index)
-	c.budget.release()
+	c.budget.release(c.pieceBytes())
 }
 
 func (c *prefetchCoordinator) desiredPiecesLocked() []int {
@@ -979,7 +1028,7 @@ func (c *prefetchCoordinator) desiredPiecesLocked() []int {
 		return nil
 	}
 	start := c.anchor.fileStart + c.anchor.cursor
-	end := start + defaultPrefetchHigh
+	end := start + c.window
 	fileEnd := c.anchor.fileStart + c.anchor.fileSize
 	if end > fileEnd {
 		end = fileEnd
@@ -1011,7 +1060,7 @@ func (c *prefetchCoordinator) updateBufferedLocked() {
 	if c.anchor.torrentSize > 0 && end > c.anchor.torrentSize {
 		end = c.anchor.torrentSize
 	}
-	limit := defaultPrefetchHigh
+	limit := c.window
 	if remaining := end - (c.anchor.fileStart + c.anchor.cursor); remaining < limit {
 		limit = remaining
 	}
@@ -1183,7 +1232,7 @@ func (c *prefetchCoordinator) windowBoundsLocked() (int64, int64) {
 		return 0, 0
 	}
 	start := clampCursor(c.anchor.cursor, c.anchor.fileSize)
-	end := playbackWindowEnd(start, c.anchor.fileSize)
+	end := c.playbackWindowEnd(start, c.anchor.fileSize)
 	if c.anchor.pieceLength <= 0 {
 		return start, end
 	}
@@ -1221,7 +1270,7 @@ func (c *prefetchCoordinator) cleanup() {
 			c.torrent.CancelPieces(index, index+1)
 		}
 		c.priorityCancels++
-		c.budget.release()
+		c.budget.release(c.pieceBytes())
 	}
 	c.active = make(map[int]struct{})
 	for index := range c.refs {
