@@ -43,7 +43,6 @@ func TestRaFileReadWithOutOfOrderReadAheadPieces(t *testing.T) {
 		fileSize:    3 * pieceLength,
 		pieceLength: pieceLength,
 		torrentSize: 3 * pieceLength,
-		readahead:   2 * pieceLength,
 	}
 
 	request := cache.ReadRequest{FileSize: file.fileSize, PieceLength: pieceLength, TorrentLength: file.torrentSize}
@@ -91,7 +90,6 @@ func TestRaFileTargetPinFailureDoesNotPinShortTail(t *testing.T) {
 		fileSize:    pieceLength + 2,
 		pieceLength: pieceLength,
 		torrentSize: pieceLength + 2,
-		readahead:   2,
 	}
 	request := cache.ReadRequest{FileSize: file.fileSize, PieceLength: pieceLength, TorrentLength: file.torrentSize}
 	file.protectWindow(file.windowKeys(request, pieceLength+2))

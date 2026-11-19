@@ -6,6 +6,12 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 cd -- "$repo_root"
 
+# The image reports the version baked in at build time. Fall back to "dev" the
+# same way a binary built without ldflags does.
+build_version() {
+	git describe --tags --always --dirty 2>/dev/null || printf 'dev\n'
+}
+
 command -v docker >/dev/null
 command -v curl >/dev/null
 
@@ -30,7 +36,7 @@ token_ttl = "30m"
 EOF
 
 image="torrentfs-http-smoke:local"
-docker build --tag "$image" .
+docker build --build-arg "VERSION=$(build_version)" --tag "$image" .
 docker run --detach --env "PUID=$runtime_uid" --env "PGID=$runtime_gid" --name "$container_name" --publish 127.0.0.1::8080 --volume "$work_dir/torrents:/torrents" --volume "$work_dir/torrentfs.toml:/config.toml:ro" "$image" -config /config.toml /torrents >/dev/null
 
 port=''

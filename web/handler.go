@@ -10,6 +10,19 @@ import (
 	"strings"
 )
 
+// isClientRoute reports whether the single-page app owns the path. Anything
+// else is a real 404: serving index.html for every unknown path made probes
+// such as /healthz or /metrics look healthy before those endpoints existed.
+// Keep this list in sync with the routes in web/src/app/App.tsx: a new
+// top-level route that is missing here turns its deep link into a 404.
+func isClientRoute(requestPath string) bool {
+	switch requestPath {
+	case "", "index.html", "login", "config":
+		return true
+	}
+	return strings.HasPrefix(requestPath, "torrents/")
+}
+
 func newStaticHandler(assets fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -26,7 +39,7 @@ func newStaticHandler(assets fs.FS) http.Handler {
 		filePath := requestPath
 		info, err := fs.Stat(assets, filePath)
 		if err != nil || info.IsDir() {
-			if requestPath == "assets" || strings.HasPrefix(requestPath, "assets/") || path.Ext(requestPath) != "" {
+			if !isClientRoute(requestPath) {
 				http.NotFound(w, r)
 				return
 			}

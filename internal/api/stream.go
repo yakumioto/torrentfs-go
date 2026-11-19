@@ -2,11 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
 	"path"
 	"sync"
+
+	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
 	"github.com/yakumioto/torrentfs-go/internal/media"
@@ -17,6 +21,15 @@ import (
 // Each returned reader owns one handle and supports request cancellation.
 type StreamBackend interface {
 	OpenStream(stream.Location) (stream.File, error)
+}
+
+// streamETag derives the validator from the requested file alone. The link
+// signature is a capability: echoing it into a cache header leaks it to every
+// proxy and log along the way, and any future expiry would make the validator
+// change on each rotation and defeat conditional requests.
+func streamETag(hash metainfo.Hash, filePath string) string {
+	sum := sha256.Sum256([]byte(hash.HexString() + "\x00" + filePath))
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +92,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", media.ContentType(location.Path))
-	w.Header().Set("ETag", `"`+location.Hash.HexString()+"-"+location.Signature+`"`)
+	w.Header().Set("ETag", streamETag(location.Hash, location.Path))
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	reader := &streamReaderAt{ctx: ctx, reader: file.Reader}

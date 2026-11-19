@@ -54,6 +54,21 @@ type serverOptions struct {
 	logger       *slog.Logger
 	configViewer ConfigViewer
 	configSaver  ConfigSaver
+	readiness    func() error
+	version      string
+}
+
+// WithReadiness supplies the output-backend readiness probe behind /readyz.
+// A nil probe means the HTTP surface is the only output and is ready as soon as
+// it can answer, which suits tests and HTTP-only deployments.
+func WithReadiness(probe func() error) Option {
+	return func(options *serverOptions) { options.readiness = probe }
+}
+
+// WithVersion sets the build version echoed by /api/v1/stats and the startup
+// log. It defaults to "dev" for builds that do not inject one.
+func WithVersion(version string) Option {
+	return func(options *serverOptions) { options.version = version }
 }
 
 // WithLogger routes API lifecycle and authentication logs to l.
@@ -66,6 +81,8 @@ func WithLogger(l *slog.Logger) Option {
 type Server struct {
 	backend      Backend
 	auth         *auth.Service
+	readiness    func() error
+	version      string
 	maxUpload    atomic.Int64
 	logger       *slog.Logger
 	configViewer ConfigViewer
@@ -95,11 +112,17 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = logging.Discard()
 	}
+	version := options.version
+	if version == "" {
+		version = "dev"
+	}
 	s := &Server{
 		backend:       backend,
 		logger:        logger,
 		configViewer:  options.configViewer,
 		configSaver:   options.configSaver,
+		readiness:     options.readiness,
+		version:       version,
 		streamEnabled: cfg.STRM.BaseURL != "",
 	}
 	s.maxUpload.Store(cfg.HTTP.MaxUploadBytes.Int64())
@@ -141,10 +164,17 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
-	s.handler = dispatchAPIAndStatic(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
+	s.handler = s.dispatchRoutes(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout bounds the whole request including the body, so it has to
+		// cover the largest upload: 10 MiB over a 0.3 Mbit/s link still fits in
+		// five minutes, while a slow-drip client cannot hold a connection open
+		// indefinitely. WriteTimeout stays unset on purpose: it would cut off
+		// long /stream responses that are still making progress.
+		ReadTimeout: 5 * time.Minute,
+		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil
 }
@@ -217,8 +247,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdownErr
 }
 
-func dispatchAPIAndStatic(apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
+// dispatchRoutes routes the health checks before any fallback, so a liveness or
+// readiness check can never be answered by the single-page app. They bypass the
+// auth middleware on purpose: an orchestrator has no credentials, which matches
+// the signed-URL precedent already used by /stream.
+func (s *Server) dispatchRoutes(apiHandler, streamHandler, staticHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			s.serveHealth(w, r, s.handleHealthz)
+			return
+		case "/readyz":
+			s.serveHealth(w, r, s.handleReadyz)
+			return
+		}
 		if r.URL.Path == "/stream" || strings.HasPrefix(r.URL.Path, "/stream/") {
 			streamHandler.ServeHTTP(w, r)
 			return
@@ -229,6 +271,17 @@ func dispatchAPIAndStatic(apiHandler, streamHandler, staticHandler http.Handler)
 		}
 		staticHandler.ServeHTTP(w, r)
 	})
+}
+
+// serveHealth answers a health check with GET or HEAD only, so a POST gets the
+// same 405 the API routes would return instead of a silent 200.
+func (s *Server) serveHealth(w http.ResponseWriter, r *http.Request, handler http.HandlerFunc) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	handler(w, r)
 }
 
 func (s *Server) authenticate(next http.Handler) http.Handler {

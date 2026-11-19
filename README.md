@@ -31,7 +31,7 @@
 ```bash
 git clone https://github.com/yakumioto/torrentfs-go.git
 cd torrentfs-go
-docker build -t torrentfs .
+docker build --build-arg VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -t torrentfs .
 ```
 
 ### 2. 准备目录和凭据

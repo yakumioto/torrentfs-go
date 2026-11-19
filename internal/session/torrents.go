@@ -380,7 +380,6 @@ func (t *Torrent) readerFor(displayPath string) (*openedFile, error) {
 		fileSize:    f.Length(),
 		pieceLength: info.PieceLength,
 		torrentSize: t.tor.Length(),
-		readahead:   defaultStreamingReadahead,
 	}
 	if !r.acquireHandle() {
 		return nil, fmt.Errorf("session: torrent is closed: %w", vfs.ErrClosed)

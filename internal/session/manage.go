@@ -13,6 +13,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	infohash_v2 "github.com/anacrolix/torrent/types/infohash-v2"
 )
 
 var (
@@ -23,6 +24,10 @@ var (
 	ErrUnknownTorrent = errors.New("session: unknown torrent")
 	// ErrInvalidSource reports malformed add input.
 	ErrInvalidSource = errors.New("session: invalid torrent source")
+	// ErrV2Only marks a well-formed v2-only source. Storage keys, cache keys and
+	// paths are all v1 infohashes today, so the add is refused with a message
+	// that points at the missing support instead of at a missing hash.
+	ErrV2Only = fmt.Errorf("%w: v2-only torrents are not supported (no v1 info hash)", ErrInvalidSource)
 )
 
 // lockHash serializes operations on one info hash so an add and a delete can
@@ -64,16 +69,28 @@ func (s *Session) newRegistryEntry(hash metainfo.Hash, name string, state Torren
 	}
 }
 
+// validateSourceSpec returns the v1 infohash the rest of the session keys on,
+// and explains why a source cannot be keyed when it has none.
+func validateSourceSpec(spec *torrent.TorrentSpec) (metainfo.Hash, error) {
+	if hash := spec.InfoHash; hash != (metainfo.Hash{}) {
+		return hash, nil
+	}
+	if spec.InfoHashV2.Ok && spec.InfoHashV2.Value != (infohash_v2.T{}) {
+		return metainfo.Hash{}, ErrV2Only
+	}
+	return metainfo.Hash{}, fmt.Errorf("%w: missing info hash", ErrInvalidSource)
+}
+
 func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*TorrentView, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	logFailure := func(err error) {
+	logFailure := func(err error, extra ...any) {
 		attrs := []any{"source", sourceKind(src), "err", err}
 		if src.MetainfoPath != "" {
 			attrs = append(attrs, "path", src.MetainfoPath)
 		}
-		s.logger.Error("managed torrent add failed", attrs...)
+		s.logger.Error("managed torrent add failed", append(attrs, extra...)...)
 	}
 
 	spec, err := specFromSource(src)
@@ -82,10 +99,15 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 		logFailure(err)
 		return nil, err
 	}
-	hash := spec.InfoHash
-	if hash == (metainfo.Hash{}) {
-		err := fmt.Errorf("%w: missing info hash", ErrInvalidSource)
-		logFailure(err)
+	hash, err := validateSourceSpec(spec)
+	if err != nil {
+		if errors.Is(err, ErrV2Only) {
+			// Keep the 32-byte hash for debugging: it is the only identity a
+			// v2-only source has, and it never reaches a v1 key.
+			logFailure(err, "btmh", spec.InfoHashV2.Value.HexString())
+		} else {
+			logFailure(err)
+		}
 		return nil, err
 	}
 	data, err := readManagedSource(src)
@@ -128,7 +150,7 @@ func (s *Session) AddTorrentAndPersist(ctx context.Context, src Source) (*Torren
 		}
 	}
 
-	return s.addManagedLocked(ctx, hash, spec, data, src.MagnetURI, logFailure)
+	return s.addManagedLocked(ctx, hash, spec, data, src.MagnetURI, func(err error) { logFailure(err) })
 }
 
 // AddTorrentAndPersist's concrete transaction is kept in this typed helper so

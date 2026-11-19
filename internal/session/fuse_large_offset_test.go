@@ -108,7 +108,6 @@ func TestFuseLargeOffsetReadAt(t *testing.T) {
 		fileSize:    fileSize,
 		pieceLength: largeOffsetPieceLength,
 		torrentSize: fileSize,
-		readahead:   largeOffsetPieceLength,
 	}
 	backend := &largeOffsetBackend{hash: hash, file: file, size: fileSize}
 

@@ -20,13 +20,26 @@ export interface Torrent {
 
 export interface RuntimeStats {
   started_at: string;
+  version: string;
   cache: {
     used_bytes: number;
     capacity_bytes: number;
+    hits: number;
+    misses: number;
+    evictions: number;
+    evicted_bytes: number;
+    put_rejections: number;
+    pin_reservation_rejections: number;
   };
   transfer: {
     downloaded_bytes: number;
     uploaded_bytes: number;
+  };
+  // Session-wide sum of per-torrent prefetch gauges.
+  prefetch: {
+    buffered_bytes: number;
+    active_pieces: number;
+    active_bytes: number;
   };
 }
 
