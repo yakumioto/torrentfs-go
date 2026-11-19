@@ -90,6 +90,7 @@ type Server struct {
 	configSaver  ConfigSaver
 	handler      http.Handler
 	http         *http.Server
+	loginLimiter *loginLimiter
 
 	mu       sync.RWMutex
 	listener net.Listener
@@ -165,6 +166,7 @@ func New(cfg config.Config, backend Backend, opts ...Option) (*Server, error) {
 	mux.HandleFunc("PUT /api/v1/torrents/{id}/category", s.handleSetTorrentCategory)
 	mux.HandleFunc("POST /api/v1/torrents/prune", s.handlePrune)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.handleOperation)
+	s.loginLimiter = newLoginLimiter(time.Now)
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.handler = s.dispatchRoutes(s.authenticate(mux), http.HandlerFunc(s.handleStream), web.Handler())
 	s.http = &http.Server{

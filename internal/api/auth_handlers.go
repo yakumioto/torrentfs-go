@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/auth"
@@ -32,6 +33,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.auth == nil {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	address := loginAddress(r)
+	if wait, allowed := s.loginLimiter.allow(address); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+		writeError(w, http.StatusTooManyRequests, "too many login attempts")
 		return
 	}
 
@@ -69,12 +77,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token, _, err := s.auth.Login(request.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
+			s.loginLimiter.fail(address)
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
 	}
+	s.loginLimiter.reset(address)
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token:     token,
 		TokenType: "Bearer",
