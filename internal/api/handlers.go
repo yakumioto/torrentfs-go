@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yakumioto/torrentfs-go/internal/filesystem"
+	"github.com/yakumioto/torrentfs-go/internal/handoff"
 	"github.com/yakumioto/torrentfs-go/internal/session"
 )
 
@@ -571,6 +572,12 @@ func writeSessionError(w http.ResponseWriter, action string, err error) {
 		writeError(w, http.StatusBadRequest, "invalid category name")
 	case errors.Is(err, session.ErrDeleting):
 		writeError(w, http.StatusConflict, "torrent is being deleted")
+	case errors.Is(err, session.ErrHandoffUnconfigured):
+		writeCodedError(w, http.StatusConflict, "handoff_unconfigured", "handoff target is not configured")
+	case errors.Is(err, session.ErrHandoffInProgress):
+		writeCodedError(w, http.StatusConflict, "handoff_in_progress", "torrent handoff is in progress")
+	case errors.Is(err, handoff.ErrUnreachable), errors.Is(err, handoff.ErrAuthFailed), errors.Is(err, handoff.ErrRejected):
+		writeCodedError(w, http.StatusBadGateway, session.HandoffErrorCode(err), err.Error())
 	case errors.Is(err, session.ErrTorrentNotReady):
 		writeError(w, http.StatusConflict, "torrent is not ready")
 	case errors.Is(err, session.ErrNoPieceDownload):

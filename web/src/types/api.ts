@@ -18,6 +18,16 @@ export interface Torrent {
   error?: string;
 }
 
+/**
+ * HandoffTarget reports the external downloader a torrent can be handed off
+ * to. Version is present only after a successful connection test.
+ */
+export interface HandoffTarget {
+  configured: boolean;
+  target: string;
+  version?: string;
+}
+
 export interface RuntimeStats {
   started_at: string;
   version: string;

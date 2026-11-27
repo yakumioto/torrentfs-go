@@ -22,6 +22,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../app/auth-context';
+import { HandoffTestButton } from '../components/handoff/HandoffTestButton';
 import { useConfig, useSaveConfig } from '../queries/hooks';
 import type { ConfigKey, ConfigSaveResult, ConfigView } from '../types/api';
 import { configValueInputError } from '../utils/config-value';
@@ -62,6 +63,8 @@ const SECTION_LABELS: Record<string, string> = {
   smb: 'SMB',
   upload_rate: '上传限速',
   experiments: '实验',
+  handoff: '移种',
+  'handoff.transmission': '移交目标（Transmission）',
   'experiments.upload': '上传实验',
 };
 
@@ -72,6 +75,8 @@ const SECTION_LABELS: Record<string, string> = {
 const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   experiments:
     '上传统计实验常驻运行，默认基线模式；在这里统一调整实验模式与参数，改动按标记立即生效或等待重启。',
+  handoff:
+    '移种把种子交给外部下载器接管：填写 Transmission 的 RPC 地址与认证信息。地址留空即关闭移种，新建任务的入口会保持禁用。',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -1317,6 +1322,7 @@ export function ConfigPage() {
                           />
                         ))}
                       </div>
+                      {section.id === 'handoff.transmission' && <HandoffTestButton />}
                     </section>
                   ))}
                 </section>

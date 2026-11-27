@@ -348,6 +348,13 @@ func (s *Session) allocateConnections() {
 	}
 	s.mu.RUnlock()
 	for _, st := range torrents {
+		if st.handoffPaused.Load() {
+			// A handoff pins the torrent at zero connections: the target is
+			// about to take over, and a re-granted allowance would put two
+			// clients back on the same infohash.
+			st.applyHandoffPause()
+			continue
+		}
 		st.observeUpload(now)
 		plan := connectionPolicy(now, st.connectionActivity(now, conn), conn, timing)
 		st.applyConnectionPlan(now, plan, conn)

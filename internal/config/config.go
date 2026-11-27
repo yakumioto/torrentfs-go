@@ -148,6 +148,9 @@ type Config struct {
 	UploadRate UploadRate `toml:"upload_rate"`
 	// Experiments groups the settings of the experimental features.
 	Experiments Experiments `toml:"experiments"`
+	// Handoff groups the settings of handing a torrent off to an external
+	// downloader.
+	Handoff Handoff `toml:"handoff"`
 }
 
 // Experiments groups the settings of the experimental features.
@@ -493,6 +496,7 @@ func (c Config) validateSyntax(collector *validationCollector) {
 	collector.add(c.validateSMBShape())
 	collector.add(c.validateUploadRateShape())
 	collector.add(c.validateUploadExperimentShape())
+	collector.add(c.Handoff.Transmission.ValidateShape())
 }
 
 // validateUploadExperimentShape checks the shape of the upload statistics
