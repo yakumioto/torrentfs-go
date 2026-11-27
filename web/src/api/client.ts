@@ -4,6 +4,7 @@ import type {
   ConfigSaveResult,
   ConfigView,
   ExperimentView,
+  HandoffTarget,
   LoginResponse,
   Operation,
   PruneResult,
@@ -118,6 +119,21 @@ export class ApiClient {
     const body = new FormData();
     body.append('file', file);
     return this.request<Torrent>('/torrents', { method: 'POST', body, signal });
+  }
+
+  handoffTorrent(id: string, signal?: AbortSignal): Promise<Operation> {
+    return this.request<Operation>(`/torrents/${encodeURIComponent(id)}/handoff`, {
+      method: 'POST',
+      signal,
+    });
+  }
+
+  getHandoffTarget(signal?: AbortSignal): Promise<HandoffTarget> {
+    return this.request<HandoffTarget>('/handoff', { signal });
+  }
+
+  testHandoffTarget(signal?: AbortSignal): Promise<HandoffTarget> {
+    return this.request<HandoffTarget>('/handoff/test', { method: 'POST', signal });
   }
 
   deleteTorrent(id: string, signal?: AbortSignal): Promise<Operation> {

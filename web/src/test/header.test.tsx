@@ -170,6 +170,9 @@ describe('Header refresh control', () => {
       if (url.endsWith('/experiments/upload')) {
         return Promise.resolve(jsonResponse(baselineExperiment()));
       }
+      if (url.endsWith('/handoff')) {
+        return Promise.resolve(jsonResponse({ configured: true, target: 'http://nas:9091' }));
+      }
       if (url.endsWith('/torrent-1')) {
         return Promise.resolve(jsonResponse(torrent));
       }
@@ -178,7 +181,7 @@ describe('Header refresh control', () => {
 
     renderApp('/torrents/torrent-1', fetchMock);
     await waitFor(() => expect(screen.getByRole('heading', { name: torrent.name })).toBeInTheDocument());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/torrents'))).toBe(false);
     fetchMock.mockClear();
 

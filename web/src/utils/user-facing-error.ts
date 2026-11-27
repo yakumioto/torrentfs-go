@@ -53,6 +53,30 @@ export function userFacingOperationCode(code: string | undefined, fallback = '�
   if (code === 'subtitle_cleanup_failed') {
     return '字幕文件清理失败。修复存储权限或空间后，可以再次删除同一任务完成重试。';
   }
+  if (code !== undefined && HANDOFF_CODE_MESSAGES[code] !== undefined) {
+    return HANDOFF_CODE_MESSAGES[code];
+  }
+  return fallback;
+}
+
+/**
+ * Handoff failures are mapped by stable code. The generic 409 copy would be
+ * wrong here: a conflict on this route means either an unconfigured target or
+ * a handoff already in progress, never a .torrent reference.
+ */
+const HANDOFF_CODE_MESSAGES: Record<string, string> = {
+  handoff_unconfigured: '尚未配置移交目标。请先在配置页填写 Transmission 的 RPC 地址并保存。',
+  handoff_in_progress: '该任务正在移交中，请等待当前移交结束后再试。',
+  handoff_unreachable: '无法连接 Transmission，请确认它正在运行、RPC 地址正确且允许远程访问。',
+  handoff_auth_failed: 'Transmission 拒绝了认证，请检查用户名和密码。',
+  handoff_rejected: 'Transmission 拒绝了这次移交，请确认种子有效后重试。',
+  torrent_deleting: '任务正在删除，无法再移交。',
+};
+
+export function userFacingHandoffError(error: unknown, fallback = '后台服务未能完成移交，请稍后重试。'): string {
+  if (error instanceof ApiError) {
+    return HANDOFF_CODE_MESSAGES[error.code] ?? fallback;
+  }
   return fallback;
 }
 

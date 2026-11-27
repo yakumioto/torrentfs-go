@@ -270,6 +270,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		session.NewConfigApplier(sess),
 		session.NewUploadRateApplier(sess),
 		session.NewExperimentApplier(sess),
+		session.NewHandoffApplier(sess),
 	); err != nil {
 		_, _ = fmt.Fprintf(stderr, "torrentfs: initialize configuration controller: %v\n", err)
 		sequence.run()

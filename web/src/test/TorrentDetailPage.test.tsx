@@ -143,7 +143,7 @@ describe('TorrentDetailPage', () => {
     await queryClient.refetchQueries({ queryKey: queryKeys.torrentStatus('torrent-1') });
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Updated detail title' })).toBeInTheDocument());
     expect(screen.getAllByText('错误')).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it('keeps Torrent, file, and absolute piece scopes explicit', async () => {

@@ -1,10 +1,10 @@
 import { Button, Tooltip } from '@mantine/core';
-import { IconArrowLeft, IconTrash, IconUpload } from '@tabler/icons-react';
+import { IconArrowLeft, IconSend, IconTrash, IconUpload } from '@tabler/icons-react';
 import { memo } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './TorrentDetailHeader.module.css';
 
-export const TorrentDetailHeader = memo(function TorrentDetailHeader({ name, infoHash, onDelete, deleteDisabled, onUploadSubtitle, uploadDisabled, uploadDisabledReason }: {
+export const TorrentDetailHeader = memo(function TorrentDetailHeader({ name, infoHash, onDelete, deleteDisabled, onUploadSubtitle, uploadDisabled, uploadDisabledReason, onHandoff, handoffDisabled, handoffDisabledReason }: {
   name: string;
   infoHash: string;
   onDelete: () => void;
@@ -12,6 +12,9 @@ export const TorrentDetailHeader = memo(function TorrentDetailHeader({ name, inf
   onUploadSubtitle: () => void;
   uploadDisabled: boolean;
   uploadDisabledReason: string;
+  onHandoff: () => void;
+  handoffDisabled: boolean;
+  handoffDisabledReason: string;
 }) {
   const uploadButton = (
     <Button
@@ -39,6 +42,12 @@ export const TorrentDetailHeader = memo(function TorrentDetailHeader({ name, inf
             ? <Tooltip label={uploadDisabledReason} withArrow><span className={styles.tooltipAnchor}>{uploadButton}</span></Tooltip>
             : uploadButton}
           {uploadDisabled && uploadDisabledReason !== '' && <span className={styles.actionHint}>{uploadDisabledReason}</span>}
+        </div>
+        <div className={styles.actionGroup}>
+          {handoffDisabled && handoffDisabledReason !== ''
+            ? <Tooltip label={handoffDisabledReason} withArrow><span className={styles.tooltipAnchor}><Button color="torrent" variant="light" leftSection={<IconSend size={16} />} onClick={onHandoff} disabled aria-label="移种到 Transmission">移种</Button></span></Tooltip>
+            : <Button color="torrent" variant="light" leftSection={<IconSend size={16} />} onClick={onHandoff} aria-label="移种到 Transmission">移种</Button>}
+          {handoffDisabled && handoffDisabledReason !== '' && <span className={styles.actionHint}>{handoffDisabledReason}</span>}
         </div>
         <Button color="danger" variant="light" leftSection={<IconTrash size={16} />} onClick={onDelete} disabled={deleteDisabled}>
           删除任务

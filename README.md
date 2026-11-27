@@ -149,7 +149,7 @@ strm = "off"
 - 每个配置项都有对应的环境变量，由配置项点路径机械派生：点路径转大写、`.` 换成 `_`、加 `TORRENTFS_` 前缀。例如 `http.auth.token_ttl` → `TORRENTFS_HTTP_AUTH_TOKEN_TTL`，`cache.capacity` → `TORRENTFS_CACHE_CAPACITY`。没有例外。
 - **配置文件入口**：`TORRENTFS_CONFIG` 指定配置文件路径，`-config` 参数优先于它。**不做隐式搜索路径**：不指定就是不带配置文件启动，不会去猜某个路径。
 - **热应用与热重载**：配置文件加载后即生效。配置页面（`/config`）保存时依次完成整体校验、原子写回与热应用；进程另外每约 2 秒检查配置文件摘要，外部编辑或 ConfigMap 更新会走同一条「加载 → 校验 → 应用」路径。可热应用的配置项立即作用于运行中进程，其余写回后标记「重启生效」。
-- 可热应用的是 14 个配置项：`log.level`、`http.max_upload_size`、`http.auth.token_ttl`、`connections.reading_conns`、`connections.uploading_conns`、`connections.read_grace`、`upload_rate.limit`、`upload_rate.schedule_start`、`upload_rate.schedule_end`、`experiments.upload.mode`、`experiments.upload.rate`、`experiments.upload.multiplier`、`experiments.upload.jitter`、`experiments.upload.cap`。其余配置项重启生效；`password` 不热应用，因为 HTTP 与 SMB 共用同一个口令，热改会让两个输出不一致。这份清单与 schema 的 `hotapply` 标签由 Go 测试逐项比对。
+- 可热应用的是 17 个配置项：`log.level`、`http.max_upload_size`、`http.auth.token_ttl`、`connections.reading_conns`、`connections.uploading_conns`、`connections.read_grace`、`upload_rate.limit`、`upload_rate.schedule_start`、`upload_rate.schedule_end`、`experiments.upload.mode`、`experiments.upload.rate`、`experiments.upload.multiplier`、`experiments.upload.jitter`、`experiments.upload.cap`、`handoff.transmission.url`、`handoff.transmission.username`、`handoff.transmission.password`。其余配置项重启生效；`password` 不热应用，因为 HTTP 与 SMB 共用同一个口令，热改会让两个输出不一致。这份清单与 schema 的 `hotapply` 标签由 Go 测试逐项比对。
 - 外部编辑未通过校验时，进程保留最近一次成功加载的配置，页面显示最近一次自动重载的时间与失败原因；页面自己写回不会触发重载。环境变量在热重载时不会重新读取，重载只是「同一环境 + 新文件」的重新合并。
 - **配置页面写回需要可写配置文件**：进程必须对配置文件及其所在目录都有写权限；原子写回会在同目录创建临时文件、保留上一份 `.bak`，并沿用原文件权限。镜像默认把 `/etc/torrentfs` 交给运行用户（`1000:1000`），Compose 模板用命名卷 `torrentfs-config` 持久化；只读挂载、只读根文件系统，或卷属主与自定义 `PUID/PGID` 不一致时，页面降级为只读并显示原因（`file_not_writable`），保存不会写入，进程继续使用当前配置。
 - **只读原因**：整页或单个配置项不可编辑时以稳定的机器可读 code 区分——环境变量覆盖（`environment_override`，键级）、口令（`secret`，键级；值从不显示、不可编辑，保存其他配置时原样保留）、未加载配置文件（`not_configured`，整页）与配置文件不可写（`file_not_writable`，整页）。没有配置文件启动时，上传限速与实验设置也只能在带配置文件启动后管理。
@@ -219,6 +219,9 @@ strm = "off"
 | `experiments.upload.seed` | `TORRENTFS_EXPERIMENTS_UPLOAD_SEED` | `0` | Seed fixes the random jitter sequence for reproducible runs. Zero lets the process choose one. The seed is fixed at startup; a new value takes effect after a restart. |
 | `experiments.upload.announce_log` | `TORRENTFS_EXPERIMENTS_UPLOAD_ANNOUNCE_LOG` | `` | AnnounceLog is the JSON Lines file that receives one record per tracker announce. Empty disables it. The file is opened at startup; a new value takes effect after a restart. |
 | `experiments.upload.peer_sample_interval` | `TORRENTFS_EXPERIMENTS_UPLOAD_PEER_SAMPLE_INTERVAL` | `0s` | PeerSampleInterval is how often peer activity is sampled into the announce log. It is read at startup; a new value takes effect after a restart. |
+| `handoff.transmission.url` | `TORRENTFS_HANDOFF_TRANSMISSION_URL` | `` | URL is the Transmission RPC endpoint, for example http://127.0.0.1:9091/transmission/rpc. An empty value disables the handoff feature. The endpoint is applied without a restart. |
+| `handoff.transmission.username` | `TORRENTFS_HANDOFF_TRANSMISSION_USERNAME` | `` | Username is the HTTP basic authentication user name of the RPC endpoint. Transmission without authentication leaves it empty. |
+| `handoff.transmission.password` | `TORRENTFS_HANDOFF_TRANSMISSION_PASSWORD` | `` | Password is the HTTP basic authentication password of the RPC endpoint. Transmission without authentication leaves it empty. |
 <!-- END generated:readme-reference -->
 
 ### 检查与查看配置

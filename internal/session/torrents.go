@@ -59,6 +59,12 @@ type Torrent struct {
 	// definition in GLOSSARY.md. Guarded by atomics for the same reason as
 	// the fields above: the allocator reads it without t.mu.
 	pieceDownloadActive atomic.Int32
+	// handoffPaused pins the connection allowance at zero while the torrent
+	// is being handed off. The allocator reads it on every pass, so the pause
+	// survives the periodic re-evaluation that would otherwise grant the
+	// torrent its activity allowance again. Atomic for the same reason as the
+	// allocator counters.
+	handoffPaused atomic.Bool
 	// pieceDownload is this torrent's current or most recently finished
 	// piece download, replaced wholesale by the next start. Guarded by t.mu;
 	// never persisted.

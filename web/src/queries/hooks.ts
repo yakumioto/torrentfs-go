@@ -7,6 +7,7 @@ import type {
   ConfigSaveResult,
   ConfigView,
   ExperimentView,
+  HandoffTarget,
   Operation,
   PruneResult,
   RuntimeStats,
@@ -309,6 +310,34 @@ export function useAddTorrentFiles(api: ApiClient) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
       }
     },
+  });
+}
+
+export function useHandoffTarget(api: ApiClient, enabled: boolean) {
+  return useQuery<HandoffTarget>({
+    queryKey: queryKeys.handoffTarget,
+    queryFn: ({ signal }) => api.getHandoffTarget(signal),
+    enabled,
+    retry: shouldRetry,
+    retryDelay,
+  });
+}
+
+export function useHandoffTorrent(api: ApiClient) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, signal }: { id: string; signal?: AbortSignal }) =>
+      api.handoffTorrent(id, signal),
+    onSuccess: (operation: Operation) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.torrents });
+      queryClient.setQueryData(queryKeys.operation(operation.operation_id), operation);
+    },
+  });
+}
+
+export function useTestHandoffTarget(api: ApiClient) {
+  return useMutation({
+    mutationFn: ({ signal }: { signal?: AbortSignal }) => api.testHandoffTarget(signal),
   });
 }
 

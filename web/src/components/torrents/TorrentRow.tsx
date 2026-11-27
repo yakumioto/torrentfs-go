@@ -1,12 +1,13 @@
 import { ActionIcon, Badge, Menu, Tooltip } from '@mantine/core';
-import { IconDots, IconExternalLink, IconFolder, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
+import { IconDots, IconExternalLink, IconFolder, IconSend, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { ExperimentTorrentStat, Torrent } from '../../types/api';
 import { useAuth } from '../../app/auth-context';
-import { useSetFavorite } from '../../queries/hooks';
+import { useHandoffTarget, useSetFavorite } from '../../queries/hooks';
 import { CategoryAssignmentDialog } from '../dialogs/CategoryAssignmentDialog';
 import { DeleteTorrentDialog } from '../dialogs/DeleteTorrentDialog';
+import { HandoffTorrentDialog } from '../dialogs/HandoffTorrentDialog';
 import styles from './TorrentRow.module.css';
 import { formatBytes, formatDate } from '../../utils/format';
 import { formatSignedBytes, experimentOverreportedBytes, experimentPendingRealUploadBytes } from '../../utils/experiments';
@@ -41,11 +42,18 @@ export function TorrentRow({ torrent, showExperiment = false, experimentStat }: 
   const favorite = useSetFavorite(auth.api);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const handoffTarget = useHandoffTarget(auth.api, true);
   const disabled = torrent.state === 'deleting';
   const name = torrent.name || '未命名任务';
   const favoriteLabel = torrent.favorite ? `取消收藏 ${name}` : `收藏 ${name}`;
 
   const openDelete = () => setDeleteOpen(true);
+  const handoffDisabledReason = torrent.state !== 'ready'
+    ? '只有已就绪的任务可以移种。'
+    : handoffTarget.data !== undefined && !handoffTarget.data.configured
+      ? '尚未配置移交目标，请先在配置页填写 Transmission 地址。'
+      : '';
   const toggleFavorite = () => favorite.mutate({ id: torrent.id, favorite: !torrent.favorite });
 
   return (
@@ -120,6 +128,17 @@ export function TorrentRow({ torrent, showExperiment = false, experimentStat }: 
               设置分类
             </Menu.Item>
             <Menu.Divider />
+            {handoffDisabledReason === '' ? (
+              <Menu.Item leftSection={<IconSend size={15} />} onClick={() => setHandoffOpen(true)}>
+                移种到 Transmission
+              </Menu.Item>
+            ) : (
+              <Tooltip label={handoffDisabledReason} withArrow position="left">
+                <span>
+                  <Menu.Item leftSection={<IconSend size={15} />} disabled>移种到 Transmission</Menu.Item>
+                </span>
+              </Tooltip>
+            )}
             <Menu.Item color="red" leftSection={<IconTrash size={15} />} onClick={openDelete}>
               删除任务
             </Menu.Item>
@@ -135,6 +154,12 @@ export function TorrentRow({ torrent, showExperiment = false, experimentStat }: 
         torrent={torrent}
         opened={deleteOpen}
         onClose={() => setDeleteOpen(false)}
+      />
+      <HandoffTorrentDialog
+        torrent={torrent}
+        target={handoffTarget.data}
+        opened={handoffOpen}
+        onClose={() => setHandoffOpen(false)}
       />
     </div>
   );

@@ -113,6 +113,19 @@ strm_mountpoint = ""
 # restriction that only the mounting user may access the mount.
 allow_other = false
 
+[handoff.transmission]
+# URL is the Transmission RPC endpoint, for example
+# http://127.0.0.1:9091/transmission/rpc. An empty value disables the
+# handoff feature. The endpoint is applied without a restart.
+url = ""
+# Username is the HTTP basic authentication user name of the RPC
+# endpoint. Transmission without authentication leaves it empty.
+username = ""
+# Password is the HTTP basic authentication password of the RPC
+# endpoint. Transmission without authentication leaves it empty.
+# A secret value: prefer the environment variable TORRENTFS_HANDOFF_TRANSMISSION_PASSWORD.
+password = ""
+
 [http]
 # ListenAddr is the address the HTTP service binds. Empty disables the
 # service. The default binds loopback only.

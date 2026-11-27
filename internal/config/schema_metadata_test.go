@@ -34,6 +34,9 @@ func TestOnlyTheHotApplyBoundaryIsMarkedHotApply(t *testing.T) {
 		"experiments.upload.multiplier": "experiment",
 		"experiments.upload.jitter":     "experiment",
 		"experiments.upload.cap":        "experiment",
+		"handoff.transmission.url":      "handoff",
+		"handoff.transmission.username": "handoff",
+		"handoff.transmission.password": "handoff",
 	}
 	for _, key := range Schema() {
 		component, hot := want[key.Path]

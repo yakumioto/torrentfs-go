@@ -5,6 +5,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/errors';
 import { useAuth } from '../app/auth-context';
 import { DeleteTorrentDialog } from '../components/dialogs/DeleteTorrentDialog';
+import { HandoffTorrentDialog } from '../components/dialogs/HandoffTorrentDialog';
 import { UploadSubtitleDialog } from '../components/dialogs/UploadSubtitleDialog';
 import { DeleteSubtitleDialog } from '../components/dialogs/DeleteSubtitleDialog';
 import { TorrentDetailHeader } from '../components/detail/TorrentDetailHeader';
@@ -16,6 +17,7 @@ import { TorrentPiecesPanel } from '../components/detail/TorrentPiecesPanel';
 import type { FileStatus, PieceStatus, Subtitle } from '../types/api';
 import {
   useExperiment,
+  useHandoffTarget,
   useTorrentDetail,
   useTorrentLiveSummary,
   useTorrentStatus,
@@ -63,12 +65,14 @@ export function TorrentDetailPage() {
   const [subtitleOpen, setSubtitleOpen] = useState(false);
   const [subtitleDeleteOpen, setSubtitleDeleteOpen] = useState(false);
   const [pendingSubtitleDelete, setPendingSubtitleDelete] = useState<Subtitle | null>(null);
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const openDelete = useCallback(() => setDeleteOpen(true), []);
   const openSubtitle = useCallback(() => setSubtitleOpen(true), []);
   const openSubtitleDelete = useCallback((subtitle: Subtitle) => {
     setPendingSubtitleDelete(subtitle);
     setSubtitleDeleteOpen(true);
   }, []);
+  const openHandoff = useCallback(() => setHandoffOpen(true), []);
   const enabled = auth.isReady && visible;
   const detail = useTorrentDetail(auth.api, id, enabled);
   const status = useTorrentStatus(auth.api, id, enabled);
@@ -80,6 +84,7 @@ export function TorrentDetailPage() {
   const statusSubtitles = useTorrentStatusSubtitles(auth.api, id, enabled);
   const subtitleTargets = useTorrentSubtitleTargets(auth.api, id, enabled);
   const experiment = useExperiment(auth.api, enabled);
+  const handoffTarget = useHandoffTarget(auth.api, enabled);
 
   if (detail.isPending) {
     return <div className={`panel panel--padding ${styles.loading}`} role="status" aria-busy="true" aria-label="正在加载任务详情"><div className={styles.loadingBar} /><div className={`${styles.loadingBar} ${styles.loadingBarShort}`} /><div className={styles.loadingBlock} /></div>;
@@ -115,6 +120,12 @@ export function TorrentDetailPage() {
     uploadableCount: uploadableTargets.length,
   });
   const uploadDisabled = uploadDisabledReason !== '';
+  const handoffDisabledReason = torrent.state !== 'ready'
+    ? '只有已就绪的任务可以移种。'
+    : handoffTarget.data !== undefined && !handoffTarget.data.configured
+      ? '尚未配置移交目标，请先在配置页填写 Transmission 地址。'
+      : '';
+  const handoffDisabled = handoffDisabledReason !== '';
 
   return (
     <div className={styles.page}>
@@ -126,6 +137,9 @@ export function TorrentDetailPage() {
         onUploadSubtitle={openSubtitle}
         uploadDisabled={uploadDisabled}
         uploadDisabledReason={uploadDisabledReason}
+        onHandoff={openHandoff}
+        handoffDisabled={handoffDisabled}
+        handoffDisabledReason={handoffDisabledReason}
       />
 
       <TorrentLiveSummary summary={liveSummary.data} />
@@ -189,6 +203,12 @@ export function TorrentDetailPage() {
       />
 
       <DeleteTorrentDialog torrent={torrent} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />
+      <HandoffTorrentDialog
+        torrent={torrent}
+        target={handoffTarget.data}
+        opened={handoffOpen}
+        onClose={() => setHandoffOpen(false)}
+      />
     </div>
   );
 }

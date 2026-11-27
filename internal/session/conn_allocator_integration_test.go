@@ -59,9 +59,9 @@ func fakeConnectionClock(t *testing.T, sess *session.Session) (now func() time.T
 // TestConnectionAllocatorFollowsReadActivity is the end-to-end contract of the
 // activity-based allowances: a torrent opens no peer connections while idle,
 // connects to more than one peer when it is read, and afterwards falls back to
-// the single probe connection while dropping the excess. The swarm is wired
+// the five probe connections while dropping the excess. The swarm is wired
 // with explicit peer addresses instead of a tracker, so the seeders cannot
-// spend their one probe slot on each other before the leecher arrives.
+// spend their probe slots on each other before the leecher arrives.
 func TestConnectionAllocatorFollowsReadActivity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -70,7 +70,7 @@ func TestConnectionAllocatorFollowsReadActivity(t *testing.T) {
 	content := bytes.Repeat([]byte{7}, 8*testPieceLength)
 	torrentBytes, hash := buildSingleFileTorrentBytes(t, "payload.bin", content, nil)
 
-	const seederCount = 3
+	const seederCount = 7
 	seederAddrs := make([]torrent.PeerInfo, 0, seederCount)
 	for i := 0; i < seederCount; i++ {
 		seeder := seederFor(t, ctx, filepath.Join(work, fmt.Sprintf("seeder-%d", i)), torrentBytes, hash, content)
@@ -124,25 +124,25 @@ func TestConnectionAllocatorFollowsReadActivity(t *testing.T) {
 	if _, err := reader.ReadAt(make([]byte, 32<<10), 0); err != nil {
 		t.Fatalf("read the torrent file: %v", err)
 	}
-	if err := waitFor(ctx, func() bool { return totalActivePeers(leecher) >= 2 }); err != nil {
-		t.Fatalf("the reading torrent never connected to more than one seeder: %v", err)
+	if err := waitFor(ctx, func() bool { return totalActivePeers(leecher) > 5 }); err != nil {
+		t.Fatalf("the reading torrent never connected to more than five seeders: %v", err)
 	}
 
 	// Closing the handle starts the grace window. Once it expires the torrent
-	// drops to the single probe connection and the excess connections go away.
+	// drops to the five probe connections and the excess connections go away.
 	if err := closer.Close(); err != nil {
 		t.Fatalf("close the torrent file: %v", err)
 	}
 	advance(time.Duration(cfg.Connections.ReadGrace) + time.Second)
 	session.AllocateConnectionsForTest(leecher)
-	if got := session.ConnectionAllowanceForTest(state); got != 1 {
-		t.Fatalf("a quiet cached torrent has allowance %d, want the probe allowance 1", got)
+	if got := session.ConnectionAllowanceForTest(state); got != 5 {
+		t.Fatalf("a quiet cached torrent has allowance %d, want the probe allowance 5", got)
 	}
 	if got := session.ConnectionStateForTest(state); got != "probe" {
 		t.Fatalf("a quiet cached torrent is in state %q, want probe", got)
 	}
-	if err := waitFor(ctx, func() bool { return totalActivePeers(leecher) <= 1 }); err != nil {
-		t.Fatalf("the quiet torrent kept more than the probe connection: %v", err)
+	if err := waitFor(ctx, func() bool { return totalActivePeers(leecher) <= 5 }); err != nil {
+		t.Fatalf("the quiet torrent kept more than five probe connections: %v", err)
 	}
 }
 
