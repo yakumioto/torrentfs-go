@@ -9,10 +9,10 @@ import (
 
 const (
 	// probeConns is the allowance for a cached torrent that nobody is reading
-	// or uploading. One slot lets a peer connect and ask for pieces; without it
-	// an upload could never be discovered, because the client refuses a new
-	// connection before it can see a piece request.
-	probeConns = 1
+	// or uploading. Five slots let several peers connect and ask for pieces,
+	// reducing the chance that only complete seeders occupy the allowance.
+	// Without probe connections an upload could never be discovered.
+	probeConns = 5
 	// defaultUploadGrace is how long after the last observed upload a cached
 	// torrent keeps its uploading allowance.
 	defaultUploadGrace = 5 * time.Minute
@@ -192,7 +192,7 @@ type connectionPlan struct {
 //     content is not fully cached: the reading allowance;
 //   - uploading: cached and a real upload was observed within the upload
 //     grace: the uploading allowance;
-//   - probe: cached but quiet: one probe connection, rotated periodically;
+//   - probe: cached but quiet: five probe connections, rotated periodically;
 //   - idle: otherwise, no connections.
 func connectionPolicy(now time.Time, activity connectionActivity, conn config.Connections, timing connectionAllocatorTiming) connectionPlan {
 	// A torrent without metadata can be neither read nor cached; its only job
@@ -257,10 +257,10 @@ func metadataConnectionPlan(now time.Time, activity connectionActivity) connecti
 	return plan
 }
 
-// probeConnectionPlan keeps one connection on a cached but quiet torrent and
-// rotates it after a full quiet period. The quiet period starts when the slot
-// is established (the torrent left reading or uploading), not when the last
-// activity happened, so a freshly opened slot gets the whole interval.
+// probeConnectionPlan keeps five connections on a cached but quiet torrent and
+// rotates them together after a full quiet period. The quiet period starts when
+// the allowance is established (the torrent left reading or uploading), not when
+// the last activity happened, so a fresh probe gets the whole interval.
 func probeConnectionPlan(now time.Time, activity connectionActivity, timing connectionAllocatorTiming) connectionPlan {
 	since := activity.ProbeSince
 	if activity.PreviousState != connectionStateProbe || since.IsZero() {

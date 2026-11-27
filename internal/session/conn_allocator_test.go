@@ -252,8 +252,8 @@ func TestConnectionPolicyDowngradeTimeline(t *testing.T) {
 		t.Fatalf("within the read grace allowance = %d, want %d", got.Allowance, conn.ReadingConns)
 	}
 
-	// ReadGrace expires without any upload: the torrent drops to one probe slot
-	// and the slot's quiet period starts now.
+	// ReadGrace expires without any upload: the torrent drops to five probe slots
+	// and their quiet period starts now.
 	stoppedAt := closedAt.Add(time.Duration(conn.ReadGrace) + time.Second)
 	activity = connectionActivity{HasInfo: true, CachedBytes: cached, PreviousState: connectionStateReading}
 	plan = connectionPolicy(stoppedAt, activity, conn, timing)

@@ -111,8 +111,8 @@ func TestPieceDownloadFetchesOnlyRequestedPiecesAndGrantsReadingAllowance(t *tes
 	if got := session.ConnectionStateForTest(state); got != "probe" {
 		t.Fatalf("a torrent past the read grace after its piece download is in state %q, want probe", got)
 	}
-	if got := session.ConnectionAllowanceForTest(state); got != 1 {
-		t.Fatalf("a torrent past the read grace after its piece download has allowance %d, want the probe allowance 1", got)
+	if got := session.ConnectionAllowanceForTest(state); got != 5 {
+		t.Fatalf("a torrent past the read grace after its piece download has allowance %d, want the probe allowance 5", got)
 	}
 }
 
